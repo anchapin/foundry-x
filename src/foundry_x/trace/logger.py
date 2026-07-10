@@ -18,7 +18,7 @@ import sqlite3
 import sys
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -41,7 +41,9 @@ class TraceSession(BaseModel):
     started_at: str
     harness_version: str
     model_id: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    # ``Any`` per ADR-0006 serialization-boundary carve-out (same rationale
+    # as TraceEvent.payload).
+    metadata: dict[str, Any] = Field(default_factory=dict)
     ended_at: str | None = None
 
 
@@ -315,9 +317,8 @@ class TraceLogger:
         )
         if self.backend == "sqlite":
             data = event.model_dump()
-            assert self._conn is not None  # backend == "sqlite"
-            with self._conn:
-                self._conn.execute(
+            with sqlite3.connect(self.path) as conn:
+                conn.execute(
                     "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
                     (
                         data["event_id"],
@@ -444,15 +445,7 @@ class TraceLogger:
                     continue
                 if "event_id" not in record:
                     continue
-                events.append(
-                    TraceEvent(
-                        event_id=record["event_id"],
-                        session_id=record["session_id"],
-                        timestamp=record["timestamp"],
-                        kind=record["kind"],
-                        payload=record["payload"],
-                    )
-                )
+                events.append(TraceEvent.model_validate(record))
         events.sort(key=lambda e: e.timestamp)
         return events
 

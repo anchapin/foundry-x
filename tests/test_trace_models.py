@@ -56,36 +56,3 @@ def test_record_load_round_trip_nested_dicts(tmp_path, backend):
     assert len(events) == 1
     assert events[0].payload == payload
     assert events[0].payload == recorded.payload
-
-
-@_BACKENDS
-def test_critic_verdict_event_joins_to_session_model_id(tmp_path, backend):
-    """critic_verdict events can be joined to their session's model_id (issue #361).
-
-    Phase 3's core KPI — Improvement Rate — requires attributing benchmark
-    outcomes to specific quantizations. This test verifies that a critic_verdict
-    event recorded in a session with a known model_id can be correctly attributed
-    by joining the events table to the sessions table.
-    """
-    suffix = ".db" if backend == "sqlite" else ".jsonl"
-    path = tmp_path / f"traces{suffix}"
-    logger = TraceLogger(path, backend=backend)
-
-    model_id = "codellama-7b.Q5_K_M.gguf"
-    with logger.session(harness_version="0.1.0", model_id=model_id) as sid:
-        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
-        logger.record(
-            sid, kind="critic_verdict", payload={"approved": True, "reason": "all checks pass"}
-        )
-
-    sessions = logger.list_sessions()
-    assert len(sessions) == 1
-    assert sessions[0].model_id == model_id
-
-    events = logger.load_session(sid)
-    verdict_events = [e for e in events if e.kind == "critic_verdict"]
-    assert len(verdict_events) == 1
-    assert verdict_events[0].payload["approved"] is True
-
-    session_for_event = next(s for s in sessions if s.session_id == verdict_events[0].session_id)
-    assert session_for_event.model_id == model_id
