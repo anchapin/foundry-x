@@ -71,9 +71,29 @@ many times per day against a benchmark suite.
   meta-agent that turns failure reports into `ProposedEdit`s against
   the harness.
 - **failure report** — the structured artifact produced by the
-  `Digester` from a trace, naming what failed, where, and the
-  candidate root cause; consumed by the `Evolver` as the basis for a
+  `Digester` from a trace, naming what failed, where, and the candidate
+  root cause; consumed by the `Evolver` as the basis for a
   `ProposedEdit`.
+
+## Event kinds
+
+The vocabulary of `kind` values persisted by the `TraceLogger` onto
+trace events. The `Digester` aligns its failure classifier against
+these names (see `src/foundry_x/evolution/digester.py`). Adding a new
+kind is a vocabulary change and must ship in the same PR as the code
+that emits it.
+
+- **`injection_blocked`** — emitted by the `InjectionFirewallHook`
+  (one per block) when a tool result matches a prompt-injection
+  marker. Payload contract: `{"markers": list[str], "tool": str,
+  "preview": str}` — the sorted unique marker names, the originating
+  tool name, and the first 120 characters of the suppressed text with
+  newlines folded to spaces (safe to persist; never re-injected into a
+  prompt). The `Digester` aggregates every `injection_blocked` event
+  in a session into one `FailureReport` with
+  `proposed_class == 'injection-attempt'` and one entry per block in
+  `failed_steps` so the `Evolver` sees the full adversarial surface.
+  See issue #120.
 
 ## Artifacts on disk
 

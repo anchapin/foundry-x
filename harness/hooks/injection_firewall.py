@@ -25,6 +25,7 @@ import base64
 import logging
 import re
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -286,12 +287,41 @@ class InjectionFirewallHook:
         The runner is never aborted in either mode — the firewall never
         raises — but ``"warn"`` makes the side effect observable without
         truncating output that may still be legitimate.
+    tracer:
+        Optional sink invoked on every block-policy detection. Receives the
+        structured payload dict the caller should persist under the
+        ``injection_blocked`` trace-event kind (issue #120). The payload
+        shape is owned by the firewall — the hook knows the marker names,
+        the tool name, and the bounded preview — and the caller's only job
+        is to forward it to its trace store::
+
+            payload = {
+                "markers": [...],   # list[str], sorted unique marker names
+                "tool":    "...",   # str, the originating tool name
+                "preview": "...",   # str, first _PREVIEW_LEN chars of the
+                                    # suppressed text with newlines folded
+                                    # to spaces (never re-injected into a
+                                    # prompt, safe to persist)
+            }
+
+        The firewall swallows any exception raised by ``tracer`` (logs and
+        continues) so a misbehaving sink never aborts the agent run; per
+        AGENTS.md §2 the failure is surfaced via the project logger rather
+        than silently dropped. When ``tracer`` is ``None`` (the default,
+        e.g. for the self-registered hook in ``harness/hooks/__init__``)
+        blocks are still written to the module logger exactly as before —
+        the legacy audit surface is preserved.
     """
 
-    def __init__(self, policy: Literal["block", "warn"] = "block") -> None:
+    def __init__(
+        self,
+        policy: Literal["block", "warn"] = "block",
+        tracer: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         if policy not in ("block", "warn"):
             raise ValueError(f"injection_firewall: unknown policy {policy!r}")
         self._policy = policy
+        self._tracer = tracer
 
     async def pre_tool(self, call: ToolCall) -> ToolCall:
         return call
@@ -325,11 +355,45 @@ class InjectionFirewallHook:
             "[injection_firewall] output suppressed: injection markers "
             f"detected ({names}). Flagged for human review."
         )
+        if self._tracer is not None:
+            self._emit_block_event(result.name, scan.matches, preview)
         return ToolResult(
             name=result.name,
             output=safe_output,
             error=f"injection_detected:{names} preview={preview!r}",
         )
+
+    def _emit_block_event(
+        self,
+        tool_name: str,
+        matches: tuple[InjectionMatch, ...],
+        preview: str,
+    ) -> None:
+        """Forward one block decision to the injected ``tracer`` sink.
+
+        Kept tiny and synchronous so the hook contract stays an ``async``
+        boundary at the hook level. The payload shape is the contract with
+        the :mod:`src.foundry_x` TraceLogger (issue #120); see the
+        constructor docstring for the schema. A misbehaving tracer is
+        logged at exception level and swallowed — the firewall never
+        aborts the agent run on a sink failure (the same isolation
+        contract the hook registry applies to its own hook exceptions;
+        see ``harness/hooks/base.py::_isolate_failure``).
+        """
+        assert self._tracer is not None
+        payload: dict[str, Any] = {
+            "markers": sorted({m.name for m in matches}),
+            "tool": tool_name,
+            "preview": preview,
+        }
+        try:
+            self._tracer(payload)
+        except Exception:
+            _log.exception(
+                "injection_firewall: tracer raised on block of tool %r; "
+                "isolating and continuing",
+                tool_name,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -344,15 +408,24 @@ class InjectionFirewallHook:
 # letting the sandbox build a fresh, fully-loaded registry.
 
 
-def register_into(registry: HookRegistry) -> InjectionFirewallHook:
+def register_into(
+    registry: HookRegistry,
+    *,
+    tracer: Callable[[dict[str, Any]], None] | None = None,
+) -> InjectionFirewallHook:
     """Install a fresh :class:`InjectionFirewallHook` into ``registry``.
 
     Returns the registered hook so callers can introspect or detach it.
     Use this in the Critic sandbox: construct an empty ``HookRegistry``,
     call ``register_into(registry)`` for each built-in, then run the
     evaluation. Nothing leaks into the host process's default registry.
+
+    Passing ``tracer=`` wires the new hook's block path to the supplied
+    sink (typically a closure over ``TraceLogger.record``) so the runner
+    or sandbox emits the ``injection_blocked`` trace event (issue #120)
+    without coupling the harness package to ``foundry_x``.
     """
-    hook = InjectionFirewallHook()
+    hook = InjectionFirewallHook(tracer=tracer)
     registry.register(hook)
     return hook
 
