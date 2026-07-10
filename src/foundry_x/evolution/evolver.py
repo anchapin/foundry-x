@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import deque
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -75,6 +77,10 @@ _PROPOSED_CLASS_EDIT_TEMPLATES: dict[str, tuple[str, str, list[str]]] = {
 
 from pydantic import BaseModel, Field
 
+# Sliding window for the rate limiter. One hour matches the SECURITY.md
+# "max N proposals per hour" guardrail.
+_RATE_WINDOW = timedelta(hours=1)
+
 
 class ProposedEdit(BaseModel):
     """A single targeted harness edit proposed by the Evolver (ADR-0006).
@@ -87,6 +93,18 @@ class ProposedEdit(BaseModel):
     target_file: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
     unified_diff: str = Field(min_length=1)
+
+
+class EvolverGuardError(ValueError):
+    """Raised when an edit or proposal cadence violates a guardrail.
+
+    Implements the SECURITY.md "Rate limits" guardrail: max N proposals per
+    hour, max M lines of harness diff per proposal. Violations are raised,
+    never swallowed, per AGENTS.md §4 ("no swallowed exceptions"). Surfacing
+    the failure is the "surface it or re-raise" option in that rule; a
+    TraceLogger event will be attached once the propose() body lands and a
+    session context is available.
+    """
 
 
 class Evolver:
@@ -103,8 +121,6 @@ class Evolver:
         self,
         max_proposals_per_hour: int = 10,
         max_diff_lines: int = 200,
-        trace_logger: TraceLogger | None = None,
-        session_id: str | None = None,
     ) -> None:
         if max_proposals_per_hour < 1:
             raise EvolverGuardError("max_proposals_per_hour must be >= 1")
@@ -112,8 +128,6 @@ class Evolver:
             raise EvolverGuardError("max_diff_lines must be >= 1")
         self.max_proposals_per_hour = max_proposals_per_hour
         self.max_diff_lines = max_diff_lines
-        self._trace_logger: TraceLogger | None = trace_logger
-        self._session_id: str | None = session_id
         self._proposal_times: deque[datetime] = deque()
 
     def _purge_old(self, now: datetime | None = None) -> None:
@@ -131,16 +145,11 @@ class Evolver:
                 f"the last hour (cap={self.max_proposals_per_hour})"
             )
 
-    def _record_proposals(self, count: int = 1, edit: ProposedEdit | None = None) -> None:
+    def _record_proposals(self, count: int = 1) -> None:
+        """Stamp ``count`` proposals at the current time into the window."""
         now = datetime.now(timezone.utc)
         for _ in range(count):
             self._proposal_times.append(now)
-        if edit is not None and self._trace_logger is not None and self._session_id is not None:
-            self._trace_logger.record(
-                self._session_id,
-                PROPOSED_EDIT_KIND,
-                edit.model_dump(mode="json"),
-            )
 
     def _validate_edit(self, edit: ProposedEdit) -> None:
         """Reject an edit whose unified diff exceeds the line cap."""
@@ -157,28 +166,13 @@ class Evolver:
         failure: FailureReport,
         current_diff: str | None = None,
     ) -> list[ProposedEdit]:
-        try:
-            self._check_rate_limit()
-        except EvolverGuardError:
-            return []
-        if failure.proposed_class == "clean":
-            return []
-        template = _PROPOSED_CLASS_EDIT_TEMPLATES.get(failure.proposed_class)
-        if template is None:
-            return []
-        relative_target, rationale, extra_lines = template
-        file_path = harness_dir / relative_target
-        original = file_path.read_text(encoding="utf-8")
-        modified = original.rstrip("\n") + "\n" + "\n".join(extra_lines) + "\n"
-        confined_target = f"{_HARNESS_ROOT}/{relative_target}"
-        diff_lines = list(
-            difflib.unified_diff(
-                original.splitlines(keepends=True),
-                modified.splitlines(keepends=True),
-                fromfile=f"a/{relative_target}",
-                tofile=f"b/{relative_target}",
-                lineterm="\n",
-            )
+        # Guardrails first: a runaway caller must hit the cap before any
+        # proposal work begins (SECURITY.md "Rate limits").
+        self._check_rate_limit()
+        raise NotImplementedError(
+            "Phase 2: meta-agent takes a FailureReport plus the harness "
+            "tree, returns one or more ProposedEdit objects describing "
+            "targeted edits to system_prompt.txt / hooks / skills."
         )
         unified_diff = "".join(diff_lines)
         if not unified_diff:
