@@ -49,15 +49,10 @@ and ask the human.
   `TraceLogger`, surface it, or re-raise. Bare `except: pass` is a bug.
 - **Never widen scope.** A bug fix is not a refactor. A feature is not a
   re-architecture. If you discover adjacent issues, file them and move on.
-- **Only merge agent-authored PRs after CI is green.** Agents may merge
-  their own PRs only when every required check is passing, the branch is
-  cleanly mergeable, and the PR does not contain harness hand-edits. Two
-  human approvals are still required for harness hand-edits.
+- **Never merge your own PR.** A human reviews and merges
+  agent-authored work. Two human approvals for harness hand-edits.
 - **Never pretend a benchmark passed.** If a test fails, the change is
   not done. Re-read the failure, do not paper over it.
-- **Never merge directly to `main`.** All changes go through PRs targeting
-  `develop`. The `main` branch is protected and requires PR reviews,
-  status checks (CI + benchmark gate), and linear history.
 
 ## 3. The FoundryX way
 
@@ -99,9 +94,6 @@ mirrors the way our product works:
 
 ## 5. Commit and PR etiquette
 
-- **Branch from `develop` and target `develop`.** The `main` branch is
-  protected — all work branches off `develop` and PRs target `develop`.
-  Use `git checkout -b fix/issue-NNN-description develop` to create branches.
 - One logical change per commit. If a refactor is needed to make the
   feature possible, that is two commits in two PRs.
 - Commit subject: 50 chars, imperative, no trailing period.

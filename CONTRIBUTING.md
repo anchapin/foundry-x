@@ -40,7 +40,7 @@ uv run ruff check .           # lint
 
 ## Workflow
 
-1. **Branch** off `main`. Naming:
+1. **Branch** off `develop` (or `main` for hotfixes). Naming:
    - `feat/short-name`
    - `fix/short-name`
    - `chore/short-name`
@@ -63,15 +63,14 @@ uv run ruff check .           # lint
    - `fix(evolver): prevent duplicate ProposedEdit on retry`
    - `docs(adr): record uv adoption`
 
-5. **Push and open a PR** against `main`. Fill out the PR template:
+5. **Push and open a PR** against `develop`. Fill out the PR template:
    motivation, evidence, risk, ADRs touched.
 
 6. **CI must be green** before review.
 
-7. **Merge gate.** CI must be green and the branch cleanly mergeable.
-   Agent-authored PRs that do not touch `harness/` may be self-merged
-   by the agent once CI passes (AGENTS.md §2). PRs containing harness
-   hand-edits require two human approvals before merge.
+7. **At least one human approval** before merge. Agent-authored PRs
+   require a second human reviewer per the rules in `AGENTS.md`.
+   Harness hand-edits require a second human reviewer.
 
 ## Adding a dependency
 

@@ -32,13 +32,14 @@ We design against these threats:
 
 - **Critic gate (hard requirement, ADR-0004).** Every harness edit
   must pass the `Critic` benchmark gate before it is marked active.
-  Enforced via `.github/workflows/critic.yml`.
+  This is enforced in CI, not in code comments.
+  <!-- ci-status: planned: no .github/workflows yet; enforced locally per ADR-0007 -->
 - **Test gate.** Every change to `src/foundry_x/` must pass
-  `uv run pytest`. CI blocks merges. Enforced via
-  `.github/workflows/ci.yml`.
+  `uv run pytest`. CI blocks merges.
+  <!-- ci-status: planned: no .github/workflows yet; run `uv run pytest` locally -->
 - **Lint gate.** Every change must pass `uv run ruff check .`. CI
-  blocks merges. Enforced via `.github/workflows/ci.yml`.
-- **Pre-commit hooks (recommended):** `ruff` and a `gitleaks`
+  blocks merges. <!-- ci-status: planned: no .github/workflows yet; run `uv run ruff check .` locally -->
+- **Pre-commit hooks (recommended):** `ruff` and a `git-secrets`
   check to block common credential patterns.
 - **Trace sanitization.** Trace writers MUST redact values matching
   secret-like patterns (`sk-...`, `Bearer ...`, PEM blocks) before
@@ -49,7 +50,7 @@ We design against these threats:
   either truncated or flagged for human review.
 - **Rate limits.** The `Evolver` is rate-limited: max N proposals per
   hour, max M lines of harness diff per proposal. Defaults live in
-  `src/foundry_x/evolution/evolver.py`.
+  `harness/hooks/`.
 - **Runaway detection.** The runner monitors wall-clock per task and
   total tokens per evolution cycle; exceeding the cap aborts the run.
 - **Sandbox.** Run benchmarks and evolution inside a Docker
@@ -66,16 +67,6 @@ We design against these threats:
   forever.
 - Trace stores MUST NOT contain raw API keys. Strip them at write
   time.
-- If a trace is found to hold a secret that slipped past the write-time
-  scrubber, the `foundry-trace` CLI offers two operator remediation
-  commands (issue #192, backed by the `TraceLogger.delete_session` and
-  `TraceLogger.redact_event` helpers from issue #157):
-  - `foundry-trace redact-session SESSION_ID` deletes the session and
-    all its events and prints the count removed.
-  - `foundry-trace redact-key SESSION_ID EVENT_INDEX KEY` overwrites a
-    single payload field with `[REDACTED]`, exiting non-zero if the
-    event index is out of range.
-  Both accept `--out` to append a JSONL audit record of the action.
 
 ## Dependencies
 
@@ -83,8 +74,8 @@ We design against these threats:
 - New dependencies require justification in the PR. High-risk
   packages (anything that shells out, anything with native
   extensions, anything in a maintenance dormancy) require an ADR.
-- We run `uv pip audit` (or equivalent) in CI on every PR. Enforced
-  via `.github/workflows/audit.yml`.
+- We run `uv pip audit` (or equivalent) in CI on every PR.
+  <!-- ci-status: planned: no .github/workflows yet; audit manually until infra lands -->
 
 ## Prompt injection
 
@@ -111,28 +102,6 @@ mitigation within 30 days for high-severity issues.
 ## Scope of this document
 
 This is a starting point. As the harness gains capabilities, the
-threat model and guardrails must be revisited.
-
-The `Critic` gate (ADR-0004) carries a dedicated security-evals
-BenchmarkTask family that pins each of the guardrails above to a
-regression test. See [ADR-0009](adr/0009-security-evals-benchmark-family.md)
-for the family definition and selection rules. The four tasks ship
-under `benchmarks/tasks/`:
-
-- `test_secret_redaction_evals.py` — `TraceLogger` scrubs the token
-  set enumerated in §Secrets above (issue #3 + #121).
-- `test_injection_firewall_evals.py` — `InjectionFirewallHook`
-  truncates adversarial tool results before re-injection
-  (issue #5 + #122).
-- `test_hook_isolation_evals.py` — a thrown hook exception does not
-  abort the chain (issue #21).
-- `test_evolver_guardrail_evals.py` — `ProposedEdit` confines edits
-  to `harness/{system_prompt.txt,hooks/,skills/}` and the `Evolver`
-  enforces the §"Rate limits" cap.
-
-A regression in any of the four flips the Critic red before the
-proposed harness edit ships. The Critic additionally persists a
-regression baseline at `logs/critic_baseline.json` (ADR-0004 step 3,
-issue #186): once a benchmark task is recorded as passing, any
-later flip to failing rejects the gate with `regression:<task_name>`
-in `failed_checks`.
+threat model and guardrails must be revisited. The `Critic` itself
+should be extended to include security-relevant test cases; track
+that work as an ADR.

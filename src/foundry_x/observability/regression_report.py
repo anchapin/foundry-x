@@ -50,10 +50,7 @@ def _load_verdict_events(
     logger: TraceLogger,
     since: str | None,
 ) -> list[tuple[str, str, VerdictRecord]]:
-    query = (
-        "SELECT session_id, timestamp, payload FROM events "
-        "WHERE kind = ?"
-    )
+    query = "SELECT session_id, timestamp, payload FROM events " "WHERE kind = ?"
     params: list[object] = [VERDICT_KIND]
     if since is not None:
         query += " AND timestamp >= ?"
@@ -133,9 +130,7 @@ def _render(
         lines.append("| Task | Was passing (session) | Now failing (session) |")
         lines.append("| --- | --- | --- |")
         for reg in regressions:
-            lines.append(
-                f"| {reg.task} | {reg.was_passing_session} | {reg.now_failing_session} |"
-            )
+            lines.append(f"| {reg.task} | {reg.was_passing_session} | {reg.now_failing_session} |")
     else:
         lines.append("_None._")
     lines += ["", "## New Passes", ""]
@@ -143,9 +138,7 @@ def _render(
         lines.append("| Task | Was failing (session) | Now passing (session) |")
         lines.append("| --- | --- | --- |")
         for pas in new_passes:
-            lines.append(
-                f"| {pas.task} | {pas.was_failing_session} | {pas.now_passing_session} |"
-            )
+            lines.append(f"| {pas.task} | {pas.was_failing_session} | {pas.now_passing_session} |")
     else:
         lines.append("_None._")
     lines.append("")

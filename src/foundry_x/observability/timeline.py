@@ -94,8 +94,6 @@ def format_timeline(
         summary = _extract_summary(event.payload)
         step = f"#{index}".ljust(_STEP_NUM_WIDTH + 1)
 
-        lines.append(
-            f"{prefix}{step} {offset:>{_OFFSET_WIDTH}}  {kind} {summary}".rstrip()
-        )
+        lines.append(f"{prefix}{step} {offset:>{_OFFSET_WIDTH}}  {kind} {summary}".rstrip())
 
     return "\n".join(lines)
