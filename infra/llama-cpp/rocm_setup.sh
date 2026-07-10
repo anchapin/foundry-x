@@ -2,6 +2,7 @@
 set -euo pipefail
 
 LLAMACPP_DIR="${LLAMACPP_DIR:-$HOME/llama.cpp}"
+LLAMACPP_REF="${LLAMACPP_REF:-b9957}"
 ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
 HIPCC="${ROCM_PATH}/llvm/bin/clang++"
 
@@ -38,8 +39,9 @@ script builds and prints the run hint, exactly as before.
                         GGUF and verify it responds (HTTP 200 + non-empty
                         completion). Also enabled via LLAMACPP_SMOKE_MODEL.
 
-Env vars: LLAMACPP_SMOKE_MODEL, LLAMACPP_SMOKE_PORT (8765),
-          LLAMACPP_SMOKE_NGL (0), LLAMACPP_SMOKE_TIMEOUT (60)
+Env vars: LLAMACPP_REF (b9957), LLAMACPP_SMOKE_MODEL,
+          LLAMACPP_SMOKE_PORT (8765), LLAMACPP_SMOKE_NGL (0),
+          LLAMACPP_SMOKE_TIMEOUT (60)
 USAGE
             exit 0
             ;;
@@ -56,8 +58,12 @@ fi
 # -------------------------------------------------------------------
 
 if [[ ! -d "$LLAMACPP_DIR" ]]; then
-    git clone https://github.com/ggerganov/llama.cpp "$LLAMACPP_DIR"
+    git clone --no-checkout --filter=blob:none https://github.com/ggerganov/llama.cpp "$LLAMACPP_DIR"
 fi
+
+echo "Building llama.cpp @ $LLAMACPP_REF"
+git -C "$LLAMACPP_DIR" fetch --depth 1 origin "$LLAMACPP_REF"
+git -C "$LLAMACPP_DIR" checkout --detach FETCH_HEAD
 
 cd "$LLAMACPP_DIR"
 
