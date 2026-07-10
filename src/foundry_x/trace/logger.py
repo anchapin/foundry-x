@@ -1,3 +1,15 @@
+"""Trace logger for FoundryX.
+
+This module is the only writer to the trace store. Both backends (sqlite
+and jsonl) MUST scrub secret-like substrings from every value they
+persist, including the ``metadata`` dict that an Operator passes to
+:class:`TraceLogger.session`. See ``docs/SECURITY.md`` §Secrets
+(lines 61-69) for the policy, ADR-0003 for the trace-store rationale,
+and the ``_redact`` / ``_redact_value`` helpers below for the
+implementation. Issue #121 extended the original layer (issue #3) to
+cover modern token formats and the previously-untouched metadata path.
+"""
+
 from __future__ import annotations
 
 import json
@@ -69,25 +81,60 @@ _PEM_RE = re.compile(
     r"-----BEGIN (?:[A-Z ]*)PRIVATE KEY-----.*?-----END (?:[A-Z ]*)PRIVATE KEY-----",
     re.DOTALL,
 )
+# GitHub classic PATs (ghp_, gho_, ghs_, ghu_) and fine-grained PATs
+# (github_pat_ plus the 11-char-suffix variant github_pat_11XXXX...). Issue
+# #121 expands coverage beyond the original three regexes shipped with #3.
+_GITHUB_CLASSIC_PAT_RE = re.compile(r"(?:ghp|gho|ghs|ghu)_[A-Za-z0-9]{20,}")
+_GITHUB_FINE_GRAINED_PAT_RE = re.compile(r"github_pat_[A-Za-z0-9_]{20,}")
+# JSON Web Tokens: three base64url segments separated by dots.
+_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b")
+# AWS access key IDs — fixed 20-char body prefixed with AKIA / ASIA.
+_AWS_ACCESS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
+# Stripe live keys (sk_live_, pk_live_, also restricted/sidecar variants).
+_STRIPE_LIVE_KEY_RE = re.compile(r"\b(?:sk|pk|rk)_(?:live|restricted)_[A-Za-z0-9]{16,}")
+# Slack tokens: xox[baprs]- followed by the segment body.
+_SLACK_TOKEN_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}")
 
 _DEFAULT_SECRET_KEY_NAMES: frozenset[str] = frozenset(
     {
         "api_key",
         "apikey",
         "authorization",
+        "aws_access_key_id",
+        "aws_secret_access_key",
+        "github_token",
+        "anthropic_api_key",
+        "openai_api_key",
+        "access_token",
+        "id_token",
+        "jwt",
         "password",
         "passwd",
+        "refresh_token",
         "secret",
         "secret_key",
+        "slack_token",
+        "stripe_key",
         "token",
     }
 )
 
 
 def _redact_value(value: str) -> str:
-    """Mask secret-like substrings within a single string."""
+    """Mask secret-like substrings within a single string.
+
+    Order matters only for readability: PEM blocks (which can contain
+    ``-----BEGIN`` and ``sk-``-like substrings) are scrubbed first, then
+    the remaining content-patterns. Token order is fixed across calls.
+    """
     value = _PEM_RE.sub("[REDACTED:pem]", value)
+    value = _JWT_RE.sub("[REDACTED:jwt]", value)
     value = _API_KEY_RE.sub("[REDACTED:api-key]", value)
+    value = _GITHUB_CLASSIC_PAT_RE.sub("[REDACTED:github-pat]", value)
+    value = _GITHUB_FINE_GRAINED_PAT_RE.sub("[REDACTED:github-pat]", value)
+    value = _AWS_ACCESS_KEY_RE.sub("[REDACTED:aws-access-key]", value)
+    value = _STRIPE_LIVE_KEY_RE.sub("[REDACTED:stripe-key]", value)
+    value = _SLACK_TOKEN_RE.sub("[REDACTED:slack-token]", value)
     value = _BEARER_RE.sub("[REDACTED:bearer]", value)
     return value
 
@@ -101,8 +148,10 @@ def _redact(
     Returns a new structure; the input is not mutated. Dict keys whose
     lower-cased name is in ``secret_key_names`` have their entire value
     replaced with ``[REDACTED:secret]`` regardless of content; all other
-    string values are scanned for ``sk-...``, ``Bearer ...`` and PEM
-    blocks.
+    string values are scanned for ``sk-...``, ``Bearer ...``, PEM blocks,
+    GitHub classic/fine-grained PATs, JWTs, AWS access key IDs, Stripe
+    live keys, and Slack tokens. Issue #121 added the modern-token set
+    and the metadata-path coverage.
     """
     if isinstance(payload, dict):
         redacted: dict[str, Any] = {}
@@ -142,6 +191,12 @@ class TraceLogger:
         model_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Iterator[str]:
+        # Issue #121: scrub the metadata dict before either backend writes it.
+        # The original ``record()`` path already redacts its payload; the
+        # ``session()`` start-of-life marker did not, so an Operator passing
+        # ``metadata={'github_token': 'ghp_...'}`` would have persisted the raw
+        # token. SECURITY.md §Secrets.
+        redacted_metadata: dict[str, Any] = _redact(metadata) if metadata else {}
         session_id = str(uuid.uuid4())
         if self.backend == "jsonl":
             with self.path.open("a", encoding="utf-8") as fh:
@@ -152,7 +207,7 @@ class TraceLogger:
                             "started_at": _now(),
                             "harness_version": harness_version,
                             "model_id": model_id,
-                            "metadata": metadata or {},
+                            "metadata": redacted_metadata,
                             "kind": "session_start",
                         }
                     )
@@ -169,7 +224,7 @@ class TraceLogger:
                         _now(),
                         harness_version,
                         model_id,
-                        json.dumps(metadata or {}),
+                        json.dumps(redacted_metadata),
                     ),
                 )
         try:
