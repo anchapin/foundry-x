@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .base import ToolCall, ToolResult, register_hook
+from .base import HookRegistry, ToolCall, ToolResult, register_hook
 
 _log = logging.getLogger("harness.injection_firewall")
 
@@ -168,6 +168,34 @@ class InjectionFirewallHook:
 
 
 # ---------------------------------------------------------------------------
-# Self-registration (issue #5: "The hook self-registers via register_hook()")
+# Registration helpers
 # ---------------------------------------------------------------------------
+# The firewall ships as a built-in (issue #5: it self-registers into the
+# default registry on import). The Critic sandbox (ADR-0004, issue #22)
+# needs to evaluate harness variants in isolation, so we also expose
+# :func:`register_into` — pass any :class:`HookRegistry` to install the
+# firewall into it without touching the process default. This keeps the
+# global ``import harness.hooks`` behavior unchanged for the runner while
+# letting the sandbox build a fresh, fully-loaded registry.
+
+
+def register_into(registry: HookRegistry) -> InjectionFirewallHook:
+    """Install a fresh :class:`InjectionFirewallHook` into ``registry``.
+
+    Returns the registered hook so callers can introspect or detach it.
+    Use this in the Critic sandbox: construct an empty ``HookRegistry``,
+    call ``register_into(registry)`` for each built-in, then run the
+    evaluation. Nothing leaks into the host process's default registry.
+    """
+    hook = InjectionFirewallHook()
+    registry.register(hook)
+    return hook
+
+
+# ---------------------------------------------------------------------------
+# Default-registry self-registration (issue #5)
+# ---------------------------------------------------------------------------
+# Unchanged behavior: ``import harness.hooks`` still wires the firewall into
+# the process-default registry. The Critic sandbox opts out by constructing
+# its own ``HookRegistry`` and calling :func:`register_into` instead.
 register_hook(InjectionFirewallHook())

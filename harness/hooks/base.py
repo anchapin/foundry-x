@@ -115,43 +115,6 @@ class HookRegistry:
                 )
 
 
-        Implements the issue #21 isolation contract: a single buggy hook
-        must not crash the entire agent run. The failure is (a) logged via
-        the module logger with the hook name, slot, and exception, and
-        (b) optionally forwarded to ``on_error`` for structured sinks such
-        as the project TraceLogger. ``call`` / ``result`` are passed through
-        unchanged so subsequent hooks still observe the original payload.
-
-        AGENTS.md §2 forbids silently swallowing exceptions, so every
-        branch either logs or re-raises. We catch ``Exception`` (not
-        ``BaseException``) so ``asyncio.CancelledError``, ``KeyboardInterrupt``
-        and ``SystemExit`` propagate normally — those are control-flow
-        signals that must abort the run, not be hidden behind a failed hook.
-        """
-        hook_name = type(hook).__qualname__
-        _log.exception(
-            "hook %r (#%d) raised in %s; isolating and continuing: %r",
-            hook_name,
-            index,
-            slot,
-            exc,
-        )
-        if self._on_error is not None:
-            try:
-                self._on_error(slot, index, hook_name, exc)
-            except Exception as sink_exc:  # pragma: no cover - defensive
-                # A misbehaving sink must not undo the isolation. Surface the
-                # sink's own failure through the same logger and move on.
-                _log.exception(
-                    "HookRegistry.on_error callback raised while reporting "
-                    "%s failure of hook %r (#%d): %r",
-                    slot,
-                    hook_name,
-                    index,
-                    sink_exc,
-                )
-
-
 # ---------------------------------------------------------------------------
 # Module-level default registry
 # ---------------------------------------------------------------------------
