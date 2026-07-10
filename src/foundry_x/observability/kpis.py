@@ -20,6 +20,11 @@ recorded by :class:`~foundry_x.trace.logger.TraceLogger`:
 
 When the source events are absent the function degrades gracefully,
 returning ``None`` (cycle time) or ``0.0`` so the CLI can print ``N/A``.
+
+Issue #120 adds an auxiliary per-session ``injection_blocked`` count derived
+from the firewall events persisted by ``InjectionFirewallHook``. The
+counts are surfaced only when at least one session has ≥1 block, so a
+clean store does not grow the KPI output.
 """
 
 from __future__ import annotations
@@ -33,15 +38,23 @@ from typing import Sequence
 
 from pydantic import BaseModel
 
+from foundry_x.evolution.digester import INJECTION_BLOCKED_KIND
 from foundry_x.trace.logger import TraceLogger
 
 
 class KpiSummary(BaseModel):
-    """Structured summary of the three PRD KPIs."""
+    """Structured summary of the three PRD KPIs.
+
+    Issue #120 adds ``injection_blocks``: a ``session_id -> count`` map
+    of ``injection_blocked`` events per session, sourced from the firewall
+    hook. Empty by default; populated only when the trace store has at
+    least one ``injection_blocked`` event.
+    """
 
     cycle_time_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
+    injection_blocks: dict[str, int] = {}
 
 
 def compute_kpis(
@@ -67,6 +80,7 @@ def compute_kpis(
 
         cycle_time = _cycle_time(conn, session_ids)
         regression_rate, improvement_rate = _verdict_rates(conn, session_ids)
+        injection_blocks = _injection_blocks(conn, session_ids)
     finally:
         conn.close()
 
@@ -74,6 +88,7 @@ def compute_kpis(
         cycle_time_seconds=cycle_time,
         regression_rate=regression_rate,
         improvement_rate=improvement_rate,
+        injection_blocks=injection_blocks,
     )
 
 
@@ -146,6 +161,26 @@ def _verdict_rates(conn: sqlite3.Connection, session_ids: list[str]) -> tuple[fl
     return regression_rate, improvement_rate
 
 
+def _injection_blocks(conn: sqlite3.Connection, session_ids: list[str]) -> dict[str, int]:
+    """Per-session count of ``injection_blocked`` events (issue #120).
+
+    Returns a ``session_id -> count`` map including only sessions with at
+    least one block. Sessions without blocks are omitted so the rendering
+    path can decide whether to add an extra section based on the map being
+    non-empty (per the issue's "show … when at least one is present").
+    """
+    if not session_ids:
+        return {}
+    placeholders = ",".join("?" for _ in session_ids)
+    rows = conn.execute(
+        f"SELECT session_id, COUNT(*) FROM events "
+        f"WHERE kind = ? AND session_id IN ({placeholders}) "
+        f"GROUP BY session_id",
+        (INJECTION_BLOCKED_KIND, *session_ids),
+    ).fetchall()
+    return {sid: int(count) for sid, count in rows if count}
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -160,6 +195,20 @@ def _render_markdown(summary: KpiSummary) -> str:
         f"| Regression Rate | {_format_value(summary.regression_rate)} |",
         f"| Improvement Rate | {_format_value(summary.improvement_rate)} |",
     ]
+    # Issue #120: surface per-session ``injection_blocked`` counts only when
+    # at least one session has ≥1 block; a clean trace store stays compact.
+    if summary.injection_blocks:
+        total = sum(summary.injection_blocks.values())
+        lines.append("")
+        lines.append(
+            f"Injection Blocked: {total} block(s) across "
+            f"{len(summary.injection_blocks)} session(s)."
+        )
+        lines.append("")
+        lines.append("| Session | injection_blocked |")
+        lines.append("| --- | --- |")
+        for sid, count in sorted(summary.injection_blocks.items()):
+            lines.append(f"| {sid} | {count} |")
     return "\n".join(lines)
 
 
