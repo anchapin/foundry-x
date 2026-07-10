@@ -39,19 +39,6 @@ benchmarks/
 - `models.py` defines the `BenchmarkTask` pydantic model and any
   per-task option schemas that cross the import boundary (ADR-0006).
 
-## Listing tasks
-
-To list all available benchmark tasks without running them, use pytest's
-collection-only mode:
-
-```bash
-uv run pytest --co -q -m benchmark
-```
-
-This outputs the names of all tasks currently registered in
-`benchmarks/tasks/`, useful for discovering available tasks and
-verifying a new task was added correctly.
-
 ## Mark a test with `@pytest.mark.benchmark`
 
 Every benchmark task carries the `benchmark` marker so the suite can be
