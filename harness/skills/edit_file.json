@@ -1,0 +1,33 @@
+{
+  "name": "edit_file",
+  "version": "0.1.0",
+  "description": "Apply a targeted string replacement to an existing file in the agent's workspace.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Absolute or harness-relative path to the file to edit."
+      },
+      "old_string": {
+        "type": "string",
+        "description": "Exact substring currently present in the file to be replaced."
+      },
+      "new_string": {
+        "type": "string",
+        "description": "Replacement text for the matched substring."
+      }
+    },
+    "required": ["path", "old_string", "new_string"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string" },
+      "sha256": { "type": "string" },
+      "replacements_made": { "type": "integer" }
+    },
+    "required": ["path", "sha256", "replacements_made"]
+  }
+}
