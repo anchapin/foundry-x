@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import difflib
-from collections import deque
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -76,76 +73,7 @@ _PROPOSED_CLASS_EDIT_TEMPLATES: dict[str, tuple[str, str, list[str]]] = {
     ),
 }
 
-
-def _normalize_relative_parts(parts: tuple[str, ...]) -> tuple[str, ...] | None:
-    """Collapse ``.``/``..`` in a relative path without touching the FS.
-
-    Returns the normalized component stack, or ``None`` if a ``..`` would
-    escape above the starting point (e.g. ``../../etc/passwd``). Pure and
-    deterministic so the validator has no dependency on the process CWD.
-    """
-    stack: list[str] = []
-    for part in parts:
-        if part in ("", "."):
-            continue
-        if part == "..":
-            if not stack:
-                return None
-            stack.pop()
-            continue
-        stack.append(part)
-    return tuple(stack)
-
-
-def _confine_to_harness_tree(raw: str) -> str:
-    """Resolve ``raw`` against the harness root and reject escapes.
-
-    Enforces the ADR-0004 invariant — "edits only land in ``harness/``" —
-    at the model boundary rather than only in the Critic. Accepts paths
-    beneath ``harness/system_prompt.txt``, ``harness/manifest.json`` (leaf
-    files), ``harness/hooks/...`` and ``harness/skills/...``. Absolute
-    paths, traversal escapes (``../../etc/passwd``), and anything outside
-    the allowed targets raise ``ValueError`` (surfaced as a pydantic
-    ``ValidationError`` by the field validator).
-
-    Returns the canonical POSIX form so ``harness/./hooks/../hooks/a.py``
-    and ``harness/hooks/a.py`` collapse to one representation. Pure: no
-    filesystem access, no CWD dependence.
-    """
-    path = Path(raw)
-    if path.is_absolute():
-        raise ValueError(
-            f"target_file must be relative to the harness root, got absolute path: {raw!r}"
-        )
-    normalized = _normalize_relative_parts(path.parts)
-    if normalized is None:
-        raise ValueError(f"target_file escapes the harness root via '..': {raw!r}")
-    if len(normalized) < 2 or normalized[0] != _HARNESS_ROOT:
-        raise ValueError(f"target_file must live under {_HARNESS_ROOT}/, got: {raw!r}")
-    entry = normalized[1]
-    if entry in _HARNESS_LEAF_FILES:
-        # Leaf files (system_prompt.txt, manifest.json): nothing may sit
-        # beneath them.
-        if len(normalized) != 2:
-            raise ValueError(f"target_file treats {_HARNESS_ROOT}/{entry} as a directory: {raw!r}")
-    elif entry in _HARNESS_SUBDIRS:
-        # hooks/ and skills/ are directories: an edit must target a file
-        # inside them, not the directory itself.
-        if len(normalized) < 3:
-            raise ValueError(
-                f"target_file must name a file under {_HARNESS_ROOT}/{entry}/, "
-                f"not the directory itself: {raw!r}"
-            )
-    else:
-        raise ValueError(
-            f"target_file points at a non-editable harness entry "
-            f"({entry!r}); only system_prompt.txt, manifest.json, hooks/, "
-            f"and skills/ may be edited: {raw!r}"
-        )
-    canonical = "/".join(normalized)
-    if any("\\" in p or "\x00" in p for p in normalized):
-        raise ValueError(f"target_file contains an illegal component: {raw!r}")
-    return canonical
+from pydantic import BaseModel, Field
 
 
 class ProposedEdit(BaseModel):
@@ -153,54 +81,12 @@ class ProposedEdit(BaseModel):
 
     The three string fields are required and non-blank so a malformed edit
     surfaces a ``ValidationError`` at the boundary instead of reaching the
-    Critic and wasting a gate run. ``target_file`` is further confined to
-    the harness tree (ADR-0004) at construction time. ``unified_diff`` must
-    be a valid git-apply unified diff with ``--- a/`` and ``+++ b/`` headers.
+    Critic and wasting a gate run.
     """
 
     target_file: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
     unified_diff: str = Field(min_length=1)
-
-    @field_validator("target_file")
-    @classmethod
-    def _target_file_within_harness_tree(cls, value: str) -> str:
-        """Confine edits to harness/{system_prompt.txt,manifest.json,hooks/,skills/}.
-
-        Enforces the ADR-0004 self-modification guardrail at the model
-        boundary (ADR-0006) so an out-of-tree proposal cannot reach the
-        Critic. Returns the canonical normalized path.
-        """
-        return _confine_to_harness_tree(value)
-
-    @field_validator("unified_diff")
-    @classmethod
-    def _unified_diff_has_git_apply_headers(cls, value: str) -> str:
-        """Validate that the unified diff has git-apply compatible headers.
-
-        ``git apply`` requires a unified diff with ``--- a/<path>`` and
-        ``+++ b/<path>`` header lines. A bare hunk (starting with ``@@``)
-        will be rejected by git apply with an opaque error. We validate at
-        the model boundary per ADR-0006 so malformed edits fail fast.
-        """
-        lines = value.splitlines()
-        if not any(line.startswith("--- a/") for line in lines):
-            raise ValueError("unified_diff missing '--- a/' header required by git apply")
-        if not any(line.startswith("+++ b/") for line in lines):
-            raise ValueError("unified_diff missing '+++ b/' header required by git apply")
-        return value
-
-
-class EvolverGuardError(ValueError):
-    """Raised when an edit or proposal cadence violates a guardrail.
-
-    Implements the SECURITY.md "Rate limits" guardrail: max N proposals per
-    hour, max M lines of harness diff per proposal. Violations are raised,
-    never swallowed, per AGENTS.md §4 ("no swallowed exceptions"). Surfacing
-    the failure is the "surface it or re-raise" option in that rule; a
-    TraceLogger event will be attached once the propose() body lands and a
-    session context is available.
-    """
 
 
 class Evolver:

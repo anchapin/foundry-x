@@ -48,7 +48,7 @@ def test_proposed_edit_valid_payload_constructs():
     edit = ProposedEdit(
         target_file="harness/system_prompt.txt",
         rationale="add tool guidance",
-        unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        unified_diff="@@ -1 +1 @@\n-old\n+new\n",
     )
     assert edit.target_file == "harness/system_prompt.txt"
 

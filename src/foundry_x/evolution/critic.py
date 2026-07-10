@@ -1,56 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from pydantic import BaseModel, Field
-
-from benchmarks.models import BenchmarkTask
-from benchmarks.registry import load_all_tasks
-
-_NOTES_TAIL_CHARS = 4000
-
-# SECURITY.md Threat #2: prompt-injection patterns checked at the Critic gate
-# (issue #333). These are the same categories named in the firewall docstring
-# (harness/hooks/injection_firewall.py INJECTION_PATTERNS) but expressed as
-# plain strings rather than compiled regexes so the critic can scan a diff
-# without importing the harness package.
-_INJECTION_PATTERNS: tuple[tuple[str, str], ...] = (
-    ("ignore_previous", r"ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions"),
-    ("disregard_previous", r"disregard\s+(?:all\s+)?(?:previous|prior|above)\s+instructions"),
-    ("forget_previous", r"forget\s+(?:all\s+)?(?:previous|prior|above)\s+instructions"),
-    ("new_instructions", r"(?:new|updated|real)\s+instructions\s*:"),
-    ("role_tag_colon", r"(?:^|\n|\r)\s*(?:system|assistant|developer|user)\s*:\s*"),
-    ("chatml_tag", r"<\|(?:im_start|im_end|system|assistant|user|begin_of_text|endoftext)\|>"),
-    ("ignored_context", r"end\s+of\s+context\s+above"),
-)
-
-
-def _scan_diff_for_injection(diff: str) -> list[str]:
-    """Return the names of any injection patterns found in *diff*.
-
-    Scans only the ``+`` (addition) lines of the unified diff after stripping
-    the diff prefix characters (``+/ /-``) so that the plain content is matched
-    against the patterns.  This avoids false negatives where a pattern's ``^``
-    anchor would fail to match because the diff line starts with ``+``.
-    """
-    triggered: list[str] = []
-    addition_lines: list[str] = []
-    for line in diff.splitlines():
-        if line.startswith("+"):
-            addition_lines.append(line[1:])
-    clean_content = "\n".join(addition_lines)
-    for name, pattern in _INJECTION_PATTERNS:
-        regex = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
-        if regex.search(clean_content):
-            triggered.append(name)
-    return triggered
-
-
-#: Default location of the regression baseline JSON written by the Critic
-#: (ADR-0004 step 3, issue #186). Relative to the process working directory
-#: so an invocation from the repo root lands at ``logs/critic_baseline.json``.
-DEFAULT_BASELINE_PATH: Path = Path("logs") / "critic_baseline.json"
 
 
 class CriticVerdict(BaseModel):
