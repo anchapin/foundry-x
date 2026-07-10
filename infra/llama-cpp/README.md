@@ -5,7 +5,10 @@ Target: AMD RX 6600 XT on Linux Mint with ROCm 5.7+.
 ## Build
 
 ```bash
-git clone https://github.com/ggerganov/llama.cpp
+LLAMACPP_REF="${LLAMACPP_REF:-b9957}"
+git clone --no-checkout --filter=blob:none https://github.com/ggerganov/llama.cpp
+git -C llama.cpp fetch --depth 1 origin "$LLAMACPP_REF"
+git -C llama.cpp checkout --detach FETCH_HEAD
 cd llama.cpp
 HIPCFLAGS="-march=native -mtune=native" \
 CMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++ \
