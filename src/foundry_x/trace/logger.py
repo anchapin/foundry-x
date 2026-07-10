@@ -139,6 +139,11 @@ class TraceLogger:
         return event
 
     def load_session(self, session_id: str) -> Sequence[TraceEvent]:
+        if self.backend == "jsonl":
+            return self._load_session_jsonl(session_id)
+        return self._load_session_sqlite(session_id)
+
+    def _load_session_sqlite(self, session_id: str) -> list[TraceEvent]:
         events: list[TraceEvent] = []
         with sqlite3.connect(self.path) as conn:
             rows = conn.execute(
@@ -156,6 +161,40 @@ class TraceLogger:
                     payload=json.loads(payload),
                 )
             )
+        return events
+
+    def _load_session_jsonl(self, session_id: str) -> list[TraceEvent]:
+        """Replay events for a session from a JSONL trace file.
+
+        The JSONL backend interleaves ``session_start`` marker lines with
+        event lines in a single append-only file. Marker lines carry no
+        ``event_id`` and are skipped here; event lines matching
+        ``session_id`` are reconstructed into :class:`TraceEvent` objects
+        ordered by timestamp.
+        """
+        events: list[TraceEvent] = []
+        if not self.path.exists():
+            return events
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                record: dict[str, Any] = json.loads(line)
+                if record.get("session_id") != session_id:
+                    continue
+                if "event_id" not in record:
+                    continue
+                events.append(
+                    TraceEvent(
+                        event_id=record["event_id"],
+                        session_id=record["session_id"],
+                        timestamp=record["timestamp"],
+                        kind=record["kind"],
+                        payload=record["payload"],
+                    )
+                )
+        events.sort(key=lambda e: e.timestamp)
         return events
 
 
