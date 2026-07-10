@@ -1,0 +1,25 @@
+{
+  "name": "read_file",
+  "version": "0.1.0",
+  "description": "Read the full contents of a file from the agent's workspace.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Absolute or harness-relative path to the file."
+      }
+    },
+    "required": ["path"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "content": { "type": "string" },
+      "sha256": { "type": "string" },
+      "truncated": { "type": "boolean" }
+    },
+    "required": ["content", "sha256", "truncated"]
+  }
+}
