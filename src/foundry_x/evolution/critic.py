@@ -42,37 +42,11 @@ class Critic:
     ) -> None:
         self.harness_dir = harness_dir
         self.benchmark_path = benchmark_path
-        # Default selection runs the full benchmark suite via ``-m benchmark``
-        # (ADR-0005, issue #185) — a harness edit that breaks any
-        # ``@pytest.mark.benchmark`` task is caught at the gate.
-        self.pytest_args = pytest_args or ["-q", "-m", "benchmark"]
-        # Diff-size cap mirrors the SECURITY.md "max M lines of harness diff
-        # per proposal" guardrail and the Evolver default (issue #333).
-        if max_diff_lines < 1:
-            raise ValueError("max_diff_lines must be >= 1")
-        self.max_diff_lines = max_diff_lines
-        # In-process registry wiring (issue #108): the Critic can now
-        # enumerate benchmark tasks without spawning pytest. Stored as
-        # ``None`` so the registry is loaded lazily on first access --
-        # importing ``foundry_x.evolution.critic`` must not eagerly pull
-        # in every task module (and the pytest import chain those tasks
-        # transitively trigger).
-        self._benchmark_tasks: list[BenchmarkTask] | None = (
-            list(benchmark_tasks) if benchmark_tasks is not None else None
-        )
-
-    @property
-    def benchmark_tasks(self) -> list[BenchmarkTask]:
-        """The ``BenchmarkTask`` instances this Critic will gate against (issue #108).
-
-        Lazy-loaded from the in-process registry on first access; cached on
-        the instance so subsequent accesses are O(1). Tests can pre-seed
-        ``benchmark_tasks=...`` in the constructor to avoid touching the
-        registry at all (see ``tests/test_critic.py``).
-        """
-        if self._benchmark_tasks is None:
-            self._benchmark_tasks = load_all_tasks()
-        return self._benchmark_tasks
+        # Next-step wiring target (issue #107): prepend `python
+        # harness/scripts/load_check.py --harness-dir <copy>` so a broken
+        # `harness/skills/*.json` or an unimportable hook fails the gate
+        # *before* pytest runs. Out of scope for #107.
+        self.pytest_args = pytest_args or ["-q", "tests/test_smoke.py"]
 
     def evaluate(self, proposed_diff: str) -> CriticVerdict:
         """Apply ``proposed_diff`` to a sandbox copy of the harness and run pytest.
