@@ -32,13 +32,12 @@ We design against these threats:
 
 - **Critic gate (hard requirement, ADR-0004).** Every harness edit
   must pass the `Critic` benchmark gate before it is marked active.
-  This is enforced in CI, not in code comments.
-  <!-- ci-status: planned: no .github/workflows yet; enforced locally per ADR-0007 -->
+  Enforced via `.github/workflows/critic.yml`.
 - **Test gate.** Every change to `src/foundry_x/` must pass
-  `uv run pytest`. CI blocks merges.
-  <!-- ci-status: planned: no .github/workflows yet; run `uv run pytest` locally -->
+  `uv run pytest`. CI blocks merges. Enforced via
+  `.github/workflows/ci.yml`.
 - **Lint gate.** Every change must pass `uv run ruff check .`. CI
-  blocks merges. <!-- ci-status: planned: no .github/workflows yet; run `uv run ruff check .` locally -->
+  blocks merges. Enforced via `.github/workflows/ci.yml`.
 - **Pre-commit hooks (recommended):** `ruff` and a `git-secrets`
   check to block common credential patterns.
 - **Trace sanitization.** Trace writers MUST redact values matching
@@ -74,8 +73,8 @@ We design against these threats:
 - New dependencies require justification in the PR. High-risk
   packages (anything that shells out, anything with native
   extensions, anything in a maintenance dormancy) require an ADR.
-- We run `uv pip audit` (or equivalent) in CI on every PR.
-  <!-- ci-status: planned: no .github/workflows yet; audit manually until infra lands -->
+- We run `uv pip audit` (or equivalent) in CI on every PR. Enforced
+  via `.github/workflows/audit.yml`.
 
 ## Prompt injection
 

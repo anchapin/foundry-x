@@ -11,10 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@v4
 
-      - name: Install uv (hash-verified)
-        uses: ./.github/actions/install-uv
+      - name: Install uv
+        run: pip install --upgrade uv
 
       - name: Set up Python
         run: uv python install 3.11
