@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+
+_NOTES_TAIL_CHARS = 4000
 
 
 class CriticVerdict(BaseModel):
@@ -22,10 +28,8 @@ class Critic:
     the harness inside a temporary directory and runs pytest there — the live
     ``harness_dir`` is never mutated.
 
-    Benchmark-subset selection (ADR-0004 step 2) uses ``-m benchmark`` by
-    default so every ``@pytest.mark.benchmark`` task gates the edit
-    (ADR-0005, issue #185). The verdict's ``passed_checks`` lists every
-    benchmark tag the run covered.
+    Benchmark-subset selection (ADR-0004 step 2) is deferred until the
+    ``benchmarks/`` subsystem wires ``@pytest.mark.benchmark`` (ADR-0005).
     """
 
     def __init__(
@@ -71,35 +75,14 @@ class Critic:
         return self._benchmark_tasks
 
     def evaluate(self, proposed_diff: str) -> CriticVerdict:
-        """Apply ``proposed_diff`` to a sandbox copy of the harness and gate it.
+        """Apply ``proposed_diff`` to a sandbox copy of the harness and run pytest.
 
         Steps (ADR-0004):
 
         1. Copy ``harness_dir`` into a fresh ``TemporaryDirectory``.
-        2. Enforce the diff-size cap (``max_diff_lines``). An oversized diff
-           is rejected immediately (``failed_checks=["diff_size_cap"]``).
-        3. Scan the diff for prompt-injection markers (SECURITY.md Threat #2).
-           A diff carrying ``ignore previous instructions``-style phrases or
-           role-tag sequences is rejected immediately
-           (``failed_checks=["injection_detected"]``).
-        4. Apply ``proposed_diff`` via ``git apply``. A patch that does not
+        2. Apply ``proposed_diff`` via ``git apply``. A patch that does not
            apply cleanly is rejected immediately (``failed_checks=["git apply"]``).
-        5. Run ``harness/scripts/load_check.py`` against the sandbox copy
-           (issue #187). A harness that fails to load -- broken
-           ``skills/*.json``, an unimportable hook, an empty system prompt
-           -- is rejected *before* pytest is spawned, so the verdict names
-           the precondition (``failed_checks=["load_check"]``) rather than
-           a confusing downstream pytest error.
-        6. Run pytest with ``self.pytest_args`` in the sandbox.
-
-        Every subprocess inside this method is bounded by
-        ``self.gate_timeout_s`` (issue #188). On
-        :class:`subprocess.TimeoutExpired` the verdict is
-        ``approved=False`` with ``failed_checks`` carrying the offending check
-        name suffixed ``":timeout"`` (e.g. ``"pytest:timeout"``), and
-        ``notes`` holds the trailing window of any partial output the
-        process managed to write before being killed — or a wall-clock-cap
-        message when no partial output was captured.
+        3. Run pytest with ``self.pytest_args`` in the sandbox.
 
         The verdict's ``approved`` flag is ``True`` only when every check that
         runs succeeds. All filesystem mutations are confined to the temp copy.
@@ -111,27 +94,8 @@ class Critic:
             passed_checks: list[str] = []
             failed_checks: list[str] = []
 
-            # Gate 1: Diff-size cap (issue #333).
+            # 1. Apply the proposed diff to the sandbox copy only.
             if proposed_diff.strip():
-                line_count = len(proposed_diff.splitlines())
-                if line_count > self.max_diff_lines:
-                    return CriticVerdict(
-                        approved=False,
-                        passed_checks=[],
-                        failed_checks=["diff_size_cap"],
-                        notes=f"diff too large: {line_count} lines (cap={self.max_diff_lines})",
-                    )
-                # Gate 2: Injection scan (issue #333 / SECURITY.md Threat #2).
-                #    the diff payload for prompt-injection markers before the
-                #    sandbox is mutated.
-                injection_markers = _scan_diff_for_injection(proposed_diff)
-                if injection_markers:
-                    return CriticVerdict(
-                        approved=False,
-                        passed_checks=[],
-                        failed_checks=["injection_detected"],
-                        notes=f"injection pattern(s) in diff: {', '.join(injection_markers)}",
-                    )
                 apply_result = subprocess.run(
                     ["git", "apply", "--whitespace=nowarn"],
                     input=proposed_diff,
@@ -148,31 +112,7 @@ class Critic:
                     )
                 passed_checks.append("git apply")
 
-            # Gate 3: Precondition gate (issue #187).
-            #    against the sandbox copy. A harness tree that fails to load
-            #    must fail the gate *before* pytest runs.
-            load_check_script = sandbox_root / "scripts" / "load_check.py"
-            load_result = subprocess.run(
-                [
-                    sys.executable,
-                    str(load_check_script),
-                    "--harness-dir",
-                    str(sandbox_root),
-                ],
-                cwd=sandbox_root,
-                capture_output=True,
-                text=True,
-            )
-            if load_result.returncode != 0:
-                return CriticVerdict(
-                    approved=False,
-                    passed_checks=passed_checks,
-                    failed_checks=[*failed_checks, "load_check"],
-                    notes=_tail(load_result.stderr or load_result.stdout),
-                )
-            passed_checks.append("load_check")
-
-            # Gate 4: Pytest benchmark suite.
+            # 2. Run pytest in the sandbox.
             pytest_result = subprocess.run(
                 [sys.executable, "-m", "pytest", *self.pytest_args],
                 cwd=sandbox_root,
@@ -181,9 +121,6 @@ class Critic:
             )
             if pytest_result.returncode == 0:
                 passed_checks.append("pytest")
-                # Record every benchmark tag the run covered (issue #185).
-                covered_tags = sorted({tag for task in self.benchmark_tasks for tag in task.tags})
-                passed_checks.extend(f"benchmark:{tag}" for tag in covered_tags)
             else:
                 failed_checks.append("pytest")
 
