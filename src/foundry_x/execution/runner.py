@@ -13,6 +13,7 @@ import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
@@ -48,6 +49,54 @@ DEFAULT_TASK_TIMEOUT_S: float = 600.0
 # stamped into trace sessions so each trace is attributable to the harness
 # revision that produced it.
 _FALLBACK_HARNESS_VERSION: str = "0.1.0"
+
+# Env-var names consulted for model identity (issue #12). ``FOUNDRY_MODEL_ID``
+# is the explicit, foundry-owned override; the other two already exist in
+# ``.env.example`` and let a local-first deployment self-describe without an
+# extra setting (PHILOSOPHY.md §5).
+_MODEL_ID_ENV = "FOUNDRY_MODEL_ID"
+_LLAMACPP_MODEL_PATH_ENV = "LLAMACPP_MODEL_PATH"
+_OPENCODE_SERVER_URL_ENV = "OPENCODE_SERVER_URL"
+
+
+def resolve_model_id(env: dict[str, str] | None = None) -> str | None:
+    """Resolve the model identity to stamp into the trace session (issue #12).
+
+    Resolution order, highest precedence first:
+
+    1. ``FOUNDRY_MODEL_ID`` — an explicit, foundry-owned override. Whitespace
+       is trimmed; an empty value falls through.
+    2. ``LLAMACPP_MODEL_PATH`` basename — for a local-first llama.cpp run the
+       model file name (e.g. ``codellama-7b.Q5_K_M.gguf``) is a stable,
+       human-readable identity with no extra configuration.
+    3. ``OPENCODE_SERVER_URL`` host — the network address of an OpenAI-
+       compatible endpoint (e.g. ``127.0.0.1``), stripped of scheme/port/path.
+    4. ``None`` — provenance is unknown rather than fabricated.
+
+    The value is purely informational provenance supporting ADR-0007 and the
+    improvement-rate KPI's before/after comparability (PRD §4): so that a
+    change in *success rate* can be separated from a change in *model*. No
+    value is ever invented; absent evidence the field stays ``NULL``.
+    """
+    source = env if env is not None else os.environ
+
+    explicit = source.get(_MODEL_ID_ENV, "").strip()
+    if explicit:
+        return explicit
+
+    model_path = source.get(_LLAMACPP_MODEL_PATH_ENV, "").strip()
+    if model_path:
+        basename = os.path.basename(model_path)
+        if basename:
+            return basename
+
+    server_url = source.get(_OPENCODE_SERVER_URL_ENV, "").strip()
+    if server_url:
+        host = urlsplit(server_url).hostname
+        if host:
+            return host
+
+    return None
 
 
 def resolve_harness_version(harness_dir: Path) -> str:
@@ -331,11 +380,7 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
 
     logger = TraceLogger(args.trace_path)
     harness_version = resolve_harness_version(harness_dir)
-    limits = run_limits_from_env()
-
-    logger = TraceLogger(args.trace_path, backend=resolve_trace_backend())
-    harness_version = resolve_harness_version(harness_dir)
-    model_id = args.model_id if args.model_id is not None else resolve_model_id()
+    model_id = resolve_model_id()
     limits = run_limits_from_env()
 
     with logger.session(harness_version=harness_version, model_id=model_id) as session_id:
