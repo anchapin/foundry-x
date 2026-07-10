@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import subprocess
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -17,6 +18,56 @@ from foundry_x.trace.logger import TraceLogger
 # real model turn, small enough to abort a runaway loop before it exhausts
 # the GPU/wallet. Mandated by docs/SECURITY.md "Runaway detection".
 DEFAULT_TASK_TIMEOUT_S: float = 600.0
+
+# Last-resort literal when neither ``harness/VERSION`` nor a git tag of the
+# harness directory can be read (issue #11). The harness is the evolved
+# artifact (PHILOSOPHY.md §6, ADR-0004); the *resolved* version is what gets
+# stamped into trace sessions so each trace is attributable to the harness
+# revision that produced it.
+_FALLBACK_HARNESS_VERSION: str = "0.1.0"
+
+
+def resolve_harness_version(harness_dir: Path) -> str:
+    """Return the version of the harness rooted at ``harness_dir``.
+
+    Resolution order (issue #11):
+
+    1. ``harness_dir / "VERSION"`` — a single-line text file owned by the
+       harness itself. The foundry reads a value the harness owns; it does
+       not hand-edit harness DNA (AGENTS.md §2, ADR-0004).
+    2. ``git describe --tags --always`` run in ``harness_dir``. Lets an
+       evolved checkout self-describe even before a ``VERSION`` bump.
+    3. The :data:`_FALLBACK_HARNESS_VERSION` literal.
+
+    Whitespace (including a trailing newline) is stripped from the file
+    contents and from the git output so the stamped value is canonical.
+
+    Failures (missing file, git not installed, git error, non-repo
+    directory) fall through silently to the next source rather than
+    aborting the run; a missing version stamp is preferable to a run that
+    cannot start.
+    """
+    version_file = harness_dir / "VERSION"
+    try:
+        text = version_file.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        text = ""
+    if text.strip():
+        return text.strip()
+
+    try:
+        completed = subprocess.run(  # noqa: S603 — args are a literal list
+            ["git", "describe", "--tags", "--always"],
+            cwd=str(harness_dir),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _FALLBACK_HARNESS_VERSION
+    candidate = completed.stdout.strip()
+    return candidate or _FALLBACK_HARNESS_VERSION
 
 
 class RunLimits(BaseModel):
@@ -143,7 +194,7 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         sys.path.insert(0, str(harness_dir))
 
     logger = TraceLogger(args.trace_path)
-    harness_version = "0.1.0"
+    harness_version = resolve_harness_version(harness_dir)
     limits = run_limits_from_env()
 
     with logger.session(harness_version=harness_version) as session_id:
