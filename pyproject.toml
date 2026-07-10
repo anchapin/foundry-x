@@ -10,6 +10,10 @@ dependencies = [
     "httpx>=0.27",
 ]
 
+[project.scripts]
+fx-trace = "foundry_x.observability.cli:main"
+foundry-kpis = "foundry_x.observability.kpis:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
@@ -28,6 +32,11 @@ packages = ["src/foundry_x"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["benchmarks/fixtures"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "benchmarks"]
+pythonpath = ["."]
+markers = [
+    "benchmark: deterministic gatekeeping benchmark task (ADR-0004, ADR-0005)",
+]
