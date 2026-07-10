@@ -64,6 +64,17 @@
 A single iteration is small. The value comes from running the loop
 many times per day against a benchmark suite.
 
+## Concepts
+
+- **meta-agent** — an agent that operates on another agent's artifacts
+  rather than on the end task; in FoundryX the `Evolver` is the
+  meta-agent that turns failure reports into `ProposedEdit`s against
+  the harness.
+- **failure report** — the structured artifact produced by the
+  `Digester` from a trace, naming what failed, where, and the
+  candidate root cause; consumed by the `Evolver` as the basis for a
+  `ProposedEdit`.
+
 ## Artifacts on disk
 
 - `harness/system_prompt.txt` — the agent's persona and operating rules.

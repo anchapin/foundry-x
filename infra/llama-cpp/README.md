@@ -27,6 +27,28 @@ cmake --build build --config Release -j"$(nproc)"
 
 Then point `LLAMACPP_HOST` in `.env` at it.
 
+## Smoke test
+
+`rocm_setup.sh` can verify the built server actually serves inference
+right after building — opt-in, no model needed in CI:
+
+```bash
+./rocm_setup.sh --smoke-test /srv/models/your-model.Q5_K_M.gguf
+# or via env var:
+LLAMACPP_SMOKE_MODEL=/srv/models/your-model.Q5_K_M.gguf ./rocm_setup.sh
+```
+
+It launches `llama-server` in the background, polls `/health` for up to
+60 s, asserts a non-empty `/completion`, reports the model name, then
+tears the server down. On failure it prints the server log and points
+at the pitfalls below.
+
+| Env var | Default | Purpose |
+| --- | --- | --- |
+| `LLAMACPP_SMOKE_NGL` | `0` | GPU layers to offload. Raise (e.g. `35`) to exercise the ROCm path. |
+| `LLAMACPP_SMOKE_PORT` | `8765` | Ephemeral port for the test server. |
+| `LLAMACPP_SMOKE_TIMEOUT` | `60` | Readiness deadline in seconds. |
+
 ## ROCm pitfalls on RX 6600 XT
 
 - ROCm 5.7+ lists Navi 22 in the supported matrix out of the box.
