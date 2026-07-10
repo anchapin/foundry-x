@@ -40,6 +40,10 @@ Resolves #
 
 ## Checklist
 
+- [ ] **CI is green** — `ci.yml` (ruff + pytest), `audit.yml`
+      (`uv pip audit`), and `critic.yml` (benchmark gate, ADR-0004)
+      when the diff touches `harness/**` or `src/foundry_x/evolution/**`
+      all show ✅ on the PR checks list
 - [ ] Commit subject is Conventional Commits — `type(scope): summary`,
       imperative mood, no trailing period, 50 chars or fewer (ADR-0008)
 - [ ] ADR recorded for any non-trivial decision (ADR-0008)
