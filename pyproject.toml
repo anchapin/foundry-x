@@ -34,4 +34,7 @@ line-length = 100
 target-version = "py311"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "benchmarks"]
+markers = [
+    "benchmark: benchmark task for the Critic gate (ADR-0004, ADR-0005)",
+]
