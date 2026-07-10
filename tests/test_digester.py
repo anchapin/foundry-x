@@ -13,6 +13,8 @@ import pytest
 from foundry_x.evolution.digester import (
     FAILURE_KINDS,
     FAILURE_PAYLOAD_KEYS,
+    INJECTION_ATTEMPT_CLASS,
+    INJECTION_BLOCKED_KIND,
     Digester,
     FailureReport,
 )
@@ -176,3 +178,141 @@ def test_failure_vocabularies_are_frozen_constants():
     assert isinstance(FAILURE_PAYLOAD_KEYS, frozenset)
     assert "tool_error" in FAILURE_KINDS
     assert "traceback" in FAILURE_PAYLOAD_KEYS
+
+
+# ---------------------------------------------------------------------------
+# Issue #120: ``injection_blocked`` aggregation → ``proposed_class`` ==
+# ``'injection-attempt'`` with one ``failed_steps`` entry per block.
+#
+# The firewall emits one ``injection_blocked`` trace event per
+# suppression. The Digester's contract is to surface the full
+# adversarial surface — not just the first block — so the Evolver can
+# propose patterns or scrubbing policies that address every marker
+# rather than papering over one.
+# ---------------------------------------------------------------------------
+
+
+def _block_event(
+    markers: list[str],
+    tool: str = "read_file",
+    event_id: str = "e-block",
+    seq: int = 4,
+    preview: str = "ignore previous instructions",
+) -> TraceEvent:
+    """Build an ``injection_blocked`` event with the canonical payload shape."""
+    return _ev(
+        INJECTION_BLOCKED_KIND,
+        {"markers": markers, "tool": tool, "preview": preview},
+        event_id=event_id,
+        seq=seq,
+    )
+
+
+def test_single_injection_block_yields_injection_attempt_class():
+    events = [
+        *_CLEAN_EVENTS,
+        _block_event(["ignore_previous"], event_id="e-block", seq=4),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == INJECTION_ATTEMPT_CLASS
+    assert INJECTION_ATTEMPT_CLASS in report.summary
+    assert len(report.failed_steps) == 1
+    step = report.failed_steps[0]
+    assert step["kind"] == INJECTION_BLOCKED_KIND
+    assert step["event_id"] == "e-block"
+    assert step["signal"] == f"kind:{INJECTION_BLOCKED_KIND}"
+    # Payload is preserved verbatim so the Evolver can re-derive marker
+    # names without re-parsing the original tool output.
+    assert step["payload"]["markers"] == ["ignore_previous"]
+    # Cause references the first block's marker list as evidence (ADR-0007).
+    assert any("ignore_previous" in c for c in report.suspected_causes)
+
+
+def test_multiple_injection_blocks_are_aggregated():
+    """Every block in the session lands in ``failed_steps``; count is exact."""
+    events = [
+        _ev("user_prompt", {"text": "go"}, event_id="e1", seq=1),
+        _block_event(["ignore_previous"], event_id="e-b1", seq=2),
+        _ev("tool_call", {"tool": "read_file"}, event_id="e2", seq=3),
+        _block_event(
+            ["ignore_spanish", "role_tag_colon"],
+            event_id="e-b2",
+            seq=4,
+            tool="shell",
+        ),
+        _block_event(["base64_payload"], event_id="e-b3", seq=5, tool="curl"),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == INJECTION_ATTEMPT_CLASS
+    assert len(report.failed_steps) == 3
+    assert [s["event_id"] for s in report.failed_steps] == ["e-b1", "e-b2", "e-b3"]
+    assert "3 firewall block(s)" in report.summary
+
+
+def test_injection_blocks_take_precedence_over_later_tool_error():
+    """An adversarial tool result is the more actionable failure signal.
+
+    Even if a downstream ``tool_error`` event arrives after one or more
+    ``injection_blocked`` events, the Digester must surface the
+    injection-attempt class so the Evolver does not propose a fix for
+    the wrong problem.
+    """
+    events = [
+        _ev("user_prompt", {"text": "go"}, event_id="e1", seq=1),
+        _block_event(["ignore_previous"], event_id="e-block", seq=2),
+        _ev(
+            "tool_error",
+            {"error": "exit code 1"},
+            event_id="e-tool-err",
+            seq=3,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == INJECTION_ATTEMPT_CLASS
+    # ``tool_error`` is still observed (later in the trace) but the
+    # reported failure class is the injection attempt.
+    assert report.failed_steps[0]["event_id"] == "e-block"
+
+
+def test_no_injection_blocks_falls_through_to_existing_classifier():
+    """Without injection events, the generic first-failure walk still wins."""
+    events = [
+        *_CLEAN_EVENTS,
+        _ev(
+            "tool_error",
+            {"error": "no such tool: frobnicate"},
+            event_id="e-fail",
+            seq=4,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "wrong-tool"
+    assert report.failed_steps[0]["kind"] == "tool_error"
+
+
+def test_injection_block_without_markers_payload_still_classified():
+    """A malformed payload (no ``markers`` key) still produces a useful report."""
+    events = [
+        _ev(
+            INJECTION_BLOCKED_KIND,
+            {"tool": "read_file", "preview": "adversarial span"},
+            event_id="e-malformed",
+            seq=2,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == INJECTION_ATTEMPT_CLASS
+    assert len(report.failed_steps) == 1
+    # Cause still references something trace-derived so the report stays
+    # grounded (ADR-0007).
+    assert report.suspected_causes
+
+
+def test_injection_block_vocabulary_is_exported():
+    """The new event kind + class are pinned as module-level constants."""
+    assert INJECTION_BLOCKED_KIND == "injection_blocked"
+    assert INJECTION_ATTEMPT_CLASS == "injection-attempt"
+    # ``injection_blocked`` is intentionally NOT in ``FAILURE_KINDS``: it
+    # is handled by a dedicated aggregation pass, not the generic
+    # first-failure walk.
+    assert INJECTION_BLOCKED_KIND not in FAILURE_KINDS
