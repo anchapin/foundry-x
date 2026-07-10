@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
 
+from pydantic import BaseModel, Field
 
-@dataclass
-class CriticVerdict:
+
+class CriticVerdict(BaseModel):
+    """Result of a Critic gate run against a proposed harness edit (ADR-0006)."""
+
     approved: bool
-    passed_checks: list[str] = field(default_factory=list)
-    failed_checks: list[str] = field(default_factory=list)
+    passed_checks: list[str] = Field(default_factory=list)
+    failed_checks: list[str] = Field(default_factory=list)
     notes: str = ""
 
 

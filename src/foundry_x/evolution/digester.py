@@ -1,14 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 
-@dataclass
-class FailureReport:
+class FailureReport(BaseModel):
+    """Structured failure payload emitted by the Digester (ADR-0006).
+
+    ``failed_steps`` carries loosely-typed per-step dicts whose shape varies
+    by failure mode; ``dict[str, Any]`` is intentional and noted per ADR-0006.
+    """
+
     session_id: str
     summary: str
-    failed_steps: list[dict] = field(default_factory=list)
-    suspected_causes: list[str] = field(default_factory=list)
+    failed_steps: list[dict[str, Any]] = Field(default_factory=list)
+    suspected_causes: list[str] = Field(default_factory=list)
     proposed_class: str = "unknown"
 
 
