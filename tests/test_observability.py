@@ -53,9 +53,7 @@ def test_format_timeline_error_marker():
 
 def test_format_timeline_tool_name_summary():
     output = format_timeline(_sample_events())
-    tool_call_line = next(
-        ln for ln in output.splitlines() if re.search(r"#2", ln)
-    )
+    tool_call_line = next(ln for ln in output.splitlines() if re.search(r"#2", ln))
     assert "read_file" in tool_call_line
 
 

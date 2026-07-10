@@ -1,0 +1,36 @@
+PROJECT LICENSE — PLACEHOLDER, NOT YET FINAL
+
+FoundryX does not yet have a final open-source license. Until one is
+selected and this file replaced with its full text, the project is
+"All rights reserved" under default copyright law, which means:
+
+  - You may READ the source for personal evaluation.
+  - You may NOT redistribute, modify, or use it in production without
+    explicit written permission from the copyright holder.
+  - Inbound contributions cannot be accepted under a clean license
+    until this file is replaced.
+
+Recommended next steps — pick one, then replace this file with the
+verbatim license text (no header other than what the license itself
+specifies):
+
+  - Apache License 2.0 (recommended for AI/ML projects; includes
+    explicit patent grants, which matter when the codebase trains,
+    serves, or shapes model behavior).
+  - MIT License (simpler, broadest compatibility, no patent grant).
+  - Business Source License 1.1 (BSL) if a future open-source release
+    is planned under a time-delayed model, with a converter license
+    to Apache-2.0 after the change-date.
+  - Dual license (e.g., AGPL-3.0 + commercial) if the project
+    intends to monetize hosted services.
+
+When you replace this file:
+
+  1. Drop the chosen license text verbatim, with its required header.
+  2. Update the "License" section in README.md.
+  3. Add SPDX-License-Identifier comments at the top of every source
+     file (optional but recommended for unambiguous reuse).
+  4. Open a PR titled "chore: adopt <LICENSE> license" and link it to
+     an ADR in docs/adr/ explaining the choice.
+
+Until then, this file is the project's license.

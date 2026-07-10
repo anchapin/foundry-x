@@ -114,9 +114,7 @@ def _cycle_time(conn: sqlite3.Connection, session_ids: list[str]) -> float | Non
     return sum(deltas) / len(deltas)
 
 
-def _verdict_rates(
-    conn: sqlite3.Connection, session_ids: list[str]
-) -> tuple[float, float]:
+def _verdict_rates(conn: sqlite3.Connection, session_ids: list[str]) -> tuple[float, float]:
     total_verdicts = 0
     approved = 0
     regression_sessions = 0
@@ -124,8 +122,7 @@ def _verdict_rates(
 
     for sid in session_ids:
         rows = conn.execute(
-            "SELECT payload FROM events "
-            "WHERE session_id = ? AND kind = 'critic_verdict'",
+            "SELECT payload FROM events " "WHERE session_id = ? AND kind = 'critic_verdict'",
             (sid,),
         ).fetchall()
         if not rows:
