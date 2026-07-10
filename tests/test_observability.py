@@ -4,9 +4,10 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from foundry_x.evolution.digester import FailureReport
+from foundry_x.observability.cli import main as cli_main
 from foundry_x.observability.render import render_failure_report
 from foundry_x.observability.timeline import format_timeline
-from foundry_x.trace.logger import TraceEvent
+from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 
 def _event(kind: str, offset: timedelta, payload: dict) -> TraceEvent:
@@ -152,3 +153,60 @@ def test_render_empty_fields_uses_defaults():
     assert "## Suspected Causes" in md
     assert "## Failed Steps" in md
     assert "## Classification: unknown" in md
+
+
+# --- fx-trace timeline CLI tests ---
+
+
+def _populate_session(db_path) -> str:
+    logger = TraceLogger(db_path)
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "user_prompt", {"prompt": "Fix the bug in auth.py"})
+        logger.record(sid, "tool_call", {"name": "read_file"})
+        logger.record(sid, "tool_result", {"name": "read_file", "status": "ok"})
+    return sid
+
+
+def test_cli_timeline_prints_formatted_session(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+
+    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "user_prompt" in captured.out
+    assert "tool_call" in captured.out
+    assert "read_file" in captured.out
+    assert "tool_result" in captured.out
+    # Five timeline lines are produced: each event renders a step line.
+    step_lines = [ln for ln in captured.out.splitlines() if re.search(r"#\d+", ln)]
+    assert len(step_lines) == 3
+    # The known/loaded session should not be reported as missing.
+    assert captured.err == ""
+
+
+def test_cli_timeline_missing_session_returns_nonzero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = cli_main(["timeline", "--db", str(db), "--session-id", "ghost-session"])
+
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "ghost-session" in captured.err
+
+
+def test_cli_timeline_jsonl_backend(tmp_path, capsys):
+    db = tmp_path / "traces.jsonl"
+    logger = TraceLogger(db, backend="jsonl")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "user_prompt", {"prompt": "hi"})
+
+    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "user_prompt" in out
+    assert "hi" in out

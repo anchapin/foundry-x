@@ -5,7 +5,14 @@ import sys
 from pathlib import Path
 
 from foundry_x.observability.regression_report import generate_regression_report
+from foundry_x.observability.timeline import format_timeline
 from foundry_x.trace.logger import TraceLogger
+
+
+def _infer_backend(path: str | Path) -> str:
+    """Return ``"jsonl"`` for ``.jsonl`` paths, ``"sqlite"`` otherwise."""
+    suffix = Path(path).suffix.lower()
+    return "jsonl" if suffix == ".jsonl" else "sqlite"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -34,6 +41,21 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write the report to this path instead of stdout.",
     )
+
+    timeline = sub.add_parser(
+        "timeline",
+        help="Print the formatted timeline of a session from the trace store.",
+    )
+    timeline.add_argument(
+        "--db",
+        required=True,
+        help="Path to the trace store (sqlite .db or jsonl).",
+    )
+    timeline.add_argument(
+        "--session-id",
+        required=True,
+        help="Session UUID whose events should be rendered.",
+    )
     return parser
 
 
@@ -47,6 +69,17 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.out).write_text(report, encoding="utf-8")
         else:
             sys.stdout.write(report)
+        return 0
+
+    if args.command == "timeline":
+        backend = _infer_backend(args.db)
+        logger = TraceLogger(args.db, backend=backend)
+        events = logger.load_session(args.session_id)
+        if not events:
+            sys.stderr.write(f"session {args.session_id} not found or empty\n")
+            return 2
+        sys.stdout.write(format_timeline(events))
+        sys.stdout.write("\n")
         return 0
 
     return 1
