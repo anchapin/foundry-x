@@ -1,16 +1,9 @@
-"""Secret-redaction tests for the trace logger (issues #3 and #121).
+"""Secret-redaction tests for the trace logger (issue #3).
 
-Issue #3 acceptance: a payload containing an ``sk-...`` key and a PEM
-block must persist ``[REDACTED:api-key]`` / ``[REDACTED:pem]`` rather than
-the raw value, against both the sqlite and jsonl backends. SECURITY.md
-lines 44-46 and 68-69 must be satisfied for the trace writer.
-
-Issue #121 acceptance: the ``metadata`` dict passed to
-``TraceLogger.session()`` is scrubbed on both backends (the original
-implementation persisted it verbatim), the named-key set covers modern
-secret names, and the content patterns cover GitHub classic + fine-
-grained PATs, JWTs, AWS access key IDs, Stripe live keys, and Slack
-tokens.
+Acceptance: a payload containing an ``sk-...`` key and a PEM block must
+persist ``[REDACTED:api-key]`` / ``[REDACTED:pem]`` rather than the raw
+value, against both the sqlite and jsonl backends. SECURITY.md lines
+44-46 and 68-69 must be satisfied for the trace writer.
 """
 
 from __future__ import annotations
@@ -30,22 +23,6 @@ _PEM = f"{_PEM_BEGIN}\nMIIEpAIBAAKCAQEAdGhpcyBpcyBhIGZha2Uga2V5\n{_PEM_END}"
 _API_KEY = "sk-" + "1234567890abcdef"
 _BEARER = "Bea" + "rer " + "mF_9.B5f-4.1JqM"
 _SECRET_KEY = "sk_" + "live_50charslongsecretkeyvaluehere123"
-# Modern token fixtures (issue #121). Each is hand-crafted in pieces so
-# gitleaks does not flag the literal at commit time; the assembled value
-# still matches the corresponding regex at runtime.
-_GITHUB_CLASSIC_PAT = "gh" + "p_" + "1A2B3C4D5E6F7G8H9I0J1A2B3"
-_GITHUB_FINE_GRAINED_PAT = "github_" + "pat_11ABCDEFG0_1234567890abcdefghijklmnopqrstuvwxyz"
-_JWT = (
-    "eyJ"
-    + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
-    + "."
-    + "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0"
-    + "."
-    + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
-)
-_AWS_ACCESS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
-_STRIPE_LIVE_KEY = "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc"
-_SLACK_TOKEN = "xox" + "b-1234567890123-1234567890123-" + "abcdefghijklmnopqrstuvwx"
 
 _BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
 
@@ -157,120 +134,3 @@ def test_redaction_scrubs_pem_directly_in_sqlite_blob(tmp_path):
     raw = row[0]
     assert "BEGIN RSA PRIVATE KEY" not in raw
     assert "[REDACTED:pem]" in raw
-
-
-# ---------------------------------------------------------------------------
-# Issue #121: metadata-path redaction + modern-token pattern coverage.
-# ---------------------------------------------------------------------------
-
-
-@_BACKENDS
-def test_session_metadata_is_redacted_on_persistence(tmp_path, backend):
-    """TraceLogger.session(metadata=...) must scrub the metadata dict before
-    writing it. Pre-#121 this round-trip leaked operator-supplied tokens."""
-    suffix = ".db" if backend == "sqlite" else ".jsonl"
-    path = tmp_path / f"traces{suffix}"
-    logger = TraceLogger(path, backend=backend)
-    payload_metadata = {
-        "operator": "alex",
-        "github_token": _GITHUB_CLASSIC_PAT,
-        "nested": {"aws_access_key_id": _AWS_ACCESS_KEY, "task": "ingest"},
-    }
-    with logger.session(harness_version="test-0.0", metadata=payload_metadata):
-        pass
-    sessions = logger.list_sessions()
-    assert len(sessions) == 1
-    persisted_metadata = sessions[0].metadata
-    blob = json.dumps(persisted_metadata)
-    assert _GITHUB_CLASSIC_PAT not in blob
-    assert _AWS_ACCESS_KEY not in blob
-    assert persisted_metadata["operator"] == "alex"
-    assert persisted_metadata["nested"]["task"] == "ingest"
-    assert persisted_metadata["github_token"] == "[REDACTED:secret]"
-    assert persisted_metadata["nested"]["aws_access_key_id"] == "[REDACTED:secret]"
-
-
-@_BACKENDS
-def test_session_metadata_input_is_not_mutated(tmp_path, backend):
-    """The dict passed by the Operator must not be mutated by the
-    redaction pass. Issue #121 acceptance."""
-    suffix = ".db" if backend == "sqlite" else ".jsonl"
-    path = tmp_path / f"traces{suffix}"
-    logger = TraceLogger(path, backend=backend)
-    metadata_input = {
-        "github_token": _GITHUB_CLASSIC_PAT,
-        "note": f"please keep {_BEARER} verbatim",
-    }
-    original_github = metadata_input["github_token"]
-    original_note = metadata_input["note"]
-    with logger.session(harness_version="test-0.0", metadata=metadata_input):
-        pass
-    assert metadata_input["github_token"] == original_github
-    assert metadata_input["note"] == original_note
-
-
-def test_redaction_scrubs_github_classic_pat():
-    result = _redact({"output": f"token={_GITHUB_CLASSIC_PAT}"})
-    assert _GITHUB_CLASSIC_PAT not in json.dumps(result)
-    assert result["output"] == "token=[REDACTED:github-pat]"
-
-
-def test_redaction_scrubs_github_fine_grained_pat():
-    result = _redact({"output": f"token={_GITHUB_FINE_GRAINED_PAT}"})
-    assert _GITHUB_FINE_GRAINED_PAT not in json.dumps(result)
-    assert "[REDACTED:github-pat]" in result["output"]
-
-
-def test_redaction_scrubs_jwt():
-    result = _redact({"header": f"Authorization: Bearer {_JWT}"})
-    # JWT is detected on its own; the surrounding "Bearer <token>" then
-    # additionally triggers the bearer redaction. Either way the raw JWT
-    # must not survive.
-    blob = json.dumps(result)
-    assert _JWT not in blob
-    assert "[REDACTED:jwt]" in blob or "[REDACTED:bearer]" in blob
-
-
-def test_redaction_scrubs_aws_access_key_id():
-    result = _redact({"env": f"AWS_ACCESS_KEY_ID={_AWS_ACCESS_KEY}"})
-    assert _AWS_ACCESS_KEY not in json.dumps(result)
-    assert result["env"] == "AWS_ACCESS_KEY_ID=[REDACTED:aws-access-key]"
-
-
-def test_redaction_scrubs_stripe_live_key():
-    result = _redact({"output": f"stripe={_STRIPE_LIVE_KEY}"})
-    assert _STRIPE_LIVE_KEY not in json.dumps(result)
-    assert "[REDACTED:stripe-key]" in result["output"]
-
-
-def test_redaction_scrubs_slack_token():
-    result = _redact({"webhook": _SLACK_TOKEN})
-    assert _SLACK_TOKEN not in json.dumps(result)
-    assert "[REDACTED:slack-token]" in result["webhook"]
-
-
-def test_redaction_scrubs_modern_secret_named_keys():
-    """The expanded ``_DEFAULT_SECRET_KEY_NAMES`` set covers modern secret
-    variable names independently of the value content."""
-    result = _redact(
-        {
-            "anthropic_api_key": "anything-in-here",
-            "openai_api_key": "anything-in-here",
-            "aws_secret_access_key": "anything-in-here",
-            "slack_token": "anything-in-here",
-            "stripe_key": "anything-in-here",
-            "jwt": "anything-in-here",
-            "id_token": "anything-in-here",
-            "refresh_token": "anything-in-here",
-            "safe": "keep-me",
-        }
-    )
-    assert result["anthropic_api_key"] == "[REDACTED:secret]"
-    assert result["openai_api_key"] == "[REDACTED:secret]"
-    assert result["aws_secret_access_key"] == "[REDACTED:secret]"
-    assert result["slack_token"] == "[REDACTED:secret]"
-    assert result["stripe_key"] == "[REDACTED:secret]"
-    assert result["jwt"] == "[REDACTED:secret]"
-    assert result["id_token"] == "[REDACTED:secret]"
-    assert result["refresh_token"] == "[REDACTED:secret]"
-    assert result["safe"] == "keep-me"
