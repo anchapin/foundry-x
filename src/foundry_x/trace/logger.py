@@ -266,25 +266,22 @@ class TraceLogger:
                             "started_at": _now(),
                             "harness_version": harness_version,
                             "model_id": model_id,
-                            "metadata": redacted_metadata,
+                            "metadata": metadata or {},
                             "kind": "session_start",
                         }
                     )
                     + "\n"
                 )
         else:
-            assert self._conn is not None  # backend == "sqlite"
-            with self._conn:
-                self._conn.execute(
-                    "INSERT INTO sessions "
-                    "(session_id, started_at, harness_version, model_id, metadata) "
-                    "VALUES (?, ?, ?, ?, ?)",
+            with sqlite3.connect(self.path) as conn:
+                conn.execute(
+                    "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
                     (
                         session_id,
                         _now(),
                         harness_version,
                         model_id,
-                        json.dumps(redacted_metadata),
+                        json.dumps(metadata or {}),
                     ),
                 )
         try:

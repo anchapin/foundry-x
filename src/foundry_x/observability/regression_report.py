@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import json
+import sqlite3
+from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
@@ -24,7 +26,6 @@ class _Regression:
     task: str
     was_passing_session: str
     now_failing_session: str
-    now_failing_version: str
 
 
 @dataclass
@@ -32,42 +33,6 @@ class _NewPass:
     task: str
     was_failing_session: str
     now_passing_session: str
-    now_passing_version: str
-
-
-class RegressionRow(BaseModel):
-    """One regressed task observed by the regression report (ADR-0006 boundary model)."""
-
-    task: str
-    was_passing_session: str
-    now_failing_session: str
-    now_failing_version: str
-
-
-class NewPassRow(BaseModel):
-    """One task that began passing in the latest window (ADR-0006 boundary model)."""
-
-    task: str
-    was_failing_session: str
-    now_passing_session: str
-    now_passing_version: str
-
-
-class RegressionAnalysis(BaseModel):
-    """Full result of a regression analysis pass.
-
-    Carries the rendered Markdown report alongside the structured regressions
-    and new passes so callers (e.g. ``fx-trace regression-report
-    --fail-on-regression``) can both persist the artifact and gate CI off the
-    same observation (issue #99).
-    """
-
-    report: str
-    total: int
-    approvals: int
-    rejections: int
-    regressions: list[RegressionRow] = Field(default_factory=list)
-    new_passes: list[NewPassRow] = Field(default_factory=list)
 
 
 def record_verdict(logger: TraceLogger, session_id: str, verdict: CriticVerdict) -> None:
@@ -85,46 +50,31 @@ def _load_verdict_events(
     logger: TraceLogger,
     since: str | None,
 ) -> list[tuple[str, str, VerdictRecord]]:
-    """Stream every ``critic_verdict`` event through :class:`TraceLogger`.
-
-    Issue #273 — previously walked ``list_sessions()`` and called
-    ``iter_events(sid)`` once per session, opening a fresh connection per
-    session. :meth:`TraceLogger.query_events` collapses that nested loop
-    into a single streaming cursor across all sessions; the ``since``
-    filter is still applied after the fetch (the issue's
-    ``query_events`` signature deliberately does not include a timestamp
-    filter — keeping the surface narrow).
-    """
+    query = (
+        "SELECT session_id, timestamp, payload FROM events "
+        "WHERE kind = ?"
+    )
+    params: list[object] = [VERDICT_KIND]
+    if since is not None:
+        query += " AND timestamp >= ?"
+        params.append(since)
+    query += " ORDER BY timestamp ASC, rowid ASC"
     events: list[tuple[str, str, VerdictRecord]] = []
-    for event in logger.query_events(kind=VERDICT_KIND):
-        if since is not None and event.timestamp < since:
-            continue
-        events.append(
-            (
-                event.session_id,
-                event.timestamp,
-                VerdictRecord(**event.payload),
-            )
-        )
-    # Preserve the previous ORDER BY timestamp ASC, rowid ASC ordering
-    # (issue #82: deterministic ordering keeps the regression-pairing
-    # logic stable across runs). ``query_events`` already returns rows in
-    # timestamp order; this stable re-sort guarantees identical tie-
-    # breaking to the prior per-session nested loop.
-    events.sort(key=lambda row: row[1])
+    with sqlite3.connect(logger.path) as conn:
+        rows = conn.execute(query, tuple(params)).fetchall()
+    for session_id, timestamp, payload in rows:
+        events.append((session_id, timestamp, VerdictRecord(**json.loads(payload))))
     return events
 
 
 def _compute(
     events: list[tuple[str, str, VerdictRecord]],
-    versions: dict[str, str],
 ) -> tuple[list[_Regression], list[_NewPass]]:
     prior_passed: dict[str, str] = {}
     prior_failed: dict[str, str] = {}
     regressions: list[_Regression] = []
     new_passes: list[_NewPass] = []
     for session_id, _timestamp, verdict in events:
-        session_version = versions.get(session_id, "")
         for task in verdict.failed_checks:
             if task in prior_passed:
                 regressions.append(
@@ -132,7 +82,6 @@ def _compute(
                         task=task,
                         was_passing_session=prior_passed[task],
                         now_failing_session=session_id,
-                        now_failing_version=session_version,
                     )
                 )
         for task in verdict.passed_checks:
@@ -142,7 +91,6 @@ def _compute(
                         task=task,
                         was_failing_session=prior_failed[task],
                         now_passing_session=session_id,
-                        now_passing_version=session_version,
                     )
                 )
         for task in verdict.passed_checks:
@@ -152,83 +100,14 @@ def _compute(
     return regressions, new_passes
 
 
-def generate_regression_report(
-    logger: TraceLogger,
-    since: str | None = None,
-    task: str | None = None,
-) -> str:
-    """Produce a Markdown regression report over all persisted Critic verdicts.
-
-    When ``task`` is provided, only rows whose ``task`` column equals that
-    name are included in the Regressed / New Passes sections (issue #182).
-    The Regression Summary counts (total verdicts / approvals / rejections)
-    remain the full population so the reviewer keeps context about the
-    analysis pass. If the task filter eliminates every row, the rendered
-    report collapses to a single ``no rows for task <name>`` line.
-    """
-    return analyze_regressions(logger, since=since, task=task).report
-
-
-def analyze_regressions(
-    logger: TraceLogger,
-    since: str | None = None,
-    task: str | None = None,
-) -> RegressionAnalysis:
-    """Run the regression analysis and return both the Markdown report and the
-    structured rows.
-
-    Issue #99: the regression-report CLI needs both the rendered artifact and
-    the list of regressed tasks (to gate CI with ``--fail-on-regression``).
-    Doing the analysis once here keeps the report and the gate consistent.
-
-    Issue #182: ``task`` narrows the regressions / new passes lists to a
-    single task name. The summary counts stay at full population so the
-    filtered view does not silently hide regressions in unrelated tasks.
-    """
+def generate_regression_report(logger: TraceLogger, since: str | None = None) -> str:
+    """Produce a Markdown regression report over all persisted Critic verdicts."""
     events = _load_verdict_events(logger, since)
     total = len(events)
     approvals = sum(1 for _sid, _ts, v in events if v.approved)
     rejections = total - approvals
-    versions = _session_versions(logger)
-    regressions, new_passes = _compute(events, versions)
-    if task is not None:
-        regressions = [r for r in regressions if r.task == task]
-        new_passes = [p for p in new_passes if p.task == task]
-    report = _render(total, approvals, rejections, regressions, new_passes, task=task)
-    return RegressionAnalysis(
-        report=report,
-        total=total,
-        approvals=approvals,
-        rejections=rejections,
-        regressions=[RegressionRow(**asdict(r)) for r in regressions],
-        new_passes=[NewPassRow(**asdict(p)) for p in new_passes],
-    )
-
-
-def _session_versions(logger: TraceLogger) -> dict[str, str]:
-    """Build a ``session_id -> harness_version`` map for every known session.
-
-    The map is consumed by :func:`_compute` so each regression / new-pass row
-    can surface the manifest version of its *current-state* session (issue
-    #103: regression_report gains a column showing the manifest version of
-    each verdict's source session). Sessions whose row is missing are
-    rendered as an empty string rather than ``None`` so the Markdown table
-    stays a 4-column shape.
-    """
-    return {s.session_id: s.harness_version for s in logger.list_sessions()}
-
-
-def _session_versions(logger: TraceLogger) -> dict[str, str]:
-    """Build a ``session_id -> harness_version`` map for every known session.
-
-    The map is consumed by :func:`_compute` so each regression / new-pass row
-    can surface the manifest version of its *current-state* session (issue
-    #103: regression_report gains a column showing the manifest version of
-    each verdict's source session). Sessions whose row is missing are
-    rendered as an empty string rather than ``None`` so the Markdown table
-    stays a 4-column shape.
-    """
-    return {s.session_id: s.harness_version for s in logger.list_sessions()}
+    regressions, new_passes = _compute(events)
+    return _render(total, approvals, rejections, regressions, new_passes)
 
 
 def _render(
@@ -237,13 +116,7 @@ def _render(
     rejections: int,
     regressions: list[_Regression],
     new_passes: list[_NewPass],
-    task: str | None = None,
 ) -> str:
-    # Issue #182: when the task filter narrows both sections to zero rows,
-    # collapse the report to a single-line message so the CLI's stdout is
-    # grep-friendly without a dangling "_None._" table.
-    if task is not None and not regressions and not new_passes:
-        return f"no rows for task {task}\n"
     lines: list[str] = [
         "# Critic Regression Report",
         "",
@@ -257,23 +130,21 @@ def _render(
         "",
     ]
     if regressions:
-        lines.append("| Task | Was passing (session) | Now failing (session) | Manifest version |")
-        lines.append("| --- | --- | --- | --- |")
+        lines.append("| Task | Was passing (session) | Now failing (session) |")
+        lines.append("| --- | --- | --- |")
         for reg in regressions:
             lines.append(
-                f"| {reg.task} | {reg.was_passing_session} | "
-                f"{reg.now_failing_session} | {reg.now_failing_version} |"
+                f"| {reg.task} | {reg.was_passing_session} | {reg.now_failing_session} |"
             )
     else:
         lines.append("_None._")
     lines += ["", "## New Passes", ""]
     if new_passes:
-        lines.append("| Task | Was failing (session) | Now passing (session) | Manifest version |")
-        lines.append("| --- | --- | --- | --- |")
+        lines.append("| Task | Was failing (session) | Now passing (session) |")
+        lines.append("| --- | --- | --- |")
         for pas in new_passes:
             lines.append(
-                f"| {pas.task} | {pas.was_failing_session} | "
-                f"{pas.now_passing_session} | {pas.now_passing_version} |"
+                f"| {pas.task} | {pas.was_failing_session} | {pas.now_passing_session} |"
             )
     else:
         lines.append("_None._")
