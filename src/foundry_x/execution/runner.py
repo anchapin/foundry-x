@@ -4,7 +4,8 @@ import argparse
 import asyncio
 import os
 import sys
-from collections.abc import Awaitable
+import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -104,7 +105,27 @@ async def run_task(task: str, harness_dir: Path, log: TraceLogger, session_id: s
     )
 
 
-def main() -> None:
+def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
+    """Entry point for the FoundryX execution runner.
+
+    A single task session is opened, a ``task_received`` event is recorded,
+    the task is awaited under :class:`RunLimits`, and a *terminal* event is
+    recorded before the session closes:
+
+    - ``task_completed`` with ``duration_ms`` on success.
+    - ``task_failed`` with ``error_type``, ``message``, and ``duration_ms``
+      on any :class:`Exception` (including the ``TimeoutError`` re-raised by
+      :func:`run_with_limits`); the exception is then re-raised so the
+      caller still observes it. Recording the outcome satisfies ADR-0007
+      (traces carry observable behavior) and gives the Phase 2 Digester a
+      terminal status to reason about. Stack frames are deliberately omitted
+      to keep the trace compact.
+
+    ``run_task_fn`` defaults to the module-level :func:`run_task`; tests may
+    inject a stub to drive ``main`` without the real model client.
+    """
+    task = run_task_fn if run_task_fn is not None else run_task
+
     parser = argparse.ArgumentParser(description="FoundryX execution runner")
     parser.add_argument("--task", required=True, help="Task prompt for the agent")
     parser.add_argument(
@@ -127,13 +148,33 @@ def main() -> None:
 
     with logger.session(harness_version=harness_version) as session_id:
         logger.record(session_id, kind="task_received", payload={"prompt": args.task})
-        asyncio.run(
-            run_with_limits(
-                run_task(args.task, harness_dir, logger, session_id),
-                logger,
-                session_id,
-                limits,
+        start = time.monotonic()
+        try:
+            asyncio.run(
+                run_with_limits(
+                    task(args.task, harness_dir, logger, session_id),
+                    logger,
+                    session_id,
+                    limits,
+                )
             )
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            logger.record(
+                session_id,
+                kind="task_failed",
+                payload={
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                    "duration_ms": duration_ms,
+                },
+            )
+            raise
+        duration_ms = int((time.monotonic() - start) * 1000)
+        logger.record(
+            session_id,
+            kind="task_completed",
+            payload={"duration_ms": duration_ms},
         )
 
 
