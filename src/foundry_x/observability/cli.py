@@ -259,6 +259,17 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stdout.write("\n")
         return 0
 
+    if args.command == "timeline":
+        backend = _infer_backend(args.db)
+        logger = TraceLogger(args.db, backend=backend)
+        events = logger.load_session(args.session_id)
+        if not events:
+            sys.stderr.write(f"session {args.session_id} not found or empty\n")
+            return 2
+        sys.stdout.write(format_timeline(events))
+        sys.stdout.write("\n")
+        return 0
+
     return 1
 
 
