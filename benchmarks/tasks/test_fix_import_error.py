@@ -58,7 +58,6 @@ TASK = BenchmarkTask(
         "to fixtures/fix_import_error/<case>/expected_stdout.txt."
     ),
     timeout_seconds=30,
-    requires_skills=["bash"],
     tags=["debugging", "imports", "stdlib", "multi-file"],
 )
 
@@ -141,9 +140,9 @@ def test_fix_import_error(benchmark_workspace: Path, case_id: str) -> None:
         f"the fix; got rc={bad.returncode} stdout={bad.stdout!r} "
         f"stderr={bad.stderr!r}"
     )
-    assert (
-        "NameError" in bad.stderr
-    ), f"task {TASK.name}/{case_id}: expected NameError in stderr; got stderr={bad.stderr!r}"
+    assert "NameError" in bad.stderr, (
+        f"task {TASK.name}/{case_id}: expected NameError in stderr; " f"got stderr={bad.stderr!r}"
+    )
 
     # Apply the golden fix: overwrite module.py in the workspace with the
     # corrected version (missing import added at the top).
