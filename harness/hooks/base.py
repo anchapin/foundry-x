@@ -46,6 +46,19 @@ class HookRegistry:
     def register(self, hook: Hook) -> None:
         self._hooks.append(hook)
 
+    def reset(self, on_error: HookErrorCallback | None = None) -> None:
+        """Drop every registered hook and replace ``on_error`` with ``on_error``.
+
+        Lets a Critic sandbox or test wipe a registry back to a known-empty
+        state without having to construct a fresh instance — useful when
+        the caller already holds a reference and downstream code uses it
+        by identity (e.g. the runner's ``get_registry()`` return value).
+        The default ``None`` clears any previously bound sink as well; that
+        is intentional — ``reset`` is the nuclear option.
+        """
+        self._hooks.clear()
+        self._on_error = on_error
+
     async def run_pre(self, call: ToolCall) -> ToolCall:
         for index, hook in enumerate(self._hooks):
             try:
@@ -102,13 +115,72 @@ class HookRegistry:
                 )
 
 
-_REGISTRY = HookRegistry()
-
-
-def register_hook(hook: Hook) -> Hook:
-    _REGISTRY.register(hook)
-    return hook
+# ---------------------------------------------------------------------------
+# Module-level default registry
+# ---------------------------------------------------------------------------
+# A single ``HookRegistry`` instance backs the convenience helpers below so
+# existing call sites (``register_hook(h)``, ``get_registry()``) keep working
+# unchanged. The Critic sandbox (ADR-0004) needs to evaluate harness
+# variants in isolation — hooks from variant A must not leak into variant B's
+# evaluation. The reset / swap helpers beneath make that possible without
+# forcing every consumer to thread a registry argument through their code.
+_DEFAULT_REGISTRY: HookRegistry = HookRegistry()
+# Backwards-compatible alias for tests that historically reached into the
+# module global directly (see ``tests/test_hook_isolation.py``). New code
+# should call :func:`get_registry` so the swap helpers below are honored.
+_REGISTRY = _DEFAULT_REGISTRY
 
 
 def get_registry() -> HookRegistry:
-    return _REGISTRY
+    """Return the process-default registry.
+
+    Returns whatever the most recent :func:`set_default_registry` call
+    installed (or the original singleton if no swap has happened). Existing
+    code keeps working unchanged; the Critic sandbox calls
+    ``set_default_registry`` once at setup time so ``get_registry()`` in
+    downstream code transparently returns the sandbox-scoped registry.
+    """
+    return _DEFAULT_REGISTRY
+
+
+def set_default_registry(registry: HookRegistry) -> HookRegistry:
+    """Replace the process-default registry.
+
+    Returns the *previous* default so callers can restore it (e.g. a Critic
+    sandbox evaluation that wants to leave the host process untouched when it
+    finishes). Pass an existing instance to share state, or a fresh
+    ``HookRegistry()`` to start blank.
+    """
+    global _DEFAULT_REGISTRY
+    previous = _DEFAULT_REGISTRY
+    _DEFAULT_REGISTRY = registry
+    return previous
+
+
+def reset_default_registry() -> HookRegistry:
+    """Discard every hook from the default registry and return it.
+
+    Convenience for tests: equivalent to ``set_default_registry(HookRegistry())``
+    but reuses the existing instance so any caller that already holds a
+    reference (via :func:`get_registry`) sees the cleared state immediately.
+    """
+    _DEFAULT_REGISTRY.reset()
+    return _DEFAULT_REGISTRY
+
+
+def register_hook(
+    hook: Hook,
+    *,
+    registry: HookRegistry | None = None,
+) -> Hook:
+    """Register ``hook`` against ``registry`` (or the process default).
+
+    The ``registry`` keyword is the Critic-sandbox entry point: pass a
+    fresh ``HookRegistry`` to install the hook into an isolated chain that
+    will not cross-contaminate the host process. Without ``registry`` the
+    call is identical to the pre-issue behavior — hooks land on the
+    module-level default, which every existing caller relies on.
+    """
+    target = registry if registry is not None else _DEFAULT_REGISTRY
+    target.register(hook)
+    return hook
