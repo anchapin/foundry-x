@@ -101,6 +101,24 @@ mitigation within 30 days for high-severity issues.
 ## Scope of this document
 
 This is a starting point. As the harness gains capabilities, the
-threat model and guardrails must be revisited. The `Critic` itself
-should be extended to include security-relevant test cases; track
-that work as an ADR.
+threat model and guardrails must be revisited.
+
+The `Critic` gate (ADR-0004) carries a dedicated security-evals
+BenchmarkTask family that pins each of the guardrails above to a
+regression test. See [ADR-0009](adr/0009-security-evals-benchmark-family.md)
+for the family definition and selection rules. The four tasks ship
+under `benchmarks/tasks/`:
+
+- `test_secret_redaction_evals.py` — `TraceLogger` scrubs the token
+  set enumerated in §Secrets above (issue #3 + #121).
+- `test_injection_firewall_evals.py` — `InjectionFirewallHook`
+  truncates adversarial tool results before re-injection
+  (issue #5 + #122).
+- `test_hook_isolation_evals.py` — a thrown hook exception does not
+  abort the chain (issue #21).
+- `test_evolver_guardrail_evals.py` — `ProposedEdit` confines edits
+  to `harness/{system_prompt.txt,hooks/,skills/}` and the `Evolver`
+  enforces the §"Rate limits" cap.
+
+A regression in any of the four flips the Critic red before the
+proposed harness edit ships.
