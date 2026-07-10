@@ -1,0 +1,24 @@
+{
+  "failed_steps": [
+    {
+      "event_id": "evt-001",
+      "index": 0,
+      "kind": "tool_error",
+      "payload": {
+        "args": {
+          "path": "/tmp/a"
+        },
+        "exit_code": 1,
+        "stderr": "no such tool",
+        "tool": "foo"
+      },
+      "signal": "kind:tool_error"
+    }
+  ],
+  "proposed_class": "tool-error",
+  "session_id": "sess-fixture-001",
+  "summary": "tool-error failure (kind=tool_error, signal=kind:tool_error): no tool named foo",
+  "suspected_causes": [
+    "Tool execution raised an error (matched: error). Inspect the failing call's traceback."
+  ]
+}
