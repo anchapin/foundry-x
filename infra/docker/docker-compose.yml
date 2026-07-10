@@ -1,0 +1,89 @@
+# Sandboxed run path for benchmarks and evolution.
+#
+# Implements the docs/SECURITY.md:54-59 guardrail:
+#
+#   "Run benchmarks and evolution inside a Docker container with read-only
+#    mounts for the host filesystem (see infra/). The default local dev path
+#    runs unsandboxed but should be migrated to the container for any
+#    non-trivial evolution run."
+#
+# This file is that "infra/" run path. It wraps the existing Dockerfile
+# (infra/docker/Dockerfile — unchanged) with the runtime sandbox the
+# guardrail already mandates:
+#
+#   * src/, harness/, tests/ are bind-mounted READ-ONLY so a buggy hook
+#     cannot write outside the workspace (threat #6) and the live, evolved
+#     harness is exercised without an image rebuild.
+#   * logs/ is the only read-write host mount, so the TraceLogger
+#     (ADR-0003) persists traces to a host-visible SQLite DB.
+#   * A dedicated bridge network grants no broad host network access; the
+#     container reaches the host llama-server (infra/llama-cpp) solely via
+#     host.docker.internal.
+#   * A memory + CPU cap contains runaway evolution runs (threat #5).
+#
+# See infra/docker/README.md for usage.
+
+services:
+  foundryx:
+    # Build context is the repo root so the Dockerfile can COPY pyproject,
+    # src, harness, and tests. The Compose file itself lives under infra/docker/.
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    image: foundryx:latest
+    init: true
+
+    # Pull runtime configuration from .env (LLAMACPP_HOST, FOUNDRY_*).
+    # `required: false` so `compose config` / CI validation does not hard-fail
+    # when .env is absent on a fresh clone; a real run copies .env.example first.
+    env_file:
+      - path: ../../.env
+        required: false
+
+    environment:
+      # Inside the default bridge network 127.0.0.1 is the container, not the
+      # host. Reach the host's llama-server (infra/llama-cpp) via the
+      # host-gateway alias added in extra_hosts. This overrides the .env value
+      # for the container without mutating the host's .env.
+      LLAMACPP_HOST: http://host.docker.internal:8080
+      # TraceLogger writes to a path inside the writable logs mount so events
+      # are visible on the host (acceptance criterion).
+      FOUNDRY_TRACE_PATH: /app/logs/traces.db
+
+    volumes:
+      # Read-only bind mounts of the host source (SECURITY.md threat #6).
+      # The live, evolved harness is used without an image rebuild.
+      - ../../src:/app/src:ro
+      - ../../harness:/app/harness:ro
+      - ../../tests:/app/tests:ro
+      # The ONLY read-write host mount: traces land on the host.
+      - ../../logs:/app/logs
+
+    # Isolated bridge network: the container has no broad host network access.
+    # It reaches the host llama-server exclusively via host.docker.internal.
+    networks:
+      - sandbox
+
+    extra_hosts:
+      # Linux: make the host reachable as host.docker.internal so the container
+      # can talk to llama-server (infra/llama-cpp/README.md).
+      - "host.docker.internal:host-gateway"
+
+    # Resource caps (SECURITY.md threat #5: resource exhaustion). Honoured by
+    # `docker compose` (Compose v2) for container creation.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "2.0"
+
+    # Drop all Linux capabilities and forbid privilege escalation — the runner
+    # needs none of them (supplementary hardening beyond SECURITY.md:56).
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  sandbox:
+    driver: bridge
