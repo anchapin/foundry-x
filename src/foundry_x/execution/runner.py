@@ -197,6 +197,38 @@ def resolve_trace_backend(env: dict[str, str] | None = None) -> str:
         )
     return backend
 
+# Trace-backend selection (issue #13). ``.env.example`` documents
+# ``FOUNDRY_TRACE_BACKEND`` as the way to switch the trace store between the
+# default SQLite database and the JSONL export format (ADR-0003). Keeping the
+# supported set in one place lets the runner validate the value up front
+# rather than silently falling through to a no-op backend, honoring
+# AGENTS.md §2 ("Never silently swallow an exception").
+_TRACE_BACKEND_ENV = "FOUNDRY_TRACE_BACKEND"
+_SUPPORTED_TRACE_BACKENDS: frozenset[str] = frozenset({"sqlite", "jsonl"})
+_DEFAULT_TRACE_BACKEND: str = "sqlite"
+
+
+def resolve_trace_backend(env: dict[str, str] | None = None) -> str:
+    """Resolve the trace backend from ``FOUNDRY_TRACE_BACKEND`` (issue #13).
+
+    The value is lower-cased and whitespace-stripped before comparison so a
+    value such as ``"JSONL"`` or ``" sqlite "`` from a hand-edited ``.env``
+    is accepted. An empty/absent value yields the :data:`_DEFAULT_TRACE_BACKEND`
+    (``sqlite``), matching ``.env.example``. An unrecognized value raises
+    :class:`ValueError` naming the valid options — failing fast at startup is
+    preferable to a silent fall-through that writes nothing and leaves the
+    engineer debugging why no trace appeared (AGENTS.md §2).
+    """
+    source = env if env is not None else os.environ
+    raw = source.get(_TRACE_BACKEND_ENV, "").strip().lower()
+    backend = raw or _DEFAULT_TRACE_BACKEND
+    if backend not in _SUPPORTED_TRACE_BACKENDS:
+        valid = ", ".join(sorted(_SUPPORTED_TRACE_BACKENDS))
+        raise ValueError(
+            f"Unsupported FOUNDRY_TRACE_BACKEND={backend!r}; " f"valid options are: {valid}"
+        )
+    return backend
+
 
 def resolve_model_id(env: dict[str, str] | None = None) -> str | None:
     """Resolve the model identity to stamp into the trace session (issue #12).
