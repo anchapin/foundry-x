@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -46,6 +47,69 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 """
+
+
+# --- Secret redaction ---------------------------------------------------------
+# Required by docs/SECURITY.md (lines 44-46, 68-69) and ADR-0003 (line 34).
+# Patterns are matched against every string value in a payload before it is
+# persisted to either backend, so that the trace store never holds raw
+# credentials. The Digester still sees a `[REDACTED:<kind>]` sentinel, which
+# preserves the signal that a secret *was* present without leaking its value.
+
+_API_KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]{8,}")
+_BEARER_RE = re.compile(r"(?i)bearer\s+[A-Za-z0-9\-._~+/]+=*")
+_PEM_RE = re.compile(
+    r"-----BEGIN (?:[A-Z ]*)PRIVATE KEY-----.*?-----END (?:[A-Z ]*)PRIVATE KEY-----",
+    re.DOTALL,
+)
+
+_DEFAULT_SECRET_KEY_NAMES: frozenset[str] = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "authorization",
+        "password",
+        "passwd",
+        "secret",
+        "secret_key",
+        "token",
+    }
+)
+
+
+def _redact_value(value: str) -> str:
+    """Mask secret-like substrings within a single string."""
+    value = _PEM_RE.sub("[REDACTED:pem]", value)
+    value = _API_KEY_RE.sub("[REDACTED:api-key]", value)
+    value = _BEARER_RE.sub("[REDACTED:bearer]", value)
+    return value
+
+
+def _redact(
+    payload: Any,
+    secret_key_names: frozenset[str] = _DEFAULT_SECRET_KEY_NAMES,
+) -> Any:
+    """Recursively scrub secret-like values from a payload.
+
+    Returns a new structure; the input is not mutated. Dict keys whose
+    lower-cased name is in ``secret_key_names`` have their entire value
+    replaced with ``[REDACTED:secret]`` regardless of content; all other
+    string values are scanned for ``sk-...``, ``Bearer ...`` and PEM
+    blocks.
+    """
+    if isinstance(payload, dict):
+        redacted: dict[str, Any] = {}
+        for key, val in payload.items():
+            if isinstance(key, str) and key.lower() in secret_key_names:
+                redacted[key] = "[REDACTED:secret]"
+            else:
+                redacted[key] = _redact(val, secret_key_names)
+        return redacted
+    if isinstance(payload, list):
+        return [_redact(item, secret_key_names) for item in payload]
+    if isinstance(payload, str):
+        return _redact_value(payload)
+    return payload
 
 
 class TraceLogger:
@@ -108,7 +172,7 @@ class TraceLogger:
             session_id=session_id,
             timestamp=_now(),
             kind=kind,
-            payload=payload,
+            payload=_redact(payload),
         )
         if self.backend == "sqlite":
             with sqlite3.connect(self.path) as conn:
