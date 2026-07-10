@@ -70,6 +70,16 @@ def _seed_session(
                     "preview": f"block {i}",
                 },
             )
+        for i in range(injection_block_count):
+            logger.record(
+                sid,
+                kind="injection_blocked",
+                payload={
+                    "markers": ["ignore_previous"],
+                    "tool": "read_file",
+                    "preview": f"block {i}",
+                },
+            )
     return sid
 
 

@@ -123,6 +123,7 @@ class KpiHistoryEntry(BaseModel):
     cycle_time_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
+    injection_blocks: dict[str, int] = {}
 
 
 def compute_kpis(
