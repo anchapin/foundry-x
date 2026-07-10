@@ -1,8 +1,24 @@
+"""Deterministic trace-walking and failure classification (issue #15, Phase 2).
+
+The ``Digester`` is the first link of the evolution loop
+(``Runner`` -> trace -> ``Digester`` -> ``Evolver`` -> ``Critic``). It turns
+an ordered list of :class:`~foundry_x.trace.logger.TraceEvent` objects into a
+:class:`FailureReport` without ever calling an LLM: the report is derived
+purely from trace content, satisfying ADR-0007 ("trace-driven development is
+the default" — failure reports come from observed traces, not speculation).
+
+Classification is keyword-driven by design (issue #15). The vocabulary of
+failure-signalling event ``kind`` values is exposed as module constants so the
+trace subsystem can align its emitted kinds against them in a later phase.
+"""
+
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable, Sequence
 
 from pydantic import BaseModel, Field
+
+from foundry_x.trace.logger import TraceEvent
 
 
 class FailureReport(BaseModel):
@@ -19,10 +35,256 @@ class FailureReport(BaseModel):
     proposed_class: str = "unknown"
 
 
+# --- Failure-signalling vocabulary -----------------------------------------
+# Module-level constants (issue #15): the set of ``kind`` values that
+# unambiguously mark a trace event as a failure, plus the payload keys that
+# signal a failure even when the ``kind`` is benign (e.g. a ``tool_result``
+# carrying a traceback). The trace subsystem (``src/foundry_x/trace/``) can
+# align its emitted kinds against ``FAILURE_KINDS`` in a later phase.
+FAILURE_KINDS: frozenset[str] = frozenset(
+    {
+        "tool_error",
+        "task_failed",
+        "run_failed",
+        "agent_error",
+        "error",
+    }
+)
+
+FAILURE_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {
+        "error",
+        "traceback",
+        "exception",
+    }
+)
+
+# Keyword rules driving deterministic classification. ``proposed_class`` is
+# always one of the four named classes (issue #15). The classes are checked
+# in this fixed order and the first match wins, so:
+#   * ``wrong-tool`` (specific multi-word tool-selection phrases) beats the
+#     generic ``tool-error`` catch-all.
+#   * ``bad-prompt`` and ``state-leak`` (specific phrases) likewise beat the
+#     catch-all.
+#   * ``tool-error`` is intentionally last: it mops up any structural
+#     failure signal (``kind`` / payload key) that no specific keyword
+#     matched, e.g. an opaque ``{"error": "exit code 1"}``.
+#
+# Keyword tuples are ordered most-specific-first so the recorded
+# ``suspected_causes`` evidence string is deterministic (not hash-ordered).
+# Keyword rules are imperfect by design (issue #15 scope); a traceback that
+# happens to contain the word "ambiguous" would mis-classify as ``bad-prompt``.
+_CLASS_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "wrong-tool",
+        (
+            "no such tool",
+            "tool not found",
+            "unknown tool",
+            "invalid tool",
+            "no tool named",
+            "no command named",
+            "unknown function",
+            "is not a valid tool",
+        ),
+    ),
+    (
+        "bad-prompt",
+        (
+            "missing context",
+            "under-specified",
+            "underspecified",
+            "malformed prompt",
+            "cannot parse prompt",
+            "contradictory",
+            "ambiguous",
+            "vague",
+            "unparseable",
+        ),
+    ),
+    (
+        "state-leak",
+        (
+            "no such file",
+            "file not found",
+            "already exists",
+            "unexpected state",
+            "race condition",
+            "dirty tree",
+            "is not empty",
+            "leftover",
+            "stale",
+            "leak",
+        ),
+    ),
+    (
+        "tool-error",
+        (
+            "traceback",
+            "exception",
+            "timed out",
+            "timeout",
+            "exit code",
+            "segmentation fault",
+            "segfault",
+            "broken pipe",
+            "command not found",
+            "error",
+            "failed",
+        ),
+    ),
+)
+
+# Cause templates per class. The matched keyword interpolates as evidence
+# (ADR-0007): every suspected cause points back at trace content.
+_CLASS_CAUSE_TEMPLATES: dict[str, str] = {
+    "wrong-tool": (
+        "Agent invoked a tool/command that is not registered (matched: "
+        "{match}). Review the available-tool list in the prompt."
+    ),
+    "bad-prompt": (
+        "Task prompt appears ambiguous or under-specified (matched: {match}). "
+        "Tighten the prompt with concrete acceptance criteria."
+    ),
+    "state-leak": (
+        "Execution hit stale or leaked state (matched: {match}). Check sandbox "
+        "reset/cleanup between steps."
+    ),
+    "tool-error": (
+        "Tool execution raised an error (matched: {match}). Inspect the "
+        "failing call's traceback."
+    ),
+}
+
+
+def _is_failure(event: TraceEvent) -> tuple[bool, str]:
+    """Return ``(is_failure, signal)`` for one event.
+
+    ``signal`` describes *what* tripped the detector so the report can carry
+    evidence (ADR-0007); it is empty when no failure is present.
+    """
+    if event.kind in FAILURE_KINDS:
+        return True, f"kind:{event.kind}"
+    for key in FAILURE_PAYLOAD_KEYS:
+        if key in event.payload:
+            return True, f"payload_key:{key}"
+    return False, ""
+
+
+def _walk_strings(value: Any) -> Iterable[str]:
+    """Yield every string within a nested payload structure.
+
+    Payload keys are yielded too (a key named ``timeout`` is a signal). This
+    is the single place the free-form ``Any`` payload is consumed; it is the
+    serialization-boundary carve-out described in ADR-0006.
+    """
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, sub in value.items():
+            if isinstance(key, str):
+                yield key
+            yield from _walk_strings(sub)
+    elif isinstance(value, (list, tuple, set)):
+        for sub in value:
+            yield from _walk_strings(sub)
+
+
+def _flatten_text(event: TraceEvent) -> str:
+    """Lowercase blob of the kind plus every string in the payload."""
+    return " ".join((event.kind, *_walk_strings(event.payload))).lower()
+
+
+def _classify(event: TraceEvent, signal: str) -> tuple[str, list[str]]:
+    """Map a failing event to ``(proposed_class, suspected_causes)``.
+
+    ``proposed_class`` is always one of the four named classes. The
+    most-specific keyword match wins (see ``_CLASS_KEYWORDS`` precedence);
+    when only a structural signal (``kind`` / payload key) is present with no
+    recognisable keyword, the class defaults to ``tool-error``.
+    """
+    text = _flatten_text(event)
+    matched_class = ""
+    matched_keyword = ""
+    for cls, keywords in _CLASS_KEYWORDS:
+        for keyword in keywords:
+            if keyword in text:
+                matched_class = cls
+                matched_keyword = keyword
+                break
+        if matched_class:
+            break
+
+    if not matched_class:
+        matched_class = "tool-error"
+        matched_keyword = signal
+
+    causes = [_CLASS_CAUSE_TEMPLATES[matched_class].format(match=matched_keyword)]
+    if signal.startswith("payload_key:"):
+        causes.append(f"Failing payload key present: {signal.split(':', 1)[1]}.")
+    return matched_class, causes
+
+
+def _detail(event: TraceEvent) -> str:
+    """Best-effort one-line excerpt of the failing event's payload."""
+    for key in FAILURE_PAYLOAD_KEYS:
+        value = event.payload.get(key)
+        if isinstance(value, str) and value.strip():
+            line = value.strip().splitlines()[0].strip()
+            if line:
+                return line[:200]
+    return _flatten_text(event)[:200]
+
+
+def _summarise(event: TraceEvent, signal: str, proposed_class: str) -> str:
+    detail = _detail(event)
+    head = f"{proposed_class} failure (kind={event.kind}, signal={signal})"
+    if detail:
+        head += f": {detail}"
+    return head
+
+
 class Digester:
-    def digest(self, session_id: str, events) -> FailureReport:
-        raise NotImplementedError(
-            "Phase 2: walk trace events, identify the first failed step, "
-            "and classify the failure mode (bad-prompt / wrong-tool / "
-            "tool-error / state-leak). Return a FailureReport."
+    def digest(
+        self,
+        session_id: str,
+        events: Sequence[TraceEvent],
+    ) -> FailureReport:
+        """Walk trace events and classify the first failure (issue #15).
+
+        Pure and deterministic: no LLM call, no I/O. Events are stably sorted
+        by ``timestamp`` so the "first" failed step is well-defined regardless
+        of how the caller assembled the sequence (mirrors the ordering contract
+        of ``TraceLogger.load_session``). When no failure is found the report
+        is returned with ``proposed_class == "clean"`` and empty
+        ``failed_steps``.
+        """
+        ordered = sorted(events, key=lambda e: e.timestamp)
+        for index, event in enumerate(ordered):
+            is_failure, signal = _is_failure(event)
+            if not is_failure:
+                continue
+            proposed_class, causes = _classify(event, signal)
+            failed_step: dict[str, Any] = {
+                "index": index,
+                "event_id": event.event_id,
+                "kind": event.kind,
+                "timestamp": event.timestamp,
+                "signal": signal,
+                "payload": event.payload,
+            }
+            return FailureReport(
+                session_id=session_id,
+                summary=_summarise(event, signal, proposed_class),
+                failed_steps=[failed_step],
+                suspected_causes=causes,
+                proposed_class=proposed_class,
+            )
+
+        return FailureReport(
+            session_id=session_id,
+            summary=(f"No failures detected across {len(ordered)} trace event(s)."),
+            failed_steps=[],
+            suspected_causes=[],
+            proposed_class="clean",
         )
