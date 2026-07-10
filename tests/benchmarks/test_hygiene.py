@@ -19,9 +19,8 @@ gate without a single test failing:
 
 Scope notes:
 
-- The marker-coverage check scopes to ``benchmarks/tasks/`` (issue #108
-  moved the smoke canary here so the in-process registry can discover it
-  via its ``TASK`` attribute). The infrastructure tests under
+- The marker-coverage check scopes to ``benchmarks/tasks/`` and the smoke
+  canary (``benchmarks/test_smoke.py``). The infrastructure tests under
   ``benchmarks/test_workspace_fixture.py`` deliberately lack the marker
   because they are not benchmark tasks -- they exercise the
   ``benchmark_workspace`` fixture contract itself.
@@ -50,6 +49,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARKS_DIR = REPO_ROOT / "benchmarks"
 TASKS_DIR = BENCHMARKS_DIR / "tasks"
 FIXTURES_DIR = BENCHMARKS_DIR / "fixtures"
+SMOKE_TEST = BENCHMARKS_DIR / "test_smoke.py"
 
 #: Modules that perform network I/O. Tasks must not import them
 #: (benchmarks/README.md "No network"; PHILOSOPHY.md §5).
@@ -110,13 +110,11 @@ def _function_markers(py_file: Path) -> dict[str, set[str]]:
 
 
 def _benchmark_target_files() -> list[Path]:
-    """Files that contain benchmark tasks: every ``benchmarks/tasks/test_*.py``.
-
-    The smoke canary lives under ``benchmarks/tasks/test_smoke.py`` since
-    issue #108 moved it there so the in-process registry can harvest its
-    ``TASK`` attribute; no separate path is required.
-    """
-    return sorted(TASKS_DIR.glob("test_*.py"))
+    """Files that contain benchmark tasks: every ``benchmarks/tasks/test_*.py`` plus the smoke canary."""
+    files = sorted(TASKS_DIR.glob("test_*.py"))
+    if SMOKE_TEST.exists():
+        files.append(SMOKE_TEST)
+    return files
 
 
 def _declared_benchmark_tasks() -> list[tuple[str, Path]]:
@@ -171,11 +169,7 @@ def test_every_benchmark_test_carries_marker(pytester: pytest.Pytester) -> None:
         py_file = Path(path_str)
         if not py_file.is_absolute():
             py_file = (REPO_ROOT / path_str).resolve()
-        # Parametrised tests generate nodeids like
-        # ``test_fix_import_error[missing_module]``; strip the bracketed
-        # suffix so the AST lookup finds the bare function definition.
-        bare_name = test_name.split("[", 1)[0]
-        markers = _function_markers(py_file).get(bare_name, set())
+        markers = _function_markers(py_file).get(test_name, set())
         if "benchmark" not in markers:
             missing.append(f"{nodeid} (markers present: {sorted(markers) or 'none'})")
 
@@ -216,7 +210,7 @@ def test_benchmark_tasks_have_no_network_imports() -> None:
 
 @pytest.mark.benchmark
 def test_every_benchmark_task_has_matching_fixture_directory() -> None:
-    """Fixture-existence invariant: every non-smoke ``BenchmarkTask`` has a fixture dir.
+    """Fixture-existence invariant: every ``BenchmarkTask`` has a fixture dir.
 
     Imports each ``benchmarks/tasks/test_*.py`` module, reads its
     ``TASK = BenchmarkTask(...)`` instance, and asserts the named fixture
@@ -224,26 +218,12 @@ def test_every_benchmark_task_has_matching_fixture_directory() -> None:
     produce a confusing ``FileNotFoundError`` deep inside ``conftest.py``
     at task-run time (conftest.py:63-69); surfacing the mismatch at
     collection time keeps the failure mode local and unambiguous.
-
-    The smoke canary (``difficulty_tier="smoke"``) is excluded: by design
-    it requires no fixture data and no agent invocation -- it is a
-    static check that the plumbing is wired up. The ``difficulty_tier``
-    field is the right discriminator because the smoke tier was added
-    for exactly this shape of task (benchmarks/models.py:36-37).
     """
     declared = _declared_benchmark_tasks()
     assert declared, "no BenchmarkTask instances declared under benchmarks/tasks/"
 
     missing: list[str] = []
     for task_name, source_file in declared:
-        # Import the module to read the task's ``difficulty_tier``.
-        # Cheap: module is already cached in sys.modules by
-        # ``_declared_benchmark_tasks``.
-        module = __import__(f"benchmarks.tasks.{source_file.stem}", fromlist=["TASK"])
-        task = module.TASK
-        if task.difficulty_tier == "smoke":
-            # Smoke canary -- no fixture data by design (issue #27).
-            continue
         fixture_path = FIXTURES_DIR / task_name
         if not fixture_path.is_dir():
             missing.append(
