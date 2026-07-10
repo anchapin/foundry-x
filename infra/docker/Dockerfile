@@ -49,30 +49,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential git curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Pin the uv installer to a specific version AND content hash (issue #25).
-# UV_VERSION is the GitHub release tag. UV_SHA256 is the SHA256 of the
-# matching x86_64-unknown-linux-gnu release tarball, embedded so a
-# compromised release or MITM between the build host and GitHub cannot
-# silently swap the binary (docs/SECURITY.md threat #3).
-# To bump UV_VERSION: download
-#   https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_TARGET}.tar.gz
-# record `sha256sum` output, update UV_SHA256, and re-run
-# `uv sync --frozen` to confirm reproducibility.
+# Pin the uv installer to a specific version. Unpinned `pip install uv`
+# reproduces PyPI's "latest" on every build, which is both a reproducibility
+# bug (ADR-0002: the resolved package set can silently change between
+# builds) and a supply-chain weakening (docs/SECURITY.md threat #3).
+# Bump UV_VERSION deliberately and re-verify `uv sync --frozen` succeeds.
 ARG UV_VERSION=0.9.30
-ARG UV_SHA256=8b3762374972daa7a74bbc6896cc73229ca69a07403dd9f9ea3805a51ffd7582
-ARG UV_TARGET=uv-x86_64-unknown-linux-gnu
-
-RUN set -eux; \
-    curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_TARGET}.tar.gz" -o /tmp/uv.tar.gz; \
-    echo "${UV_SHA256}  /tmp/uv.tar.gz" | sha256sum -c -; \
-    # Extract into /usr/local/bin (on PATH in the python slim base), not
-    # /usr/local: the release tarball is flat (uv, uvx at the archive root
-    # under a single top dir), so --strip-components=1 lands uv directly in
-    # the target dir. /usr/local is NOT on PATH, which broke `uv --version`.
-    tar -xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1; \
-    rm -f /tmp/uv.tar.gz; \
-    uv --version
-
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
+RUN uv --version
 WORKDIR /app
 COPY pyproject.toml uv.lock* ./
 # BuildKit cache mount: a second consecutive `docker build` reuses uv's

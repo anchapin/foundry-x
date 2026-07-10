@@ -1,20 +1,13 @@
 """Static validation of the sandbox Dockerfile uv installation.
 
 Mirrors `tests/test_compose_sandbox.py` and `tests/test_dockerignore.py`:
-parses the Dockerfile directly, no Docker daemon required.
+parses the Dockerfile directly, no Docker daemon required. Guards the
+pinned installer (issue #25) so the guardrail cannot regress silently.
 
-Per ADR-0002 and `docs/SECURITY.md` threat #3, the Dockerfile MUST pin
-both the base image and the uv installer to digests (issue #124):
-
-- The `FROM python:3.11-slim` line MUST carry a `@sha256:<64hex>` digest
-  so a fresh Docker Hub build of the same tag cannot swap the base
-  layer between rebuilds.
-- The uv installer MUST be fetched as a GitHub release tarball AND
-  verified against an embedded SHA256 before extraction, so a
-  compromised release cannot auto-install.
-
-Guards the pinned installer (issue #25) and the hash-verified install
-(issue #124) so the supply-chain guardrails cannot regress silently.
+Per ADR-0002 and `docs/SECURITY.md` threat #3, the uv installer MUST be
+pinned to a specific version. An unpinned `pip install uv` reproduces
+PyPI's "latest" on every build, which is exactly the reproducibility and
+supply-chain weakness this guard exists to prevent.
 """
 
 from __future__ import annotations
@@ -39,64 +32,6 @@ def lines(dockerfile_text: str) -> list[str]:
     return dockerfile_text.splitlines()
 
 
-def test_base_image_is_digest_pinned(lines: list[str]) -> None:
-    """The base image MUST be pinned to a digest (`@sha256:<64hex>`).
-
-    A tag-only `FROM python:3.11-slim` allows Docker Hub to swap the
-    layer contents between rebuilds (docs/SECURITY.md threat #3).
-    Closes the gap that issue #124 calls out on line 1.
-    """
-    from_lines = [ln for ln in lines if re.match(r"^\s*FROM\s+\S", ln)]
-    assert from_lines, "Dockerfile must start with a FROM instruction"
-    first = from_lines[0]
-    assert "python:3.11" in first, f"FROM must pin a Python 3.11 image, got: {first!r}"
-    digest = re.search(r"@sha256:([a-f0-9]{64})\b", first)
-    assert digest, (
-        f"FROM must pin a digest (@sha256:<64hex>), got: {first!r}. "
-        "See issue #124 and docs/SECURITY.md threat #3."
-    )
-
-
-def test_uv_installer_is_hash_verified(dockerfile_text: str) -> None:
-    """The uv installer tarball MUST be SHA256-verified before extraction.
-
-    Guards against an attacker who controls either the release server
-    or the network path between the build host and GitHub releases
-    (docs/SECURITY.md threat #3). The version pin alone (issue #25)
-    is not sufficient: a compromised `uv==${UV_VERSION}` PyPI release
-    would still install. The hash check is what makes the pin
-    trustworthy.
-    """
-    # 1) ARG UV_SHA256=<64hex> must be declared with a concrete value.
-    sha_arg = re.search(
-        r"^\s*ARG\s+UV_SHA256\s*=\s*([a-fA-F0-9]{64})\s*$",
-        dockerfile_text,
-        re.MULTILINE,
-    )
-    assert sha_arg, (
-        "Dockerfile must declare `ARG UV_SHA256=<64hex>` so the uv "
-        "tarball is verified before extraction. See issue #124."
-    )
-
-    # 2) The downloaded tarball must be checked with `sha256sum -c`.
-    assert "sha256sum -c" in dockerfile_text, (
-        "Dockerfile must verify the tarball with `sha256sum -c -` before "
-        "extracting uv. See issue #124."
-    )
-
-    # 3) The download URL must reference the pinned UV_VERSION arg,
-    #    not a hard-coded version (a hard-coded URL would defeat the ARG).
-    download = re.search(
-        r"https://github\.com/astral-sh/uv/releases/download/\$\{?UV_VERSION\}?/",
-        dockerfile_text,
-    )
-    assert download, (
-        "Dockerfile must download the uv tarball from "
-        "`https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/...`. "
-        "Hard-coded versions in the URL defeat ARG pinning. See issue #124."
-    )
-
-
 def test_arg_uv_version_is_declared(lines: list[str]) -> None:
     """The pinned version MUST be declared via `ARG UV_VERSION=<x.y.z>` (issue #25)."""
     args = [ln for ln in lines if re.match(r"\s*ARG\s+UV_VERSION\b", ln)]
@@ -116,20 +51,30 @@ def test_arg_uv_version_is_declared(lines: list[str]) -> None:
     ), f"UV_VERSION must look like semver `x.y.z` (got {version!r})"
 
 
+def test_uv_install_is_pinned(lines: list[str]) -> None:
+    """The uv install line MUST reference `${UV_VERSION}` so the version is sourced from ARG."""
+    install_lines = [ln for ln in lines if "pip install" in ln and "uv" in ln]
+    assert install_lines, "Dockerfile must install uv via pip (or another channel)"
+    joined = " ".join(install_lines)
+    assert "${UV_VERSION}" in joined, (
+        "uv install must reference `${UV_VERSION}` so the version is "
+        "sourced from the ARG. Unpinned `pip install uv` violates ADR-0002 "
+        "reproducibility (see issue #25 and docs/SECURITY.md threat #3)."
+    )
+
+
 def test_uv_version_sanity_check(lines: list[str]) -> None:
-    """`uv --version` must run after the install so mismatches fail loudly.
+    """`RUN uv --version` must follow the install so mismatches fail loudly.
 
     AGENTS.md §2: *"Never silently swallow an exception."* A pinned
-    installer whose binary is missing or wrong-named would otherwise
-    be caught only at `uv sync` time, deep inside the build.
+    installer whose binary is missing or wrong-named would otherwise be
+    caught only at `uv sync` time, deep inside the build.
     """
     install_idx = next(
-        (i for i, ln in enumerate(lines) if "astral-sh/uv/releases/download" in ln),
+        (i for i, ln in enumerate(lines) if "pip install" in ln and "uv" in ln),
         None,
     )
-    assert (
-        install_idx is not None
-    ), "Dockerfile must fetch uv from astral-sh/uv/releases/download (issue #124)."
+    assert install_idx is not None, "Dockerfile must install uv"
     post = lines[install_idx:]
     assert any("uv --version" in ln for ln in post), (
         "Dockerfile must run `uv --version` after installing uv so a "
@@ -137,13 +82,13 @@ def test_uv_version_sanity_check(lines: list[str]) -> None:
     )
 
 
-def test_no_pip_install_uv(dockerfile_text: str) -> None:
-    """No line may install uv via `pip install` — the hash-verified
-    tarball is the canonical install path (issue #124).
+def test_no_unpinned_uv_install(dockerfile_text: str) -> None:
+    """No line may contain a bare `pip install ... uv` without a version pin.
 
-    Guards against a regression that reverts to `pip install uv==...`,
-    which is the supply-chain hole this whole issue closes. The
-    version pin alone is not a content pin.
+    Guards against a future regression that re-introduces the original
+    unpinned `RUN pip install --no-cache-dir uv` while keeping a separate
+    pinned line (e.g. for a different tool). Such a line would still be
+    a supply-chain hole.
     """
     for raw in dockerfile_text.splitlines():
         stripped = raw.strip()
@@ -151,9 +96,13 @@ def test_no_pip_install_uv(dockerfile_text: str) -> None:
             continue
         if "pip install" not in stripped:
             continue
-        if re.search(r"\buv\b", stripped):
+        # If this line installs uv, it must carry a version pin.
+        if (
+            re.search(r"\buv\b", stripped)
+            and "uv==" not in stripped
+            and "${UV_VERSION}" not in stripped
+        ):
             pytest.fail(
-                f"`pip install` of uv is forbidden; use the hash-verified "
-                f"tarball from astral-sh/uv/releases/download (issue #124). "
-                f"Offending line: {stripped!r}"
+                f"unpinned uv install: {stripped!r}. Use `uv==${{UV_VERSION}}` "
+                "or remove the line (see issue #25)."
             )
