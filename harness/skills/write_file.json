@@ -1,0 +1,29 @@
+{
+  "name": "write_file",
+  "version": "0.1.0",
+  "description": "Write full contents to a file in the agent's workspace, creating or overwriting it.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Absolute or harness-relative path to the file to write."
+      },
+      "content": {
+        "type": "string",
+        "description": "Full text contents to write to the file."
+      }
+    },
+    "required": ["path", "content"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string" },
+      "sha256": { "type": "string" },
+      "bytes_written": { "type": "integer" }
+    },
+    "required": ["path", "sha256", "bytes_written"]
+  }
+}
