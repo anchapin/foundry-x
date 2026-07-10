@@ -10,20 +10,15 @@ the default" — failure reports come from observed traces, not speculation).
 Classification is keyword-driven by design (issue #15). The vocabulary of
 failure-signalling event ``kind`` values is exposed as module constants so the
 trace subsystem can align its emitted kinds against them in a later phase.
-
-Issue #120 adds a structured ``injection_blocked`` event kind emitted by the
-``InjectionFirewallHook`` whenever it suppresses a tool result. The Digester
-recognizes that kind with a dedicated aggregation pass (one entry per block
-in ``failed_steps``) before the generic first-failure walk runs, so an
-adversarial tool result is surfaced as ``proposed_class='injection-attempt'``
-even when a downstream ``tool_error`` event also occurs.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable, Sequence
 
 from pydantic import BaseModel, Field
+
+from foundry_x.trace.logger import TraceEvent
 
 
 class FailureReport(BaseModel):
@@ -46,15 +41,6 @@ class FailureReport(BaseModel):
 # signal a failure even when the ``kind`` is benign (e.g. a ``tool_result``
 # carrying a traceback). The trace subsystem (``src/foundry_x/trace/``) can
 # align its emitted kinds against ``FAILURE_KINDS`` in a later phase.
-#
-# ``injection_blocked`` (issue #120) is *not* in ``FAILURE_KINDS``: it is
-# handled by a dedicated aggregation pass in :meth:`Digester.digest` that
-# collects *every* block in the session (not just the first), so the
-# generic first-failure walk would under-report. The constant is exported
-# separately so tests can pin the contract.
-INJECTION_BLOCKED_KIND: str = "injection_blocked"
-INJECTION_ATTEMPT_CLASS: str = "injection-attempt"
-
 FAILURE_KINDS: frozenset[str] = frozenset(
     {
         "tool_error",
@@ -165,17 +151,8 @@ _CLASS_CAUSE_TEMPLATES: dict[str, str] = {
         "reset/cleanup between steps."
     ),
     "tool-error": (
-        "Tool execution raised an error (matched: {match}). Inspect the failing call's traceback."
-    ),
-    # Issue #120: structured ``injection_blocked`` events aggregate into a
-    # single ``injection-attempt`` report. The template references the first
-    # block's marker list as evidence; later blocks are listed in
-    # ``failed_steps`` for full traceability.
-    "injection-attempt": (
-        "InjectionFirewallHook suppressed {count} tool result(s) for prompt-"
-        "injection markers (first block matched: {match}). Treat the agent "
-        "as compromised for this session; consider tightening the firewall "
-        "patterns or the upstream tool-result scrubbing policy."
+        "Tool execution raised an error (matched: {match}). Inspect the "
+        "failing call's traceback."
     ),
 }
 
@@ -267,67 +244,6 @@ def _summarise(event: TraceEvent, signal: str, proposed_class: str) -> str:
     return head
 
 
-def _aggregate_injection_blocks(
-    session_id: str,
-    ordered: Sequence[TraceEvent],
-) -> FailureReport | None:
-    """Aggregate every ``injection_blocked`` event in ``ordered`` (issue #120).
-
-    Returns a fully-formed :class:`FailureReport` with
-    ``proposed_class == 'injection-attempt'`` and one entry per block in
-    ``failed_steps`` so the Evolver can see the full extent of the
-    adversarial surface. The summary mentions the block count (per the
-    issue's "block count in ``failed_steps``" acceptance criterion) and
-    the first block's marker list is used as the cause's ``{match}``
-    placeholder so the report stays grounded in trace content (ADR-0007).
-
-    Returns ``None`` when no ``injection_blocked`` event is present, so
-    the caller can fall through to the generic first-failure walk.
-    """
-    blocks = [(i, e) for i, e in enumerate(ordered) if e.kind == INJECTION_BLOCKED_KIND]
-    if not blocks:
-        return None
-
-    first_event = blocks[0][1]
-    # Prefer the structured ``markers`` list from the firewall payload; fall
-    # back to the full flattened text so a malformed payload (missing the
-    # ``markers`` key, e.g. from a hand-crafted trace) still produces a
-    # useful ``{match}`` snippet.
-    first_markers = first_event.payload.get("markers")
-    if isinstance(first_markers, list) and first_markers:
-        match_repr = ",".join(str(m) for m in first_markers)
-    else:
-        match_repr = _flatten_text(first_event)[:80]
-
-    failed_steps: list[dict[str, Any]] = [
-        {
-            "index": index,
-            "event_id": event.event_id,
-            "kind": event.kind,
-            "timestamp": event.timestamp,
-            "signal": f"kind:{INJECTION_BLOCKED_KIND}",
-            "payload": event.payload,
-        }
-        for index, event in blocks
-    ]
-    causes = [
-        _CLASS_CAUSE_TEMPLATES[INJECTION_ATTEMPT_CLASS].format(
-            match=match_repr,
-            count=len(blocks),
-        )
-    ]
-    return FailureReport(
-        session_id=session_id,
-        summary=(
-            f"{INJECTION_ATTEMPT_CLASS} failure: {len(blocks)} firewall "
-            f"block(s) across {len(ordered)} trace event(s)"
-        ),
-        failed_steps=failed_steps,
-        suspected_causes=causes,
-        proposed_class=INJECTION_ATTEMPT_CLASS,
-    )
-
-
 class Digester:
     def digest(
         self,
@@ -342,18 +258,8 @@ class Digester:
         of ``TraceLogger.load_session``). When no failure is found the report
         is returned with ``proposed_class == "clean"`` and empty
         ``failed_steps``.
-
-        Issue #120 short-circuits the generic walk when one or more
-        ``injection_blocked`` events are present: every block is aggregated
-        into a single ``injection-attempt`` report so the Evolver sees the
-        full adversarial surface rather than just the first block.
         """
         ordered = sorted(events, key=lambda e: e.timestamp)
-
-        injection_report = _aggregate_injection_blocks(session_id, ordered)
-        if injection_report is not None:
-            return injection_report
-
         for index, event in enumerate(ordered):
             is_failure, signal = _is_failure(event)
             if not is_failure:
