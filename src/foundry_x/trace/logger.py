@@ -65,17 +65,33 @@ class TraceLogger:
         metadata: dict[str, Any] | None = None,
     ) -> Iterator[str]:
         session_id = str(uuid.uuid4())
-        with sqlite3.connect(self.path) as conn:
-            conn.execute(
-                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
-                (
-                    session_id,
-                    _now(),
-                    harness_version,
-                    model_id,
-                    json.dumps(metadata or {}),
-                ),
-            )
+        if self.backend == "jsonl":
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps(
+                        {
+                            "session_id": session_id,
+                            "started_at": _now(),
+                            "harness_version": harness_version,
+                            "model_id": model_id,
+                            "metadata": metadata or {},
+                            "kind": "session_start",
+                        }
+                    )
+                    + "\n"
+                )
+        else:
+            with sqlite3.connect(self.path) as conn:
+                conn.execute(
+                    "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        _now(),
+                        harness_version,
+                        model_id,
+                        json.dumps(metadata or {}),
+                    ),
+                )
         try:
             yield session_id
         finally:
