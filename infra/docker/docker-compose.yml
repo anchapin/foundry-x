@@ -22,6 +22,8 @@
 #   * A read-only root filesystem with bounded tmpfs caps closes the
 #     writable-surface gap left by issue #6 (see THREAT MODEL: root FS below).
 #   * A memory + CPU cap contains runaway evolution runs (threat #5).
+#   * pids_limit + ulimits (nproc, nofile) close the fork-bomb / FD-exhaustion
+#     gap that memory + CPU caps alone do not catch (issue #118).
 #
 # See infra/docker/README.md for usage.
 #
@@ -40,9 +42,12 @@
 #   2. `tmpfs:` entries for /tmp, /var/tmp, /run with explicit size caps
 #      give the container the writable surface it actually needs
 #      (Python's tempfile, uv's cache via UV_CACHE_DIR, /run for PID files)
-#      while bounding the blast radius of a runaway. 256m is generous for
-#      the runner's actual workload (a single trace DB + a uv cache) and
-#      small enough that a misbehaving hook cannot exhaust host RAM.
+#      while bounding the blast radius of a runaway. The caps are sized
+#      per-path: /tmp is the busiest (uv cache + Python tempfile + sqlite
+#      WAL) and gets 512m; /var/tmp is rarely written in this workload and
+#      stays at 256m; /run holds PID files only and is capped at 64m.
+#      Each cap is small enough that a misbehaving hook cannot exhaust
+#      host RAM before the memory limit (above) fires.
 #
 # ----------------------------------------------------------------------------
 # THREAT MODEL: egress (resolves SECURITY.md threat #5 + the loopback gap)
@@ -116,12 +121,13 @@ services:
     read_only: true
 
     # Bounded writable tmpfs mounts (THREAT MODEL: root FS in the header).
-    # 256m is sized for the runner's actual workload (uv cache, Python
-    # tempfile, PID files); mode 1777 matches the FHS defaults.
+    # Sized per-path: /tmp is busiest (uv cache + Python tempfile + sqlite
+    # WAL) at 512m; /var/tmp rarely written, kept at 256m; /run holds only
+    # PID files at 64m. mode 1777 matches the FHS defaults.
     tmpfs:
-      - /tmp:size=256m,mode=1777
+      - /tmp:size=512m,mode=1777
       - /var/tmp:size=256m,mode=1777
-      - /run:size=256m,mode=1777
+      - /run:size=64m,mode=1777
 
     # Isolated bridge network: the container has no broad host network access.
     # It reaches the host llama-server exclusively via the narrowly-scoped
@@ -138,12 +144,28 @@ services:
       - "llamacpp:host-gateway"
 
     # Resource caps (SECURITY.md threat #5: resource exhaustion). Honoured by
-    # `docker compose` (Compose v2) for container creation.
+    # `docker compose` (Compose v2) for container creation. The `pids`
+    # field under deploy.resources.limits must agree with the top-level
+    # `pids_limit` (Compose Spec: "pids_limit must be consistent with the
+    # pids attribute in the Deploy Specification"); we set both to 256
+    # so swarm-mode and local-compose paths honour the same cap.
     deploy:
       resources:
         limits:
           memory: 2g
           cpus: "2.0"
+          pids: 256
+
+    # Process and FD caps (issue #118). memory + CPU limits alone do not
+    # stop a fork-bomb or a FD-exhaustion loop: those can still take the
+    # host down before the memory cap fires. pids_limit bounds the total
+    # number of processes/threads inside the container; ulimits cap the
+    # per-process thread count (nproc) and open-file count (nofile) so a
+    # runaway hook cannot multiply its resource use inside one process.
+    pids_limit: 256
+    ulimits:
+      nproc: 512
+      nofile: 2048
 
     # Drop all Linux capabilities and forbid privilege escalation — the runner
     # needs none of them (supplementary hardening beyond SECURITY.md:56).

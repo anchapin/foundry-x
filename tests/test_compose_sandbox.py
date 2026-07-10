@@ -35,9 +35,9 @@ def test_src_and_harness_mounts_are_read_only(compose: dict) -> None:
     """Host source must be bind-mounted :ro (SECURITY.md threat #6)."""
     volumes = _service(compose)["volumes"]
     ro = {v.split(":")[1] for v in volumes if v.endswith(":ro")}
-    assert {"/app/src", "/app/harness"} <= ro, (
-        "src/ and harness/ must be read-only so a buggy hook cannot write " "outside the workspace"
-    )
+    assert (
+        {"/app/src", "/app/harness"} <= ro
+    ), "src/ and harness/ must be read-only so a buggy hook cannot write outside the workspace"
 
 
 def test_logs_mount_is_writable(compose: dict) -> None:
@@ -137,9 +137,9 @@ def test_tmpfs_caps_present(compose: dict) -> None:
 
     for path, opts in entries:
         if path in _REQUIRED_TMPFS_PATHS:
-            assert re.search(_TMPFS_SIZE_CAP_PATTERN, opts), (
-                f"tmpfs {path!r} must declare a size cap (e.g. size=256m); " f"got opts={opts!r}"
-            )
+            assert re.search(
+                _TMPFS_SIZE_CAP_PATTERN, opts
+            ), f"tmpfs {path!r} must declare a size cap (e.g. size=256m); got opts={opts!r}"
             # Mode 1777 is the FHS default for world-writable sticky dirs;
             # the test does not fail if mode is absent, only if it is wrong.
             mode_match = re.search(r"(?:^|[,\s])mode=([0-7]+)", opts)
@@ -182,3 +182,102 @@ def test_extra_hosts_is_llamacpp_gateway_only(compose: dict) -> None:
 
     llamacpp_entries = [n for n in names if "llamacpp" in n.lower()]
     assert llamacpp_entries, f"extra_hosts must declare the LLAMACPP gateway; got names: {names!r}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #118: pids_limit + ulimits + tmpfs caps hardening.
+# ---------------------------------------------------------------------------
+
+
+def _tmpfs_entry(compose: dict, mount_path: str) -> tuple[int, int] | None:
+    """Return ``(size_mb, mode_octal)`` for ``mount_path`` in tmpfs entries.
+
+    Compose accepts either a list of strings ("/path:size=NNm,mode=NNNN") or
+    a dict mapping mount paths to the same fragment. Returns ``None`` if the
+    path isn't present.
+    """
+    svc = _service(compose)
+    tmpfs = svc.get("tmpfs")
+    if not tmpfs:
+        return None
+    if isinstance(tmpfs, dict):
+        fragment = tmpfs.get(mount_path)
+    else:
+        match = [t for t in tmpfs if t.startswith(f"{mount_path}:")]
+        fragment = match[0] if match else None
+    if fragment is None:
+        return None
+    # Strip the leading "<path>:" so the remaining fragment is "size=NNm,mode=NNNN"
+    # without the path segment attaching to a key on the first split.
+    inner = fragment.split(":", 1)[1] if ":" in fragment else fragment
+    parts: dict[str, str] = {}
+    for piece in inner.split(","):
+        if "=" not in piece:
+            continue
+        key, value = piece.split("=", 1)
+        parts[key.strip()] = value.strip()
+    size_token = parts.get("size", "").rstrip("m").rstrip("M")
+    mode_token = parts.get("mode", "")
+    if not size_token.isdigit():
+        raise AssertionError(f"tmpfs {mount_path}: cannot parse size from {fragment!r}")
+    if not mode_token.isdigit():
+        raise AssertionError(f"tmpfs {mount_path}: cannot parse mode from {fragment!r}")
+    return int(size_token), int(mode_token)
+
+
+def test_pids_limit_is_set(compose: dict) -> None:
+    """Issue #118: a top-level pids_limit on the foundryx service bounds the
+    total process count inside the container. Memory + CPU caps alone do not
+    stop a fork-bomb (SECURITY.md threat #5)."""
+    svc = _service(compose)
+    assert (
+        int(svc.get("pids_limit", 0)) >= 1
+    ), f"pids_limit must be a positive integer; got {svc.get('pids_limit')!r}"
+
+
+def test_pids_limit_matches_deploy_resources_pids(compose: dict) -> None:
+    """Compose Spec requires top-level pids_limit to be consistent with the
+    pids attribute under deploy.resources.limits. Issue #118 sets both to 256
+    so swarm and local compose paths honour the same cap."""
+    svc = _service(compose)
+    top_level = int(svc.get("pids_limit", 0))
+    deploy_pids = int(svc.get("deploy", {}).get("resources", {}).get("limits", {}).get("pids", 0))
+    assert top_level > 0 and deploy_pids > 0, (
+        f"both pids_limit and deploy.resources.limits.pids must be set; "
+        f"got top_level={top_level}, deploy={deploy_pids}"
+    )
+    assert top_level == deploy_pids, (
+        f"pids_limit ({top_level}) must match deploy.resources.limits.pids "
+        f"({deploy_pids}) per Compose Spec"
+    )
+
+
+def test_ulimits_cap_process_and_fd_use(compose: dict) -> None:
+    """Issue #118: ulimits cap per-process thread count (nproc) and open-file
+    count (nofile) so a runaway hook cannot multiply its resource use inside
+    one process."""
+    svc = _service(compose)
+    ulimits = svc.get("ulimits") or {}
+    assert (
+        "nproc" in ulimits and int(ulimits["nproc"]) > 0
+    ), f"ulimits.nproc must be set; got {ulimits!r}"
+    assert (
+        "nofile" in ulimits and int(ulimits["nofile"]) > 0
+    ), f"ulimits.nofile must be set; got {ulimits!r}"
+
+
+def test_tmpfs_per_path_sizes(compose: dict) -> None:
+    """Issue #118 sizes tmpfs per-path: /tmp busiest at 512m, /var/tmp at 256m,
+    /run at 64m (PID files only)."""
+    assert _tmpfs_entry(compose, "/tmp") == (
+        512,
+        1777,
+    ), f"tmpfs /tmp must be 512m mode 1777; got {_tmpfs_entry(compose, '/tmp')!r}"
+    assert _tmpfs_entry(compose, "/var/tmp") == (
+        256,
+        1777,
+    ), f"tmpfs /var/tmp must be 256m mode 1777; got {_tmpfs_entry(compose, '/var/tmp')!r}"
+    assert _tmpfs_entry(compose, "/run") == (
+        64,
+        1777,
+    ), f"tmpfs /run must be 64m mode 1777 (PID files only); got {_tmpfs_entry(compose, '/run')!r}"
