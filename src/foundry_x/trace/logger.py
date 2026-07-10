@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -40,7 +41,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     started_at TEXT NOT NULL,
     harness_version TEXT NOT NULL,
     model_id TEXT,
-    metadata TEXT
+    metadata TEXT,
+    ended_at TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
     event_id TEXT PRIMARY KEY,
@@ -125,6 +127,13 @@ class TraceLogger:
         if backend == "sqlite":
             with sqlite3.connect(self.path) as conn:
                 conn.executescript(_SCHEMA)
+                # Non-destructive migration for pre-issue-#8 databases that
+                # predate the ``ended_at`` column (issue #8). Guarded by a
+                # pragma check so freshly-created databases are untouched and
+                # existing ``logs/*.db`` files do not break.
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+                if "ended_at" not in columns:
+                    conn.execute("ALTER TABLE sessions ADD COLUMN ended_at TEXT")
 
     @contextmanager
     def session(
@@ -152,7 +161,9 @@ class TraceLogger:
         else:
             with sqlite3.connect(self.path) as conn:
                 conn.execute(
-                    "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO sessions "
+                    "(session_id, started_at, harness_version, model_id, metadata) "
+                    "VALUES (?, ?, ?, ?, ?)",
                     (
                         session_id,
                         _now(),
@@ -164,7 +175,72 @@ class TraceLogger:
         try:
             yield session_id
         finally:
-            pass
+            # Record the wall-clock end timestamp even when the body raised,
+            # so a failed session still gets an ``ended_at`` (issue #8). This
+            # is the primitive the PRD cycle-time KPI and SECURITY.md runaway
+            # detection build on.
+            self._end_session(session_id)
+
+    def _end_session(self, session_id: str) -> None:
+        """Stamp ``ended_at`` on session exit (issue #8).
+
+        Writes to the ``sessions`` table for sqlite, or appends a
+        ``session_end`` marker line for jsonl. Per AGENTS.md we never
+        silently swallow exceptions, so when the ``session()`` body
+        completed cleanly any write error is re-raised (it indicates a
+        real problem with the trace store). When the body is already
+        unwinding for an exception, re-raising here would mask the
+        caller's original error, so in that one case the write error is
+        suppressed — leaving ``ended_at`` null, which degrades gracefully
+        downstream rather than corrupting the caller's stack trace.
+        """
+        ended_at = _now()
+        masking_active_exception = sys.exc_info()[1] is not None
+        try:
+            if self.backend == "jsonl":
+                with self.path.open("a", encoding="utf-8") as fh:
+                    fh.write(
+                        json.dumps(
+                            {
+                                "session_id": session_id,
+                                "ended_at": ended_at,
+                                "kind": "session_end",
+                            }
+                        )
+                        + "\n"
+                    )
+            else:
+                with sqlite3.connect(self.path) as conn:
+                    conn.execute(
+                        "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
+                        (ended_at, session_id),
+                    )
+        except Exception:
+            if masking_active_exception:
+                return
+            raise
+
+    def session_duration(self, session_id: str) -> timedelta | None:
+        """Wall-clock duration of a session, or ``None`` if not yet ended.
+
+        Returns ``ended_at - started_at`` parsed from ISO-8601 timestamps.
+        ``None`` means the session is still open, has no recorded
+        ``ended_at`` (e.g. a pre-#8 row never re-opened), or the stored
+        timestamps could not be parsed. Intended for the Digester and the
+        trace CLI.
+        """
+        for session in self.list_sessions():
+            if session.session_id != session_id:
+                continue
+            if session.ended_at is None:
+                return None
+            try:
+                start = datetime.fromisoformat(session.started_at)
+                end = datetime.fromisoformat(session.ended_at)
+            except ValueError:
+                return None
+            return end - start
+        return None
 
     def record(
         self,
@@ -237,33 +313,38 @@ class TraceLogger:
         return sessions
 
     def _list_sessions_jsonl(self) -> list[TraceSession]:
-        sessions: list[TraceSession] = []
-        seen: set[str] = set()
+        # Two marker kinds share the JSONL file: ``session_start`` (written
+        # on session entry) and ``session_end`` (written on exit, issue #8).
+        # The first start line per session_id wins; a later end line, if
+        # present, fills in ``ended_at``.
+        sessions: dict[str, dict[str, Any]] = {}
         if not self.path.exists():
-            return sessions
+            return []
         with self.path.open("r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
                     continue
                 record: dict[str, Any] = json.loads(line)
-                if record.get("kind") != "session_start":
-                    continue
-                session_id = record["session_id"]
-                if session_id in seen:
-                    continue
-                seen.add(session_id)
-                sessions.append(
-                    TraceSession(
-                        session_id=session_id,
-                        started_at=record["started_at"],
-                        harness_version=record["harness_version"],
-                        model_id=record.get("model_id"),
-                        metadata=record.get("metadata") or {},
-                    )
-                )
-        sessions.sort(key=lambda s: s.started_at)
-        return sessions
+                kind = record.get("kind")
+                session_id = record.get("session_id")
+                if kind == "session_start":
+                    if session_id in sessions:
+                        continue
+                    sessions[session_id] = {
+                        "session_id": session_id,
+                        "started_at": record["started_at"],
+                        "harness_version": record["harness_version"],
+                        "model_id": record.get("model_id"),
+                        "metadata": record.get("metadata") or {},
+                        "ended_at": None,
+                    }
+                elif kind == "session_end":
+                    if session_id in sessions:
+                        sessions[session_id]["ended_at"] = record.get("ended_at")
+        result = [TraceSession(**data) for data in sessions.values()]
+        result.sort(key=lambda s: s.started_at)
+        return result
 
     def _load_session_sqlite(self, session_id: str) -> list[TraceEvent]:
         events: list[TraceEvent] = []
