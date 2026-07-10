@@ -18,7 +18,7 @@ import sqlite3
 import sys
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -161,33 +161,15 @@ class TraceLogger:
         # supersedes in ADR-0003.
         self._conn: sqlite3.Connection | None = None
         if backend == "sqlite":
-            self._conn = sqlite3.connect(self.path)
-            # WAL is a persistent database property (stored in the file
-            # header), so this also benefits raw ``sqlite3.connect`` readers
-            # opened against the same file later.
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.executescript(_SCHEMA)
-            # Non-destructive migration for pre-issue-#8 databases that
-            # predate the ``ended_at`` column (issue #8). Guarded by a
-            # pragma check so freshly-created databases are untouched and
-            # existing ``logs/*.db`` files do not break.
-            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)")}
-            if "ended_at" not in columns:
-                self._conn.execute("ALTER TABLE sessions ADD COLUMN ended_at TEXT")
-            self._conn.commit()
-
-    def close(self) -> None:
-        """Close the reused sqlite connection (issue #274).
-
-        Optional lifecycle hook: the connection is also released by garbage
-        collection when the logger falls out of scope, so existing callers
-        that never call ``close()`` keep working. Tests and long-running
-        services that construct many loggers can call this to release the
-        connection (and its ``-wal``/``-shm`` sidecar handles) deterministically.
-        """
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+            with sqlite3.connect(self.path) as conn:
+                conn.executescript(_SCHEMA)
+                # Non-destructive migration for pre-issue-#8 databases that
+                # predate the ``ended_at`` column (issue #8). Guarded by a
+                # pragma check so freshly-created databases are untouched and
+                # existing ``logs/*.db`` files do not break.
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+                if "ended_at" not in columns:
+                    conn.execute("ALTER TABLE sessions ADD COLUMN ended_at TEXT")
 
     @contextmanager
     def session(
@@ -222,7 +204,9 @@ class TraceLogger:
         else:
             with sqlite3.connect(self.path) as conn:
                 conn.execute(
-                    "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO sessions "
+                    "(session_id, started_at, harness_version, model_id, metadata) "
+                    "VALUES (?, ?, ?, ?, ?)",
                     (
                         session_id,
                         _now(),
@@ -269,9 +253,8 @@ class TraceLogger:
                         + "\n"
                     )
             else:
-                assert self._conn is not None  # backend == "sqlite"
-                with self._conn:
-                    self._conn.execute(
+                with sqlite3.connect(self.path) as conn:
+                    conn.execute(
                         "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
                         (ended_at, session_id),
                     )
@@ -373,33 +356,38 @@ class TraceLogger:
         return sessions
 
     def _list_sessions_jsonl(self) -> list[TraceSession]:
-        sessions: list[TraceSession] = []
-        seen: set[str] = set()
+        # Two marker kinds share the JSONL file: ``session_start`` (written
+        # on session entry) and ``session_end`` (written on exit, issue #8).
+        # The first start line per session_id wins; a later end line, if
+        # present, fills in ``ended_at``.
+        sessions: dict[str, dict[str, Any]] = {}
         if not self.path.exists():
-            return sessions
+            return []
         with self.path.open("r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
                     continue
                 record: dict[str, Any] = json.loads(line)
-                if record.get("kind") != "session_start":
-                    continue
-                session_id = record["session_id"]
-                if session_id in seen:
-                    continue
-                seen.add(session_id)
-                sessions.append(
-                    TraceSession(
-                        session_id=session_id,
-                        started_at=record["started_at"],
-                        harness_version=record["harness_version"],
-                        model_id=record.get("model_id"),
-                        metadata=record.get("metadata") or {},
-                    )
-                )
-        sessions.sort(key=lambda s: s.started_at)
-        return sessions
+                kind = record.get("kind")
+                session_id = record.get("session_id")
+                if kind == "session_start":
+                    if session_id in sessions:
+                        continue
+                    sessions[session_id] = {
+                        "session_id": session_id,
+                        "started_at": record["started_at"],
+                        "harness_version": record["harness_version"],
+                        "model_id": record.get("model_id"),
+                        "metadata": record.get("metadata") or {},
+                        "ended_at": None,
+                    }
+                elif kind == "session_end":
+                    if session_id in sessions:
+                        sessions[session_id]["ended_at"] = record.get("ended_at")
+        result = [TraceSession(**data) for data in sessions.values()]
+        result.sort(key=lambda s: s.started_at)
+        return result
 
     def _load_session_sqlite(self, session_id: str) -> list[TraceEvent]:
         events: list[TraceEvent] = []
