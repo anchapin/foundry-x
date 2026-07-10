@@ -27,6 +27,7 @@ class TraceSession:
     harness_version: str
     model_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    ended_at: str | None = None
 
 
 _SCHEMA = """
@@ -206,6 +207,69 @@ class TraceLogger:
         if self.backend == "jsonl":
             return self._load_session_jsonl(session_id)
         return self._load_session_sqlite(session_id)
+
+    def list_sessions(self) -> list[TraceSession]:
+        if self.backend == "jsonl":
+            return self._list_sessions_jsonl()
+        return self._list_sessions_sqlite()
+
+    def _list_sessions_sqlite(self) -> list[TraceSession]:
+        with sqlite3.connect(self.path) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+            selected = [
+                "session_id",
+                "started_at",
+                "harness_version",
+                "model_id",
+                "metadata",
+            ]
+            if "ended_at" in columns:
+                selected.append("ended_at")
+            query = "SELECT " + ", ".join(selected) + " FROM sessions ORDER BY started_at"
+            rows = conn.execute(query).fetchall()
+        sessions: list[TraceSession] = []
+        for row in rows:
+            values = dict(zip(selected, row))
+            sessions.append(
+                TraceSession(
+                    session_id=values["session_id"],
+                    started_at=values["started_at"],
+                    harness_version=values["harness_version"],
+                    model_id=values.get("model_id"),
+                    metadata=json.loads(values.get("metadata") or "{}"),
+                    ended_at=values.get("ended_at"),
+                )
+            )
+        return sessions
+
+    def _list_sessions_jsonl(self) -> list[TraceSession]:
+        sessions: list[TraceSession] = []
+        seen: set[str] = set()
+        if not self.path.exists():
+            return sessions
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                record: dict[str, Any] = json.loads(line)
+                if record.get("kind") != "session_start":
+                    continue
+                session_id = record["session_id"]
+                if session_id in seen:
+                    continue
+                seen.add(session_id)
+                sessions.append(
+                    TraceSession(
+                        session_id=session_id,
+                        started_at=record["started_at"],
+                        harness_version=record["harness_version"],
+                        model_id=record.get("model_id"),
+                        metadata=record.get("metadata") or {},
+                    )
+                )
+        sessions.sort(key=lambda s: s.started_at)
+        return sessions
 
     def _load_session_sqlite(self, session_id: str) -> list[TraceEvent]:
         events: list[TraceEvent] = []
