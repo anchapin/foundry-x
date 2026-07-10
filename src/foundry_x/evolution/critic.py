@@ -40,6 +40,10 @@ class Critic:
     ) -> None:
         self.harness_dir = harness_dir
         self.benchmark_path = benchmark_path
+        # Next-step wiring target (issue #107): prepend `python
+        # harness/scripts/load_check.py --harness-dir <copy>` so a broken
+        # `harness/skills/*.json` or an unimportable hook fails the gate
+        # *before* pytest runs. Out of scope for #107.
         self.pytest_args = pytest_args or ["-q", "tests/test_smoke.py"]
 
     def evaluate(self, proposed_diff: str) -> CriticVerdict:
