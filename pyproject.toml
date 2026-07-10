@@ -20,6 +20,9 @@ dev = [
     "ruff>=0.3",
 ]
 
+[project.scripts]
+foundry-kpis = "foundry_x.observability.kpis:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
