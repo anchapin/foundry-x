@@ -12,12 +12,11 @@ import shlex
 import statistics
 import subprocess
 import sys
-import time
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 from pydantic import BaseModel, Field
 
@@ -40,14 +39,89 @@ from foundry_x.execution.model_adapter import (
 )
 from foundry_x.trace.logger import TraceLogger
 
-if TYPE_CHECKING:
-    from harness.hooks.base import HookRegistry, ToolCall, ToolResult
-else:
-    # Imported lazily inside ``_resolve_hook_registry`` and ``run_task``
-    # so that importing this module does not require the harness package
-    # to be on ``sys.path`` (the AGENTS.md §7 self-reference rule the
-    # foundry must respect in import direction).
-    ToolCall = ToolResult = HookRegistry = object  # type: ignore[assignment]
+# Default wall-clock cap (seconds) for a single task. Generous enough for a
+# real model turn, small enough to abort a runaway loop before it exhausts
+# the GPU/wallet. Mandated by docs/SECURITY.md "Runaway detection".
+DEFAULT_TASK_TIMEOUT_S: float = 600.0
+
+
+class RunLimits(BaseModel):
+    """Configurable caps guarding against resource exhaustion (SECURITY.md).
+
+    ``task_timeout_s`` is enforced today via :func:`run_with_limits`.
+    ``token_budget`` is a hook point that ``run_task`` will consult once the
+    model client is wired (a prerequisite for ADR-0004); it is **not** counted
+    yet, only plumbed through so the budget is observable in abort events.
+    """
+
+    task_timeout_s: float | None = Field(
+        default=DEFAULT_TASK_TIMEOUT_S,
+        description="Wall-clock seconds allowed for a single task before abort. "
+        "None disables the wall-clock cap.",
+    )
+    token_budget: int | None = Field(
+        default=None,
+        description="Total tokens permitted per evolution cycle (hook point; "
+        "enforced when the model client lands).",
+    )
+
+
+def run_limits_from_env(env: dict[str, str] | None = None) -> RunLimits:
+    """Build :class:`RunLimits` from environment variables.
+
+    Recognized keys (consistent with ``.env.example``):
+
+    - ``FOUNDRY_TASK_TIMEOUT``: seconds; ``<= 0`` disables the wall-clock cap.
+    - ``FOUNDRY_TOKEN_BUDGET``: integer token cap; empty/absent leaves it
+      unset (hook point only).
+    """
+    source = env if env is not None else os.environ
+
+    task_timeout_s: float | None
+    timeout_raw = source.get("FOUNDRY_TASK_TIMEOUT", "")
+    if timeout_raw == "":
+        task_timeout_s = DEFAULT_TASK_TIMEOUT_S
+    else:
+        value = float(timeout_raw)
+        task_timeout_s = None if value <= 0 else value
+
+    token_budget: int | None
+    budget_raw = source.get("FOUNDRY_TOKEN_BUDGET", "")
+    token_budget = None if budget_raw == "" else int(budget_raw)
+
+    return RunLimits(task_timeout_s=task_timeout_s, token_budget=token_budget)
+
+
+async def run_with_limits(
+    awaitable: Awaitable[Any],
+    log: TraceLogger,
+    session_id: str,
+    limits: RunLimits,
+) -> Any:
+    """Await ``awaitable`` under the wall-clock cap in ``limits``.
+
+    On timeout, record a ``task_aborted`` trace event (reason ``wall_clock``)
+    carrying the exceeded cap, then re-raise :class:`asyncio.TimeoutError` so
+    the caller observes the abort. This is the SECURITY.md "Runaway
+    detection" guardrail: a degenerate harness edit that loops unbounded is
+    aborted before it can exhaust resources.
+    """
+    if limits.task_timeout_s is None:
+        return await awaitable
+    try:
+        return await asyncio.wait_for(awaitable, timeout=limits.task_timeout_s)
+    except asyncio.TimeoutError:
+        log.record(
+            session_id,
+            kind="task_aborted",
+            payload={
+                "reason": "wall_clock",
+                "timeout_s": limits.task_timeout_s,
+                "token_budget": limits.token_budget,
+            },
+        )
+        raise
+
 
 # Default wall-clock cap (seconds) for a single task. Generous enough for a
 # real model turn, small enough to abort a runaway loop before it exhausts
@@ -1421,7 +1495,9 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
     if str(harness_dir) not in sys.path:
         sys.path.insert(0, str(harness_dir))
 
-    workspace_root = Path(args.workspace_root).resolve() if args.workspace_root else None
+    logger = TraceLogger(args.trace_path)
+    harness_version = "0.1.0"
+    limits = run_limits_from_env()
 
     logger = TraceLogger(args.trace_path, backend=resolve_trace_backend())
     harness_version = resolve_harness_version(harness_dir)
@@ -1430,49 +1506,13 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
 
     with logger.session(harness_version=harness_version, model_id=model_id) as session_id:
         logger.record(session_id, kind="task_received", payload={"prompt": args.task})
-        start = time.monotonic()
-        # ``run_task`` accepts the ``limits`` kwarg so it can enforce the
-        # ``FOUNDRY_TOKEN_BUDGET`` cap (issue #197); injected ``run_task_fn``
-        # stubs in the test suite keep the older four-positional-arg
-        # signature for clarity, so the kwarg is only passed when we are
-        # calling the module-level :func:`run_task`.
-        if run_task_fn is not None:
-            task_coro = task(args.task, harness_dir, logger, session_id)
-        else:
-            task_coro = task(
-                args.task,
-                harness_dir,
+        asyncio.run(
+            run_with_limits(
+                run_task(args.task, harness_dir, logger, session_id),
                 logger,
                 session_id,
-                limits=limits,
-                workspace_root=workspace_root,
+                limits,
             )
-        try:
-            asyncio.run(
-                run_with_limits(
-                    task_coro,
-                    logger,
-                    session_id,
-                    limits,
-                )
-            )
-        except Exception as exc:
-            duration_ms = int((time.monotonic() - start) * 1000)
-            logger.record(
-                session_id,
-                kind="task_failed",
-                payload={
-                    "error_type": type(exc).__name__,
-                    "message": str(exc),
-                    "duration_ms": duration_ms,
-                },
-            )
-            raise
-        duration_ms = int((time.monotonic() - start) * 1000)
-        logger.record(
-            session_id,
-            kind="task_completed",
-            payload={"duration_ms": duration_ms},
         )
 
 
