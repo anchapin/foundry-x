@@ -5,28 +5,32 @@ import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+from pydantic import BaseModel, Field
 
-@dataclass
-class TraceEvent:
+
+class TraceEvent(BaseModel):
     event_id: str
     session_id: str
     timestamp: str
-    kind: str
+    kind: str = Field(min_length=1)
+    # ``Any`` is justified here per ADR-0006: the payload is the
+    # serialization-boundary free-form dict whose schema is owned by the
+    # event producer (the closed ``kind`` vocabulary arrives in Phase 2).
     payload: dict[str, Any]
 
 
-@dataclass
-class TraceSession:
+class TraceSession(BaseModel):
     session_id: str
     started_at: str
     harness_version: str
     model_id: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    # ``Any`` per ADR-0006 serialization-boundary carve-out (same rationale
+    # as TraceEvent.payload).
+    metadata: dict[str, Any] = Field(default_factory=dict)
     ended_at: str | None = None
 
 
@@ -176,31 +180,21 @@ class TraceLogger:
             payload=_redact(payload),
         )
         if self.backend == "sqlite":
+            data = event.model_dump()
             with sqlite3.connect(self.path) as conn:
                 conn.execute(
                     "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
                     (
-                        event.event_id,
-                        event.session_id,
-                        event.timestamp,
-                        event.kind,
-                        json.dumps(event.payload),
+                        data["event_id"],
+                        data["session_id"],
+                        data["timestamp"],
+                        data["kind"],
+                        json.dumps(data["payload"]),
                     ),
                 )
         elif self.backend == "jsonl":
             with self.path.open("a", encoding="utf-8") as fh:
-                fh.write(
-                    json.dumps(
-                        {
-                            "event_id": event.event_id,
-                            "session_id": event.session_id,
-                            "timestamp": event.timestamp,
-                            "kind": event.kind,
-                            "payload": event.payload,
-                        }
-                    )
-                    + "\n"
-                )
+                fh.write(event.model_dump_json() + "\n")
         return event
 
     def load_session(self, session_id: str) -> Sequence[TraceEvent]:
@@ -281,12 +275,14 @@ class TraceLogger:
             ).fetchall()
         for event_id, sid, ts, kind, payload in rows:
             events.append(
-                TraceEvent(
-                    event_id=event_id,
-                    session_id=sid,
-                    timestamp=ts,
-                    kind=kind,
-                    payload=json.loads(payload),
+                TraceEvent.model_validate(
+                    {
+                        "event_id": event_id,
+                        "session_id": sid,
+                        "timestamp": ts,
+                        "kind": kind,
+                        "payload": json.loads(payload),
+                    }
                 )
             )
         return events
@@ -313,15 +309,7 @@ class TraceLogger:
                     continue
                 if "event_id" not in record:
                     continue
-                events.append(
-                    TraceEvent(
-                        event_id=record["event_id"],
-                        session_id=record["session_id"],
-                        timestamp=record["timestamp"],
-                        kind=record["kind"],
-                        payload=record["payload"],
-                    )
-                )
+                events.append(TraceEvent.model_validate(record))
         events.sort(key=lambda e: e.timestamp)
         return events
 
