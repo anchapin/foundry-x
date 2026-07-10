@@ -33,6 +33,7 @@ git clone https://github.com/anchapin/foundry-x.git
 cd foundry-x
 uv sync                       # install deps
 cp .env.example .env          # then edit with your model endpoint
+uv run pre-commit install     # install git hooks (ruff, gitleaks, ...)
 uv run pytest                 # smoke tests
 uv run ruff check .           # lint
 ```
@@ -51,8 +52,9 @@ uv run ruff check .           # lint
 
 3. **Run the local checks.**
    ```bash
-   uv run ruff check .
-   uv run pytest
+   uv run pre-commit run --all-files   # ruff, secrets, hygiene
+   uv run ruff check .                 # lint only
+   uv run pytest                       # tests
    ```
 
 4. **Commit** with [Conventional Commits](https://www.conventionalcommits.org/).

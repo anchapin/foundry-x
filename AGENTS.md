@@ -75,11 +75,16 @@ mirrors the way our product works:
 ## 4. Tooling you are expected to use
 
 - **Package manager:** `uv` (ADR-0002). Never `pip install` directly.
-- **Lint:** `uv run ruff check .` — must pass before commit.
+- **Pre-commit hooks:** installed via `uv run pre-commit install`.
+  Run on demand with `uv run pre-commit run --all-files`. Hooks
+  include ruff, ruff-format, gitleaks (secret scan), and standard
+  hygiene checks. See `.pre-commit-config.yaml`.
+- **Lint:** `uv run ruff check .` — must pass before commit (and is
+  also enforced by pre-commit).
 - **Test:** `uv run pytest` — must pass before commit.
 - **Type discipline:** Python 3.11+ syntax. `pydantic` for all
-  structured data at module boundaries. No `Any` without a comment
-  explaining why.
+  structured data at module boundaries (ADR-0006). No `Any` without
+  a comment explaining why.
 - **Logging:** the project's own `TraceLogger`. Do not sprinkle
   `print()` or generic `logging.info` in library code; route through
   trace events so the evolution loop can see them.
