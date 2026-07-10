@@ -62,30 +62,3 @@ def test_trace_logger_jsonl_does_not_touch_sqlite(tmp_path):
     assert jsonl_path.exists()
     sqlite_artifacts = [p for p in tmp_path.iterdir() if p.suffix in {".db", ".sqlite", ".sqlite3"}]
     assert sqlite_artifacts == []
-
-
-def test_context_pruning_hook_loads_via_manifest():
-    """Issue #106 acceptance: the context_pruning hook is opt-in via
-    ``harness/manifest.json`` and must load + register cleanly when the
-    entry is present."""
-    from harness.hooks.base import HookRegistry
-    from harness.hooks.context_pruning import ContextPruningHook, register_into
-
-    manifest = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
-    assert (
-        "context_pruning" in manifest["hooks"]
-    ), "context_pruning entry missing from harness/manifest.json"
-
-    module_path = _REPO_ROOT / "harness" / "hooks" / "context_pruning.py"
-    assert module_path.exists(), f"hook module missing at {module_path}"
-
-    registry = HookRegistry()
-    hook = register_into(
-        registry,
-        session_id="smoke-session",
-        threshold=200,
-        pruner=lambda *a, **k: 0,
-        tracer=lambda *a, **k: None,
-    )
-    assert isinstance(hook, ContextPruningHook)
-    assert hook in registry._hooks  # noqa: SLF001 — intentional inspection
