@@ -204,6 +204,18 @@ class EvolverGuardError(ValueError):
     """
 
 
+class EvolverGuardError(ValueError):
+    """Raised when an edit or proposal cadence violates a guardrail.
+
+    Implements the SECURITY.md "Rate limits" guardrail: max N proposals per
+    hour, max M lines of harness diff per proposal. Violations are raised,
+    never swallowed, per AGENTS.md §4 ("no swallowed exceptions"). Surfacing
+    the failure is the "surface it or re-raise" option in that rule; a
+    TraceLogger event will be attached once the propose() body lands and a
+    session context is available.
+    """
+
+
 class Evolver:
     """Proposes harness edits, bounded by the SECURITY.md rate/diff guardrails.
 
