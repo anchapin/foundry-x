@@ -544,6 +544,117 @@ class TraceLogger:
         events.sort(key=lambda e: e.timestamp)
         return events
 
+    def delete_session(self, session_id: str) -> bool:
+        """Remove every event and the session row for ``session_id``.
+
+        Idempotent: returns ``True`` whether or not the session existed,
+        so an operator running this on a stale ``session_id`` after a
+        previous delete does not see an error. The other session in the
+        store is untouched. Works on both sqlite and jsonl backends.
+        """
+        if self.backend == "jsonl":
+            self._delete_session_jsonl(session_id)
+        else:
+            self._delete_session_sqlite(session_id)
+        return True
+
+    def _delete_session_sqlite(self, session_id: str) -> None:
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("DELETE FROM events WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+
+    def _delete_session_jsonl(self, session_id: str) -> None:
+        if not self.path.exists():
+            return
+        kept: list[str] = []
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    kept.append(line)
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except json.JSONDecodeError:
+                    kept.append(line)
+                    continue
+                if record.get("session_id") == session_id:
+                    continue
+                kept.append(line)
+        with self.path.open("w", encoding="utf-8") as fh:
+            fh.writelines(kept)
+
+    def redact_event(
+        self,
+        session_id: str,
+        event_index: int,
+        key: str,
+    ) -> bool:
+        """Replace ``payload[key]`` with ``"[REDACTED]"`` on the indexed event.
+
+        ``event_index`` is the position of the target event in the
+        timestamp-ordered stream for ``session_id`` (the same order
+        :meth:`load_session` and :meth:`iter_events` return). Returns
+        ``True`` when the event was found and rewritten; ``False`` when
+        the index is out of range so a stale index surfaces immediately
+        rather than silently rewriting the wrong row.
+        """
+        if self.backend == "jsonl":
+            return self._redact_event_jsonl(session_id, event_index, key)
+        return self._redact_event_sqlite(session_id, event_index, key)
+
+    def _redact_event_sqlite(
+        self,
+        session_id: str,
+        event_index: int,
+        key: str,
+    ) -> bool:
+        with sqlite3.connect(self.path) as conn:
+            rows = conn.execute(
+                "SELECT event_id, payload FROM events WHERE session_id = ? " "ORDER BY timestamp",
+                (session_id,),
+            ).fetchall()
+            if event_index < 0 or event_index >= len(rows):
+                return False
+            event_id, payload_text = rows[event_index]
+            payload = json.loads(payload_text)
+            payload[key] = "[REDACTED]"
+            conn.execute(
+                "UPDATE events SET payload = ? WHERE event_id = ?",
+                (json.dumps(payload), event_id),
+            )
+        return True
+
+    def _redact_event_jsonl(
+        self,
+        session_id: str,
+        event_index: int,
+        key: str,
+    ) -> bool:
+        if not self.path.exists():
+            return False
+        with self.path.open("r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+        session_events: list[tuple[int, dict[str, Any]]] = []
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            record = json.loads(stripped)
+            if record.get("session_id") == session_id and "event_id" in record:
+                session_events.append((idx, record))
+        if not session_events:
+            return False
+        session_events.sort(key=lambda pair: pair[1].get("timestamp", ""))
+        if event_index < 0 or event_index >= len(session_events):
+            return False
+        target_idx, target_record = session_events[event_index]
+        target_record["payload"][key] = "[REDACTED]"
+        lines[target_idx] = json.dumps(target_record) + "\n"
+        with self.path.open("w", encoding="utf-8") as fh:
+            fh.writelines(lines)
+        return True
+
     def _iter_events_jsonl(
         self,
         session_id: str,
