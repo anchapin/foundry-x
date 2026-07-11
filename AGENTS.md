@@ -49,8 +49,10 @@ and ask the human.
   `TraceLogger`, surface it, or re-raise. Bare `except: pass` is a bug.
 - **Never widen scope.** A bug fix is not a refactor. A feature is not a
   re-architecture. If you discover adjacent issues, file them and move on.
-- **Never merge your own PR.** A human reviews and merges
-  agent-authored work. Two human approvals for harness hand-edits.
+- **Only merge agent-authored PRs after CI is green.** Agents may merge
+  their own PRs only when every required check is passing, the branch is
+  cleanly mergeable, and the PR does not contain harness hand-edits. Two
+  human approvals are still required for harness hand-edits.
 - **Never pretend a benchmark passed.** If a test fails, the change is
   not done. Re-read the failure, do not paper over it.
 
