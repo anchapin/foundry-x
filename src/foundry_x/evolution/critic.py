@@ -8,6 +8,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from benchmarks.models import BenchmarkTask
+from benchmarks.registry import load_all_tasks
+
 _NOTES_TAIL_CHARS = 4000
 
 
@@ -37,6 +40,7 @@ class Critic:
         harness_dir: Path,
         benchmark_path: Path | None = None,
         pytest_args: list[str] | None = None,
+        benchmark_tasks: list[BenchmarkTask] | None = None,
     ) -> None:
         self.harness_dir = harness_dir
         self.benchmark_path = benchmark_path
@@ -45,6 +49,28 @@ class Critic:
         # `harness/skills/*.json` or an unimportable hook fails the gate
         # *before* pytest runs. Out of scope for #107.
         self.pytest_args = pytest_args or ["-q", "tests/test_smoke.py"]
+        # In-process registry wiring (issue #108): the Critic can now
+        # enumerate benchmark tasks without spawning pytest. Stored as
+        # ``None`` so the registry is loaded lazily on first access --
+        # importing ``foundry_x.evolution.critic`` must not eagerly pull
+        # in every task module (and the pytest import chain those tasks
+        # transitively trigger).
+        self._benchmark_tasks: list[BenchmarkTask] | None = (
+            list(benchmark_tasks) if benchmark_tasks is not None else None
+        )
+
+    @property
+    def benchmark_tasks(self) -> list[BenchmarkTask]:
+        """The ``BenchmarkTask`` instances this Critic will gate against (issue #108).
+
+        Lazy-loaded from the in-process registry on first access; cached on
+        the instance so subsequent accesses are O(1). Tests can pre-seed
+        ``benchmark_tasks=...`` in the constructor to avoid touching the
+        registry at all (see ``tests/test_critic.py``).
+        """
+        if self._benchmark_tasks is None:
+            self._benchmark_tasks = load_all_tasks()
+        return self._benchmark_tasks
 
     def evaluate(self, proposed_diff: str) -> CriticVerdict:
         """Apply ``proposed_diff`` to a sandbox copy of the harness and run pytest.
