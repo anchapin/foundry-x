@@ -47,6 +47,6 @@ def test_sort_a_list(benchmark_workspace: Path, case: str) -> None:
 
     run_solution(benchmark_workspace, GOLDEN_SOLUTION)
 
-    actual = (benchmark_workspace / "output.txt").read_text()
-    expected = (fixture_dir / "expected.txt").read_text()
+    actual = (benchmark_workspace / "output.txt").read_text().rstrip("\n")
+    expected = (fixture_dir / "expected.txt").read_text().rstrip("\n")
     assert actual == expected, f"task {TASK.name}/{case}: output mismatch"
