@@ -20,7 +20,12 @@ from foundry_x.execution.model_adapter import (
     ToolDefinition,
     ToolFunctionSchema,
 )
-from foundry_x.execution.runner import build_model_adapter, run_task
+from foundry_x.execution.runner import (
+    _DEFAULT_REQUEST_TIMEOUT_S,
+    _resolve_request_timeout,
+    build_model_adapter,
+    run_task,
+)
 from foundry_x.trace.logger import TraceLogger
 
 
@@ -285,3 +290,103 @@ async def test_invalid_response_shape_raises_response_error():
         )
         with pytest.raises(ModelAdapterResponseError):
             await adapter.complete(messages=[ModelMessage(role="user", content="hello")], tools=[])
+
+
+# --- per-request httpx timeout (issue #201) --------------------------------
+
+
+def _env_with_timeout(value: str | None) -> dict[str, str]:
+    """Build the env dict ``build_model_adapter`` needs, optionally setting the timeout."""
+    env = {
+        "OPENCODE_SERVER_URL": "http://model.test/v1",
+        "FOUNDRY_MODEL_ID": "foundry-test",
+    }
+    if value is not None:
+        env["FOUNDRY_REQUEST_TIMEOUT_S"] = value
+    return env
+
+
+@pytest.mark.asyncio
+async def test_build_model_adapter_applies_default_request_timeout():
+    """Issue #201: when ``FOUNDRY_REQUEST_TIMEOUT_S`` is unset the owned
+    httpx client is built with the default cap so a stuck endpoint still
+    aborts within the documented budget.
+    """
+    adapter = build_model_adapter(_env_with_timeout(value=None))
+    try:
+        assert adapter._client.timeout.read == _DEFAULT_REQUEST_TIMEOUT_S
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_build_model_adapter_applies_env_request_timeout():
+    """Issue #201: an explicit ``FOUNDRY_REQUEST_TIMEOUT_S`` is plumbed into
+    the owned httpx client as the per-request cap.
+    """
+    adapter = build_model_adapter(_env_with_timeout(value="5.5"))
+    try:
+        assert adapter._client.timeout.read == 5.5
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_build_model_adapter_non_positive_request_timeout_falls_back():
+    """Issue #201: a non-positive value falls back to the default rather than
+    disabling the per-step guard (a stuck step would otherwise hang the
+    session until the wall-clock cap fires).
+    """
+    for raw in ("0", "-1", "0.0"):
+        adapter = build_model_adapter(_env_with_timeout(value=raw))
+        try:
+            assert adapter._client.timeout.read == _DEFAULT_REQUEST_TIMEOUT_S, raw
+        finally:
+            await adapter.aclose()
+
+
+def test_resolve_request_timeout_non_numeric_raises():
+    """Issue #201: a non-numeric value raises ValueError at process start so a
+    typo in ``.env`` surfaces immediately (AGENTS.md §2).
+    """
+    with pytest.raises(ValueError):
+        _resolve_request_timeout(env={"FOUNDRY_REQUEST_TIMEOUT_S": "not-a-number"})
+
+
+@pytest.mark.parametrize("raw", ["inf", "-inf", "nan", "Infinity", "NaN"])
+def test_resolve_request_timeout_non_finite_raises(raw):
+    """Issue #201: a non-finite value raises ValueError at process start; an
+    infinite/NaN cap would never fire and silently disable the guard.
+    """
+    with pytest.raises(ValueError):
+        _resolve_request_timeout(env={"FOUNDRY_REQUEST_TIMEOUT_S": raw})
+
+
+@pytest.mark.asyncio
+async def test_adapter_request_timeout_wraps_read_timeout():
+    """Issue #201: when the per-request cap fires the adapter wraps the
+    httpx timeout as :class:`ModelAdapterError` with ``__cause__`` carrying
+    the original :class:`httpx.ReadTimeout`, so ``run_task`` records a
+    ``model_error`` outcome instead of hanging.
+
+    ``httpx.MockTransport`` bypasses the network-layer timeout enforcement
+    (the cap is applied around real socket I/O), so the handler emulates the
+    read timeout a real transport would raise once the configured budget is
+    exceeded.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("read timed out", request=request)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        timeout=0.01,
+    ) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test",
+            model="foundry-test",
+            client=client,
+        )
+        with pytest.raises(ModelAdapterError) as exc_info:
+            await adapter.complete(messages=[ModelMessage(role="user", content="hello")], tools=[])
+        assert isinstance(exc_info.value.__cause__, httpx.ReadTimeout)
