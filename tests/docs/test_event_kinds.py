@@ -56,8 +56,7 @@ CONTEXT_MD = REPO_ROOT / "docs" / "CONTEXT.md"
 #   - Runner.main: ``task_received``, ``task_completed``, ``task_failed``
 #   - Runner.run_with_limits: ``task_aborted``
 #   - Runner.run_task: ``user_prompt``, ``model_request``, ``model_response``,
-#     ``model_error``, ``tool_call``, ``tool_result``, ``outcome``,
-#     ``hook_registry_error`` (issue #260: get_registry() raised)
+#     ``model_error``, ``tool_call``, ``tool_result``, ``outcome``
 #   - InjectionFirewallHook: ``injection_blocked`` (via ``tracer`` callback)
 #   - ContextPruningHook: ``context_pruned`` (via ``tracer`` callback)
 #   - record_verdict: ``critic_verdict`` (constant ``VERDICT_KIND``)
@@ -65,7 +64,6 @@ KNOWN_KINDS: frozenset[str] = frozenset(
     {
         "context_pruned",
         "critic_verdict",
-        "hook_registry_error",
         "injection_blocked",
         "model_error",
         "model_request",
