@@ -5,6 +5,10 @@ import sys
 from pathlib import Path
 
 from foundry_x.observability.regression_report import analyze_regressions
+from foundry_x.observability.session_summary import (
+    build_session_summary,
+    render_session_summary,
+)
 from foundry_x.observability.timeline import format_timeline
 from foundry_x.trace.logger import TraceLogger
 
@@ -65,6 +69,30 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Session UUID whose events should be rendered.",
     )
+
+    # Issue #184: cross-session outcome roll-up. Lets an Operator read
+    # a single table over every (or filtered) session before opening
+    # any one of them in detail. Does not call the Digester or Critic.
+    session_summary = sub.add_parser(
+        "session-summary",
+        help="Render a one-row-per-session roll-up of recorded outcomes.",
+    )
+    session_summary.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace store (sqlite .db or jsonl).",
+    )
+    session_summary.add_argument(
+        "--harness-version",
+        default=None,
+        help="Only include sessions recorded with this harness version.",
+    )
+    session_summary.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Show at most N sessions after newest-first ordering.",
+    )
     return parser
 
 
@@ -90,6 +118,14 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write(f"session {args.session_id} not found or empty\n")
             return 2
         sys.stdout.write(format_timeline(events))
+        sys.stdout.write("\n")
+        return 0
+
+    if args.command == "session-summary":
+        backend = _infer_backend(args.db)
+        logger = TraceLogger(args.db, backend=backend)
+        rows = build_session_summary(logger, harness_version=args.harness_version)
+        sys.stdout.write(render_session_summary(rows, limit=args.limit))
         sys.stdout.write("\n")
         return 0
 
