@@ -45,11 +45,8 @@ from benchmarks.models import BenchmarkTask
 from foundry_x.execution.model_adapter import (
     ModelMessage,
     ModelResponse,
-    ModelResponseChunk,
     ModelToolCall,
-    ModelToolCallChunk,
     ToolCallFunction,
-    ToolCallFunctionChunk,
 )
 from foundry_x.execution.runner import run_task
 from foundry_x.trace.logger import TraceLogger
@@ -118,25 +115,8 @@ class _StubAdapter:
         return await self.complete(messages, tools, **kwargs)
 
     async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
-        response = await self.complete(messages, tools, **kwargs)
-        if response.message.content:
-            yield ModelResponseChunk(content=response.message.content)
-        for i, tc in enumerate(response.tool_calls):
-            yield ModelResponseChunk(
-                tool_calls=[
-                    ModelToolCallChunk(
-                        index=i,
-                        id=tc.id,
-                        type=tc.type,
-                        function=ToolCallFunctionChunk(
-                            name=tc.function.name,
-                            arguments=tc.function.arguments,
-                        ),
-                    )
-                ]
-            )
-        if response.finish_reason:
-            yield ModelResponseChunk(finish_reason=response.finish_reason)
+        if False:
+            yield None  # pragma: no cover - satisfies AsyncIterator signature
 
 
 def _stub_harness(harness_dir: Path) -> Path:
@@ -254,9 +234,9 @@ def test_runner_loop_smoke(benchmark_workspace: Path) -> None:
 
         # --- Terminal outcome ----------------------------------------------
         outcome_event = next(event for event in events if event.kind == "outcome")
-        assert (
-            outcome_event.payload["reason"] == "final_answer"
-        ), f"expected outcome.reason='final_answer'; got {outcome_event.payload!r}"
+        assert outcome_event.payload["reason"] == "final_answer", (
+            f"expected outcome.reason='final_answer'; got " f"{outcome_event.payload!r}"
+        )
         assert outcome_event.payload["status"] == "success"
         assert outcome_event.payload["steps"] >= 1
 
