@@ -1,0 +1,4 @@
+# placeholder - control-eval task does not read fixture data; the
+# sandbox_compose benchmark parses infra/docker/docker-compose.yml directly
+# and asserts its hardening knobs are present, so no seeded workspace data
+# is needed.
