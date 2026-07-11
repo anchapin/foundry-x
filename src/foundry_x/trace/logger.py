@@ -16,8 +16,10 @@ import json
 import re
 import sqlite3
 import sys
+import threading
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
@@ -66,6 +68,104 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 """
+
+
+# --- SQLite connection cache (issue #84) -------------------------------------
+# Phase 2 runs the Runner (writer) and the Critic (reader) concurrently against
+# the same trace file. The default rollback journal serialises writers and
+# surfaces SQLITE_BUSY to readers, which is unacceptable for the
+# Digester -> Evolver -> Critic loop. WAL mode lets one writer and many readers
+# proceed without blocking each other, and ``synchronous=NORMAL`` keeps writes
+# durable across process crashes without the fsync cost of FULL.
+#
+# Multiple ``TraceLogger`` instances on the same path (e.g. the CLI's ``main()``
+# alongside an in-process runner) historically opened a fresh ``sqlite3.connect``
+# per call. With WAL that would still work but waste file handles and force a
+# PRAGMA re-application on every connect. The cache below lets every instance
+# on the same ``(path, backend)`` share a single long-lived ``Connection``
+# (with ``check_same_thread=False`` so threads are safe) plus a per-entry
+# ``RLock`` that serialises writes. Readers do not take the lock, so concurrent
+# reads proceed in parallel as WAL permits. The ``_CACHE_LOCK`` only guards the
+# dict itself, never the cached connections.
+#
+# See ADR-0003 §Consequences (concurrent writers were the named revisit
+# trigger) and the issue for the original trace evidence.
+
+_CACHE_LOCK = threading.Lock()
+_CONNECTION_CACHE: dict[tuple[str, str], "_CachedConnection"] = {}
+
+
+@dataclass
+class _CachedConnection:
+    conn: sqlite3.Connection
+    lock: threading.RLock
+    refcount: int = 0
+
+
+def _acquire_sqlite_connection(path: Path, backend: str) -> _CachedConnection:
+    """Return a refcounted, thread-safe sqlite3 connection for ``(path, backend)``.
+
+    The first caller for a given key opens the file with ``journal_mode=WAL``
+    and ``synchronous=NORMAL`` and runs the schema migration. Subsequent
+    callers reuse the same ``Connection`` and just bump the refcount. Each
+    TraceLogger instance must pair this call with a ``_release_sqlite_connection``
+    in ``__del__`` (or an explicit close path) so the connection is closed
+    when the last referencing instance goes away.
+    """
+    key = (str(path), backend)
+    with _CACHE_LOCK:
+        cached = _CONNECTION_CACHE.get(key)
+        if cached is not None:
+            cached.refcount += 1
+            return cached
+        # ``check_same_thread=False`` because the connection is shared across
+        # TraceLogger instances that may live on different threads; the
+        # ``RLock`` on the cached entry provides the actual serialisation.
+        conn = sqlite3.connect(path, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        # Verify the WAL pragma actually took effect. If it did not (e.g. the
+        # file lives on a read-only mount that rejected the journal-mode
+        # switch), fail loudly rather than silently degrading to the default
+        # rollback journal — that is the silent regression issue #84 is here
+        # to prevent.
+        actual_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        if actual_mode.lower() != "wal":
+            conn.close()
+            raise sqlite3.OperationalError(
+                f"PRAGMA journal_mode=WAL did not take effect on {path!s} "
+                f"(got {actual_mode!r}); concurrent-readers/writer safety "
+                f"guaranteed by issue #84 cannot hold."
+            )
+        conn.executescript(_SCHEMA)
+        # Non-destructive migration for pre-issue-#8 databases that predate
+        # the ``ended_at`` column (issue #8). Guarded by a pragma check so
+        # freshly-created databases are untouched and existing ``logs/*.db``
+        # files do not break. Runs once per (path, backend) at first acquire.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+        if "ended_at" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN ended_at TEXT")
+        cached = _CachedConnection(conn=conn, lock=threading.RLock(), refcount=1)
+        _CONNECTION_CACHE[key] = cached
+        return cached
+
+
+def _release_sqlite_connection(path: Path, backend: str) -> None:
+    """Decrement the refcount; close and evict when the last holder releases."""
+    key = (str(path), backend)
+    with _CACHE_LOCK:
+        cached = _CONNECTION_CACHE.get(key)
+        if cached is None:
+            return
+        cached.refcount -= 1
+        if cached.refcount <= 0:
+            try:
+                cached.conn.close()
+            except sqlite3.Error:
+                # Connection already closed externally (e.g. interpreter
+                # shutdown ordering); nothing useful to do here.
+                pass
+            _CONNECTION_CACHE.pop(key, None)
 
 
 # --- Secret redaction ---------------------------------------------------------
@@ -173,16 +273,48 @@ class TraceLogger:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.backend = backend
+        # ``_sqlite`` is None for the jsonl backend, otherwise it holds the
+        # shared cached connection + write lock for this ``(path, backend)``.
+        # Multiple TraceLogger instances on the same path share the entry via
+        # the module-level cache (issue #84), which is what lets the writer
+        # (Runner) and the reader (CLI / Critic) coexist on one file without
+        # reopening it on every call.
+        self._sqlite: _CachedConnection | None = None
         if backend == "sqlite":
-            with sqlite3.connect(self.path) as conn:
-                conn.executescript(_SCHEMA)
-                # Non-destructive migration for pre-issue-#8 databases that
-                # predate the ``ended_at`` column (issue #8). Guarded by a
-                # pragma check so freshly-created databases are untouched and
-                # existing ``logs/*.db`` files do not break.
-                columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
-                if "ended_at" not in columns:
-                    conn.execute("ALTER TABLE sessions ADD COLUMN ended_at TEXT")
+            self._sqlite = _acquire_sqlite_connection(self.path, backend)
+
+    def __del__(self) -> None:
+        # Release the cached connection when this TraceLogger is garbage-collected.
+        # CPython guarantees ``__del__`` runs when the instance refcount hits 0,
+        # which is the common case for short-lived ``TraceLogger(db_path)`` call
+        # sites in CLI handlers and tests. Cyclic-reference cases fall back to
+        # interpreter-shutdown cleanup, which is acceptable: the underlying file
+        # handle is still released when the OS reaps the process.
+        if self._sqlite is not None:
+            _release_sqlite_connection(self.path, self.backend)
+            self._sqlite = None
+
+    @contextmanager
+    def _write_conn(self) -> Iterator[sqlite3.Connection]:
+        """Yield the shared sqlite connection under the per-(path, backend)
+        write lock, committing on success and rolling back on exception.
+
+        Equivalent to the previous ``with sqlite3.connect(self.path) as conn:``
+        pattern: every write is its own short transaction so a single failing
+        statement does not poison the next. Readers never enter this helper.
+        """
+        if self._sqlite is None:
+            raise RuntimeError(
+                "TraceLogger has no sqlite connection (backend="
+                f"{self.backend!r}); did you mean to pass backend='sqlite'?"
+            )
+        with self._sqlite.lock:
+            try:
+                yield self._sqlite.conn
+                self._sqlite.conn.commit()
+            except Exception:
+                self._sqlite.conn.rollback()
+                raise
 
     @contextmanager
     def session(
@@ -214,7 +346,7 @@ class TraceLogger:
                     + "\n"
                 )
         else:
-            with sqlite3.connect(self.path) as conn:
+            with self._write_conn() as conn:
                 conn.execute(
                     "INSERT INTO sessions "
                     "(session_id, started_at, harness_version, model_id, metadata) "
@@ -265,7 +397,7 @@ class TraceLogger:
                         + "\n"
                     )
             else:
-                with sqlite3.connect(self.path) as conn:
+                with self._write_conn() as conn:
                     conn.execute(
                         "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
                         (ended_at, session_id),
@@ -312,7 +444,7 @@ class TraceLogger:
         )
         if self.backend == "sqlite":
             data = event.model_dump()
-            with sqlite3.connect(self.path) as conn:
+            with self._write_conn() as conn:
                 conn.execute(
                     "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
                     (
@@ -339,19 +471,20 @@ class TraceLogger:
         return self._list_sessions_sqlite()
 
     def _list_sessions_sqlite(self) -> list[TraceSession]:
-        with sqlite3.connect(self.path) as conn:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
-            selected = [
-                "session_id",
-                "started_at",
-                "harness_version",
-                "model_id",
-                "metadata",
-            ]
-            if "ended_at" in columns:
-                selected.append("ended_at")
-            query = "SELECT " + ", ".join(selected) + " FROM sessions ORDER BY started_at"
-            rows = conn.execute(query).fetchall()
+        assert self._sqlite is not None
+        conn = self._sqlite.conn
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        selected = [
+            "session_id",
+            "started_at",
+            "harness_version",
+            "model_id",
+            "metadata",
+        ]
+        if "ended_at" in columns:
+            selected.append("ended_at")
+        query = "SELECT " + ", ".join(selected) + " FROM sessions ORDER BY started_at"
+        rows = conn.execute(query).fetchall()
         sessions: list[TraceSession] = []
         for row in rows:
             values = dict(zip(selected, row))
@@ -402,13 +535,14 @@ class TraceLogger:
         return result
 
     def _load_session_sqlite(self, session_id: str) -> list[TraceEvent]:
+        assert self._sqlite is not None
+        conn = self._sqlite.conn
+        rows = conn.execute(
+            "SELECT event_id, session_id, timestamp, kind, payload "
+            "FROM events WHERE session_id = ? ORDER BY timestamp",
+            (session_id,),
+        ).fetchall()
         events: list[TraceEvent] = []
-        with sqlite3.connect(self.path) as conn:
-            rows = conn.execute(
-                "SELECT event_id, session_id, timestamp, kind, payload "
-                "FROM events WHERE session_id = ? ORDER BY timestamp",
-                (session_id,),
-            ).fetchall()
         for event_id, sid, ts, kind, payload in rows:
             events.append(
                 TraceEvent.model_validate(
