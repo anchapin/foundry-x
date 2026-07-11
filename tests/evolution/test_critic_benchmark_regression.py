@@ -31,7 +31,6 @@ from pathlib import Path
 
 from benchmarks.models import BenchmarkTask
 from foundry_x.evolution.critic import Critic
-from tests._harness_fixture import install_load_check_prerequisites
 
 
 _BASELINE_SOURCE = """
@@ -58,9 +57,6 @@ def _write_harness(tmp_path: Path, test_source: str) -> Path:
     tests_dir.mkdir(parents=True)
     (harness_dir / "system_prompt.txt").write_text("original\n")
     (tests_dir / "test_benchmarks.py").write_text(test_source)
-    # load_check prerequisites (issue #187): the Critic gates on
-    # harness/scripts/load_check.py before pytest.
-    install_load_check_prerequisites(harness_dir)
     return harness_dir
 
 
