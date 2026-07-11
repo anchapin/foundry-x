@@ -4,7 +4,8 @@
   "hooks": [
     "base",
     "injection_firewall",
-    "context_pruning"
+    "context_pruning",
+    "rate_limit"
   ],
   "skills": [
     "edit_file.json",

@@ -81,6 +81,28 @@ def _check_system_prompt(harness_dir: Path) -> list[str]:
     return []
 
 
+def _read_manifest_hooks(harness_dir: Path) -> list[str]:
+    """Return the ``hooks`` array from ``harness/manifest.json`` (issue #206).
+
+    SECURITY.md:50-52 promises that rate-limit defaults "live in
+    ``harness/hooks/``," so the load-check success message should name
+    every wired hook. Returns an empty list when the manifest is absent
+    or malformed -- those are not load-check failures (the manifest has
+    its own dedicated test suite in ``tests/harness/test_manifest.py``).
+    """
+    manifest = harness_dir / "manifest.json"
+    if not manifest.exists():
+        return []
+    try:
+        doc = json.loads(manifest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    hooks = doc.get("hooks", [])
+    if not isinstance(hooks, list):
+        return []
+    return [str(h) for h in hooks]
+
+
 def _check_hooks_importable(harness_dir: Path) -> list[str]:
     """Add the parent of ``harness_dir`` to ``sys.path`` and try to
     ``import harness.hooks``. Catches ImportError + post-import registry
@@ -147,9 +169,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {msg}", file=sys.stderr)
         return 1
 
+    hooks_wired = _read_manifest_hooks(harness_dir)
+    hooks_str = ", ".join(hooks_wired) if hooks_wired else "(none)"
     print(
         f"harness load-check OK: {harness_dir} "
-        f"(skills OK, system_prompt.txt non-empty, registry instantiates)"
+        f"(skills OK, system_prompt.txt non-empty, registry instantiates, "
+        f"hooks wired: {hooks_str})"
     )
     return 0
 
