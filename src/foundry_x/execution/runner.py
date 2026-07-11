@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
+from foundry_x.execution.model_adapter import ModelAdapter, ModelMessage, OpenAICompatibleAdapter
 from foundry_x.trace.logger import TraceLogger
 
 # Default wall-clock cap (seconds) for a single task. Generous enough for a
@@ -34,6 +35,10 @@ _FALLBACK_HARNESS_VERSION: str = "0.1.0"
 _MODEL_ID_ENV = "FOUNDRY_MODEL_ID"
 _LLAMACPP_MODEL_PATH_ENV = "LLAMACPP_MODEL_PATH"
 _OPENCODE_SERVER_URL_ENV = "OPENCODE_SERVER_URL"
+_LLAMACPP_HOST_ENV = "LLAMACPP_HOST"
+_FOUNDRY_MODEL_API_KEY_ENV = "FOUNDRY_MODEL_API_KEY"
+_OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+_FALLBACK_REQUEST_MODEL = "foundry-local"
 
 # Trace-backend selection (issue #13). ``.env.example`` documents
 # ``FOUNDRY_TRACE_BACKEND`` as the way to switch the trace store between the
@@ -106,6 +111,53 @@ def resolve_model_id(env: dict[str, str] | None = None) -> str | None:
             return host
 
     return None
+
+
+def _resolve_model_request_name(env: dict[str, str] | None = None) -> str:
+    """Resolve the model name sent to an OpenAI-compatible endpoint.
+
+    ``resolve_model_id`` may fall back to the endpoint host for provenance,
+    but the request body's ``model`` field should be a model-like value. If a
+    caller has not configured one, local OpenAI-compatible servers generally
+    accept an arbitrary placeholder, so the fallback stays explicit and stable.
+    """
+    source = env if env is not None else os.environ
+    explicit = source.get(_MODEL_ID_ENV, "").strip()
+    if explicit:
+        return explicit
+    model_path = source.get(_LLAMACPP_MODEL_PATH_ENV, "").strip()
+    if model_path:
+        basename = os.path.basename(model_path)
+        if basename:
+            return basename
+    return _FALLBACK_REQUEST_MODEL
+
+
+def build_model_adapter(env: dict[str, str] | None = None) -> OpenAICompatibleAdapter:
+    """Create the default OpenAI-compatible ModelAdapter from environment.
+
+    ``OPENCODE_SERVER_URL`` remains the primary endpoint knob from
+    ``.env.example``; ``LLAMACPP_HOST`` is accepted as a local-first fallback.
+    API keys are read only from environment and never persisted here.
+    """
+    source = env if env is not None else os.environ
+    base_url = (
+        source.get(_OPENCODE_SERVER_URL_ENV, "").strip()
+        or source.get(_LLAMACPP_HOST_ENV, "").strip()
+    )
+    if not base_url:
+        raise ValueError(
+            "Set OPENCODE_SERVER_URL or LLAMACPP_HOST to an OpenAI-compatible endpoint"
+        )
+    api_key = (
+        source.get(_FOUNDRY_MODEL_API_KEY_ENV, "").strip()
+        or source.get(_OPENAI_API_KEY_ENV, "").strip()
+    )
+    return OpenAICompatibleAdapter(
+        base_url=base_url,
+        model=_resolve_model_request_name(source),
+        api_key=api_key or None,
+    )
 
 
 def resolve_harness_version(harness_dir: Path) -> str:
@@ -229,11 +281,48 @@ async def run_with_limits(
         raise
 
 
-async def run_task(task: str, harness_dir: Path, log: TraceLogger, session_id: str) -> None:
-    raise NotImplementedError(
-        "Phase 1 wiring: instantiate your OpenCode client here, "
-        "fan tool calls through harness.hooks.get_registry(), "
-        "and stream events into the TraceLogger."
+async def run_task(
+    task: str,
+    harness_dir: Path,
+    log: TraceLogger,
+    session_id: str,
+    model_adapter: ModelAdapter | None = None,
+) -> None:
+    """Run one task by sending the harness prompt to a ModelAdapter.
+
+    This is intentionally the smallest Phase 1 bridge: it loads the
+    version-controlled system prompt, sends a single user task to an
+    OpenAI-compatible adapter, and records the normalized response. Tool-call
+    execution through ``harness/hooks`` remains a later layer; this function
+    only establishes the model abstraction needed to measure runs.
+    """
+    system_prompt_path = harness_dir / "system_prompt.txt"
+    system_prompt = system_prompt_path.read_text(encoding="utf-8")
+    messages = [
+        ModelMessage(role="system", content=system_prompt),
+        ModelMessage(role="user", content=task),
+    ]
+    created_adapter = model_adapter is None
+    adapter = model_adapter or build_model_adapter()
+
+    log.record(
+        session_id,
+        kind="model_request",
+        payload={"message_count": len(messages), "tool_count": 0},
+    )
+    try:
+        response = await adapter.complete(messages=messages, tools=[])
+    finally:
+        if created_adapter and isinstance(adapter, OpenAICompatibleAdapter):
+            await adapter.aclose()
+    log.record(
+        session_id,
+        kind="model_response",
+        payload={
+            "finish_reason": response.finish_reason,
+            "message": response.message.model_dump(mode="json", exclude_none=True),
+            "tool_calls": [call.model_dump(mode="json") for call in response.tool_calls],
+        },
     )
 
 
