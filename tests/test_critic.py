@@ -132,3 +132,36 @@ def test_verdict_round_trips_through_pydantic() -> None:
 def test_default_pytest_args_target_smoke_suite() -> None:
     critic = Critic(Path("/tmp/nonexistent"))
     assert critic.pytest_args == ["-q", "tests/test_smoke.py"]
+
+
+def test_critic_exposes_benchmark_tasks_from_registry() -> None:
+    """``Critic.benchmark_tasks`` lazy-loads from the in-process registry (issue #108).
+
+    The Critic can now enumerate benchmark tasks without spawning pytest.
+    The property is lazy: importing ``foundry_x.evolution.critic`` does
+    not eagerly load every task module, and tests that never touch
+    ``benchmark_tasks`` (the existing ``test_*`` cases above) pay no cost.
+    """
+    from benchmarks.models import BenchmarkTask
+
+    critic = Critic(Path("/tmp/nonexistent"))
+    tasks = critic.benchmark_tasks
+    assert tasks, "registry must return at least one benchmark task"
+    assert all(isinstance(t, BenchmarkTask) for t in tasks)
+    # Cached: second access returns the same list object.
+    assert critic.benchmark_tasks is tasks
+
+
+def test_critic_accepts_pre_seeded_benchmark_tasks() -> None:
+    """``Critic(benchmark_tasks=[...])`` skips the registry lookup.
+
+    Tests that want full control over the task list (or want to avoid
+    touching the registry at all) can pre-seed it in the constructor.
+    The cached list is returned verbatim on every property access.
+    """
+    from benchmarks.models import BenchmarkTask
+
+    sentinel = BenchmarkTask(name="sentinel", description="test fixture")
+    critic = Critic(Path("/tmp/nonexistent"), benchmark_tasks=[sentinel])
+    assert critic.benchmark_tasks == [sentinel]
+    assert critic.benchmark_tasks is critic.benchmark_tasks  # cached
