@@ -38,12 +38,16 @@ runs:
         UV_VERSION: ${{ inputs.uv-version }}
         UV_SHA256: ${{ inputs.uv-sha256 }}
         UV_TARGET: uv-x86_64-unknown-linux-gnu
+        UV_INSTALL_DIR: ${{ runner.temp }}/uv-bin
       run: |
         set -eux
+        mkdir -p "${UV_INSTALL_DIR}"
         curl -fsSL \
           "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_TARGET}.tar.gz" \
           -o /tmp/uv.tar.gz
         echo "${UV_SHA256}  /tmp/uv.tar.gz" | sha256sum -c -
-        tar -xzf /tmp/uv.tar.gz -C /usr/local --strip-components=1
+        tar -xzf /tmp/uv.tar.gz -C "${UV_INSTALL_DIR}" --strip-components=1
         rm -f /tmp/uv.tar.gz
+        echo "${UV_INSTALL_DIR}" >> "${GITHUB_PATH}"
+        export PATH="${UV_INSTALL_DIR}:${PATH}"
         uv --version
