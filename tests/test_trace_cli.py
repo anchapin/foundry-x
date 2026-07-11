@@ -4,6 +4,8 @@ import inspect
 import json
 from collections.abc import Iterator
 
+import pytest
+
 from foundry_x.trace.cli import main
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
@@ -435,3 +437,137 @@ def test_events_grep_unknown_session_returns_nonzero(tmp_path, capsys):
     )
 
     assert rc == 1
+
+
+# --- Issue #192: redact-session / redact-key ---------------------------------
+
+_BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+
+
+def _suffix(backend: str) -> str:
+    return ".db" if backend == "sqlite" else ".jsonl"
+
+
+def _populate_leak(tmp_path, backend: str) -> str:
+    """Seed a session with a secret-bearing event for redaction tests."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(
+            sid,
+            "tool_result",
+            {"output": "config_api_key=leaked-value", "name": "read_file"},
+        )
+        logger.record(sid, "user_prompt", {"text": "deploy now"})
+    return str(path), sid
+
+
+@_BACKENDS
+def test_redact_session_deletes_and_prints_count(tmp_path, backend, capsys):
+    db, sid = _populate_leak(tmp_path, backend)
+
+    rc = main(["redact-session", sid, "--db", db])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert sid in out
+    assert "2 event(s) removed" in out
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    assert logger.load_session(sid) == []
+    assert sid not in [s.session_id for s in logger.list_sessions()]
+
+
+@_BACKENDS
+def test_redact_session_writes_audit_log(tmp_path, backend):
+    db, sid = _populate_leak(tmp_path, backend)
+    audit = tmp_path / "audit.jsonl"
+
+    rc = main(["redact-session", sid, "--db", db, "--out", str(audit)])
+
+    assert rc == 0
+    lines = audit.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["action"] == "redact-session"
+    assert record["session_id"] == sid
+    assert record["events_deleted"] == 2
+
+
+def test_redact_session_unknown_session_exits_zero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["redact-session", "never-existed", "--db", str(db)])
+
+    assert rc == 0
+    assert "0 event(s) removed" in capsys.readouterr().out
+
+
+@_BACKENDS
+def test_redact_key_rewrites_field(tmp_path, backend, capsys):
+    db, sid = _populate_leak(tmp_path, backend)
+
+    rc = main(["redact-key", sid, "0", "output", "--db", db])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Redacted key 'output'" in out
+    path = tmp_path / f"traces{_suffix(backend)}"
+    events = TraceLogger(path, backend=backend).load_session(sid)
+    assert events[0].payload["output"] == "[REDACTED]"
+    assert events[0].payload["name"] == "read_file"
+    assert events[1].payload == {"text": "deploy now"}
+
+
+@_BACKENDS
+def test_redact_key_out_of_range_exits_nonzero(tmp_path, backend, capsys):
+    db, sid = _populate_leak(tmp_path, backend)
+
+    rc = main(["redact-key", sid, "99", "output", "--db", db])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "out of range" in err
+    path = tmp_path / f"traces{_suffix(backend)}"
+    events = TraceLogger(path, backend=backend).load_session(sid)
+    assert events[0].payload["output"] == "config_api_key=leaked-value"
+
+
+def test_redact_key_unknown_session_exits_nonzero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["redact-key", "missing", "0", "output", "--db", str(db)])
+
+    assert rc == 1
+
+
+@_BACKENDS
+def test_redact_key_writes_audit_log(tmp_path, backend):
+    db, sid = _populate_leak(tmp_path, backend)
+    audit = tmp_path / "audit.jsonl"
+
+    rc = main(["redact-key", sid, "0", "output", "--db", db, "--out", str(audit)])
+
+    assert rc == 0
+    lines = audit.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["action"] == "redact-key"
+    assert record["session_id"] == sid
+    assert record["event_index"] == 0
+    assert record["key"] == "output"
+
+
+def test_redact_audit_log_appends_across_invocations(tmp_path, capsys):
+    db, sid = _populate_leak(tmp_path, "sqlite")
+    audit = tmp_path / "audit.jsonl"
+
+    main(["redact-key", sid, "0", "output", "--db", db, "--out", str(audit)])
+    main(["redact-session", sid, "--db", db, "--out", str(audit)])
+
+    lines = audit.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["action"] == "redact-key"
+    assert json.loads(lines[1])["action"] == "redact-session"
