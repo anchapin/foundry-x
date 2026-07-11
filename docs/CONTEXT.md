@@ -86,17 +86,78 @@ these names (see `src/foundry_x/evolution/digester.py`). Adding a new
 kind is a vocabulary change and must ship in the same PR as the code
 that emits it.
 
-- **`injection_blocked`** — emitted by the `InjectionFirewallHook`
-  (one per block) when a tool result matches a prompt-injection
-  marker. Payload contract: `{"markers": list[str], "tool": str,
-  "preview": str}` — the sorted unique marker names, the originating
-  tool name, and the first 120 characters of the suppressed text with
-  newlines folded to spaces (safe to persist; never re-injected into a
-  prompt). The `Digester` aggregates every `injection_blocked` event
-  in a session into one `FailureReport` with
-  `proposed_class == 'injection-attempt'` and one entry per block in
-  `failed_steps` so the `Evolver` sees the full adversarial surface.
-  See issue #120.
+The table below enumerates every `kind` value currently emitted by
+the production code paths (Runner, Critic, hooks, and the trace store
+itself), grouped by lifecycle phase. The "Failure signal?" column
+marks kinds whose presence is itself an indication of failure; benign
+kinds can still carry a failure signal in their payload (see
+`FAILURE_PAYLOAD_KEYS` in `src/foundry_x/evolution/digester.py`).
+The "Failure-signalling subset" subsection below cross-references the
+`Digester`'s `FAILURE_KINDS` vocabulary.
+
+### Session lifecycle
+
+| Kind | Producer | Payload contract | Failure signal? |
+| --- | --- | --- | --- |
+| **`session_start`** | `TraceLogger.session` (`src/foundry_x/trace/logger.py`) | JSONL marker line `{"session_id", "started_at", "harness_version", "model_id", "metadata", "kind": "session_start"}`. In the sqlite backend the same data lives on the `sessions` row, not in the `events` table; the marker is part of the persisted vocabulary either way. | no |
+| **`session_end`** | `TraceLogger._end_session` (`src/foundry_x/trace/logger.py`) | JSONL marker line `{"session_id", "ended_at", "kind": "session_end"}`. In sqlite it updates `sessions.ended_at`. | no |
+| **`task_received`** | `Runner.main` (`src/foundry_x/execution/runner.py`) | `{"prompt": str}` — the raw `--task` argument before the agent loop is opened. | no |
+| **`task_completed`** | `Runner.main` (terminal, success path) | `{"duration_ms": int}` — wall-clock time of the entire `run_task` awaitable. | no |
+| **`task_failed`** | `Runner.main` (terminal, exception path) | `{"error_type": str, "message": str, "duration_ms": int}` — exception class name, `str(exc)`, and wall-clock duration; stack frames are deliberately omitted to keep traces compact (ADR-0007). | **yes** (terminal) |
+| **`task_aborted`** | `Runner.run_with_limits` (wall-clock cap, SECURITY.md "Runaway detection") | `{"reason": "wall_clock", "timeout_s": float \| null, "token_budget": int \| null}` — the cap that fired plus the active token budget at abort time. | **yes** (terminal) |
+
+### Agent loop
+
+| Kind | Producer | Payload contract | Failure signal? |
+| --- | --- | --- | --- |
+| **`user_prompt`** | `Runner.run_task` (issue #89, ADR-0010) | `{"content": str, "tool_count": int}` — the task as fed into the model plus the size of the tool surface the agent sees. | no |
+| **`model_request`** | `Runner.run_task` (one per round-trip) | `{"step": int, "message_count": int, "tool_count": int}` — loop index, conversation length, and tool-surface size at request time. | no |
+| **`model_response`** | `Runner.run_task` (one per round-trip) | `{"step": int, "finish_reason": str, "message": dict, "tool_calls": list[dict]}` — the assistant message plus any tool calls the model emitted. | no |
+| **`model_error`** | `Runner.run_task` (on `adapter.complete` exception) | `{"step": int, "error_type": str, "message": str}` — loop index plus exception class name and `str(exc)`. Paired with a `task_failed` terminal marker. | **yes** |
+| **`tool_call`** | `Runner.run_task` (one per emitted tool call) | `{"step": int, "call_id": str, "name": str, "arguments": dict, "duration_ms": int}` — added in issue #173; per-tool-call latency for KPI slicing. | no |
+| **`tool_result`** | `Runner.run_task` (one per tool execution) | `{"step": int, "call_id": str, "name": str, "duration_ms": int, "output": Any \| null, "error": str \| null}` — non-null `error` flips the event onto the Digester's failure path via `FAILURE_PAYLOAD_KEYS`. | when `error` is non-null |
+| **`outcome`** | `Runner.run_task` (always emitted in `finally`) | `{"status": "success" \| "truncated" \| "failed", "reason": "final_answer" \| "model_error" \| "max_steps", "steps": int}` — terminal status the Digester attributes to the session. | when `status == "failed"` |
+
+### Hooks
+
+| Kind | Producer | Payload contract | Failure signal? |
+| --- | --- | --- | --- |
+| **`injection_blocked`** | `InjectionFirewallHook` (`harness/hooks/injection_firewall.py`, one per block) | `{"markers": list[str], "tool": str, "preview": str}` — sorted unique marker names, originating tool name, and the first 120 characters of the suppressed text with newlines folded to spaces (safe to persist; never re-injected into a prompt). The Digester aggregates every block in a session into one `FailureReport` with `proposed_class == 'injection-attempt'` and one entry per block in `failed_steps` so the Evolver sees the full adversarial surface. See issue #120. | **yes** (adversarial) |
+| **`context_pruned`** | `ContextPruningHook` (`harness/hooks/context_pruning.py`, opt-in via `harness/manifest.json`) | `{"dropped": int, "threshold": int}` — number of older events the pruner dropped to bring the session back under the per-session cap, plus the threshold in effect. See issue #106. | no |
+
+### Critic pipeline
+
+| Kind | Producer | Payload contract | Failure signal? |
+| --- | --- | --- | --- |
+| **`critic_verdict`** | `record_verdict` (`src/foundry_x/observability/regression_report.py`, constant `VERDICT_KIND = "critic_verdict"`) | `{"approved": bool, "passed_checks": list[str], "failed_checks": list[str], "notes": str}` — the persisted `VerdictRecord` shape (ADR-0006 boundary model). KPI and regression-report consumers reach this kind via `logger.iter_events(sid, kind="critic_verdict")`. | no (verdict is a structured summary, not a failure in itself; downstream regressions are derived from `failed_checks` history) |
+
+### Failure-signalling subset
+
+The `Digester` recognises a *failure signal* in two ways: the event's
+`kind` is in `FAILURE_KINDS`, **or** the event's payload contains a
+key from `FAILURE_PAYLOAD_KEYS`. The vocabulary below is the closed
+set the Digester considers structural failure markers; treat it as a
+subset of the broader kind vocabulary above.
+
+- **`FAILURE_KINDS`** (constant in
+  `src/foundry_x/evolution/digester.py:60-68`): `tool_error`,
+  `task_failed`, `run_failed`, `agent_error`, `error`. Of these,
+  `task_failed` is the only kind currently emitted by the production
+  Runner; the remaining four are reserved vocabulary recognized by
+  the Digester for compatibility with legacy producers and tests.
+  Adding a new value here is a vocabulary change and must ship with
+  both a producer and a regression test (ADR-0004).
+- **`FAILURE_PAYLOAD_KEYS`** (constant in
+  `src/foundry_x/evolution/digester.py:70-76`): `error`, `traceback`,
+  `exception`. A `tool_result` whose payload has any of these keys is
+  classified as a failure even though its `kind` is benign — the
+  signal is on the payload, not on the kind. The same payload-key
+  rule applies to every other kind in the table above.
+- **`injection_blocked`** is *not* in `FAILURE_KINDS`: it is handled
+  by a dedicated aggregation pass in `Digester.digest` that collects
+  *every* block in the session (not just the first), so the generic
+  first-failure walk would under-report. It is exposed as a separate
+  constant `INJECTION_BLOCKED_KIND` so tests can pin the contract.
 
 ## Artifacts on disk
 
