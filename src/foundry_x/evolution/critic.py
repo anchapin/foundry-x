@@ -138,6 +138,15 @@ class Critic:
            a confusing downstream pytest error.
         6. Run pytest with ``self.pytest_args`` in the sandbox.
 
+        Every subprocess inside this method is bounded by
+        ``self.gate_timeout_s`` (issue #188). On
+        :class:`subprocess.TimeoutExpired` the verdict is
+        ``approved=False`` with ``failed_checks`` carrying the offending check
+        name suffixed ``":timeout"`` (e.g. ``"pytest:timeout"``), and
+        ``notes`` holds the trailing window of any partial output the
+        process managed to write before being killed — or a wall-clock-cap
+        message when no partial output was captured.
+
         The verdict's ``approved`` flag is ``True`` only when every check that
         runs succeeds. All filesystem mutations are confined to the temp copy.
         """
@@ -236,3 +245,21 @@ class Critic:
 def _tail(text: str) -> str:
     """Return the trailing window of *text* for inclusion in verdict notes."""
     return text.strip()[-_NOTES_TAIL_CHARS:]
+
+
+def _timeout_notes(exc: subprocess.TimeoutExpired, gate_timeout_s: int, check: str) -> str:
+    """Build verdict ``notes`` for a ``subprocess.TimeoutExpired``.
+
+    Prefers the trailing window of any partial stdout/stderr the subprocess
+    managed to write before being killed (the same shape callers expect for
+    non-timeout failures). Falls back to a wall-clock-cap message naming the
+    offending check so the verdict is never empty: the
+    ``test_pytest_exceeds_timeout_rejected`` acceptance test (issue #188)
+    asserts ``verdict.notes`` is truthy.
+    """
+    partial = (exc.stdout or b"") + (exc.stderr or b"")
+    if isinstance(partial, bytes):
+        partial = partial.decode("utf-8", errors="replace")
+    if partial.strip():
+        return _tail(partial)
+    return _tail(f"{check} exceeded {gate_timeout_s}s wall-clock cap")

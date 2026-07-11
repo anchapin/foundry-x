@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -250,3 +251,91 @@ def test_passed_checks_list_benchmark_tags(harness_dir: Path) -> None:
     assert "benchmark:security" in verdict.passed_checks
     assert "benchmark:smoke" in verdict.passed_checks
     assert "benchmark:math" in verdict.passed_checks
+
+
+def test_default_gate_timeout_matches_issue_spec() -> None:
+    """The default ``gate_timeout_s`` matches issue #188's literal (``300``).
+
+    Issue #188 names a wall-clock cap so a hanging benchmark or a proposed
+    harness edit that re-introduces an infinite loop in a hook cannot make
+    the Critic itself a runaway (docs/SECURITY.md "Runaway detection",
+    ADR-0004 §Consequences). The Critic carries its own constant rather
+    than mirroring the Runner's ``DEFAULT_TASK_TIMEOUT_S`` so a regression
+    in either cap surfaces independently.
+    """
+    critic = Critic(Path("/tmp/nonexistent"))
+    assert critic.gate_timeout_s == DEFAULT_GATE_TIMEOUT_S == 300
+
+
+def test_custom_gate_timeout_is_preserved() -> None:
+    """``gate_timeout_s=...`` overrides the default verbatim."""
+    critic = Critic(Path("/tmp/nonexistent"), gate_timeout_s=42)
+    assert critic.gate_timeout_s == 42
+
+
+def test_pytest_exceeds_timeout_rejected(harness_dir: Path) -> None:
+    """Critic rejects when pytest exceeds ``gate_timeout_s`` (issue #188).
+
+    The harness is extended with a single test that sleeps longer than
+    the cap. ``evaluate`` must abort the run, return
+    ``approved=False``, surface ``"pytest:timeout"`` in ``failed_checks``,
+    and leave ``notes`` truthy so an engineer skimming the trace can see
+    why the gate tripped.
+    """
+    hanging_test = "import time\n" "\n" "def test_hang():\n" "    time.sleep(10)\n"
+    (harness_dir / "tests" / "test_hang.py").write_text(hanging_test)
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "tests/test_hang.py"],
+        gate_timeout_s=1,
+    )
+    verdict = critic.evaluate("")
+    assert verdict.approved is False
+    assert "pytest:timeout" in verdict.failed_checks
+    assert "pytest" not in verdict.passed_checks
+    assert verdict.notes, "timeout verdict must carry diagnostic notes"
+
+
+def test_pytest_within_timeout_still_approved(harness_dir: Path) -> None:
+    """A pytest run that finishes before the cap is approved unchanged (issue #188).
+
+    Guards against a regression where the new timeout machinery accidentally
+    aborts well-behaved runs (e.g. by misreading the cap as zero, by
+    catching the wrong exception, or by corrupting the ``passed_checks`` list).
+    """
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "tests/test_sanity.py"],
+        gate_timeout_s=30,
+    )
+    verdict = critic.evaluate("")
+    assert verdict.approved is True
+    assert "pytest" in verdict.passed_checks
+    assert "pytest:timeout" not in verdict.failed_checks
+
+
+def test_git_apply_exceeds_timeout_rejected(harness_dir: Path) -> None:
+    """A ``git apply`` that exceeds the cap is rejected with ``:timeout`` (issue #188).
+
+    ``git apply`` is overwhelmingly fast for any realistic harness diff, so
+    we drive the timeout path with a 1-second cap and a no-op diff applied
+    through ``subprocess.run`` mock — the live code path we cover is the
+    ``except subprocess.TimeoutExpired`` branch in ``evaluate`` and its
+    verdict shape (``failed_checks=["git apply:timeout"]``,
+    ``approved=False``, non-empty ``notes``).
+    """
+    from unittest.mock import patch
+
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "tests/test_sanity.py"],
+        gate_timeout_s=1,
+    )
+    with patch(
+        "foundry_x.evolution.critic.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=["git", "apply"], timeout=1),
+    ):
+        verdict = critic.evaluate("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n")
+    assert verdict.approved is False
+    assert "git apply:timeout" in verdict.failed_checks
+    assert verdict.notes
