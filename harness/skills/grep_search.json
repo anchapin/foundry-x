@@ -1,0 +1,98 @@
+{
+  "name": "grep_search",
+  "version": "0.1.0",
+  "description": "Search the contents of files under a directory for a regex pattern and return a bounded list of ``{file, line, text}`` matches. The agent uses ``grep_search`` to locate where a symbol, error string, or comment lives in the workspace *before* reading; without it the agent is forced to read every file with ``read_file`` to find a single identifier, which is exactly the workload the read_file bounding pattern (issue #20) was designed to discourage. The implementation MUST use Python stdlib primitives only: ``re.compile`` for the regex, ``pathlib.Path.rglob`` / ``glob`` for the file walk, ``fnmatch.fnmatch`` for the optional ``glob`` filter, and ``open(..., encoding=\"utf-8\", errors=\"replace\")`` for reading. Per docs/SECURITY.md threat #3 the audit surface must be stdlib-only (no shelling out to ``ripgrep`` / ``grep`` / ``ag``) so there is no fork/exec boundary to audit and no risk of a malicious filename reaching an external parser; the agent's pattern itself is the only untrusted input surface (SECURITY.md §2 prompt-input firewall) and the regex is compiled with a bounded ``re.compile(..., flags=re.DOTALL)`` after a sanity check on length. Symlinks are NOT followed (the walk uses ``Path.rglob`` on the resolved directory, then opens files directly, never ``Path.rglob`` through a symlink), keeping the hazard surface identical to ``list_dir`` (issue #105, sibling skill). Output is bounded by ``max_matches`` (default 1000) and ``max_file_bytes`` (default 1 MiB); a file larger than ``max_file_bytes`` is skipped with a single match-summary line of the form ``{file: \"<path>\", line: 0, text: \"<skipped: file exceeds max_file_bytes>\"}`` so the agent can branch explicitly instead of silently missing matches.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "pattern": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Regular expression (Python ``re`` syntax) to search for. The pattern is the only untrusted input surface for this skill -- callers MUST treat its output as untrusted (SECURITY.md §2). The implementation MUST reject patterns longer than 4096 characters and MUST NOT use ``re.RegexFlag`` features that allow arbitrary code execution (``re.VERBOSE`` is permitted, ``(?...)`` callouts are not). Use ``code_search`` (a future skill) for code-aware queries; ``grep_search`` is content-blind by design."
+      },
+      "path": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Absolute or harness-relative directory to search. The harness MUST resolve the path against the workspace root and reject any resolution that escapes it (``..`` segments, absolute paths outside the workspace) before the underlying walk, identical to the ``list_dir`` containment check (issue #105, sibling skill)."
+      },
+      "glob": {
+        "type": "string",
+        "description": "Optional filename filter (``fnmatch`` syntax). When set, only files whose path matches the pattern are searched. Composes with ``list_dir`` (which can paginate entries by name); an agent that needs to find a definition uses ``list_dir`` to scope, then ``grep_search`` with the same ``glob`` to drill in."
+      },
+      "include_hidden": {
+        "type": "boolean",
+        "default": false,
+        "description": "When ``true``, files whose path contains a ``.``-led component are searched. Defaults to ``false`` so a casual ``grep_search`` cannot leak secrets from ``.env`` or ``.git`` into the agent's context (SECURITY.md threat #5)."
+      },
+      "context_lines": {
+        "type": "integer",
+        "minimum": 0,
+        "default": 0,
+        "description": "Number of lines of context to include on either side of the match. ``0`` means only the matching line. The ``text`` field of each match is ``context_lines`` lines, the matched line, then ``context_lines`` more lines, joined with ``\"\\n\"``. Bounded by the ``max_match_text_bytes`` cap below."
+      },
+      "max_matches": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 1000,
+        "description": "Maximum number of matches returned. After this cap is hit the walk short-circuits (no further files are opened), ``truncated`` is set to ``true``, and the agent MUST narrow the search (``glob``, more specific ``pattern``, or tighter ``context_lines``) and call again. Defaults to 1000 so a single ``grep_search`` call cannot blow the local-model context window (PRD §4)."
+      },
+      "max_file_bytes": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 1048576,
+        "description": "Per-file byte cap. A file larger than this is skipped with a single synthetic match ``{file, line: 0, text: \"<skipped: file exceeds max_file_bytes>\"}`` so the agent can branch explicitly. Defaults to 1 MiB so a single ``grep_search`` call cannot blow the local-model context window (PRD §4) on generated/minified files."
+      },
+      "max_match_text_bytes": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 4096,
+        "description": "Per-match ``text`` byte cap. If a match with surrounding ``context_lines`` would produce more bytes than this, the slice is cut at the largest byte position ``<= max_match_text_bytes`` that ends on a ``'\\n'`` boundary and ``truncated`` is set to ``true``. Defaults to 4 KiB so a single misfired ``grep_search`` cannot blow the local-model context window (PRD §4)."
+      }
+    },
+    "required": ["pattern", "path"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "matches": {
+        "type": "array",
+        "description": "Sorted (by ``(file, line)`` ascending) list of regex matches. Each entry has the trio ``{file, line, text}`` -- ``file`` is the path of the matched file relative to the requested ``path`` (so ``target.py`` not ``/abs/path/to/target.py``), ``line`` is the 1-indexed source line, and ``text`` is the line (plus optional ``context_lines`` of context) with trailing newline stripped. Synthetic skips for over-cap files appear with ``line: 0`` and ``text`` of the form ``<skipped: file exceeds max_file_bytes>``. The list is bounded by ``max_matches``; when it is capped ``truncated`` is ``true`` and the agent MUST narrow the search before paging further.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Path of the matched file, relative to the requested ``path`` so the output is portable across callers with different workspace roots. UTF-8 with ``/`` as the separator on every platform (``Path.as_posix()``), no leading ``/``."
+            },
+            "line": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "1-indexed source line of the match. ``0`` only for synthetic skip entries (``<skipped: file exceeds max_file_bytes>``); all regex matches report the actual line number."
+            },
+            "text": {
+              "type": "string",
+              "description": "The matched line, optionally flanked by ``context_lines`` of context. Trailing newline stripped; inner newlines preserved (``\"\\n\"``-joined). When ``max_match_text_bytes`` was the binding cap, the slice is cut at the largest byte position ``<= max_match_text_bytes`` that ends on a ``\"\\n\"`` boundary; the agent detects truncation via the outer ``truncated`` flag rather than via a per-field suffix. Untrusted text (SECURITY.md §2 prompt-input firewall)."
+            }
+          },
+          "required": ["file", "line", "text"],
+          "additionalProperties": false
+        }
+      },
+      "truncated": {
+        "type": "boolean",
+        "description": "``true`` iff EITHER ``max_matches`` was hit (walk short-circuited, more matches may exist) OR any per-match ``text`` was cut by ``max_match_text_bytes``. The agent MUST branch on this value: narrow the search (``glob``, more specific ``pattern``, ``context_lines=0``, smaller ``max_match_text_bytes``) and call again, or stop. Never ignore a ``true`` value."
+      }
+    },
+    "required": ["matches", "truncated"],
+    "additionalProperties": false
+  },
+  "truncation_policy": {
+    "default_max_matches": 1000,
+    "default_max_file_bytes": 1048576,
+    "default_max_match_text_bytes": 4096,
+    "rationale": "1000 matches * 4 KiB each ~= 4 MiB worst case, two orders of magnitude below the 4K-32K context window of typical local 7B-70B models (PRD §4). 1 MiB per-file cap protects against generated/minified artifacts (vendored JS bundles, lockfiles) that would otherwise drown out real matches. The 4 KiB per-match cap mirrors ``read_file``'s 32 KiB cap scaled for a single match. Together these bound a single ``grep_search`` call so a runaway walk (SECURITY.md threat #5) cannot exhaust context.",
+    "truncation_strategy": "entry_cap_with_short_circuit_walk",
+    "behavior_when_truncated": "Walk files in sorted (``Path.rglob``-driven, stable) order; emit matches until either ``max_matches`` hits or the file list is exhausted. When ``max_matches`` is the binding constraint, stop the walk entirely (do not open further files) and set ``truncated=true``. When ``max_match_text_bytes`` is the binding constraint for an individual match, cut the slice at the largest byte position ``<= max_match_text_bytes`` that ends on a ``\"\\n\"`` boundary and set ``truncated=true``. When ``max_file_bytes`` skips a file, the synthetic skip entry surfaces inside ``matches`` as ``{file, line: 0, text: \"<skipped: file exceeds max_file_bytes>\"}``; the walk continues so the agent sees the full skip list."
+  }
+}

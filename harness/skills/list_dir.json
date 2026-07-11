@@ -1,0 +1,74 @@
+{
+  "name": "list_dir",
+  "version": "0.1.0",
+  "description": "Enumerate the entries of a directory in the agent's workspace and return a bounded list of name/kind/size tuples. The agent uses ``list_dir`` to discover what files exist before issuing ``read_file``, ``edit_file``, or ``write_file`` calls -- without it the agent is forced to guess paths, which the Phase 1 benchmark ``benchmarks/tasks/test_write_unit_test.py`` (issue #105 evidence) makes explicit by requiring the agent to locate a target module the benchmark author did not name. The implementation MUST use ``os.scandir`` (Python stdlib) for the directory walk; per docs/SECURITY.md threat #3 the only filesystem-introspection primitive allowed for this skill is the stdlib so the audit surface is one import, not a hand-rolled walker with custom symlink-following policy. Symlinks are NOT followed by default (target kind is reported as the ``symlink`` kind); entries beyond ``max_entries`` are dropped and ``truncated`` is set to ``true`` so a single ``list_dir`` call cannot blow the local-model context window (PRD §4, PHILOSOPHY.md §5, SECURITY.md threat #5). Hidden entries (dotfiles) are excluded unless ``include_hidden`` is set, mirroring the conservative default of ``ls`` so the agent does not silently read ``.env`` or ``.git`` into its context.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Absolute or harness-relative path to the directory to list. The harness MUST resolve the path against the workspace root and reject any resolution that escapes it (``..`` segments, absolute paths outside the workspace) before the underlying ``os.scandir`` call, mirroring the read_file bounding pattern (issue #20). The directory MUST exist and be readable; a missing or unreadable directory surfaces as ``entries=[]`` and ``truncated=false`` (the agent branches on the absence of expected entries, not on an exception)."
+      },
+      "glob": {
+        "type": "string",
+        "description": "Optional filename filter applied with ``fnmatch.fnmatch`` (Python stdlib). When set, only entries whose ``name`` matches the pattern are returned. Use ``grep_search`` to filter by file *contents*; this is purely a filename filter so the two skills compose without overlap."
+      },
+      "include_hidden": {
+        "type": "boolean",
+        "default": false,
+        "description": "When ``true``, entries whose name starts with ``.`` are returned alongside the rest. Defaults to ``false`` so a casual ``list_dir`` cannot leak ``.env``, ``.git``, or editor swap files into the agent's context. Setting this to ``true`` is an explicit opt-in; the agent SHOULD log the call so the trace shows the dotfile exposure (issue #105 evidence)."
+      },
+      "max_entries": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 1000,
+        "description": "Maximum number of entries returned. If the directory contains more entries, the excess are dropped deterministically (sorted by ``name`` ascending) and ``truncated`` is set to ``true``. Defaults to 1000 so a single ``list_dir`` call cannot blow the local-model context window (PRD §4)."
+      }
+    },
+    "required": ["path"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "entries": {
+        "type": "array",
+        "description": "Sorted (by ``name`` ascending) list of directory entries. Each entry has the trio ``{name, kind, size}`` -- ``name`` is the basename, ``kind`` is one of ``\"file\"`` / ``\"dir\"`` / ``\"symlink\"`` / ``\"other\"`` (mirroring the ``entry.is_file()`` / ``is_dir()`` / ``is_symlink()`` stdlib predicates; ``\"other\"`` covers sockets, FIFOs, block devices), and ``size`` is the byte count from ``stat().st_size`` (``0`` for non-regular entries). The list is bounded by ``max_entries``; when it is capped ``truncated`` is ``true`` and the agent MUST re-call with a tighter ``glob`` to narrow the result before paging further.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Basename of the entry (no directory component). UTF-8; not normalised -- callers compare byte-for-byte. Empty or whitespace-only names are reported as-is so a future script can investigate pathological filesystems."
+            },
+            "kind": {
+              "type": "string",
+              "enum": ["file", "dir", "symlink", "other"],
+              "description": "Type tag for the entry, derived from the stdlib ``os.DirEntry`` predicates in this order: ``is_symlink`` -> ``\"symlink\"`` (even when the link target is a regular file, so the agent can decide whether to follow); ``is_dir`` -> ``\"dir\"``; ``is_file`` -> ``\"file\"``; else ``\"other\"`` (sockets, FIFOs, block devices, character devices)."
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Entry size in bytes, read from ``stat().st_size``. ``0`` when ``kind != \"file\"`` because directory, symlink, and ``other`` sizes are not portable across filesystems (a directory's ``st_size`` is the entry's payload size on some platforms and ``0`` on others; pinning to ``0`` here keeps the contract stable)."
+            }
+          },
+          "required": ["name", "kind", "size"],
+          "additionalProperties": false
+        }
+      },
+      "truncated": {
+        "type": "boolean",
+        "description": "``true`` iff the underlying directory held more entries than ``max_entries`` and the excess were dropped. The agent MUST branch on this value: re-call with a narrower ``glob``, raise ``max_entries``, or move on -- never ignore a ``true`` value, because the missing entries may be exactly the one the agent needs."
+      }
+    },
+    "required": ["entries", "truncated"],
+    "additionalProperties": false
+  },
+  "truncation_policy": {
+    "default_max_entries": 1000,
+    "rationale": "1000 entries is ~30 KiB worst case (each entry averages 30 bytes for ``name, kind, size``), which keeps a single ``list_dir`` call well below the 4K-32K context window of typical local 7B-70B models (PRD §4) and bounds a runaway walk so it cannot exhaust context (SECURITY.md threat #5). Phase 3 will add historical-log pruning; this per-call safety bound is the Phase 1 minimum.",
+    "truncation_strategy": "entry_cap_sorted_by_name",
+    "behavior_when_truncated": "Sort the full entry set by ``name`` ascending (deterministic, byte-sort via ``sorted()``), emit the first ``max_entries`` items, drop the rest, and set ``truncated=true``. When ``glob`` is the binding filter, the glob is applied first so the cap is applied to the filtered set -- the agent that asks for ``*.py`` never silently drops Python files in favor of, say, ``.pyc`` files."
+  }
+}
