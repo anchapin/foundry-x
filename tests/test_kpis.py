@@ -10,12 +10,20 @@ exercise the real persisted :class:`CriticVerdict` payload shape
 from __future__ import annotations
 
 import json
+import re
 import time
 
 import pytest
 
 from foundry_x.evolution.critic import CriticVerdict
-from foundry_x.observability.kpis import KpiSummary, compute_kpis, main
+from foundry_x.observability.kpis import (
+    KpiComparison,
+    KpiSummary,
+    _format_delta,
+    compare_kpis,
+    compute_kpis,
+    main,
+)
 from foundry_x.observability.regression_report import record_verdict
 from foundry_x.trace.logger import TraceLogger
 
@@ -300,3 +308,161 @@ def test_main_json_includes_injection_blocks_when_present(tmp_path, capsys):
     payload = json.loads(captured.out)
     assert payload["injection_blocks"] == {s1: 2, s2: 1}
     assert sum(payload["injection_blocks"].values()) == 3
+
+
+# ---------------------------------------------------------------------------
+# Issue #100: compare baseline vs candidate harness versions. The CLI gains
+# --baseline-harness-version / --candidate-harness-version flags; when both
+# are supplied it prints Baseline / Candidate / Delta columns whose delta
+# sign convention follows the PRD (improvement up = good; regression and
+# cycle-time up = bad).
+# ---------------------------------------------------------------------------
+
+
+def test_format_delta_sign_convention():
+    # Improvement-rate increase is positive (good).
+    assert _format_delta(0.33, 0.50, higher_is_better=True) == "+0.17 (positive)"
+    # Improvement-rate decrease is negative (bad).
+    assert _format_delta(1.00, 0.50, higher_is_better=True) == "-0.50 (negative)"
+    # Regression-rate increase is negative (bad).
+    assert _format_delta(0.00, 0.50, higher_is_better=False) == "+0.50 (negative)"
+    # Cycle-time increase is negative (bad).
+    assert _format_delta(5.00, 10.00, higher_is_better=False) == "+5.00 (negative)"
+    # Cycle-time decrease is positive (good).
+    assert _format_delta(10.00, 5.00, higher_is_better=False) == "-5.00 (positive)"
+    # No movement is neutral.
+    assert _format_delta(0.50, 0.50, higher_is_better=True) == "+0.00 (neutral)"
+    # An unmeasured side is N/A.
+    assert _format_delta(None, 1.0, higher_is_better=True) == "N/A"
+    assert _format_delta(1.0, None, higher_is_better=False) == "N/A"
+
+
+def test_compare_kpis_returns_candidate_minus_baseline_deltas(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # Baseline v1: both approved, both pass "bench".
+    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
+    # Candidate v2: one passes "bench", one regresses it.
+    _seed_session(logger, "v2", approved=True, passed_checks=["bench"])
+    _seed_session(logger, "v2", approved=False, failed_checks=["bench"])
+
+    comparison = compare_kpis(logger, "v1", "v2")
+
+    assert isinstance(comparison, KpiComparison)
+    assert comparison.baseline.improvement_rate == 1.0
+    assert comparison.candidate.improvement_rate == 0.5
+    assert comparison.baseline.regression_rate == 0.0
+    assert comparison.candidate.regression_rate == 0.5
+    assert comparison.deltas["improvement_rate"] == pytest.approx(-0.5)
+    assert comparison.deltas["regression_rate"] == pytest.approx(0.5)
+    # Both versions have verdicts, so cycle-time deltas are real numbers.
+    assert comparison.deltas["cycle_time_seconds"] is not None
+
+
+def test_main_comparison_prints_baseline_candidate_delta_columns(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # Baseline v1: both approved, both pass "bench".
+    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
+    # Candidate v2: one passes "bench", one regresses it.
+    _seed_session(logger, "v2", approved=True, passed_checks=["bench"])
+    _seed_session(logger, "v2", approved=False, failed_checks=["bench"])
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--baseline-harness-version",
+            "v1",
+            "--candidate-harness-version",
+            "v2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    output = captured.out
+    lines = output.splitlines()
+    assert "| KPI | Baseline | Candidate | Delta |" in lines
+
+    def _row(name: str) -> str:
+        return next(line for line in lines if line.lstrip().startswith(f"| {name}"))
+
+    improvement = _row("Improvement Rate")
+    # 1.00 baseline, 0.50 candidate; decrease → marked negative (bad).
+    assert "1.00 | 0.50 | -0.50 (negative)" in improvement
+
+    regression = _row("Regression Rate")
+    # 0.00 baseline, 0.50 candidate; increase → marked negative (bad).
+    assert "0.00 | 0.50 | +0.50 (negative)" in regression
+
+    # Cycle-time delta is rendered for all three KPIs: both sides measured,
+    # so the cell is a signed value carrying a PRD mark (not N/A).
+    cycle = _row("Cycle Time (seconds)").strip()
+    assert re.search(r"\| [-+]?\d+\.\d{2} \((positive|negative|neutral)\) \|$", cycle)
+
+
+def test_main_comparison_marks_improvement_increase_as_positive(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # Baseline: rejected (improvement 0.0).
+    _seed_session(logger, "v1", approved=False, failed_checks=["x"])
+    # Candidate: approved (improvement 1.0) → improvement increases.
+    _seed_session(logger, "v2", approved=True, passed_checks=["x"])
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--baseline-harness-version",
+            "v1",
+            "--candidate-harness-version",
+            "v2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    improvement = next(line for line in captured.out.splitlines() if "Improvement Rate" in line)
+    # 0.00 → 1.00 is an improvement-rate increase → marked positive.
+    assert "0.00 | 1.00 | +1.00 (positive)" in improvement
+
+
+def test_main_comparison_json_structure(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
+    _seed_session(logger, "v2", approved=False, failed_checks=["bench"])
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--baseline-harness-version",
+            "v1",
+            "--candidate-harness-version",
+            "v2",
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert set(payload.keys()) == {"baseline", "candidate", "deltas"}
+    assert payload["baseline"]["improvement_rate"] == 1.0
+    assert payload["candidate"]["improvement_rate"] == 0.0
+    assert payload["deltas"]["improvement_rate"] == -1.0
+
+
+def test_main_comparison_requires_both_versions(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", approved=True)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--db", str(db), "--baseline-harness-version", "v1"])
+    assert exc.value.code == 2
