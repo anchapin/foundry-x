@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import sqlite3
 from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
@@ -50,17 +48,32 @@ def _load_verdict_events(
     logger: TraceLogger,
     since: str | None,
 ) -> list[tuple[str, str, VerdictRecord]]:
-    query = "SELECT session_id, timestamp, payload FROM events " "WHERE kind = ?"
-    params: list[object] = [VERDICT_KIND]
-    if since is not None:
-        query += " AND timestamp >= ?"
-        params.append(since)
-    query += " ORDER BY timestamp ASC, rowid ASC"
+    """Stream every ``critic_verdict`` event through :class:`TraceLogger`.
+
+    Issue #82: this helper previously opened a raw ``sqlite3`` connection
+    on ``logger.path`` and ran a bespoke ``SELECT`` — see ADR-0003
+    "No raw SQL strings in business logic". The schema is now owned by
+    :class:`TraceLogger`; we walk sessions via ``list_sessions`` and pull
+    events row-by-row via ``iter_events``. The ``since`` filter is applied
+    after the fetch (the issue's ``iter_events`` signature deliberately
+    does not include a timestamp filter — keeping the surface narrow).
+    """
     events: list[tuple[str, str, VerdictRecord]] = []
-    with sqlite3.connect(logger.path) as conn:
-        rows = conn.execute(query, tuple(params)).fetchall()
-    for session_id, timestamp, payload in rows:
-        events.append((session_id, timestamp, VerdictRecord(**json.loads(payload))))
+    for session in logger.list_sessions():
+        for event in logger.iter_events(session.session_id, kind=VERDICT_KIND):
+            if since is not None and event.timestamp < since:
+                continue
+            events.append(
+                (
+                    event.session_id,
+                    event.timestamp,
+                    VerdictRecord(**event.payload),
+                )
+            )
+    # Preserve the previous ORDER BY timestamp ASC, rowid ASC ordering
+    # (issue #82: deterministic ordering keeps the regression-pairing
+    # logic stable across runs).
+    events.sort(key=lambda row: row[1])
     return events
 
 
