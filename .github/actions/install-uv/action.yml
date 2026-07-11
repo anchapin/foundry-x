@@ -1,0 +1,49 @@
+# Reusable composite action: install uv from a SHA256-pinned tarball.
+#
+# Mirrors the hash-verified installer already used in
+# infra/docker/Dockerfile:49-67 so that CI and the sandbox image
+# install the exact same binary (docs/SECURITY.md threat #3, ADR-0002,
+# issue #208).  Using a composite action keeps the version + hash pair
+# in exactly one place, eliminating drift between the three workflow
+# files that previously each ran `pip install --upgrade uv`.
+#
+# To bump UV_VERSION: download
+#   https://github.com/astral-sh/uv/releases/download/<ver>/uv-x86_64-unknown-linux-gnu.tar.gz
+# record `sha256sum` output, update the default below AND in the
+# Dockerfile ARGs, then re-run `uv sync --frozen`.
+
+name: Install uv (hash-verified)
+description: >-
+  Download the astral-sh/uv release tarball and verify its SHA256 before
+  extraction.  Eliminates `pip install --upgrade uv` from CI workflows.
+
+inputs:
+  uv-version:
+    description: Pinned uv release tag (e.g. 0.9.30).
+    required: false
+    default: "0.9.30"
+  uv-sha256:
+    description: >-
+      SHA256 of the uv-x86_64-unknown-linux-gnu tarball for the pinned
+      version.
+    required: false
+    default: "8b3762374972daa7a74bbc6896cc73229ca69a07403dd9f9ea3805a51ffd7582"
+
+runs:
+  using: composite
+  steps:
+    - name: Download and verify uv
+      shell: bash
+      env:
+        UV_VERSION: ${{ inputs.uv-version }}
+        UV_SHA256: ${{ inputs.uv-sha256 }}
+        UV_TARGET: uv-x86_64-unknown-linux-gnu
+      run: |
+        set -eux
+        curl -fsSL \
+          "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_TARGET}.tar.gz" \
+          -o /tmp/uv.tar.gz
+        echo "${UV_SHA256}  /tmp/uv.tar.gz" | sha256sum -c -
+        tar -xzf /tmp/uv.tar.gz -C /usr/local --strip-components=1
+        rm -f /tmp/uv.tar.gz
+        uv --version
