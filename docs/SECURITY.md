@@ -66,6 +66,16 @@ We design against these threats:
   forever.
 - Trace stores MUST NOT contain raw API keys. Strip them at write
   time.
+- If a trace is found to hold a secret that slipped past the write-time
+  scrubber, the `foundry-trace` CLI offers two operator remediation
+  commands (issue #192, backed by the `TraceLogger.delete_session` and
+  `TraceLogger.redact_event` helpers from issue #157):
+  - `foundry-trace redact-session SESSION_ID` deletes the session and
+    all its events and prints the count removed.
+  - `foundry-trace redact-key SESSION_ID EVENT_INDEX KEY` overwrites a
+    single payload field with `[REDACTED]`, exiting non-zero if the
+    event index is out of range.
+  Both accept `--out` to append a JSONL audit record of the action.
 
 ## Dependencies
 

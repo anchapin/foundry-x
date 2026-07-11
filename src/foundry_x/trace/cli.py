@@ -4,7 +4,9 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from foundry_x.evolution.digester import Digester
 from foundry_x.observability.render import render_failure_report
@@ -180,6 +182,94 @@ def _events_grep(args: argparse.Namespace) -> int:
     return 0 if matches else 1
 
 
+# --- Issue #192: redact-session / redact-key ---------------------------------
+# These subcommands expose the post-write correction API (``delete_session``
+# and ``redact_event`` from logger.py) so an on-call operator can respond to
+# a secret leak within the SECURITY.md §Secrets response window without
+# dropping into a Python REPL. Both accept ``--out`` to append a JSONL audit
+# record so the remediation is traceable after the fact.
+
+
+def _logger_for(db_path: str) -> TraceLogger:
+    """Construct a :class:`TraceLogger` auto-detecting the backend.
+
+    A ``--db`` path ending in ``.jsonl`` selects the JSONL backend; every
+    other path (including the default ``logs/traces.db``) uses sqlite.
+    Issue #192 requires both subcommands to work on either backend.
+    """
+    backend = "jsonl" if db_path.endswith(".jsonl") else "sqlite"
+    return TraceLogger(db_path, backend=backend)
+
+
+def _now_ts() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _write_audit(args: argparse.Namespace, record: dict[str, Any]) -> None:
+    """Append a JSONL audit line to ``args.out`` if it was provided."""
+    if not args.out:
+        return
+    with Path(args.out).open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
+def _redact_session(args: argparse.Namespace) -> int:
+    """Implement ``redact-session`` (issue #192).
+
+    Counts the session's events (so the operator knows what was removed),
+    deletes the session row and every event via ``TraceLogger.delete_session``
+    (idempotent), prints the count, and optionally appends an audit record
+    to ``--out``. Exits 0 even when the session did not exist, mirroring
+    the idempotent contract of ``delete_session``.
+    """
+    logger = _logger_for(args.db)
+    count = len(logger.load_session(args.session_id))
+    logger.delete_session(args.session_id)
+    sys.stdout.write(f"Deleted session {args.session_id}: {count} event(s) removed.\n")
+    _write_audit(
+        args,
+        {
+            "action": "redact-session",
+            "session_id": args.session_id,
+            "events_deleted": count,
+            "timestamp": _now_ts(),
+        },
+    )
+    return 0
+
+
+def _redact_key(args: argparse.Namespace) -> int:
+    """Implement ``redact-key`` (issue #192).
+
+    Rewrites ``payload[key]`` to ``"[REDACTED]"`` on the timestamp-ordered
+    event at ``event_index`` via ``TraceLogger.redact_event``. An
+    out-of-range index returns exit code 1 immediately so a stale index
+    never silently rewrites the wrong row.
+    """
+    logger = _logger_for(args.db)
+    ok = logger.redact_event(args.session_id, args.event_index, args.key)
+    if not ok:
+        sys.stderr.write(
+            f"redact-key: event_index {args.event_index} is out of range "
+            f"for session {args.session_id}.\n"
+        )
+        return 1
+    sys.stdout.write(
+        f"Redacted key '{args.key}' on event {args.event_index} " f"of session {args.session_id}.\n"
+    )
+    _write_audit(
+        args,
+        {
+            "action": "redact-key",
+            "session_id": args.session_id,
+            "event_index": args.event_index,
+            "key": args.key,
+            "timestamp": _now_ts(),
+        },
+    )
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="foundry-trace",
@@ -295,6 +385,47 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to the trace SQLite database (default: logs/traces.db).",
     )
     events_grep_parser.set_defaults(func=_events_grep)
+
+    # Issue #192 subcommands: redact-session / redact-key.
+    redact_session_parser = sub.add_parser(
+        "redact-session",
+        help="Delete a session and all its events (SECURITY.md \u00a7Secrets).",
+    )
+    redact_session_parser.add_argument("session_id", help="Session to delete.")
+    redact_session_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    redact_session_parser.add_argument(
+        "--out",
+        default=None,
+        help="Append a JSONL audit-log record to this path.",
+    )
+    redact_session_parser.set_defaults(func=_redact_session)
+
+    redact_key_parser = sub.add_parser(
+        "redact-key",
+        help="Overwrite a single payload field with [REDACTED] (SECURITY.md \u00a7Secrets).",
+    )
+    redact_key_parser.add_argument("session_id", help="Session containing the event.")
+    redact_key_parser.add_argument(
+        "event_index",
+        type=int,
+        help="Zero-based index of the event in timestamp order.",
+    )
+    redact_key_parser.add_argument("key", help="Payload key to overwrite.")
+    redact_key_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    redact_key_parser.add_argument(
+        "--out",
+        default=None,
+        help="Append a JSONL audit-log record to this path.",
+    )
+    redact_key_parser.set_defaults(func=_redact_key)
 
     return parser
 
