@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from pydantic import BaseModel, Field
 
@@ -33,6 +33,41 @@ class _NewPass:
     was_failing_session: str
     now_passing_session: str
     now_passing_version: str
+
+
+class RegressionRow(BaseModel):
+    """One regressed task observed by the regression report (ADR-0006 boundary model)."""
+
+    task: str
+    was_passing_session: str
+    now_failing_session: str
+    now_failing_version: str
+
+
+class NewPassRow(BaseModel):
+    """One task that began passing in the latest window (ADR-0006 boundary model)."""
+
+    task: str
+    was_failing_session: str
+    now_passing_session: str
+    now_passing_version: str
+
+
+class RegressionAnalysis(BaseModel):
+    """Full result of a regression analysis pass.
+
+    Carries the rendered Markdown report alongside the structured regressions
+    and new passes so callers (e.g. ``fx-trace regression-report
+    --fail-on-regression``) can both persist the artifact and gate CI off the
+    same observation (issue #99).
+    """
+
+    report: str
+    total: int
+    approvals: int
+    rejections: int
+    regressions: list[RegressionRow] = Field(default_factory=list)
+    new_passes: list[NewPassRow] = Field(default_factory=list)
 
 
 def record_verdict(logger: TraceLogger, session_id: str, verdict: CriticVerdict) -> None:
@@ -118,13 +153,35 @@ def _compute(
 
 def generate_regression_report(logger: TraceLogger, since: str | None = None) -> str:
     """Produce a Markdown regression report over all persisted Critic verdicts."""
+    return analyze_regressions(logger, since=since).report
+
+
+def analyze_regressions(
+    logger: TraceLogger,
+    since: str | None = None,
+) -> RegressionAnalysis:
+    """Run the regression analysis and return both the Markdown report and the
+    structured rows.
+
+    Issue #99: the regression-report CLI needs both the rendered artifact and
+    the list of regressed tasks (to gate CI with ``--fail-on-regression``).
+    Doing the analysis once here keeps the report and the gate consistent.
+    """
     events = _load_verdict_events(logger, since)
     total = len(events)
     approvals = sum(1 for _sid, _ts, v in events if v.approved)
     rejections = total - approvals
     versions = _session_versions(logger)
     regressions, new_passes = _compute(events, versions)
-    return _render(total, approvals, rejections, regressions, new_passes)
+    report = _render(total, approvals, rejections, regressions, new_passes)
+    return RegressionAnalysis(
+        report=report,
+        total=total,
+        approvals=approvals,
+        rejections=rejections,
+        regressions=[RegressionRow(**asdict(r)) for r in regressions],
+        new_passes=[NewPassRow(**asdict(p)) for p in new_passes],
+    )
 
 
 def _session_versions(logger: TraceLogger) -> dict[str, str]:

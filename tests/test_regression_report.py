@@ -161,3 +161,91 @@ def test_cli_regression_report_out_file(tmp_path):
     assert rc == 0
     assert out.exists()
     assert "## Regressed Tasks" in out.read_text(encoding="utf-8")
+
+
+def test_cli_regression_report_fail_on_regression_exits_nonzero_with_regressions(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    sid_a, sid_b = _three_sessions(logger)[:2]
+    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(
+        logger,
+        sid_b,
+        CriticVerdict(approved=False, failed_checks=["task-A"]),
+    )
+
+    rc = cli_main(
+        [
+            "regression-report",
+            "--db",
+            str(db),
+            "--fail-on-regression",
+        ]
+    )
+    assert rc == 1
+
+
+def test_cli_regression_report_fail_on_regression_exits_zero_when_clean(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    sid_a, sid_b = _three_sessions(logger)[:2]
+    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(
+        logger,
+        sid_b,
+        CriticVerdict(approved=True, passed_checks=["task-A", "task-B"]),
+    )
+
+    rc = cli_main(
+        [
+            "regression-report",
+            "--db",
+            str(db),
+            "--fail-on-regression",
+        ]
+    )
+    assert rc == 0
+
+
+def test_cli_regression_report_fail_on_regression_writes_out_before_exit(tmp_path):
+    db = tmp_path / "traces.db"
+    out = tmp_path / "report.md"
+    logger = TraceLogger(db)
+    sid_a, sid_b = _three_sessions(logger)[:2]
+    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(
+        logger,
+        sid_b,
+        CriticVerdict(approved=False, failed_checks=["task-A"]),
+    )
+
+    rc = cli_main(
+        [
+            "regression-report",
+            "--db",
+            str(db),
+            "--out",
+            str(out),
+            "--fail-on-regression",
+        ]
+    )
+    assert rc == 1
+    assert out.exists()
+    body = out.read_text(encoding="utf-8")
+    assert "## Regressed Tasks" in body
+    assert "task-A" in body
+
+
+def test_cli_regression_report_without_fail_flag_does_not_gate_exit(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    sid_a, sid_b = _three_sessions(logger)[:2]
+    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(
+        logger,
+        sid_b,
+        CriticVerdict(approved=False, failed_checks=["task-A"]),
+    )
+
+    rc = cli_main(["regression-report", "--db", str(db)])
+    assert rc == 0
