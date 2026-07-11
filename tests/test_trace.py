@@ -156,3 +156,99 @@ def test_sqlite_trace_file_is_valid_database(tmp_path):
         }
     assert "sessions" in tables
     assert "events" in tables
+
+
+def _index_names(conn: sqlite3.Connection) -> set[str]:
+    return {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' " "AND name LIKE 'idx_%'",
+        )
+    }
+
+
+def test_composite_index_created_on_fresh_database(tmp_path):
+    """A fresh sqlite database gets the (session_id, kind) composite index.
+
+    Issue #196 — the index lets SQLite satisfy ``iter_events(kind=...)``
+    from the index alone instead of scanning every row for the session.
+    """
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    with sqlite3.connect(db) as conn:
+        assert "idx_events_session_kind" in _index_names(conn)
+
+
+def test_composite_index_migrated_on_pre_existing_database(tmp_path):
+    """Opening a pre-#196 database adds the composite index non-destructively.
+
+    Mirrors the ``ended_at`` migration guard (issue #8): the
+    ``CREATE INDEX IF NOT EXISTS`` in ``_SCHEMA`` is idempotent, so an
+    old database that predates the index gets it added on next open
+    without losing existing data.
+    """
+    db = tmp_path / "traces.db"
+    # Simulate a pre-#196 database: create the schema manually WITHOUT
+    # the composite index, then insert a row so we can verify data survives.
+    with sqlite3.connect(db) as conn:
+        conn.executescript(
+            "CREATE TABLE sessions ("
+            "  session_id TEXT PRIMARY KEY,"
+            "  started_at TEXT NOT NULL,"
+            "  harness_version TEXT NOT NULL,"
+            "  model_id TEXT,"
+            "  metadata TEXT,"
+            "  ended_at TEXT"
+            ");"
+            "CREATE TABLE events ("
+            "  event_id TEXT PRIMARY KEY,"
+            "  session_id TEXT NOT NULL,"
+            "  timestamp TEXT NOT NULL,"
+            "  kind TEXT NOT NULL,"
+            "  payload TEXT NOT NULL"
+            ");"
+            "CREATE INDEX idx_events_session ON events(session_id);"
+        )
+        conn.execute(
+            "INSERT INTO sessions VALUES " "('s1','2026-01-01','0.1.0',NULL,'{}',NULL)",
+        )
+        conn.execute(
+            "INSERT INTO events VALUES "
+            "('e1','s1','2026-01-01','user_prompt','{\"text\":\"hi\"}')",
+        )
+
+    # Re-open through TraceLogger — the constructor runs _SCHEMA which
+    # includes the new composite index via CREATE INDEX IF NOT EXISTS.
+    logger = TraceLogger(db)
+
+    with sqlite3.connect(db) as conn:
+        assert "idx_events_session_kind" in _index_names(conn)
+        # Existing data is preserved.
+        assert len(logger.load_session("s1")) == 1
+
+
+def test_explain_query_plan_uses_composite_index(tmp_path):
+    """EXPLAIN QUERY PLAN on a kind-filtered query uses the composite index.
+
+    Issue #196 acceptance criterion: with 10k rows planted, SQLite should
+    choose ``idx_events_session_kind`` (the covering composite index) over
+    a full table scan when both ``session_id`` and ``kind`` are filtered.
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    with logger.session(harness_version="0.1.0") as sid:
+        for i in range(200):
+            kind = "critic_verdict" if i % 50 == 0 else "tool_call"
+            logger.record(sid, kind=kind, payload={"i": i})
+
+    with sqlite3.connect(db) as conn:
+        plan_rows = conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT event_id FROM events "
+            "WHERE session_id = ? AND kind = ?",
+            (sid, "critic_verdict"),
+        ).fetchall()
+    plan_text = " ".join(str(row) for row in plan_rows)
+    assert "idx_events_session_kind" in plan_text

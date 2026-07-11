@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS events (
     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
 );
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
+CREATE INDEX IF NOT EXISTS idx_events_session_kind ON events(session_id, kind);
 """
 
 
