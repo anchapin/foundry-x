@@ -270,6 +270,14 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write("\n")
         return 0
 
+    if args.command == "session-summary":
+        backend = _infer_backend(args.db)
+        logger = TraceLogger(args.db, backend=backend)
+        rows = build_session_summary(logger, harness_version=args.harness_version)
+        sys.stdout.write(render_session_summary(rows, limit=args.limit))
+        sys.stdout.write("\n")
+        return 0
+
     return 1
 
 
