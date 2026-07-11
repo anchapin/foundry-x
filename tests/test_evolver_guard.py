@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from foundry_x.evolution.evolver import Evolver, EvolverGuardError, ProposedEdit
+from foundry_x.evolution.evolver import (
+    PROPOSED_EDIT_KIND,
+    Evolver,
+    EvolverGuardError,
+    ProposedEdit,
+)
+from foundry_x.trace.logger import TraceLogger
 
 
 def _edit(diff: str) -> ProposedEdit:
@@ -14,6 +20,18 @@ def _edit(diff: str) -> ProposedEdit:
         rationale="tighten tool guidance",
         unified_diff=diff,
     )
+
+
+def test_record_proposal_emits_trace_event(tmp_path):
+    logger = TraceLogger(tmp_path / "trace.db")
+    edit = _edit("+be precise")
+    with logger.session("harness-v1") as session_id:
+        evolver = Evolver(trace_logger=logger, session_id=session_id)
+        evolver._record_proposals(edit=edit)
+
+    events = list(logger.iter_events(session_id, kind=PROPOSED_EDIT_KIND))
+    assert len(events) == 1
+    assert events[0].payload == edit.model_dump(mode="json")
 
 
 def test_defaults_match_security_doc():
