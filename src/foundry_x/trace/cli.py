@@ -270,6 +270,124 @@ def _redact_key(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- Issue #195: seed-sample-trace -------------------------------------------
+# Plant a deterministic, secret-free session so the KPI / regression-report
+# CLIs have something to chew on without standing up llama-server. Mirrors
+# the event vocabulary the runner actually emits (issue #89, #91), so the
+# Digester sees a faithful shape.
+
+
+# Hard-coded payload constants. Every value is a literal placeholder — no
+# real tokens, PEM blocks, or other secret-shaped substrings (docs/SECURITY.md
+# §Secrets). Issue #195 acceptance criterion: "planted payloads contain no
+# real secrets".
+_SEED_PROMPT = "Refactor the auth helper to drop the legacy token cache."
+_SEED_TOOL_NAME = "read_file"
+_SEED_TOOL_ARGUMENTS: dict[str, str] = {"path": "src/foundry_x/auth.py"}
+_SEED_TOOL_OUTPUT = "def authenticate(user, password):\n    return False\n"
+_SEED_TOOL_CALL_ID = "call-seed-0001"
+_SEED_DURATION_MS = 12
+_SEED_MODEL_ID = "seeded-llama-sample"
+# Default harness version used when ``--harness-version`` is omitted. Picked
+# to be obviously a synthetic seed (``seed-sample``) so real-run sessions
+# don't collide with the planted one in regression reports.
+_SEED_DEFAULT_HARNESS_VERSION = "seed-sample"
+# Backend inferred from the ``--db`` suffix, mirroring ``observability/cli.py``.
+_SQLITE_SUFFIX = ".db"
+
+
+def _seed_sample_trace(args: argparse.Namespace) -> int:
+    """Implement ``seed-sample-trace`` (issue #195).
+
+    Plants one session in the trace store at ``args.db`` containing every
+    event kind the :mod:`foundry_x.execution.runner` emits, so the Digester,
+    KPI, and regression-report CLIs have realistic input without a live
+    ``llama-server``. Returns 0 on success; emits the planted ``session_id``
+    on stdout so a follow-up ``session-show`` or ``render-failure`` can pick
+    it up. All planted payloads are literal placeholder text — never
+    tokens, keys, or PEM blocks — per the redaction contract in
+    ``docs/SECURITY.md`` §Secrets.
+    """
+    db_path = Path(args.db)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    backend = "jsonl" if db_path.suffix.lower() != _SQLITE_SUFFIX else "sqlite"
+    logger = TraceLogger(db_path, backend=backend)
+    harness_version = args.harness_version
+
+    with logger.session(
+        harness_version=harness_version,
+        model_id=_SEED_MODEL_ID,
+        metadata={"seed": "seed-sample-trace", "issue": 195},
+    ) as session_id:
+        logger.record(
+            session_id,
+            kind="task_received",
+            payload={"prompt": _SEED_PROMPT},
+        )
+        logger.record(
+            session_id,
+            kind="user_prompt",
+            payload={"content": _SEED_PROMPT, "tool_count": 1},
+        )
+        logger.record(
+            session_id,
+            kind="model_request",
+            payload={"step": 0, "message_count": 1, "tool_count": 1},
+        )
+        logger.record(
+            session_id,
+            kind="model_response",
+            payload={
+                "step": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "Reading auth.py first to understand the legacy cache.",
+                },
+                "tool_calls": [
+                    {
+                        "id": _SEED_TOOL_CALL_ID,
+                        "function": {
+                            "name": _SEED_TOOL_NAME,
+                            "arguments": json.dumps(_SEED_TOOL_ARGUMENTS),
+                        },
+                    }
+                ],
+            },
+        )
+        logger.record(
+            session_id,
+            kind="tool_call",
+            payload={
+                "step": 0,
+                "call_id": _SEED_TOOL_CALL_ID,
+                "name": _SEED_TOOL_NAME,
+                "arguments": _SEED_TOOL_ARGUMENTS,
+                "duration_ms": _SEED_DURATION_MS,
+            },
+        )
+        logger.record(
+            session_id,
+            kind="tool_result",
+            payload={
+                "step": 0,
+                "call_id": _SEED_TOOL_CALL_ID,
+                "name": _SEED_TOOL_NAME,
+                "duration_ms": _SEED_DURATION_MS,
+                "output": _SEED_TOOL_OUTPUT,
+                "error": None,
+            },
+        )
+        logger.record(
+            session_id,
+            kind="outcome",
+            payload={"status": "success", "reason": "final_answer", "steps": 1},
+        )
+
+    sys.stdout.write(f"seeded session_id={session_id}\n")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="foundry-trace",
@@ -426,6 +544,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Append a JSONL audit-log record to this path.",
     )
     redact_key_parser.set_defaults(func=_redact_key)
+
+    # Issue #195: offline smoke subcommand. Plants a deterministic session
+    # so the Digester, KPI, and regression-report CLIs have realistic input
+    # without standing up llama-server. ``--harness-version`` lets the
+    # caller simulate a candidate harness version for the compare-kpis
+    # baseline-vs-candidate path (issue #100).
+    seed_parser = sub.add_parser(
+        "seed-sample-trace",
+        help="Plant a deterministic sample session for offline smoke testing.",
+    )
+    seed_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database (default: logs/traces.db).",
+    )
+    seed_parser.add_argument(
+        "--harness-version",
+        default=_SEED_DEFAULT_HARNESS_VERSION,
+        help=(
+            "Harness version to stamp on the seeded session "
+            "(default: %(default)s). Set to a candidate version (e.g. "
+            "1.0.0) so compare-kpis can treat the seed as the candidate."
+        ),
+    )
+    seed_parser.set_defaults(func=_seed_sample_trace)
 
     return parser
 
