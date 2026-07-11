@@ -17,25 +17,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
-from pydantic import BaseModel, Field
-
-from foundry_x.execution.harness_layout import (
-    HarnessValidationError,
-    validate as validate_harness_layout,
-)
-from foundry_x.execution.model_adapter import (
-    ModelAdapter,
-    ModelMessage,
-    ModelResponse,
-    ModelRetryEvent,
-    ModelToolCall,
-    ModelUsage,
-    OpenAICompatibleAdapter,
-    ToolCallFunction,
-    ToolDefinition,
-    ToolFunctionSchema,
-    resolve_adapter_max_retries,
-)
+from foundry_x.execution.model_adapter import ModelAdapter, ModelMessage, OpenAICompatibleAdapter
 from foundry_x.trace.logger import TraceLogger
 
 # Default wall-clock cap (seconds) for a single task. Generous enough for a
@@ -57,6 +39,10 @@ _FALLBACK_HARNESS_VERSION: str = "0.1.0"
 _MODEL_ID_ENV = "FOUNDRY_MODEL_ID"
 _LLAMACPP_MODEL_PATH_ENV = "LLAMACPP_MODEL_PATH"
 _OPENCODE_SERVER_URL_ENV = "OPENCODE_SERVER_URL"
+_LLAMACPP_HOST_ENV = "LLAMACPP_HOST"
+_FOUNDRY_MODEL_API_KEY_ENV = "FOUNDRY_MODEL_API_KEY"
+_OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+_FALLBACK_REQUEST_MODEL = "foundry-local"
 
 # Trace-backend selection (issue #13). ``.env.example`` documents
 # ``FOUNDRY_TRACE_BACKEND`` as the way to switch the trace store between the
@@ -129,6 +115,53 @@ def resolve_model_id(env: dict[str, str] | None = None) -> str | None:
             return host
 
     return None
+
+
+def _resolve_model_request_name(env: dict[str, str] | None = None) -> str:
+    """Resolve the model name sent to an OpenAI-compatible endpoint.
+
+    ``resolve_model_id`` may fall back to the endpoint host for provenance,
+    but the request body's ``model`` field should be a model-like value. If a
+    caller has not configured one, local OpenAI-compatible servers generally
+    accept an arbitrary placeholder, so the fallback stays explicit and stable.
+    """
+    source = env if env is not None else os.environ
+    explicit = source.get(_MODEL_ID_ENV, "").strip()
+    if explicit:
+        return explicit
+    model_path = source.get(_LLAMACPP_MODEL_PATH_ENV, "").strip()
+    if model_path:
+        basename = os.path.basename(model_path)
+        if basename:
+            return basename
+    return _FALLBACK_REQUEST_MODEL
+
+
+def build_model_adapter(env: dict[str, str] | None = None) -> OpenAICompatibleAdapter:
+    """Create the default OpenAI-compatible ModelAdapter from environment.
+
+    ``OPENCODE_SERVER_URL`` remains the primary endpoint knob from
+    ``.env.example``; ``LLAMACPP_HOST`` is accepted as a local-first fallback.
+    API keys are read only from environment and never persisted here.
+    """
+    source = env if env is not None else os.environ
+    base_url = (
+        source.get(_OPENCODE_SERVER_URL_ENV, "").strip()
+        or source.get(_LLAMACPP_HOST_ENV, "").strip()
+    )
+    if not base_url:
+        raise ValueError(
+            "Set OPENCODE_SERVER_URL or LLAMACPP_HOST to an OpenAI-compatible endpoint"
+        )
+    api_key = (
+        source.get(_FOUNDRY_MODEL_API_KEY_ENV, "").strip()
+        or source.get(_OPENAI_API_KEY_ENV, "").strip()
+    )
+    return OpenAICompatibleAdapter(
+        base_url=base_url,
+        model=_resolve_model_request_name(source),
+        api_key=api_key or None,
+    )
 
 
 def resolve_harness_version(harness_dir: Path) -> str:
@@ -252,103 +285,48 @@ async def run_with_limits(
         raise
 
 
-# Default wall-clock cap (seconds) for a single task. Generous enough for a
-# real model turn, small enough to abort a runaway loop before it exhausts
-# the GPU/wallet. Mandated by docs/SECURITY.md "Runaway detection".
-DEFAULT_TASK_TIMEOUT_S: float = 600.0
+async def run_task(
+    task: str,
+    harness_dir: Path,
+    log: TraceLogger,
+    session_id: str,
+    model_adapter: ModelAdapter | None = None,
+) -> None:
+    """Run one task by sending the harness prompt to a ModelAdapter.
 
-# Last-resort literal when neither ``harness/VERSION`` nor a git tag of the
-# harness directory can be read (issue #11). The harness is the evolved
-# artifact (PHILOSOPHY.md §6, ADR-0004); the *resolved* version is what gets
-# stamped into trace sessions so each trace is attributable to the harness
-# revision that produced it.
-_FALLBACK_HARNESS_VERSION: str = "0.1.0"
-
-# Env-var names consulted for model identity (issue #12). ``FOUNDRY_MODEL_ID``
-# is the explicit, foundry-owned override; the other two already exist in
-# ``.env.example`` and let a local-first deployment self-describe without an
-# extra setting (PHILOSOPHY.md §5).
-_MODEL_ID_ENV = "FOUNDRY_MODEL_ID"
-_LLAMACPP_MODEL_PATH_ENV = "LLAMACPP_MODEL_PATH"
-_OPENCODE_SERVER_URL_ENV = "OPENCODE_SERVER_URL"
-_LLAMACPP_HOST_ENV = "LLAMACPP_HOST"
-_FOUNDRY_MODEL_API_KEY_ENV = "FOUNDRY_MODEL_API_KEY"
-_OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
-_FALLBACK_REQUEST_MODEL = "foundry-local"
-
-# Trace-backend selection (issue #13). ``.env.example`` documents
-# ``FOUNDRY_TRACE_BACKEND`` as the way to switch the trace store between the
-# default SQLite database and the JSONL export format (ADR-0003). Keeping the
-# supported set in one place lets the runner validate the value up front
-# rather than silently falling through to a no-op backend, honoring
-# AGENTS.md §2 ("Never silently swallow an exception").
-_TRACE_BACKEND_ENV = "FOUNDRY_TRACE_BACKEND"
-_SUPPORTED_TRACE_BACKENDS: frozenset[str] = frozenset({"sqlite", "jsonl"})
-_DEFAULT_TRACE_BACKEND: str = "sqlite"
-
-# Agent-loop step cap (issue #89, ADR-0010). ``FOUNDRY_MAX_AGENT_STEPS`` is the
-# foundry-owned override; an empty value or a non-positive integer falls back
-# to the literal below. The cap exists for two reasons: (a) PRD §5 /
-# SECURITY.md "Runaway detection" — a degenerate harness edit that loops
-# unbounded must not exhaust the GPU/wallet, and (b) the Phase 2 Digester
-# needs a finite ``steps`` field on the outcome event so a session is
-# attributable rather than open-ended.
-_MAX_AGENT_STEPS_ENV = "FOUNDRY_MAX_AGENT_STEPS"
-_DEFAULT_MAX_AGENT_STEPS: int = 16
-
-# Per-request httpx timeout (issue #201). ``FOUNDRY_REQUEST_TIMEOUT_S`` caps a
-# single chat-completion HTTP round-trip so a stuck model endpoint cannot hang
-# the agent loop indefinitely. The wall-clock ``RunLimits`` cap guards the
-# whole session; this guards each step (SECURITY.md "Runaway detection"). A
-# non-positive value falls back to the default; a non-numeric or non-finite
-# value raises at process start (AGENTS.md §2 — fail fast, do not silently
-# swallow).
-_REQUEST_TIMEOUT_ENV = "FOUNDRY_REQUEST_TIMEOUT_S"
-_DEFAULT_REQUEST_TIMEOUT_S: float = 30.0
-
-_WORKSPACE_ROOT_ENV = "FOUNDRY_WORKSPACE_ROOT"
-
-
-def _resolve_workspace_root(env: dict[str, str] | None = None) -> Path:
-    """Resolve the agent workspace root for file-operation skill executors.
-
-    ``FOUNDRY_WORKSPACE_ROOT`` is the explicit override. When absent or
-    empty the current working directory is used as the workspace root.
-    The returned path is always absolute.
+    This is intentionally the smallest Phase 1 bridge: it loads the
+    version-controlled system prompt, sends a single user task to an
+    OpenAI-compatible adapter, and records the normalized response. Tool-call
+    execution through ``harness/hooks`` remains a later layer; this function
+    only establishes the model abstraction needed to measure runs.
     """
-    source = env if env is not None else os.environ
-    raw = source.get(_WORKSPACE_ROOT_ENV, "").strip()
-    if raw:
-        return Path(raw).resolve()
-    return Path.cwd()
+    system_prompt_path = harness_dir / "system_prompt.txt"
+    system_prompt = system_prompt_path.read_text(encoding="utf-8")
+    messages = [
+        ModelMessage(role="system", content=system_prompt),
+        ModelMessage(role="user", content=task),
+    ]
+    created_adapter = model_adapter is None
+    adapter = model_adapter or build_model_adapter()
 
-
-# Skill-executor protocol (issue #89, ADR-0010). A callable that maps a skill
-# name + already-decoded arguments dict to the tool result the model will see.
-# ``Awaitable[Any]`` lets callers return arbitrary JSON-shaped data; the runner
-# serializes the result with ``json.dumps`` before injecting it back into the
-# model's tool channel. The default executor is a stub that acknowledges the
-# call (issue #104 declared the JSON contract; the actual subprocess.run-
-# backed hook lands in a follow-up PR so the Critic can gate it independently).
-SkillExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
-
-
-class ModelResponseChunkEvent(BaseModel):
-    """Trace event payload emitted per SSE delta during streaming (#199).
-
-    Emitted for each chunk from ``adapter.stream()`` so a KPI consumer can
-    split "model latency" (time-to-first-token) from "network latency"
-    (inter-chunk gaps) without waiting for the terminal ``model_response``.
-    """
-
-    step: int = Field(description="Agent-loop step index (0-based).")
-    delta_index: int = Field(description="Zero-based chunk ordinal within this step.")
-    content_so_far: str = Field(
-        description="Concatenated assistant content up to and including this delta.",
+    log.record(
+        session_id,
+        kind="model_request",
+        payload={"message_count": len(messages), "tool_count": 0},
     )
-    chunk_duration_ms: int = Field(
-        description="Wall-clock milliseconds since the previous chunk "
-        "(or stream start for delta_index 0).",
+    try:
+        response = await adapter.complete(messages=messages, tools=[])
+    finally:
+        if created_adapter and isinstance(adapter, OpenAICompatibleAdapter):
+            await adapter.aclose()
+    log.record(
+        session_id,
+        kind="model_response",
+        payload={
+            "finish_reason": response.finish_reason,
+            "message": response.message.model_dump(mode="json", exclude_none=True),
+            "tool_calls": [call.model_dump(mode="json") for call in response.tool_calls],
+        },
     )
 
 
