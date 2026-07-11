@@ -14,6 +14,10 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
+from foundry_x.execution.harness_layout import (
+    HarnessValidationError,
+    validate as validate_harness_layout,
+)
 from foundry_x.execution.model_adapter import (
     ModelAdapter,
     ModelMessage,
@@ -696,7 +700,7 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
     except HarnessValidationError as exc:
         joined = ", ".join(exc.missing)
         print(
-            f"error: harness directory {exc.harness_dir} is missing required entries: {joined}",
+            f"error: harness directory {exc.harness_dir} is missing required " f"entries: {joined}",
             file=sys.stderr,
         )
         sys.exit(2)
