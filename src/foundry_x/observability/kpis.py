@@ -126,6 +126,22 @@ class KpiHistoryEntry(BaseModel):
     injection_blocks: dict[str, int] = {}
 
 
+class KpiComparison(BaseModel):
+    """Baseline-vs-candidate harness-version comparison (issue #100).
+
+    ``deltas`` holds the raw ``candidate - baseline`` difference for each
+    numeric KPI; the rendering layer interprets the sign per the PRD's
+    "good direction" — improvement-rate up is good, regression-rate and
+    cycle-time down are good. ``injection_blocks`` is intentionally
+    excluded from the comparison because it is an auxiliary signal, not
+    one of the three PRD success-metric KPIs.
+    """
+
+    baseline: KpiSummary
+    candidate: KpiSummary
+    deltas: dict[str, float | None]
+
+
 def compute_kpis(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -585,6 +601,37 @@ def _resolve_format(args_format: str | None, out: str | None) -> str:
 def _render_json(summary: KpiSummary) -> str:
     """Serialize a KPI summary as a stable JSON snapshot (issue #101)."""
     return summary.model_dump_json(indent=2)
+
+
+def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> str:
+    """Render baseline / candidate / delta columns for the three PRD KPIs.
+
+    Issue #100 requires the comparison to surface a delta column whose
+    sign convention follows the PRD: improvement-rate up is good,
+    regression-rate and cycle-time up are bad.
+    """
+    lines = [
+        "| KPI | Baseline | Candidate | Delta |",
+        "| --- | --- | --- | --- |",
+        "| Cycle Time (seconds) | "
+        f"{_format_value(baseline.cycle_time_seconds)} | "
+        f"{_format_value(candidate.cycle_time_seconds)} | "
+        f"{_format_delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds, higher_is_better=False)} |",
+        "| Regression Rate | "
+        f"{_format_value(baseline.regression_rate)} | "
+        f"{_format_value(candidate.regression_rate)} | "
+        f"{_format_delta(baseline.regression_rate, candidate.regression_rate, higher_is_better=False)} |",
+        "| Improvement Rate | "
+        f"{_format_value(baseline.improvement_rate)} | "
+        f"{_format_value(candidate.improvement_rate)} | "
+        f"{_format_delta(baseline.improvement_rate, candidate.improvement_rate, higher_is_better=True)} |",
+    ]
+    return "\n".join(lines)
+
+
+def _render_comparison_json(comparison: KpiComparison) -> str:
+    """Serialize a baseline-vs-candidate comparison as JSON (issue #100)."""
+    return comparison.model_dump_json(indent=2)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
