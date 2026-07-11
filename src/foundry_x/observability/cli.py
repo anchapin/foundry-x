@@ -50,6 +50,24 @@ def _build_parser() -> argparse.ArgumentParser:
             "The Markdown artifact is still written to --out before the exit code."
         ),
     )
+    regression.add_argument(
+        "--task",
+        default=None,
+        help=(
+            "Only show regressions / new passes for this task name "
+            "(issue #182). Other rows are excluded from the table; "
+            "summary counts remain the full population."
+        ),
+    )
+    regression.add_argument(
+        "--format",
+        default="markdown",
+        choices=("markdown", "json"),
+        help=(
+            "Output format. ``json`` emits the structured RegressionAnalysis "
+            "(grep-friendly, includes the filtered rows)."
+        ),
+    )
 
     timeline = sub.add_parser(
         "timeline",
@@ -73,11 +91,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "regression-report":
         logger = TraceLogger(args.db)
-        analysis = analyze_regressions(logger, since=args.since)
-        if args.out:
-            Path(args.out).write_text(analysis.report, encoding="utf-8")
+        analysis = analyze_regressions(logger, since=args.since, task=args.task)
+        if args.format == "json":
+            rendered = analysis.model_dump_json(indent=2) + "\n"
         else:
-            sys.stdout.write(analysis.report)
+            rendered = analysis.report
+        if args.out:
+            Path(args.out).write_text(rendered, encoding="utf-8")
+        else:
+            sys.stdout.write(rendered)
         if args.fail_on_regression and analysis.regressions:
             return 1
         return 0

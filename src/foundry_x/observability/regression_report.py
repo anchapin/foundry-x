@@ -151,14 +151,27 @@ def _compute(
     return regressions, new_passes
 
 
-def generate_regression_report(logger: TraceLogger, since: str | None = None) -> str:
-    """Produce a Markdown regression report over all persisted Critic verdicts."""
-    return analyze_regressions(logger, since=since).report
+def generate_regression_report(
+    logger: TraceLogger,
+    since: str | None = None,
+    task: str | None = None,
+) -> str:
+    """Produce a Markdown regression report over all persisted Critic verdicts.
+
+    When ``task`` is provided, only rows whose ``task`` column equals that
+    name are included in the Regressed / New Passes sections (issue #182).
+    The Regression Summary counts (total verdicts / approvals / rejections)
+    remain the full population so the reviewer keeps context about the
+    analysis pass. If the task filter eliminates every row, the rendered
+    report collapses to a single ``no rows for task <name>`` line.
+    """
+    return analyze_regressions(logger, since=since, task=task).report
 
 
 def analyze_regressions(
     logger: TraceLogger,
     since: str | None = None,
+    task: str | None = None,
 ) -> RegressionAnalysis:
     """Run the regression analysis and return both the Markdown report and the
     structured rows.
@@ -166,6 +179,10 @@ def analyze_regressions(
     Issue #99: the regression-report CLI needs both the rendered artifact and
     the list of regressed tasks (to gate CI with ``--fail-on-regression``).
     Doing the analysis once here keeps the report and the gate consistent.
+
+    Issue #182: ``task`` narrows the regressions / new passes lists to a
+    single task name. The summary counts stay at full population so the
+    filtered view does not silently hide regressions in unrelated tasks.
     """
     events = _load_verdict_events(logger, since)
     total = len(events)
@@ -173,7 +190,10 @@ def analyze_regressions(
     rejections = total - approvals
     versions = _session_versions(logger)
     regressions, new_passes = _compute(events, versions)
-    report = _render(total, approvals, rejections, regressions, new_passes)
+    if task is not None:
+        regressions = [r for r in regressions if r.task == task]
+        new_passes = [p for p in new_passes if p.task == task]
+    report = _render(total, approvals, rejections, regressions, new_passes, task=task)
     return RegressionAnalysis(
         report=report,
         total=total,
@@ -203,7 +223,13 @@ def _render(
     rejections: int,
     regressions: list[_Regression],
     new_passes: list[_NewPass],
+    task: str | None = None,
 ) -> str:
+    # Issue #182: when the task filter narrows both sections to zero rows,
+    # collapse the report to a single-line message so the CLI's stdout is
+    # grep-friendly without a dangling "_None._" table.
+    if task is not None and not regressions and not new_passes:
+        return f"no rows for task {task}\n"
     lines: list[str] = [
         "# Critic Regression Report",
         "",
