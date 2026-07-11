@@ -77,8 +77,22 @@ async def test_run_task_calls_injected_adapter_and_records_trace(tmp_path):
     ]
     assert adapter.tools == []
     kinds = [event.kind for event in events]
-    assert kinds == ["model_request", "model_response"]
-    assert events[1].payload["message"]["content"] == "runner response"
+    # Issue #89 / ADR-0009: run_task now brackets the round-trip with a
+    # ``user_prompt`` marker at entry and an ``outcome`` marker at exit;
+    # the round-trip event kinds (model_request/model_response) keep their
+    # position in the middle.
+    assert kinds == [
+        "user_prompt",
+        "model_request",
+        "model_response",
+        "outcome",
+    ]
+    assert events[2].payload["message"]["content"] == "runner response"
+    assert events[3].payload == {
+        "status": "success",
+        "reason": "final_answer",
+        "steps": 1,
+    }
 
 
 @pytest.mark.asyncio

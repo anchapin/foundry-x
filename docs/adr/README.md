@@ -21,5 +21,6 @@ format and process.
 | [0007](./0007-trace-driven-development.md) | Trace-driven development is the default | Accepted |
 | [0008](./0008-conventional-commits-and-adr-discipline.md) | Conventional Commits and ADR discipline | Accepted |
 | [0009](./0009-security-evals-benchmark-family.md) | Security-evals BenchmarkTask family | Accepted |
+| [0010](./0010-runner-agent-loop.md) | Runner agent loop | Accepted |
 
 When adding a new ADR, append it to this table in the same PR.
