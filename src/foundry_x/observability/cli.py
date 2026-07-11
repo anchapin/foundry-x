@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from foundry_x.observability.regression_report import analyze_regressions
+from foundry_x.observability.session_card import format_session_card
 from foundry_x.observability.session_summary import (
     build_session_summary,
     render_session_summary,
@@ -111,6 +112,25 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Show at most N sessions after newest-first ordering.",
     )
+
+    # Issue #180: ``fx-trace session-card <sid>`` prints a one-screen
+    # triage summary for a session — the human counterpart to the verbose
+    # ``timeline`` view. Exits non-zero when the session id is unknown so
+    # CI gates can depend on it.
+    card = sub.add_parser(
+        "session-card",
+        help="Print a one-screen triage card for a session from the trace store.",
+    )
+    card.add_argument(
+        "--db",
+        required=True,
+        help="Path to the trace store (sqlite .db or jsonl).",
+    )
+    card.add_argument(
+        "--session-id",
+        required=True,
+        help="Session UUID whose triage card should be rendered.",
+    )
     return parser
 
 
@@ -149,6 +169,23 @@ def main(argv: list[str] | None = None) -> int:
         rows = build_session_summary(logger, harness_version=args.harness_version)
         sys.stdout.write(render_session_summary(rows, limit=args.limit))
         sys.stdout.write("\n")
+        return 0
+
+    if args.command == "session-card":
+        backend = _infer_backend(args.db)
+        logger = TraceLogger(args.db, backend=backend)
+        # Match by session_id rather than by events alone so an empty
+        # in-flight session still renders its roll-up (graceful degrade,
+        # issue #180) instead of being reported as missing.
+        match = next(
+            (s for s in logger.list_sessions() if s.session_id == args.session_id),
+            None,
+        )
+        if match is None:
+            sys.stderr.write(f"session {args.session_id} not found\n")
+            return 2
+        events = logger.load_session(args.session_id)
+        sys.stdout.write(format_session_card(match, events) + "\n")
         return 0
 
     return 1
