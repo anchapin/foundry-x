@@ -30,6 +30,9 @@
 - **Runner** — drives a single agent session against a task. Reads the
   harness, calls the model, writes the trace.
   (`src/foundry_x/execution/runner.py`)
+- **ModelAdapter** — the model-agnostic boundary used by the Runner to call
+  OpenAI-compatible chat completion endpoints and normalize responses.
+  (`src/foundry_x/execution/model_adapter.py`)
 - **Digester** — parses a trace (or set of traces) and produces a
   failure report: what failed, where, and the candidate root cause.
   (`src/foundry_x/evolution/digester.py`)
