@@ -8,8 +8,11 @@
     "rate_limit"
   ],
   "skills": [
+    "bash.json",
     "edit_file.json",
     "example_skill.json",
+    "grep_search.json",
+    "list_dir.json",
     "write_file.json"
   ]
 }
