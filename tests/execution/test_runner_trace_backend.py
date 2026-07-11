@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -71,12 +72,27 @@ def _argv(task: str, trace_path, harness_dir, monkeypatch) -> None:
     )
 
 
+def _stub_harness(harness_dir: Path) -> None:
+    """Build a minimal valid harness layout under ``harness_dir`` (issue #90).
+
+    ``main()`` invokes ``validate_harness_layout`` before touching
+    ``sys.path``; without these stubs every ``main()`` call below would
+    abort with ``HarnessValidationError`` and the unit under test
+    (trace backend selection) would never run.
+    """
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    (harness_dir / "system_prompt.txt").write_text("stub harness\n")
+    (harness_dir / "hooks").mkdir(exist_ok=True)
+    (harness_dir / "skills").mkdir(exist_ok=True)
+
+
 def test_jsonl_backend_writes_jsonl_file(tmp_path, monkeypatch):
     """Acceptance test for issue #13: with ``FOUNDRY_TRACE_BACKEND=jsonl``,
     ``main`` writes a ``.jsonl`` trace file (no SQLite DB is created) for the
     ``task_received`` event."""
     trace_path = tmp_path / "traces.jsonl"
     monkeypatch.setenv("FOUNDRY_TRACE_BACKEND", "jsonl")
+    _stub_harness(tmp_path)
     _argv("noop task", trace_path, tmp_path, monkeypatch)
 
     async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
@@ -98,6 +114,7 @@ def test_sqlite_default_creates_sqlite_db(tmp_path, monkeypatch):
     db = tmp_path / "traces.db"
     for key in ("FOUNDRY_TRACE_BACKEND",):
         monkeypatch.delenv(key, raising=False)
+    _stub_harness(tmp_path)
     _argv("noop task", db, tmp_path, monkeypatch)
 
     async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
@@ -115,6 +132,7 @@ def test_invalid_backend_aborts_main(tmp_path, monkeypatch):
     so no partial trace store is left behind."""
     trace_path = tmp_path / "traces.db"
     monkeypatch.setenv("FOUNDRY_TRACE_BACKEND", "xml")
+    _stub_harness(tmp_path)
     _argv("noop task", trace_path, tmp_path, monkeypatch)
 
     async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001

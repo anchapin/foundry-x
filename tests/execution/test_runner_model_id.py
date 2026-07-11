@@ -79,11 +79,24 @@ def test_precedence_explicit_beats_model_path_beats_url():
     )
 
 
+def _stub_harness(harness_dir) -> None:
+    """Build a minimal valid harness layout under ``harness_dir`` (issue #90).
+
+    ``main()`` validates the harness layout before ``sys.path`` injection;
+    these stubs satisfy that gate so the model-id unit under test runs.
+    """
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    (harness_dir / "system_prompt.txt").write_text("stub harness\n")
+    (harness_dir / "hooks").mkdir(exist_ok=True)
+    (harness_dir / "skills").mkdir(exist_ok=True)
+
+
 def test_main_stamps_model_id_into_session_when_env_set(tmp_path, monkeypatch):
     """Acceptance test for issue #12: when ``FOUNDRY_MODEL_ID`` is set, the
     opened session's ``model_id`` column is populated (not NULL)."""
     db = tmp_path / "traces.db"
     monkeypatch.setenv("FOUNDRY_MODEL_ID", "qwen2.5-coder-7b")
+    _stub_harness(tmp_path)
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -113,6 +126,7 @@ def test_main_leaves_model_id_null_when_unset(tmp_path, monkeypatch):
     db = tmp_path / "traces.db"
     for key in ("FOUNDRY_MODEL_ID", "LLAMACPP_MODEL_PATH", "OPENCODE_SERVER_URL"):
         monkeypatch.delenv(key, raising=False)
+    _stub_harness(tmp_path)
     monkeypatch.setattr(
         "sys.argv",
         [
