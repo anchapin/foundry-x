@@ -2,19 +2,35 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import subprocess
 import sys
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
-from foundry_x.execution.model_adapter import ModelAdapter, ModelMessage, OpenAICompatibleAdapter
+from foundry_x.execution.model_adapter import (
+    ModelAdapter,
+    ModelMessage,
+    OpenAICompatibleAdapter,
+    ToolDefinition,
+    ToolFunctionSchema,
+)
 from foundry_x.trace.logger import TraceLogger
+
+if TYPE_CHECKING:
+    from harness.hooks.base import HookRegistry, ToolCall, ToolResult
+else:
+    # Imported lazily inside ``_resolve_hook_registry`` and ``run_task``
+    # so that importing this module does not require the harness package
+    # to be on ``sys.path`` (the AGENTS.md §7 self-reference rule the
+    # foundry must respect in import direction).
+    ToolCall = ToolResult = HookRegistry = object  # type: ignore[assignment]
 
 # Default wall-clock cap (seconds) for a single task. Generous enough for a
 # real model turn, small enough to abort a runaway loop before it exhausts
@@ -50,6 +66,26 @@ _TRACE_BACKEND_ENV = "FOUNDRY_TRACE_BACKEND"
 _SUPPORTED_TRACE_BACKENDS: frozenset[str] = frozenset({"sqlite", "jsonl"})
 _DEFAULT_TRACE_BACKEND: str = "sqlite"
 
+# Agent-loop step cap (issue #89, ADR-0010). ``FOUNDRY_MAX_AGENT_STEPS`` is the
+# foundry-owned override; an empty value or a non-positive integer falls back
+# to the literal below. The cap exists for two reasons: (a) PRD §5 /
+# SECURITY.md "Runaway detection" — a degenerate harness edit that loops
+# unbounded must not exhaust the GPU/wallet, and (b) the Phase 2 Digester
+# needs a finite ``steps`` field on the outcome event so a session is
+# attributable rather than open-ended.
+_MAX_AGENT_STEPS_ENV = "FOUNDRY_MAX_AGENT_STEPS"
+_DEFAULT_MAX_AGENT_STEPS: int = 16
+
+
+# Skill-executor protocol (issue #89, ADR-0010). A callable that maps a skill
+# name + already-decoded arguments dict to the tool result the model will see.
+# ``Awaitable[Any]`` lets callers return arbitrary JSON-shaped data; the runner
+# serializes the result with ``json.dumps`` before injecting it back into the
+# model's tool channel. The default executor is a stub that acknowledges the
+# call (issue #104 declared the JSON contract; the actual subprocess.run-
+# backed hook lands in a follow-up PR so the Critic can gate it independently).
+SkillExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
+
 
 def resolve_trace_backend(env: dict[str, str] | None = None) -> str:
     """Resolve the trace backend from ``FOUNDRY_TRACE_BACKEND`` (issue #13).
@@ -68,7 +104,7 @@ def resolve_trace_backend(env: dict[str, str] | None = None) -> str:
     if backend not in _SUPPORTED_TRACE_BACKENDS:
         valid = ", ".join(sorted(_SUPPORTED_TRACE_BACKENDS))
         raise ValueError(
-            f"Unsupported FOUNDRY_TRACE_BACKEND={backend!r}; " f"valid options are: {valid}"
+            f"Unsupported FOUNDRY_TRACE_BACKEND={backend!r}; valid options are: {valid}"
         )
     return backend
 
@@ -281,49 +317,332 @@ async def run_with_limits(
         raise
 
 
+def _resolve_max_steps(env: dict[str, str] | None = None) -> int:
+    """Resolve the per-task step cap (issue #89, ADR-0010).
+
+    ``FOUNDRY_MAX_AGENT_STEPS`` is the foundry-owned override. An empty /
+    missing value or a non-positive integer falls back to
+    :data:`_DEFAULT_MAX_AGENT_STEPS`. Errors (non-integer values) propagate so
+    a typo in ``.env`` surfaces immediately rather than silently disabling the
+    cap (AGENTS.md §2).
+    """
+    source = env if env is not None else os.environ
+    raw = source.get(_MAX_AGENT_STEPS_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_MAX_AGENT_STEPS
+    value = int(raw)
+    return value if value > 0 else _DEFAULT_MAX_AGENT_STEPS
+
+
+def _load_tool_definitions(skills_dir: Path) -> list[ToolDefinition]:
+    """Build the ``ToolDefinition`` surface from ``harness/skills/*.json``.
+
+    Maps the harness's per-skill JSON Schema (issue #104, #105) to the
+    OpenAI-compatible ``tools=`` array the :class:`ModelAdapter` protocol
+    expects. The skill's ``name`` / ``description`` / ``input_schema`` keys
+    flow directly into :class:`ToolFunctionSchema`; the output schema is
+    intentionally not transmitted (the wire format has no slot for it).
+
+    A missing ``skills/`` directory is treated as an empty surface: a freshly
+    bootstrapped harness may legitimately have no skills yet, and the loop
+    still works against a model that emits only final-answer messages. Any
+    JSON parse error is re-raised — a malformed skill file is a Critic
+    sandbox failure (ADR-0004, ``harness/scripts/load_check.py``) and the
+    runner should not paper over it.
+    """
+    if not skills_dir.is_dir():
+        return []
+    definitions: list[ToolDefinition] = []
+    for path in sorted(skills_dir.glob("*.json")):
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        name = doc.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"{path}: skill 'name' must be a non-empty string")
+        description = doc.get("description") or None
+        parameters = doc.get("input_schema") or {}
+        if not isinstance(parameters, dict):
+            raise ValueError(f"{path}: skill 'input_schema' must be a JSON object")
+        definitions.append(
+            ToolDefinition(
+                type="function",
+                function=ToolFunctionSchema(
+                    name=name,
+                    description=description,
+                    parameters=parameters,
+                ),
+            )
+        )
+    return definitions
+
+
+def _resolve_hook_registry() -> Any | None:
+    """Return the harness hook registry, or ``None`` if no harness is wired.
+
+    The foundry's AGENTS.md §7 self-reference rule forbids depending on the
+    harness package from this module's import side; instead the registry is
+    looked up lazily so a test that imports ``runner`` without a harness
+    checkout (or before ``main()`` has inserted ``harness_dir`` into
+    ``sys.path``) sees ``None`` and silently skips hook fan-out. When the
+    harness IS importable the prompt-input firewall
+    (``harness/hooks/injection_firewall.py``) is already registered there
+    via ``harness/hooks/__init__``, so SECURITY.md "Prompt-input firewall"
+    runs by default.
+    """
+    try:
+        from harness.hooks import get_registry
+    except ImportError:
+        return None
+    try:
+        return get_registry()
+    except Exception:
+        return None
+
+
+def _import_hook_types() -> tuple[type, type]:
+    """Import :class:`ToolCall` and :class:`ToolResult` from the harness.
+
+    Resolved lazily (issue #89, ADR-0010) so the runner can be imported
+    without the harness package on ``sys.path``. Calling code should treat
+    the returned classes as a contract — they implement the
+    ``Hook`` protocol declared in ``harness/hooks/base.py``.
+    """
+    from harness.hooks.base import ToolCall, ToolResult
+
+    return ToolCall, ToolResult
+
+
+async def _default_skill_executor(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Default skill executor that acknowledges the call (issue #89).
+
+    Issue #104 declares the bash skill's JSON contract; the actual
+    ``subprocess.run``-backed executor lands in a follow-up so the Critic
+    gate (ADR-0004) can evaluate it independently. Until then the runner
+    still needs *something* to close the loop and emit a ``tool_result``
+    event, so this stub returns a benign envelope the model can act on.
+
+    The shape is stable (``status`` + ``skill`` + ``echo`` of the argument
+    keys) so tests asserting the wiring can pattern-match without coupling
+    to the eventual real executor.
+    """
+    return {
+        "status": "ok",
+        "skill": name,
+        "echo": sorted(arguments.keys()),
+    }
+
+
+def _parse_tool_arguments(raw: str) -> dict[str, Any]:
+    """Parse an OpenAI-compatible tool-call ``arguments`` JSON string.
+
+    Some models emit ``""`` (no arguments) and a few emit partially-formed
+    JSON; both are coerced to an empty dict so the agent loop can stamp the
+    call into the trace without a model-side parser failure (which would
+    abort the loop and leave the session without an ``outcome`` event).
+    Non-dict JSON values are also collapsed to ``{}`` for the same reason:
+    the loop cares about the *executor contract*, not the wire shape.
+    """
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return dict(decoded) if isinstance(decoded, dict) else {}
+
+
+def _serialize_tool_result(result: Any) -> str:
+    """Render a :class:`ToolResult` to JSON for re-injection into the prompt.
+
+    ``output`` is the canonical channel the model reads; ``error`` is the
+    human-review flag (carrying previews the injection firewall writes, etc.)
+    and is included as a sibling key so the model can branch on failure
+    without us hiding the flag. ``str`` is the safe type fallback so a custom
+    executor that returns a non-JSON-able object still produces a wire-ready
+    payload instead of crashing the next ``complete()`` call.
+    """
+    payload: dict[str, Any] = {"output": result.output}
+    if result.error is not None:
+        payload["error"] = result.error
+    return json.dumps(payload, default=str)
+
+
 async def run_task(
     task: str,
     harness_dir: Path,
     log: TraceLogger,
     session_id: str,
     model_adapter: ModelAdapter | None = None,
+    *,
+    skill_executor: SkillExecutor | None = None,
 ) -> None:
-    """Run one task by sending the harness prompt to a ModelAdapter.
+    """Drive one task through the asyncio agent loop (issue #89, ADR-0010).
 
-    This is intentionally the smallest Phase 1 bridge: it loads the
-    version-controlled system prompt, sends a single user task to an
-    OpenAI-compatible adapter, and records the normalized response. Tool-call
-    execution through ``harness/hooks`` remains a later layer; this function
-    only establishes the model abstraction needed to measure runs.
+    Reads ``harness/system_prompt.txt`` and the OpenAI-compatible tool surface
+    declared in ``harness/skills/*.json``, exchanges turns with the
+    ``model_adapter`` until the model emits a final assistant message, the
+    ``max_steps`` cap is reached, or the wall-clock cap fires, and records
+    every step into the trace store:
+
+    1. ``user_prompt`` — the task enters the agent conversation
+       (the lifecycle ``task_received`` marker from ``main()`` is preserved).
+    2. ``model_request`` / ``model_response`` — every chat completion round-trip.
+    3. ``tool_call`` / ``tool_result`` — one pair per ``ToolCall`` the model
+       emits, bracketed by ``HookRegistry.run_pre`` and ``HookRegistry.run_post``
+       fan-out so the prompt-input firewall (SECURITY.md) and future hooks
+       observe every step.
+    4. ``outcome`` — terminal event with ``status`` and ``reason`` so the Phase
+       2 Digester can attribute success vs. truncation vs. failure.
+
+    The tool surface is data-driven: a skill lands as soon as its JSON file
+    does (issue #104, #105). Skill execution is delegated to ``skill_executor``
+    (default: ``_default_skill_executor`` — a stub that acknowledges the call);
+    real ``subprocess.run``-backed executors are wired in a follow-up so the
+    Critic gate (ADR-0004) can evaluate them independently.
+
+    On any model error the loop records a ``model_error`` event, sets
+    ``outcome.status="failed"`` and ``outcome.reason="model_error"``, and
+    re-raises so ``main()`` can append the ``task_failed`` terminal marker.
     """
     system_prompt_path = harness_dir / "system_prompt.txt"
     system_prompt = system_prompt_path.read_text(encoding="utf-8")
-    messages = [
+    tool_definitions = _load_tool_definitions(harness_dir / "skills")
+
+    messages: list[ModelMessage] = [
         ModelMessage(role="system", content=system_prompt),
         ModelMessage(role="user", content=task),
     ]
     created_adapter = model_adapter is None
     adapter = model_adapter or build_model_adapter()
 
+    registry = _resolve_hook_registry()
+    hook_call_cls, hook_result_cls = _import_hook_types()
+
+    executor = skill_executor or _default_skill_executor
+    max_steps = _resolve_max_steps()
+
     log.record(
         session_id,
-        kind="model_request",
-        payload={"message_count": len(messages), "tool_count": 0},
+        kind="user_prompt",
+        payload={"content": task, "tool_count": len(tool_definitions)},
     )
+
+    outcome_status = "success"
+    outcome_reason = "final_answer"
+    outcome_steps = 0
+
     try:
-        response = await adapter.complete(messages=messages, tools=[])
+        for step in range(max_steps):
+            outcome_steps = step + 1
+            log.record(
+                session_id,
+                kind="model_request",
+                payload={
+                    "step": step,
+                    "message_count": len(messages),
+                    "tool_count": len(tool_definitions),
+                },
+            )
+            try:
+                response = await adapter.complete(messages=messages, tools=tool_definitions)
+            except Exception as exc:
+                outcome_status = "failed"
+                outcome_reason = "model_error"
+                log.record(
+                    session_id,
+                    kind="model_error",
+                    payload={
+                        "step": step,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+                raise
+
+            log.record(
+                session_id,
+                kind="model_response",
+                payload={
+                    "step": step,
+                    "finish_reason": response.finish_reason,
+                    "message": response.message.model_dump(mode="json", exclude_none=True),
+                    "tool_calls": [call.model_dump(mode="json") for call in response.tool_calls],
+                },
+            )
+            messages.append(response.message)
+
+            if not response.tool_calls:
+                outcome_reason = "final_answer"
+                break
+
+            for tool_call in response.tool_calls:
+                arguments = _parse_tool_arguments(tool_call.function.arguments)
+                log.record(
+                    session_id,
+                    kind="tool_call",
+                    payload={
+                        "step": step,
+                        "call_id": tool_call.id,
+                        "name": tool_call.function.name,
+                        "arguments": arguments,
+                    },
+                )
+
+                call = hook_call_cls(name=tool_call.function.name, arguments=arguments)
+                if registry is not None:
+                    call = await registry.run_pre(call)
+
+                start = time.monotonic()
+                output: Any
+                error: str | None = None
+                try:
+                    output = await executor(call.name, dict(call.arguments))
+                except Exception as exc:
+                    output = None
+                    error = f"{type(exc).__name__}: {exc}"
+                duration_ms = int((time.monotonic() - start) * 1000)
+                result = hook_result_cls(name=call.name, output=output, error=error)
+
+                if registry is not None:
+                    result = await registry.run_post(call, result)
+
+                log.record(
+                    session_id,
+                    kind="tool_result",
+                    payload={
+                        "step": step,
+                        "call_id": tool_call.id,
+                        "name": call.name,
+                        "duration_ms": duration_ms,
+                        "output": result.output,
+                        "error": result.error,
+                    },
+                )
+
+                messages.append(
+                    ModelMessage(
+                        role="tool",
+                        name=call.name,
+                        tool_call_id=tool_call.id,
+                        content=_serialize_tool_result(result),
+                    )
+                )
+
+            if step + 1 >= max_steps and response.tool_calls:
+                outcome_status = "truncated"
+                outcome_reason = "max_steps"
+                break
     finally:
         if created_adapter and isinstance(adapter, OpenAICompatibleAdapter):
             await adapter.aclose()
-    log.record(
-        session_id,
-        kind="model_response",
-        payload={
-            "finish_reason": response.finish_reason,
-            "message": response.message.model_dump(mode="json", exclude_none=True),
-            "tool_calls": [call.model_dump(mode="json") for call in response.tool_calls],
-        },
-    )
+        log.record(
+            session_id,
+            kind="outcome",
+            payload={
+                "status": outcome_status,
+                "reason": outcome_reason,
+                "steps": outcome_steps,
+            },
+        )
 
 
 def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
