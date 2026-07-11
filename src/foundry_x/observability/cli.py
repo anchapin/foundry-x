@@ -4,7 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from foundry_x.observability.regression_report import generate_regression_report
+from foundry_x.observability.regression_report import analyze_regressions
 from foundry_x.observability.timeline import format_timeline
 from foundry_x.trace.logger import TraceLogger
 
@@ -41,6 +41,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write the report to this path instead of stdout.",
     )
+    regression.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        default=False,
+        help=(
+            "Exit non-zero if any regressed task is detected (CI gate). "
+            "The Markdown artifact is still written to --out before the exit code."
+        ),
+    )
 
     timeline = sub.add_parser(
         "timeline",
@@ -64,11 +73,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "regression-report":
         logger = TraceLogger(args.db)
-        report = generate_regression_report(logger, since=args.since)
+        analysis = analyze_regressions(logger, since=args.since)
         if args.out:
-            Path(args.out).write_text(report, encoding="utf-8")
+            Path(args.out).write_text(analysis.report, encoding="utf-8")
         else:
-            sys.stdout.write(report)
+            sys.stdout.write(analysis.report)
+        if args.fail_on_regression and analysis.regressions:
+            return 1
         return 0
 
     if args.command == "timeline":
