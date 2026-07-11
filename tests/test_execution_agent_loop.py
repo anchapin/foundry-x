@@ -35,8 +35,11 @@ import foundry_x.execution.runner as runner_mod
 from foundry_x.execution.model_adapter import (
     ModelMessage,
     ModelResponse,
+    ModelResponseChunk,
     ModelToolCall,
+    ModelToolCallChunk,
     ToolCallFunction,
+    ToolCallFunctionChunk,
 )
 from foundry_x.execution.runner import main
 from foundry_x.trace.logger import TraceLogger
@@ -75,8 +78,31 @@ class _ScriptedAdapter:
         return await self.complete(messages, tools, **kwargs)
 
     async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
-        if False:
-            yield None  # pragma: no cover - satisfies AsyncIterator signature
+        self.calls.append([ModelMessage.model_validate(m) for m in messages])
+        self.tool_surfaces.append(list(tools) if tools else [])
+        if not self._responses:
+            raise RuntimeError(
+                "_ScriptedAdapter exhausted; the loop called stream() more times than scripted"
+            )
+        response = self._responses.pop(0)
+        if response.message.content:
+            yield ModelResponseChunk(content=response.message.content)
+        for i, tc in enumerate(response.tool_calls):
+            yield ModelResponseChunk(
+                tool_calls=[
+                    ModelToolCallChunk(
+                        index=i,
+                        id=tc.id,
+                        type=tc.type,
+                        function=ToolCallFunctionChunk(
+                            name=tc.function.name,
+                            arguments=tc.function.arguments,
+                        ),
+                    )
+                ]
+            )
+        if response.finish_reason:
+            yield ModelResponseChunk(finish_reason=response.finish_reason)
 
 
 def _argv(task: str, trace_path: Path, harness_dir: Path) -> list[str]:
@@ -172,9 +198,9 @@ def test_agent_loop_records_full_event_sequence(tmp_path, monkeypatch):
     tool_call_idx = kinds.index("tool_call")
     tool_result_idx = kinds.index("tool_result")
     outcome_idx = kinds.index("outcome")
-    assert user_prompt_idx < tool_call_idx < tool_result_idx < outcome_idx, (
-        f"events out of order: {kinds!r}"
-    )
+    assert (
+        user_prompt_idx < tool_call_idx < tool_result_idx < outcome_idx
+    ), f"events out of order: {kinds!r}"
 
     tool_call_event = events[tool_call_idx]
     assert tool_call_event.payload["name"] == "bash"
@@ -193,11 +219,43 @@ def test_agent_loop_records_full_event_sequence(tmp_path, monkeypatch):
     assert tool_result_event.payload["output"]["skill"] == "bash"
 
     outcome_event = events[outcome_idx]
-    assert outcome_event.payload == {
-        "status": "success",
-        "reason": "final_answer",
-        "steps": 2,
-    }
+    assert outcome_event.payload["status"] == "success"
+    assert outcome_event.payload["reason"] == "final_answer"
+    assert outcome_event.payload["steps"] == 2
+    assert outcome_event.payload["ttft_ms"] is not None
+    assert outcome_event.payload["ttft_ms"] >= 0
+
+    # Issue #199: per-chunk trace events emitted between model_request and
+    # model_response, with delta_index, content_so_far, and chunk_duration_ms.
+    assert kinds.count("model_response_chunk") > 0
+    chunk_events = [e for e in events if e.kind == "model_response_chunk"]
+    first_chunk = chunk_events[0]
+    assert first_chunk.payload["delta_index"] == 0
+    assert "content_so_far" in first_chunk.payload
+    assert "chunk_duration_ms" in first_chunk.payload
+
+    # model_response gains time_to_first_token_ms and chunk_count (#199).
+    model_response_events = [e for e in events if e.kind == "model_response"]
+    for mr_event in model_response_events:
+        assert "time_to_first_token_ms" in mr_event.payload
+        assert "chunk_count" in mr_event.payload
+        assert mr_event.payload["chunk_count"] > 0
+
+    # Chunk events fall between their model_request and model_response (#199).
+    req_idxs = [i for i, k in enumerate(kinds) if k == "model_request"]
+    resp_idxs = [i for i, k in enumerate(kinds) if k == "model_response"]
+    chunk_idxs = [i for i, k in enumerate(kinds) if k == "model_response_chunk"]
+    for ci in chunk_idxs:
+        req_idx = max((i for i in req_idxs if i < ci), default=-1)
+        resp_idx = min((i for i in resp_idxs if i > ci), default=len(kinds))
+        assert (
+            req_idx >= 0 and ci < resp_idx
+        ), f"chunk event {ci} not bracketed by request {req_idx} and response {resp_idx}"
+    # Each step's chunks share its model_request/model_response bracket.
+    assert len(chunk_idxs) >= len(req_idxs), (
+        f"expected at least one chunk per step; got {len(chunk_idxs)} chunks "
+        f"for {len(req_idxs)} requests"
+    )
 
     assert kinds.count("model_request") == 2
     assert kinds.count("model_response") == 2
