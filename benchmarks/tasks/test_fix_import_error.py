@@ -58,6 +58,7 @@ TASK = BenchmarkTask(
         "to fixtures/fix_import_error/<case>/expected_stdout.txt."
     ),
     timeout_seconds=30,
+    requires_skills=["bash"],
     tags=["debugging", "imports", "stdlib", "multi-file"],
 )
 
