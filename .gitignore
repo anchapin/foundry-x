@@ -12,6 +12,7 @@ logs/*.jsonl
 logs/*.db
 logs/*.sqlite
 logs/*.log
+logs/*.json
 !logs/.gitkeep
 
 .DS_Store

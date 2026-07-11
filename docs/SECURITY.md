@@ -131,4 +131,8 @@ under `benchmarks/tasks/`:
   enforces the §"Rate limits" cap.
 
 A regression in any of the four flips the Critic red before the
-proposed harness edit ships.
+proposed harness edit ships. The Critic additionally persists a
+regression baseline at `logs/critic_baseline.json` (ADR-0004 step 3,
+issue #186): once a benchmark task is recorded as passing, any
+later flip to failing rejects the gate with `regression:<task_name>`
+in `failed_checks`.
