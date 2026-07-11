@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Sequence
 
 from pydantic import BaseModel
@@ -218,6 +219,26 @@ def _render_markdown(summary: KpiSummary) -> str:
     return "\n".join(lines)
 
 
+def _resolve_format(args_format: str | None, out: str | None) -> str:
+    """Return ``"markdown"`` or ``"json"``.
+
+    The explicit ``--format`` flag always wins. When unset, the format is
+    inferred from the ``--out`` file extension (``.json`` → JSON);
+    otherwise Markdown is returned. Issue #101 keeps the decision local to
+    the CLI layer so the pydantic model remains the single source of truth.
+    """
+    if args_format is not None:
+        return args_format
+    if out is not None and Path(out).suffix.lower() == ".json":
+        return "json"
+    return "markdown"
+
+
+def _render_json(summary: KpiSummary) -> str:
+    """Serialize a KPI summary as a stable JSON snapshot (issue #101)."""
+    return summary.model_dump_json(indent=2)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="foundry-kpis",
@@ -233,11 +254,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="Only consider sessions with this harness version.",
     )
+    parser.add_argument(
+        "--format",
+        choices=("markdown", "json"),
+        default=None,
+        help=(
+            "Output format. Default: 'markdown'. When --out ends in '.json',"
+            " 'json' is selected automatically."
+        ),
+    )
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="Write output to this path instead of stdout.",
+    )
     args = parser.parse_args(argv)
 
+    fmt = _resolve_format(args.format, args.out)
     logger = TraceLogger(args.db)
     summary = compute_kpis(logger, harness_version=args.harness_version)
-    print(_render_markdown(summary))
+    output = _render_json(summary) if fmt == "json" else _render_markdown(summary)
+
+    if args.out:
+        Path(args.out).write_text(output, encoding="utf-8")
+    else:
+        print(output)
     return 0
 
 
