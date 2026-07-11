@@ -197,9 +197,9 @@ def test_cross_file_refactor(benchmark_workspace: Path) -> None:
         f"got rc={good.returncode} stdout={good.stdout!r} "
         f"stderr={good.stderr!r}"
     )
-    assert (
-        "2 passed" in good.stdout
-    ), f"task {TASK.name}: expected both tests to pass; stdout={good.stdout!r}"
+    assert "2 passed" in good.stdout, (
+        f"task {TASK.name}: expected both tests to pass; " f"stdout={good.stdout!r}"
+    )
 
     driver = _run_driver(benchmark_workspace)
     assert driver.returncode == 0, (
