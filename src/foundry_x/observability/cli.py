@@ -5,12 +5,16 @@ import sys
 from pathlib import Path
 
 from foundry_x.observability.regression_report import analyze_regressions
-from foundry_x.observability.session_card import format_session_card
 from foundry_x.observability.session_summary import (
     build_session_summary,
     render_session_summary,
 )
 from foundry_x.observability.timeline import format_timeline
+from foundry_x.observability.tool_latency import (
+    aggregate_tool_latency,
+    render_tool_latency_json,
+    render_tool_latency_markdown,
+)
 from foundry_x.trace.logger import TraceLogger
 
 
@@ -113,23 +117,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Show at most N sessions after newest-first ordering.",
     )
 
-    # Issue #180: ``fx-trace session-card <sid>`` prints a one-screen
-    # triage summary for a session — the human counterpart to the verbose
-    # ``timeline`` view. Exits non-zero when the session id is unknown so
-    # CI gates can depend on it.
-    card = sub.add_parser(
-        "session-card",
-        help="Print a one-screen triage card for a session from the trace store.",
+    tool_latency = sub.add_parser(
+        "tool-latency",
+        help="Aggregate per-tool latency percentiles across sessions.",
     )
-    card.add_argument(
+    tool_latency.add_argument(
         "--db",
-        required=True,
-        help="Path to the trace store (sqlite .db or jsonl).",
+        default="logs/traces.db",
+        help="Path to the trace sqlite database (default: logs/traces.db).",
     )
-    card.add_argument(
-        "--session-id",
-        required=True,
-        help="Session UUID whose triage card should be rendered.",
+    tool_latency.add_argument(
+        "--since",
+        default=None,
+        help="ISO-8601 timestamp; only consider events at or after this time.",
+    )
+    tool_latency.add_argument(
+        "--format",
+        choices=("markdown", "json"),
+        default="markdown",
+        help="Output format (default: markdown).",
+    )
+    tool_latency.add_argument(
+        "--out",
+        default=None,
+        help="Write the report to this path instead of stdout.",
     )
     return parser
 
@@ -171,21 +182,19 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write("\n")
         return 0
 
-    if args.command == "session-card":
-        backend = _infer_backend(args.db)
-        logger = TraceLogger(args.db, backend=backend)
-        # Match by session_id rather than by events alone so an empty
-        # in-flight session still renders its roll-up (graceful degrade,
-        # issue #180) instead of being reported as missing.
-        match = next(
-            (s for s in logger.list_sessions() if s.session_id == args.session_id),
-            None,
-        )
-        if match is None:
-            sys.stderr.write(f"session {args.session_id} not found\n")
-            return 2
-        events = logger.load_session(args.session_id)
-        sys.stdout.write(format_session_card(match, events) + "\n")
+    if args.command == "tool-latency":
+        logger = TraceLogger(args.db)
+        report = aggregate_tool_latency(logger, since=args.since)
+        if args.format == "json":
+            rendered = render_tool_latency_json(report)
+        else:
+            rendered = render_tool_latency_markdown(report)
+        if args.out:
+            Path(args.out).write_text(rendered, encoding="utf-8")
+        else:
+            sys.stdout.write(rendered)
+            if not rendered.endswith("\n"):
+                sys.stdout.write("\n")
         return 0
 
     return 1
