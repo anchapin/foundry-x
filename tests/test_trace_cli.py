@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import inspect
 import json
+from collections.abc import Iterator
 
 from foundry_x.trace.cli import main
-from foundry_x.trace.logger import TraceLogger
+from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 
 def _populate(db_path) -> str:
@@ -115,3 +117,160 @@ def test_list_sessions_jsonl_backend(tmp_path):
     assert len(sessions) == 1
     assert sessions[0].session_id == sid
     assert sessions[0].harness_version == "0.2.0"
+
+
+# ---------------------------------------------------------------------------
+# Issue #82: TraceLogger.list_sessions(harness_version=...) and
+# TraceLogger.iter_events(session_id, kind=...) are the centralized query
+# surface that kpis.py and regression_report.py now go through (ADR-0003).
+# The tests below pin both methods on sqlite and jsonl backends.
+# ---------------------------------------------------------------------------
+
+
+def test_list_sessions_filters_by_harness_version(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1") as sid_v1:
+        logger.record(sid_v1, "tool_call", {"name": "read"})
+    with logger.session(harness_version="v2") as sid_v2:
+        logger.record(sid_v2, "tool_call", {"name": "write"})
+
+    only_v1 = TraceLogger(db).list_sessions(harness_version="v1")
+    assert {s.session_id for s in only_v1} == {sid_v1}
+
+    only_v2 = TraceLogger(db).list_sessions(harness_version="v2")
+    assert {s.session_id for s in only_v2} == {sid_v2}
+
+    all_versions = TraceLogger(db).list_sessions()
+    assert {s.session_id for s in all_versions} == {sid_v1, sid_v2}
+
+
+def test_list_sessions_harness_version_filter_jsonl(tmp_path):
+    db = tmp_path / "traces.jsonl"
+    logger = TraceLogger(db, backend="jsonl")
+    with logger.session(harness_version="alpha") as sid_a:
+        logger.record(sid_a, "tool_call", {"name": "read"})
+    with logger.session(harness_version="beta") as sid_b:
+        logger.record(sid_b, "tool_call", {"name": "write"})
+
+    only_alpha = TraceLogger(db, backend="jsonl").list_sessions(harness_version="alpha")
+    assert {s.session_id for s in only_alpha} == {sid_a}
+
+
+def test_iter_events_yields_trace_events_in_order(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1") as sid:
+        first = logger.record(sid, "task_received", {"prompt": "do work"})
+        second = logger.record(sid, "tool_call", {"name": "read_file"})
+        third = logger.record(sid, "critic_verdict", {"verdict": "approved"})
+
+    events = list(logger.iter_events(sid))
+
+    assert [e.event_id for e in events] == [first.event_id, second.event_id, third.event_id]
+    assert [e.kind for e in events] == ["task_received", "tool_call", "critic_verdict"]
+    assert all(isinstance(e, TraceEvent) for e in events)
+
+
+def test_iter_events_filters_by_kind(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, "task_received", {"prompt": "do work"})
+        verdict = logger.record(sid, "critic_verdict", {"verdict": "approved", "regression": False})
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    only_verdicts = list(logger.iter_events(sid, kind="critic_verdict"))
+    assert len(only_verdicts) == 1
+    assert only_verdicts[0].event_id == verdict.event_id
+
+
+def test_iter_events_is_lazy_and_streams_rows(tmp_path):
+    """Plant 1000 events and consume iter_events lazily.
+
+    Issue #82 acceptance: ``iter_events`` yields one row at a time so a
+    long session does not blow memory. We pin this by:
+      1. Asserting the return type is an ``Iterator`` (not a ``Sequence``).
+      2. Asserting the runtime type is a generator (the streaming shape).
+      3. Pulling only the first 3 events from a 1000-event session via
+         ``next()`` calls — if iter_events eagerly materialized, the
+         break-out would still succeed; the type assertion is what proves
+         the streaming contract.
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1") as sid:
+        for i in range(1000):
+            logger.record(sid, "tool_call", {"i": i})
+
+    iterator = logger.iter_events(sid)
+
+    # Return type is Iterator (issue #82 acceptance criterion). The
+    # annotation is read from the source as a string because logger.py
+    # uses ``from __future__ import annotations``, so compare against
+    # ``typing.get_type_hints`` (which evaluates the string) instead of
+    # ``signature.return_annotation`` directly.
+    import typing
+
+    resolved_hints = typing.get_type_hints(TraceLogger.iter_events)
+    return_annotation = resolved_hints["return"]
+    # ``typing.Iterator`` and ``collections.abc.Iterator`` are not the same
+    # object but both expose ``__origin__`` semantics; either is acceptable
+    # as the public return-type contract for ``iter_events``.
+    assert return_annotation in (Iterator[TraceEvent], typing.Iterator[TraceEvent])
+    # Runtime shape is a generator (the ``yield``/``yield from`` body).
+    assert inspect.isgenerator(iterator)
+
+    # Lazy consumption: pull only the first 3 rows and break out.
+    first_three = [next(iterator), next(iterator), next(iterator)]
+    assert len(first_three) == 3
+    assert [e.kind for e in first_three] == ["tool_call", "tool_call", "tool_call"]
+    assert [e.payload["i"] for e in first_three] == [0, 1, 2]
+
+    # The full session is still iterable (we just stopped early).
+    iterator.close()
+    full_count = sum(1 for _ in logger.iter_events(sid))
+    assert full_count == 1000
+
+
+def test_iter_events_empty_session(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1") as sid:
+        pass  # no events
+
+    events = list(logger.iter_events(sid))
+    assert events == []
+
+
+def test_iter_events_unknown_session_yields_nothing(tmp_path):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)  # empty store
+    logger = TraceLogger(db)
+
+    events = list(logger.iter_events("does-not-exist"))
+    assert events == []
+
+
+def test_iter_events_jsonl_backend(tmp_path):
+    db = tmp_path / "traces.jsonl"
+    logger = TraceLogger(db, backend="jsonl")
+    with logger.session(harness_version="v1") as sid:
+        first = logger.record(sid, "task_received", {"prompt": "hi"})
+        second = logger.record(sid, "critic_verdict", {"verdict": "approved"})
+
+    events = list(TraceLogger(db, backend="jsonl").iter_events(sid))
+    assert [e.event_id for e in events] == [first.event_id, second.event_id]
+    assert all(isinstance(e, TraceEvent) for e in events)
+
+
+def test_iter_events_jsonl_filters_by_kind(tmp_path):
+    db = tmp_path / "traces.jsonl"
+    logger = TraceLogger(db, backend="jsonl")
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, "task_received", {"prompt": "hi"})
+        verdict = logger.record(sid, "critic_verdict", {"verdict": "approved"})
+
+    only_verdicts = list(TraceLogger(db, backend="jsonl").iter_events(sid, kind="critic_verdict"))
+    assert len(only_verdicts) == 1
+    assert only_verdicts[0].event_id == verdict.event_id

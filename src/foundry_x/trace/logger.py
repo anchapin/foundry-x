@@ -333,12 +333,41 @@ class TraceLogger:
             return self._load_session_jsonl(session_id)
         return self._load_session_sqlite(session_id)
 
-    def list_sessions(self) -> list[TraceSession]:
-        if self.backend == "jsonl":
-            return self._list_sessions_jsonl()
-        return self._list_sessions_sqlite()
+    def list_sessions(self, harness_version: str | None = None) -> Sequence[TraceSession]:
+        """Return every recorded session, optionally filtered by harness version.
 
-    def _list_sessions_sqlite(self) -> list[TraceSession]:
+        ``harness_version`` mirrors the parameter accepted by the KPI and
+        regression-report callers so they can stop reaching past the
+        logger with raw ``sqlite3.connect``. Issue #82 — adding the filter
+        is the centralization step the issue's acceptance criteria call
+        for; the no-argument form preserves backward compatibility with
+        the existing ``tests/`` and ``cli.py`` callers.
+        """
+        if self.backend == "jsonl":
+            return self._list_sessions_jsonl(harness_version=harness_version)
+        return self._list_sessions_sqlite(harness_version=harness_version)
+
+    def iter_events(
+        self,
+        session_id: str,
+        kind: str | None = None,
+    ) -> Iterator[TraceEvent]:
+        """Yield :class:`TraceEvent` rows for *session_id* one at a time.
+
+        ``kind`` optionally narrows the stream to a single event kind
+        (``"critic_verdict"``, ``"injection_blocked"``, ...). The method
+        is a generator: rows are pulled from the underlying store as the
+        caller iterates, so long sessions do not need to fit in memory.
+        Issue #82 — replaces the raw ``sqlite3.connect + SELECT`` calls
+        that previously leaked schema knowledge into ``kpis.py`` and
+        ``regression_report.py``.
+        """
+        if self.backend == "jsonl":
+            yield from self._iter_events_jsonl(session_id, kind=kind)
+            return
+        yield from self._iter_events_sqlite(session_id, kind=kind)
+
+    def _list_sessions_sqlite(self, harness_version: str | None = None) -> Sequence[TraceSession]:
         with sqlite3.connect(self.path) as conn:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
             selected = [
@@ -350,8 +379,13 @@ class TraceLogger:
             ]
             if "ended_at" in columns:
                 selected.append("ended_at")
-            query = "SELECT " + ", ".join(selected) + " FROM sessions ORDER BY started_at"
-            rows = conn.execute(query).fetchall()
+            query = "SELECT " + ", ".join(selected) + " FROM sessions"
+            params: tuple[Any, ...] = ()
+            if harness_version is not None:
+                query += " WHERE harness_version = ?"
+                params = (harness_version,)
+            query += " ORDER BY started_at"
+            rows = conn.execute(query, params).fetchall()
         sessions: list[TraceSession] = []
         for row in rows:
             values = dict(zip(selected, row))
@@ -367,7 +401,7 @@ class TraceLogger:
             )
         return sessions
 
-    def _list_sessions_jsonl(self) -> list[TraceSession]:
+    def _list_sessions_jsonl(self, harness_version: str | None = None) -> Sequence[TraceSession]:
         # Two marker kinds share the JSONL file: ``session_start`` (written
         # on session entry) and ``session_end`` (written on exit, issue #8).
         # The first start line per session_id wins; a later end line, if
@@ -397,7 +431,12 @@ class TraceLogger:
                 elif kind == "session_end":
                     if session_id in sessions:
                         sessions[session_id]["ended_at"] = record.get("ended_at")
-        result = [TraceSession(**data) for data in sessions.values()]
+        filtered = [
+            data
+            for data in sessions.values()
+            if harness_version is None or data["harness_version"] == harness_version
+        ]
+        result = [TraceSession(**data) for data in filtered]
         result.sort(key=lambda s: s.started_at)
         return result
 
@@ -422,6 +461,37 @@ class TraceLogger:
                 )
             )
         return events
+
+    def _iter_events_sqlite(
+        self,
+        session_id: str,
+        kind: str | None = None,
+    ) -> Iterator[TraceEvent]:
+        # Stream rows from the driver one at a time (issue #82): the
+        # ``cursor`` returned by ``conn.execute`` yields rows on demand
+        # without buffering the full result set in Python memory, which is
+        # what callers like a future Digester need for long sessions.
+        query = (
+            "SELECT event_id, session_id, timestamp, kind, payload "
+            "FROM events WHERE session_id = ?"
+        )
+        params: list[Any] = [session_id]
+        if kind is not None:
+            query += " AND kind = ?"
+            params.append(kind)
+        query += " ORDER BY timestamp"
+        with sqlite3.connect(self.path) as conn:
+            cursor = conn.execute(query, params)
+            for event_id, sid, ts, k, payload in cursor:
+                yield TraceEvent.model_validate(
+                    {
+                        "event_id": event_id,
+                        "session_id": sid,
+                        "timestamp": ts,
+                        "kind": k,
+                        "payload": json.loads(payload),
+                    }
+                )
 
     def _load_session_jsonl(self, session_id: str) -> list[TraceEvent]:
         """Replay events for a session from a JSONL trace file.
@@ -448,6 +518,31 @@ class TraceLogger:
                 events.append(TraceEvent.model_validate(record))
         events.sort(key=lambda e: e.timestamp)
         return events
+
+    def _iter_events_jsonl(
+        self,
+        session_id: str,
+        kind: str | None = None,
+    ) -> Iterator[TraceEvent]:
+        # Stream lines through the file object so we never hold the full
+        # JSONL file in memory (issue #82). We do materialize one event at
+        # a time per yield, which is the smallest unit the producer can
+        # hand us — there is no row buffer to overflow on long sessions.
+        if not self.path.exists():
+            return
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                record: dict[str, Any] = json.loads(line)
+                if record.get("session_id") != session_id:
+                    continue
+                if "event_id" not in record:
+                    continue
+                if kind is not None and record.get("kind") != kind:
+                    continue
+                yield TraceEvent.model_validate(record)
 
 
 def _now() -> str:
