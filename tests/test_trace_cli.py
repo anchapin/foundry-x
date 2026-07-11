@@ -274,3 +274,164 @@ def test_iter_events_jsonl_filters_by_kind(tmp_path):
     only_verdicts = list(TraceLogger(db, backend="jsonl").iter_events(sid, kind="critic_verdict"))
     assert len(only_verdicts) == 1
     assert only_verdicts[0].event_id == verdict.event_id
+
+
+# --- Issue #83: session-list / session-show / events-grep ---------------------
+
+
+def _populate_two_versions(db_path):
+    """Plant two sessions (different harness versions) with distinguishable events.
+
+    Returns ``(sid_a, sid_b)`` in start-order. ``sid_a`` records a
+    ``user_prompt`` whose payload contains the needle ``"BUG-1234"`` that
+    the ``events-grep`` tests look for.
+    """
+    logger = TraceLogger(db_path)
+    with logger.session(harness_version="0.1.0", model_id="model-a") as sid_a:
+        logger.record(sid_a, "user_prompt", {"prompt": "Fix BUG-1234 in auth.py"})
+        logger.record(sid_a, "tool_call", {"name": "read_file"})
+    with logger.session(harness_version="0.2.0", model_id="model-b") as sid_b:
+        logger.record(sid_b, "user_prompt", {"prompt": "Refactor renderer"})
+    return sid_a, sid_b
+
+
+def test_session_list_prints_identifiers(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid_a, sid_b = _populate_two_versions(db)
+
+    rc = main(["session-list", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Header and both session_ids land in the rendered table.
+    assert "session_id  started_at  ended_at  harness_version" in out
+    assert sid_a in out
+    assert sid_b in out
+    assert "0.1.0" in out
+    assert "0.2.0" in out
+
+
+def test_session_list_filters_by_harness_version(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid_a, sid_b = _populate_two_versions(db)
+
+    rc = main(
+        [
+            "session-list",
+            "--db",
+            str(db),
+            "--harness-version",
+            "0.2.0",
+        ]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert sid_b in out
+    assert sid_a not in out
+    assert "0.2.0" in out
+    assert "0.1.0" not in out
+
+
+def test_session_list_respects_limit(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    _populate_two_versions(db)
+
+    rc = main(["session-list", "--db", str(db), "--limit", "1"])
+
+    assert rc == 0
+    out_lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    # 1 header + 1 data row.
+    assert len(out_lines) == 2
+
+
+def test_session_list_empty_db_exits_zero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["session-list", "--db", str(db)])
+
+    assert rc == 0
+    # Header is always printed so downstream tools can rely on it.
+    assert "session_id  started_at  ended_at  harness_version" in capsys.readouterr().out
+
+
+def test_session_show_prints_event_timeline(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid_a, _ = _populate_two_versions(db)
+
+    rc = main(["session-show", sid_a, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert sid_a in out
+    assert "user_prompt" in out
+    assert "tool_call" in out
+    assert "read_file" in out
+
+
+def test_session_show_unknown_session_returns_nonzero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["session-show", "does-not-exist", "--db", str(db)])
+
+    assert rc == 1
+
+
+def test_events_grep_finds_matching_event(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid_a, _ = _populate_two_versions(db)
+
+    rc = main(
+        [
+            "events-grep",
+            sid_a,
+            "--db",
+            str(db),
+            "--pattern",
+            r"BUG-1234",
+        ]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "user_prompt" in out
+    assert "BUG-1234" in out
+
+
+def test_events_grep_no_match_returns_nonzero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid_a, _ = _populate_two_versions(db)
+
+    rc = main(
+        [
+            "events-grep",
+            sid_a,
+            "--db",
+            str(db),
+            "--pattern",
+            r"this-string-will-not-appear",
+        ]
+    )
+
+    # Conventional grep semantics: 1 when nothing matched.
+    assert rc == 1
+
+
+def test_events_grep_unknown_session_returns_nonzero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(
+        [
+            "events-grep",
+            "missing-session",
+            "--db",
+            str(db),
+            "--pattern",
+            r"anything",
+        ]
+    )
+
+    assert rc == 1
