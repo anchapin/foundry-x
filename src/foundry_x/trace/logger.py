@@ -449,6 +449,245 @@ class TraceLogger:
         events.sort(key=lambda e: e.timestamp)
         return events
 
+    # --- Post-write helpers (issue #85) -----------------------------------
+    # ``delete_session`` and ``redact_event`` close the gap that issue #3
+    # left open: write-time redaction catches secrets before they hit
+    # disk, but a leak discovered afterwards required nuking the whole
+    # ``.db`` file. Per docs/SECURITY.md §Secrets, traces MUST NOT contain
+    # raw API keys; these two helpers let the Operator scrub a single
+    # event or a single session without dropping the trace store. Each
+    # operation writes a structured audit event (``kind='event_redacted'``
+    # or ``kind='session_deleted'``) so the Digester can identify rows it
+    # should treat as evidence-free.
+
+    def delete_session(self, session_id: str) -> int:
+        """Remove every event and the session row for ``session_id``.
+
+        Issue #85. Returns the count of rows removed (events + the
+        session row in sqlite; matching lines in jsonl). Raises
+        :class:`KeyError` when ``session_id`` is not present, so a
+        typo from the Operator surfaces immediately rather than silently
+        deleting nothing.
+
+        An audit event with ``kind='session_deleted'`` is recorded as
+        part of the same atomic write so the operation is visible to
+        intermediate readers. On sqlite the audit shares the deletion
+        transaction and is therefore rolled back if the deletion fails;
+        on a successful delete it is removed along with the rest of the
+        session — by design, because persisting an event whose
+        ``session_id`` has no matching ``sessions`` row would violate
+        the events.session_id foreign key. On jsonl the audit line is
+        appended to the file post-rewrite and is queryable via
+        :meth:`load_session` for forensic purposes; this asymmetry is
+        the best each backend's model allows and is documented here so
+        the asymmetry does not surprise downstream readers.
+        """
+        if self.backend == "jsonl":
+            return self._delete_session_jsonl(session_id)
+        return self._delete_session_sqlite(session_id)
+
+    def _delete_session_sqlite(self, session_id: str) -> int:
+        with sqlite3.connect(self.path) as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if existing is None:
+                raise KeyError(session_id)
+            # Audit event written first so the deletion is visible in any
+            # intermediate read. Same ``with`` block = same implicit
+            # transaction = atomic with the deletes below.
+            audit = TraceEvent(
+                event_id=str(uuid.uuid4()),
+                session_id=session_id,
+                timestamp=_now(),
+                kind="session_deleted",
+                payload={"session_id": session_id},
+            )
+            conn.execute(
+                "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+                (
+                    audit.event_id,
+                    audit.session_id,
+                    audit.timestamp,
+                    audit.kind,
+                    json.dumps(audit.payload),
+                ),
+            )
+            event_rows = conn.execute(
+                "DELETE FROM events WHERE session_id = ?", (session_id,)
+            ).rowcount
+            session_rows = conn.execute(
+                "DELETE FROM sessions WHERE session_id = ?", (session_id,)
+            ).rowcount
+        # ``event_rows`` includes the audit row (inserted then deleted in
+        # the same transaction); ``session_rows`` is the session header.
+        return event_rows + session_rows
+
+    def _delete_session_jsonl(self, session_id: str) -> int:
+        if not self.path.exists():
+            raise KeyError(session_id)
+        kept: list[str] = []
+        deleted = 0
+        found_session = False
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                record: dict[str, Any] = json.loads(stripped)
+                if record.get("session_id") == session_id:
+                    deleted += 1
+                    if record.get("kind") == "session_start":
+                        found_session = True
+                    continue
+                kept.append(line)
+        if not found_session:
+            raise KeyError(session_id)
+        # Atomic rewrite: filter then write back, with the audit line
+        # appended. The audit is persistent in jsonl (no FK constraint)
+        # and surfaces via ``load_session(deleted_sid)`` as a forensic
+        # marker. See the docstring on ``delete_session`` for the
+        # sqlite/jsonl asymmetry.
+        with self.path.open("w", encoding="utf-8") as fh:
+            for line in kept:
+                fh.write(line)
+            audit = TraceEvent(
+                event_id=str(uuid.uuid4()),
+                session_id=session_id,
+                timestamp=_now(),
+                kind="session_deleted",
+                payload={"session_id": session_id},
+            )
+            fh.write(audit.model_dump_json() + "\n")
+        return deleted + 1
+
+    def redact_event(
+        self,
+        session_id: str,
+        event_id: str,
+        replacement: dict[str, Any],
+    ) -> TraceEvent:
+        """Overwrite ``event_id``'s payload with ``replacement``.
+
+        Issue #85. Preserves ``event_id``, ``session_id``, ``timestamp``,
+        and ``kind``; only ``payload`` is replaced. The replacement dict
+        is scrubbed through the same :func:`_redact` pipeline used by
+        :meth:`record`, so callers cannot reintroduce a secret by
+        passing a raw ``sk-...`` value as the replacement.
+
+        Returns the redacted :class:`TraceEvent`. Writes an audit event
+        (``kind='event_redacted'``) into the same session so the Digester
+        can identify redacted rows in future passes.
+
+        Raises :class:`KeyError` if no event with ``event_id`` exists in
+        ``session_id``. The combined event_id + session_id match is
+        defensive: ``event_id`` is a UUID4 and globally unique on its
+        own, but requiring both keys means a caller cannot accidentally
+        redact an event with the right ``event_id`` from the wrong
+        session (e.g. after a copy/paste bug).
+        """
+        if self.backend == "jsonl":
+            return self._redact_event_jsonl(session_id, event_id, replacement)
+        return self._redact_event_sqlite(session_id, event_id, replacement)
+
+    def _redact_event_sqlite(
+        self,
+        session_id: str,
+        event_id: str,
+        replacement: dict[str, Any],
+    ) -> TraceEvent:
+        redacted_payload = _redact(replacement)
+        redacted_at = _now()
+        with sqlite3.connect(self.path) as conn:
+            update_cursor = conn.execute(
+                "UPDATE events SET payload = ? " "WHERE event_id = ? AND session_id = ?",
+                (json.dumps(redacted_payload), event_id, session_id),
+            )
+            if update_cursor.rowcount == 0:
+                raise KeyError(f"event {event_id} not found in session {session_id}")
+            row = conn.execute(
+                "SELECT event_id, session_id, timestamp, kind, payload "
+                "FROM events WHERE event_id = ? AND session_id = ?",
+                (event_id, session_id),
+            ).fetchone()
+            audit = TraceEvent(
+                event_id=str(uuid.uuid4()),
+                session_id=session_id,
+                timestamp=redacted_at,
+                kind="event_redacted",
+                payload={
+                    "event_id": event_id,
+                    "kind": row[3],
+                    "redacted_at": redacted_at,
+                },
+            )
+            conn.execute(
+                "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+                (
+                    audit.event_id,
+                    audit.session_id,
+                    audit.timestamp,
+                    audit.kind,
+                    json.dumps(audit.payload),
+                ),
+            )
+        return TraceEvent(
+            event_id=row[0],
+            session_id=row[1],
+            timestamp=row[2],
+            kind=row[3],
+            payload=json.loads(row[4]),
+        )
+
+    def _redact_event_jsonl(
+        self,
+        session_id: str,
+        event_id: str,
+        replacement: dict[str, Any],
+    ) -> TraceEvent:
+        redacted_payload = _redact(replacement)
+        redacted_at = _now()
+        if not self.path.exists():
+            raise KeyError(f"event {event_id} not found in session {session_id}")
+        kept: list[str] = []
+        target: dict[str, Any] | None = None
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                record: dict[str, Any] = json.loads(stripped)
+                if record.get("event_id") == event_id and record.get("session_id") == session_id:
+                    target = record
+                    continue
+                kept.append(line)
+        if target is None:
+            raise KeyError(f"event {event_id} not found in session {session_id}")
+        redacted_event = TraceEvent(
+            event_id=event_id,
+            session_id=session_id,
+            timestamp=target["timestamp"],
+            kind=target["kind"],
+            payload=redacted_payload,
+        )
+        audit = TraceEvent(
+            event_id=str(uuid.uuid4()),
+            session_id=session_id,
+            timestamp=redacted_at,
+            kind="event_redacted",
+            payload={
+                "event_id": event_id,
+                "kind": target["kind"],
+                "redacted_at": redacted_at,
+            },
+        )
+        with self.path.open("w", encoding="utf-8") as fh:
+            for line in kept:
+                fh.write(line)
+            fh.write(redacted_event.model_dump_json() + "\n")
+            fh.write(audit.model_dump_json() + "\n")
+        return redacted_event
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()

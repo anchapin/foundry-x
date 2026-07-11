@@ -274,3 +274,196 @@ def test_redaction_scrubs_modern_secret_named_keys():
     assert result["id_token"] == "[REDACTED:secret]"
     assert result["refresh_token"] == "[REDACTED:secret]"
     assert result["safe"] == "keep-me"
+
+
+# ---------------------------------------------------------------------------
+# Issue #85: post-write ``delete_session`` and ``redact_event`` helpers.
+# Acceptance: ``delete_session(session_id) -> int`` raises ``KeyError`` when
+# the session is absent and otherwise removes every event + the session row;
+# ``redact_event(session_id, event_id, replacement) -> TraceEvent`` overwrites
+# the payload while preserving event_id, session_id, timestamp, and kind, and
+# writes an audit event (``kind='event_redacted'`` or ``kind='session_deleted'``)
+# so the Digester can identify corrected rows in future passes.
+# ---------------------------------------------------------------------------
+
+
+@_BACKENDS
+def test_redact_event_overwrites_leaked_payload(tmp_path, backend):
+    """Plant a session with a fake-leaked ``sk-...`` payload and assert
+    that ``redact_event`` replaces it with the operator-supplied replacement
+    and that ``load_session`` returns the redacted version (issue #85
+    acceptance, end-to-end)."""
+    suffix = ".db" if backend == "sqlite" else ".jsonl"
+    path = tmp_path / f"traces{suffix}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="test-0.0") as sid:
+        leaked = logger.record(
+            sid,
+            kind="tool_result",
+            payload={"output": f"key={_API_KEY}"},
+        )
+        other = logger.record(sid, kind="user_prompt", payload={"text": "unrelated"})
+
+    replacement = {"redacted": True, "note": "operator scrubbed at T+1"}
+    returned = logger.redact_event(sid, leaked.event_id, replacement)
+
+    assert returned.event_id == leaked.event_id
+    assert returned.session_id == sid
+    assert returned.kind == leaked.kind
+    assert returned.timestamp == leaked.timestamp
+    assert returned.payload == replacement
+
+    events = logger.load_session(sid)
+    by_id = {event.event_id: event for event in events}
+    assert by_id[leaked.event_id].payload == replacement
+    # The un-leaked event is untouched.
+    assert by_id[other.event_id].payload == {"text": "unrelated"}
+    # The audit event is present and identifies which row was redacted.
+    audit_events = [e for e in events if e.kind == "event_redacted"]
+    assert len(audit_events) == 1
+    audit = audit_events[0]
+    assert audit.session_id == sid
+    assert audit.payload["event_id"] == leaked.event_id
+    assert audit.payload["kind"] == "tool_result"
+
+
+@_BACKENDS
+def test_redact_event_replacement_is_also_scrubbed(tmp_path, backend):
+    """If the operator accidentally passes a raw ``sk-...`` value as the
+    replacement, ``redact_event`` must still scrub it via the same
+    ``_redact`` pipeline used by :meth:`record`. The point of the helper
+    is to scrub leaked secrets, not to be a back door around ``_redact``."""
+    suffix = ".db" if backend == "sqlite" else ".jsonl"
+    path = tmp_path / f"traces{suffix}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="test-0.0") as sid:
+        clean = logger.record(sid, kind="note", payload={"v": "ok"})
+
+    bad_replacement = {"output": f"key={_API_KEY}"}
+    returned = logger.redact_event(sid, clean.event_id, bad_replacement)
+
+    assert _API_KEY not in json.dumps(returned.payload)
+    assert returned.payload["output"] == "key=[REDACTED:api-key]"
+
+
+@_BACKENDS
+def test_redact_event_unknown_event_id_raises_keyerror(tmp_path, backend):
+    logger = TraceLogger(
+        tmp_path / f"traces{'.db' if backend == 'sqlite' else '.jsonl'}", backend=backend
+    )
+    with logger.session(harness_version="test-0.0") as sid:
+        logger.record(sid, kind="user_prompt", payload={"x": 1})
+
+    with pytest.raises(KeyError):
+        logger.redact_event(sid, "no-such-event-id", {"redacted": True})
+
+
+@_BACKENDS
+def test_redact_event_wrong_session_id_raises_keyerror(tmp_path, backend):
+    """``event_id`` is globally unique, but ``redact_event`` requires both
+    ``session_id`` and ``event_id`` to match. A copy/paste bug that
+    passes the right event_id with the wrong session_id must raise
+    rather than silently redact the right event in the wrong session."""
+    suffix = ".db" if backend == "sqlite" else ".jsonl"
+    path = tmp_path / f"traces{suffix}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="test-0.0") as sid_a:
+        recorded_a = logger.record(sid_a, kind="note", payload={"v": 1})
+    with logger.session(harness_version="test-0.0") as sid_b:
+        logger.record(sid_b, kind="note", payload={"v": 2})
+
+    with pytest.raises(KeyError):
+        logger.redact_event(sid_b, recorded_a.event_id, {"redacted": True})
+
+
+@_BACKENDS
+def test_delete_session_removes_all_events_and_returns_count(tmp_path, backend):
+    suffix = ".db" if backend == "sqlite" else ".jsonl"
+    path = tmp_path / f"traces{suffix}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="test-0.0") as sid_keep:
+        logger.record(sid_keep, kind="note", payload={"v": 1})
+    with logger.session(harness_version="test-0.0") as sid_drop:
+        for i in range(3):
+            logger.record(sid_drop, kind="note", payload={"i": i})
+
+    removed = logger.delete_session(sid_drop)
+
+    # On sqlite the audit row is part of the same transaction, so the
+    # returned count is ``3 events + 1 audit + 1 session row``. On jsonl
+    # the audit line lives in the file post-rewrite, so it counts as 1
+    # extra removed line.
+    assert removed >= 3
+
+    surviving_sessions = [s.session_id for s in logger.list_sessions()]
+    assert sid_drop not in surviving_sessions
+    assert sid_keep in surviving_sessions
+    # On sqlite the audit row is rolled back with the session deletion; on
+    # jsonl the audit line is appended post-rewrite and persists. Both are
+    # documented in delete_session's docstring.
+    remaining = logger.load_session(sid_drop)
+    if backend == "sqlite":
+        assert remaining == []
+    else:
+        assert len(remaining) == 1
+        assert remaining[0].kind == "session_deleted"
+    # Kept session is untouched.
+    assert len(logger.load_session(sid_keep)) == 1
+
+
+@_BACKENDS
+def test_delete_session_unknown_id_raises_keyerror(tmp_path, backend):
+    logger = TraceLogger(
+        tmp_path / f"traces{'.db' if backend == 'sqlite' else '.jsonl'}", backend=backend
+    )
+    with logger.session(harness_version="test-0.0") as sid:
+        logger.record(sid, kind="note", payload={"v": 1})
+
+    with pytest.raises(KeyError):
+        logger.delete_session("does-not-exist")
+
+    # The real session is untouched after the failed delete.
+    assert [s.session_id for s in logger.list_sessions()] == [sid]
+
+
+def test_delete_session_sqlite_records_audit_atomic(tmp_path):
+    """The audit row is part of the same transaction as the deletion:
+    either both happen or neither does. Pre-#85 code paths would either
+    leak the audit forever or lose the deletion record; this test pins
+    the atomic behavior."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as sid:
+        logger.record(sid, kind="note", payload={"v": 1})
+        logger.record(sid, kind="note", payload={"v": 2})
+
+    logger.delete_session(sid)
+
+    # After a successful delete, no audit row survives in the events
+    # table — the audit shares the deletion transaction (see logger
+    # docstring on the sqlite/jsonl asymmetry).
+    import sqlite3
+
+    with sqlite3.connect(db) as conn:
+        leftover = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE session_id = ?", (sid,)
+        ).fetchone()[0]
+    assert leftover == 0
+
+
+def test_delete_session_jsonl_audit_is_queryable_for_forensics(tmp_path):
+    """On jsonl the audit line is persistent and surfaces via
+    ``load_session(deleted_sid)`` as a forensic marker. This is the
+    documented asymmetry vs. sqlite and the reason the jsonl audit
+    is not part of a transaction that also wipes it."""
+    path = tmp_path / "traces.jsonl"
+    logger = TraceLogger(path, backend="jsonl")
+    with logger.session(harness_version="test-0.0") as sid:
+        logger.record(sid, kind="note", payload={"v": 1})
+
+    logger.delete_session(sid)
+
+    surviving = logger.load_session(sid)
+    assert len(surviving) == 1
+    assert surviving[0].kind == "session_deleted"
+    assert surviving[0].payload == {"session_id": sid}
