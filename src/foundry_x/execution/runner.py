@@ -25,11 +25,13 @@ from foundry_x.execution.model_adapter import (
     ModelAdapter,
     ModelMessage,
     ModelResponse,
+    ModelRetryEvent,
     ModelToolCall,
     OpenAICompatibleAdapter,
     ToolCallFunction,
     ToolDefinition,
     ToolFunctionSchema,
+    resolve_adapter_max_retries,
 )
 from foundry_x.trace.logger import TraceLogger
 
@@ -245,6 +247,7 @@ def build_model_adapter(env: dict[str, str] | None = None) -> OpenAICompatibleAd
         model=_resolve_model_request_name(source),
         api_key=api_key or None,
         timeout=_resolve_request_timeout(source),
+        max_retries=resolve_adapter_max_retries(source),
     )
 
 
@@ -706,6 +709,19 @@ async def run_task(
     ]
     created_adapter = model_adapter is None
     adapter = model_adapter or build_model_adapter()
+
+    # Wire retry trace events (issue #200). Only `OpenAICompatibleAdapter`
+    # has retry logic; injected fakes / stubs are left untouched.
+    if isinstance(adapter, OpenAICompatibleAdapter):
+
+        def _on_retry(event: ModelRetryEvent, _sid: str = session_id) -> None:
+            log.record(
+                _sid,
+                kind="model_retry",
+                payload=event.model_dump(),
+            )
+
+        adapter.on_retry = _on_retry
 
     registry = _resolve_hook_registry()
     hook_call_cls, hook_result_cls = _import_hook_types()
