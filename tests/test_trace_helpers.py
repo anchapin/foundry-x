@@ -13,15 +13,22 @@ Acceptance from the issue body:
   value back.
 
 Both helpers operate on both the sqlite and jsonl backends.
+
+Issue #193 extends this with regression coverage for multi-event
+sessions: 50 events across three sessions, out-of-range redaction that
+must NOT rewrite the store, and timestamp ordering preserved across
+redaction. Same scenarios run against both backends so the rewrite
+paths stay in lock-step.
 """
 
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
-from foundry_x.trace.logger import TraceLogger
+from foundry_x.trace.logger import TraceLogger, TraceEvent
 
 _BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
 
@@ -167,3 +174,260 @@ def test_delete_session_on_empty_store_returns_true(tmp_path, backend):
     path = tmp_path / f"traces{_suffix(backend)}"
     logger = TraceLogger(path, backend=backend)
     assert logger.delete_session("anything") is True
+
+
+# --- Issue #193: multi-event redact_event regression coverage -----------------
+# The single-event tests above exercise redact_event against a one-event
+# session. Production sessions carry tens of events interleaved across
+# kinds and sessions. The jsonl backend rewrites the whole file on every
+# redact (logger.py:603-631) so the corner cases -- wrong event_index
+# ordering, ordering-stable output after rewrite, foreign session_id rows
+# preserved -- need an explicit multi-event regression.
+
+
+def _raw_payload_bytes_sqlite(path, session_id: str) -> dict[str, bytes]:
+    """Return ``{event_id: raw_payload_text_bytes}`` for the session.
+
+    The redact path targets ``events.payload`` as a single TEXT column;
+    byte-stability of a survivor means this column is byte-equal to its
+    pre-redact value. Loading via ``load_session`` and re-serializing
+    would re-canonicalize whitespace and key order, so we read the raw
+    TEXT instead.
+    """
+    out: dict[str, bytes] = {}
+    with sqlite3.connect(path) as conn:
+        for event_id, payload_text in conn.execute(
+            "SELECT event_id, payload FROM events WHERE session_id = ?",
+            (session_id,),
+        ).fetchall():
+            out[event_id] = payload_text.encode("utf-8")
+    return out
+
+
+def _raw_event_lines_jsonl(path) -> dict[str, bytes]:
+    """Return ``{event_id: line_bytes}`` from the jsonl trace file.
+
+    Each event in a jsonl backend occupies one line. Byte-stability of
+    a survivor means the entire line (including the trailing newline)
+    is unchanged. Markers (``session_start`` / ``session_end``) are
+    excluded because they have no ``event_id``.
+    """
+    out: dict[str, bytes] = {}
+    raw = path.read_bytes().splitlines(keepends=True)
+    for line in raw:
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        event_id = record.get("event_id")
+        if event_id is None:
+            continue
+        out[event_id] = line
+    return out
+
+
+def _plant_three_sessions(
+    logger: TraceLogger, plan: list[tuple[str, int]]
+) -> tuple[list[str], list[TraceEvent]]:
+    """Plant ``plan`` events per session and return ``(session_ids, flat_events)``.
+
+    Each event carries a payload whose ``secret`` field is unique per
+    event so we can verify byte-level stability later. The session
+    markers emitted by ``logger.session()`` are part of the jsonl file
+    but are not events.
+    """
+    sids: list[str] = []
+    flat: list[TraceEvent] = []
+    for label, count in plan:
+        with logger.session(harness_version="0.1.0") as sid:
+            sids.append(sid)
+            for i in range(count):
+                ev = logger.record(
+                    sid,
+                    kind="tool_call" if i % 2 == 0 else "tool_result",
+                    payload={
+                        "label": label,
+                        "i": i,
+                        # Distinct value per event -- lets a survivor-vs-redacted
+                        # confusion show up as a string mismatch.
+                        "secret": f"sk-{label}{i:03d}abcdef",
+                    },
+                )
+                flat.append(ev)
+    return sids, flat
+
+
+@_BACKENDS
+def test_redact_event_preserves_byte_stability_of_survivors(tmp_path, backend):
+    """50 events across three sessions; redacting one leaves the other 49
+    events byte-stable in their underlying representation.
+
+    - jsonl: every surviving event line (including the trailing newline)
+      is byte-identical to its pre-redact counterpart. Foreign-session
+      rows are also byte-stable -- the rewrite path must not touch them.
+    - sqlite: every surviving row's ``payload`` TEXT column is byte-
+      identical to its pre-redact value.
+    """
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    plan = [("a", 18), ("b", 17), ("c", 15)]
+    sids, flat = _plant_three_sessions(logger, plan)
+    assert len(flat) == 50
+
+    # Capture pre-redact raw bytes per event
+    if backend == "jsonl":
+        pre_bytes = _raw_event_lines_jsonl(path)
+    else:
+        pre_bytes_per_session = {sid: _raw_payload_bytes_sqlite(path, sid) for sid in sids}
+        pre_bytes = {eid: b for d in pre_bytes_per_session.values() for eid, b in d.items()}
+    assert len(pre_bytes) == 50
+
+    # Redact one event in the middle of session B
+    target_session = sids[1]
+    target_index_in_session = 8
+    target_event = [e for e in flat if e.session_id == target_session][target_index_in_session]
+    assert (
+        logger.redact_event(target_session, event_index=target_index_in_session, key="secret")
+        is True
+    )
+
+    # Capture post-redact raw bytes
+    if backend == "jsonl":
+        post_bytes = _raw_event_lines_jsonl(path)
+    else:
+        post_bytes_per_session = {sid: _raw_payload_bytes_sqlite(path, sid) for sid in sids}
+        post_bytes = {eid: b for d in post_bytes_per_session.values() for eid, b in d.items()}
+    assert len(post_bytes) == 50
+
+    redacted_ids = {target_event.event_id}
+    surviving_ids = set(pre_bytes) - redacted_ids
+    assert len(surviving_ids) == 49
+
+    # Every survivor is byte-stable: same event_id set, same byte payload.
+    assert set(post_bytes) == set(pre_bytes)
+    for eid in surviving_ids:
+        assert post_bytes[eid] == pre_bytes[eid], (
+            f"survivor event {eid} changed bytes during redact: "
+            f"{pre_bytes[eid]!r} -> {post_bytes[eid]!r}"
+        )
+
+    # The redacted event itself was rewritten (its payload changed).
+    assert post_bytes[target_event.event_id] != pre_bytes[target_event.event_id]
+    if backend == "jsonl":
+        redacted_record = json.loads(post_bytes[target_event.event_id].decode("utf-8"))
+        assert redacted_record["payload"]["secret"] == "[REDACTED]"
+    else:
+        # sqlite stores the payload dict as JSON TEXT in the ``events.payload``
+        # column directly, so the post-redact bytes are the payload itself.
+        redacted_payload = json.loads(post_bytes[target_event.event_id].decode("utf-8"))
+        assert redacted_payload["secret"] == "[REDACTED]"
+
+    # And the parsed view confirms only that key was rewritten.
+    redacted_events = list(logger.load_session(target_session))
+    redacted_event = next(e for e in redacted_events if e.event_id == target_event.event_id)
+    assert redacted_event.payload["secret"] == "[REDACTED]"
+    assert redacted_event.payload["label"] == target_event.payload["label"]
+    assert redacted_event.payload["i"] == target_event.payload["i"]
+    assert redacted_event.event_id == target_event.event_id
+    assert redacted_event.timestamp == target_event.timestamp
+
+
+@_BACKENDS
+def test_redact_event_out_of_range_does_not_rewrite_store(tmp_path, backend):
+    """In a multi-event session, an out-of-range ``event_index`` returns
+    ``False`` and leaves the underlying store unchanged.
+
+    - jsonl: the file's bytes are identical before and after the call.
+    - sqlite: every row's ``payload`` TEXT is identical before and after.
+    """
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="0.1.0") as sid:
+        for i in range(20):
+            logger.record(
+                sid,
+                kind="user_prompt",
+                payload={"i": i, "msg": f"hello-{i:02d}"},
+            )
+
+    pre_events = list(logger.load_session(sid))
+    assert len(pre_events) == 20
+    if backend == "jsonl":
+        pre_file_bytes = path.read_bytes()
+        pre_line_bytes = _raw_event_lines_jsonl(path)
+    else:
+        pre_payload_bytes = _raw_payload_bytes_sqlite(path, sid)
+
+    # Indices that must all be rejected without a rewrite.
+    assert logger.redact_event(sid, event_index=99, key="msg") is False
+    assert logger.redact_event(sid, event_index=20, key="msg") is False
+    assert logger.redact_event(sid, event_index=-1, key="msg") is False
+
+    if backend == "jsonl":
+        post_file_bytes = path.read_bytes()
+        post_line_bytes = _raw_event_lines_jsonl(path)
+        # File must be byte-identical: a no-op redact must not touch disk.
+        assert post_file_bytes == pre_file_bytes, "jsonl file was rewritten despite no-op redact"
+        assert post_line_bytes == pre_line_bytes
+    else:
+        post_payload_bytes = _raw_payload_bytes_sqlite(path, sid)
+        assert post_payload_bytes == pre_payload_bytes
+
+    # And the parsed view is unchanged too -- a sanity check on top of the
+    # byte-level check, in case a future refactor introduces a no-op write
+    # that happens to round-trip.
+    post_events = list(logger.load_session(sid))
+    assert post_events == pre_events
+
+
+@_BACKENDS
+def test_redact_event_preserves_timestamp_ordering(tmp_path, backend):
+    """After redacting several events, ``load_session`` returns the same
+    events in the same order: same ``event_id`` at each position, same
+    timestamp at each position. Ordering is part of the contract -- the
+    jsonl rewrite path sorts lines by timestamp to recover the original
+    order, and the sqlite path orders by timestamp in SQL.
+    """
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="0.1.0") as sid:
+        for i in range(20):
+            logger.record(
+                sid,
+                kind="tool_call",
+                payload={"i": i, "secret": f"sk-pre{i:04d}xx"},
+            )
+
+    pre_events = list(logger.load_session(sid))
+    pre_ids = [e.event_id for e in pre_events]
+    pre_timestamps = [e.timestamp for e in pre_events]
+    pre_payloads = [e.payload for e in pre_events]
+    # Sanity: timestamps are already non-decreasing on insertion.
+    assert pre_timestamps == sorted(pre_timestamps)
+
+    # Redact three non-adjacent events spread across the session.
+    redacted_indices = [3, 9, 15]
+    for idx in redacted_indices:
+        assert logger.redact_event(sid, event_index=idx, key="secret") is True
+
+    post_events = list(logger.load_session(sid))
+    post_ids = [e.event_id for e in post_events]
+    post_timestamps = [e.timestamp for e in post_events]
+
+    # Same events at each position, same timestamps, same order.
+    assert post_ids == pre_ids
+    assert post_timestamps == pre_timestamps
+    # Timestamp sequence is still non-decreasing after the rewrite.
+    assert post_timestamps == sorted(post_timestamps)
+
+    # Only the targeted positions got their payload rewritten.
+    for idx, post in enumerate(post_events):
+        if idx in redacted_indices:
+            assert post.payload["secret"] == "[REDACTED]"
+            assert pre_payloads[idx]["secret"] != "[REDACTED]"
+            # Other payload keys untouched.
+            assert post.payload["i"] == pre_payloads[idx]["i"]
+        else:
+            assert post.payload == pre_payloads[idx], (
+                f"non-redacted event at index {idx} changed payload: "
+                f"{pre_payloads[idx]} -> {post.payload}"
+            )
