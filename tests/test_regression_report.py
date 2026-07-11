@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+
 from foundry_x.evolution.critic import CriticVerdict
 from foundry_x.observability.regression_report import (
+    analyze_regressions,
     generate_regression_report,
     record_verdict,
 )
@@ -249,3 +252,152 @@ def test_cli_regression_report_without_fail_flag_does_not_gate_exit(tmp_path):
 
     rc = cli_main(["regression-report", "--db", str(db)])
     assert rc == 0
+
+
+def _plant_mixed_sessions(logger: TraceLogger) -> tuple[str, str, str]:
+    """Plant 3 sessions with two distinct tasks (issue #182 fixture).
+
+    Returns ``(sid_a, sid_b, sid_c)``.
+
+    - session A: ``task-A`` passes, ``task-B`` fails (baseline)
+    - session B: ``task-A`` regresses (now failing), ``task-B`` now passes
+    - session C: ``task-A`` recovers (new pass), ``task-B`` regresses again
+    """
+    sid_a, sid_b, sid_c = _three_sessions(logger)
+    record_verdict(
+        logger,
+        sid_a,
+        CriticVerdict(approved=False, passed_checks=["task-A"], failed_checks=["task-B"]),
+    )
+    record_verdict(
+        logger,
+        sid_b,
+        CriticVerdict(approved=False, failed_checks=["task-A"], passed_checks=["task-B"]),
+    )
+    record_verdict(
+        logger,
+        sid_c,
+        CriticVerdict(approved=False, passed_checks=["task-A"], failed_checks=["task-B"]),
+    )
+    return sid_a, sid_b, sid_c
+
+
+def test_analyze_regressions_filters_by_task(tmp_path):
+    logger = TraceLogger(tmp_path / "traces.db")
+    sid_a, sid_b, sid_c = _plant_mixed_sessions(logger)
+
+    full = analyze_regressions(logger)
+    assert {r.task for r in full.regressions} == {"task-A", "task-B"}
+    assert {p.task for p in full.new_passes} == {"task-A", "task-B"}
+
+    only_a = analyze_regressions(logger, task="task-A")
+    assert {r.task for r in only_a.regressions} == {"task-A"}
+    assert {p.task for p in only_a.new_passes} == {"task-A"}
+    # Summary counts stay at the full population (issue #182).
+    assert only_a.total == full.total == 3
+    assert only_a.approvals == 0
+    assert only_a.rejections == 3
+
+    only_b = analyze_regressions(logger, task="task-B")
+    assert {r.task for r in only_b.regressions} == {"task-B"}
+    assert {p.task for p in only_b.new_passes} == {"task-B"}
+
+    report = generate_regression_report(logger, task="task-A")
+    regressed_a = _section(report, "Regressed Tasks")
+    assert "task-A" in regressed_a
+    assert "task-B" not in regressed_a
+    new_passes_a = _section(report, "New Passes")
+    assert "task-A" in new_passes_a
+    assert "task-B" not in new_passes_a
+
+
+def test_analyze_regressions_task_with_no_matches_returns_no_rows_message(tmp_path):
+    logger = TraceLogger(tmp_path / "traces.db")
+    _plant_mixed_sessions(logger)
+
+    report = generate_regression_report(logger, task="does-not-exist")
+    assert report == "no rows for task does-not-exist\n"
+
+
+def test_cli_regression_report_task_filter_markdown(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions(logger)
+
+    rc = cli_main(["regression-report", "--db", str(db), "--task", "task-A"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "## Regressed Tasks" in captured.out
+    assert "task-A" in captured.out
+    assert "task-B" not in captured.out
+    assert "## New Passes" in captured.out
+
+
+def test_cli_regression_report_task_filter_json(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions(logger)
+
+    rc = cli_main(
+        [
+            "regression-report",
+            "--db",
+            str(db),
+            "--task",
+            "task-A",
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert payload["total"] == 3
+    assert payload["approvals"] == 0
+    assert payload["rejections"] == 3
+    assert {row["task"] for row in payload["regressions"]} == {"task-A"}
+    assert {row["task"] for row in payload["new_passes"]} == {"task-A"}
+
+
+def test_cli_regression_report_task_filter_no_match(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions(logger)
+
+    rc = cli_main(
+        [
+            "regression-report",
+            "--db",
+            str(db),
+            "--task",
+            "does-not-exist",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out == "no rows for task does-not-exist\n"
+
+
+def test_cli_regression_report_without_task_keeps_full_population(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions(logger)
+
+    rc = cli_main(["regression-report", "--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "task-A" in captured.out
+    assert "task-B" in captured.out
+
+
+def test_cli_regression_report_format_json_unfiltered(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions(logger)
+
+    rc = cli_main(["regression-report", "--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert {row["task"] for row in payload["regressions"]} == {"task-A", "task-B"}
+    assert {row["task"] for row in payload["new_passes"]} == {"task-A", "task-B"}
