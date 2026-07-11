@@ -83,12 +83,34 @@ class ModelRequest(BaseModel):
         return _JSON_OBJECT_ADAPTER.validate_python(payload)
 
 
+class ModelUsage(BaseModel):
+    """Token-usage accounting carried in a chat-completion response (issue #197).
+
+    All three counters default to ``0`` rather than being required so an
+    OpenAI-compatible endpoint that omits (for example) ``prompt_tokens``
+    still parses into a usable object — the runner only reads
+    ``usage.total_tokens`` to enforce ``FOUNDRY_TOKEN_BUDGET``, and a
+    missing token field is conservatively counted as zero (ADR-0006
+    pydantic discipline: a real ``0`` is preferable to a ``None`` that
+    would force every consumer to gate on ``is None``).
+
+    The shape mirrors the OpenAI-compatible ``usage`` object
+    (``prompt_tokens`` / ``completion_tokens`` / ``total_tokens``) so
+    wire-format JSON can be parsed without reshaping.
+    """
+
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+
+
 class ModelResponse(BaseModel):
     """Normalized non-streaming response returned by a ModelAdapter."""
 
     message: ModelMessage
     tool_calls: list[ModelToolCall] = Field(default_factory=list)
     finish_reason: str | None = None
+    usage: ModelUsage | None = None
 
 
 class ToolCallFunctionChunk(BaseModel):
@@ -117,6 +139,7 @@ class ModelResponseChunk(BaseModel):
     content: str | None = None
     tool_calls: list[ModelToolCallChunk] = Field(default_factory=list)
     finish_reason: str | None = None
+    usage: ModelUsage | None = None
 
 
 class _OpenAIChoice(BaseModel):
@@ -130,6 +153,7 @@ class _OpenAIChatCompletionResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     choices: list[_OpenAIChoice] = Field(min_length=1)
+    usage: ModelUsage | None = None
 
 
 class _OpenAIStreamDelta(BaseModel):
@@ -149,7 +173,8 @@ class _OpenAIStreamChoice(BaseModel):
 class _OpenAIChatCompletionChunk(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    choices: list[_OpenAIStreamChoice] = Field(min_length=1)
+    choices: list[_OpenAIStreamChoice] = Field(default_factory=list)
+    usage: ModelUsage | None = None
 
 
 class ModelAdapterError(RuntimeError):
@@ -366,6 +391,7 @@ def _parse_completion_response(data: JsonObject) -> ModelResponse:
         message=choice.message,
         tool_calls=choice.message.tool_calls or [],
         finish_reason=choice.finish_reason,
+        usage=parsed.usage,
     )
 
 
@@ -383,10 +409,19 @@ def _parse_sse_line(line: str) -> ModelResponseChunk | None:
         parsed = _OpenAIChatCompletionChunk.model_validate(data)
     except ValueError as exc:
         raise ModelAdapterResponseError("stream chunk did not match chat schema") from exc
-    choice = parsed.choices[0]
-    delta = choice.delta or _OpenAIStreamDelta()
-    return ModelResponseChunk(
-        content=delta.content,
-        tool_calls=delta.tool_calls or [],
-        finish_reason=choice.finish_reason,
-    )
+    if parsed.choices:
+        choice = parsed.choices[0]
+        delta = choice.delta or _OpenAIStreamDelta()
+        return ModelResponseChunk(
+            content=delta.content,
+            tool_calls=delta.tool_calls or [],
+            finish_reason=choice.finish_reason,
+            usage=parsed.usage,
+        )
+    # Usage-only chunk (empty ``choices``): OpenAI-compatible servers emit a
+    # terminal chunk carrying just the top-level ``usage`` object when
+    # ``stream_options.include_usage`` is set. Forward it so the runner can
+    # accumulate ``total_tokens`` against ``FOUNDRY_TOKEN_BUDGET`` (issue #197).
+    if parsed.usage is not None:
+        return ModelResponseChunk(usage=parsed.usage)
+    return None
