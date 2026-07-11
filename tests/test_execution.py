@@ -41,8 +41,11 @@ from foundry_x.execution.harness_layout import (
 from foundry_x.execution.model_adapter import (
     ModelMessage,
     ModelResponse,
+    ModelResponseChunk,
     ModelToolCall,
+    ModelToolCallChunk,
     ToolCallFunction,
+    ToolCallFunctionChunk,
 )
 from foundry_x.execution.runner import DEFAULT_TASK_TIMEOUT_S, main, run_task
 from foundry_x.trace.logger import TraceLogger
@@ -433,8 +436,25 @@ def test_run_task_records_tool_call_duration_ms(tmp_path):
             return await self.complete(messages, tools, **kwargs)
 
         async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
-            if False:
-                yield None
+            response = await self.complete(messages, tools, **kwargs)
+            if response.message.content:
+                yield ModelResponseChunk(content=response.message.content)
+            for i, tc in enumerate(response.tool_calls):
+                yield ModelResponseChunk(
+                    tool_calls=[
+                        ModelToolCallChunk(
+                            index=i,
+                            id=tc.id,
+                            type=tc.type,
+                            function=ToolCallFunctionChunk(
+                                name=tc.function.name,
+                                arguments=tc.function.arguments,
+                            ),
+                        )
+                    ]
+                )
+            if response.finish_reason:
+                yield ModelResponseChunk(finish_reason=response.finish_reason)
 
     async def executor(name, arguments):  # noqa: ANN001, ARG001
         return {"status": "ok"}

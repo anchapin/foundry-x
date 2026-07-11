@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
 
 import httpx
 import pytest
@@ -16,7 +15,9 @@ from foundry_x.execution.model_adapter import (
     ModelRequest,
     ModelResponse,
     ModelResponseChunk,
+    ModelToolCallChunk,
     OpenAICompatibleAdapter,
+    ToolCallFunctionChunk,
     ToolDefinition,
     ToolFunctionSchema,
 )
@@ -45,9 +46,26 @@ class FakeAdapter:
     async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
         return await self.complete(messages, tools, **kwargs)
 
-    async def stream(self, messages, tools=None, **kwargs) -> AsyncIterator[ModelResponseChunk]:  # noqa: ANN001, ARG002
-        if False:
-            yield ModelResponseChunk()
+    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+        response = await self.complete(messages, tools, **kwargs)
+        if response.message.content:
+            yield ModelResponseChunk(content=response.message.content)
+        for i, tc in enumerate(response.tool_calls):
+            yield ModelResponseChunk(
+                tool_calls=[
+                    ModelToolCallChunk(
+                        index=i,
+                        id=tc.id,
+                        type=tc.type,
+                        function=ToolCallFunctionChunk(
+                            name=tc.function.name,
+                            arguments=tc.function.arguments,
+                        ),
+                    )
+                ]
+            )
+        if response.finish_reason:
+            yield ModelResponseChunk(finish_reason=response.finish_reason)
 
 
 @pytest.mark.asyncio
@@ -85,19 +103,53 @@ async def test_run_task_calls_injected_adapter_and_records_trace(tmp_path):
     # Issue #89 / ADR-0009: run_task now brackets the round-trip with a
     # ``user_prompt`` marker at entry and an ``outcome`` marker at exit;
     # the round-trip event kinds (model_request/model_response) keep their
-    # position in the middle.
-    assert kinds == [
-        "user_prompt",
-        "model_request",
-        "model_response",
-        "outcome",
-    ]
-    assert events[2].payload["message"]["content"] == "runner response"
-    assert events[3].payload == {
-        "status": "success",
-        "reason": "final_answer",
-        "steps": 1,
-    }
+    # position in the middle. Issue #199 inserts at least one
+    # ``model_response_chunk`` event between the request and the terminal
+    # response (the stub adapter yields one content chunk + one
+    # finish_reason chunk per round-trip).
+    assert kinds[0] == "user_prompt"
+    assert kinds[-1] == "outcome"
+    assert kinds.count("model_request") == 1
+    assert kinds.count("model_response") == 1
+    chunk_idxs = [i for i, k in enumerate(kinds) if k == "model_response_chunk"]
+    assert len(chunk_idxs) >= 1
+    request_idx = kinds.index("model_request")
+    response_idx = kinds.index("model_response")
+    for ci in chunk_idxs:
+        assert request_idx < ci < response_idx, (
+            f"chunk event at {ci} must be between model_request {request_idx} "
+            f"and model_response {response_idx}"
+        )
+    response_event = next(event for event in events if event.kind == "model_response")
+    assert response_event.payload["message"]["content"] == "runner response"
+    # Issue #199: model_response carries time_to_first_token_ms and chunk_count.
+    assert "time_to_first_token_ms" in response_event.payload
+    assert "chunk_count" in response_event.payload
+    assert response_event.payload["chunk_count"] >= 1
+    chunk_event = next(event for event in events if event.kind == "model_response_chunk")
+    assert chunk_event.payload["delta_index"] == 0
+    assert chunk_event.payload["content_so_far"] == "runner response"
+    assert chunk_event.payload["chunk_duration_ms"] >= 0
+    outcome_event = next(event for event in events if event.kind == "outcome")
+    assert outcome_event.payload["status"] == "success"
+    assert outcome_event.payload["reason"] == "final_answer"
+    assert outcome_event.payload["steps"] == 1
+    # Issue #199: outcome event also carries ttft_ms (p50 across turns).
+    assert "ttft_ms" in outcome_event.payload
+    assert outcome_event.payload["ttft_ms"] >= 0
+    assert "chunk_count" in response_event.payload
+    assert response_event.payload["chunk_count"] >= 1
+    chunk_event = next(event for event in events if event.kind == "model_response_chunk")
+    assert chunk_event.payload["delta_index"] == 0
+    assert chunk_event.payload["content_so_far"] == "runner response"
+    assert chunk_event.payload["chunk_duration_ms"] >= 0
+    outcome_event = next(event for event in events if event.kind == "outcome")
+    assert outcome_event.payload["status"] == "success"
+    assert outcome_event.payload["reason"] == "final_answer"
+    assert outcome_event.payload["steps"] == 1
+    # Issue #199: outcome event also carries ttft_ms (p50 across turns).
+    assert "ttft_ms" in outcome_event.payload
+    assert outcome_event.payload["ttft_ms"] >= 0
 
 
 @pytest.mark.asyncio

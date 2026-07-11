@@ -5,10 +5,12 @@ import asyncio
 import json
 import math
 import os
+import statistics
 import subprocess
 import sys
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -22,7 +24,10 @@ from foundry_x.execution.harness_layout import (
 from foundry_x.execution.model_adapter import (
     ModelAdapter,
     ModelMessage,
+    ModelResponse,
+    ModelToolCall,
     OpenAICompatibleAdapter,
+    ToolCallFunction,
     ToolDefinition,
     ToolFunctionSchema,
 )
@@ -100,6 +105,35 @@ _DEFAULT_REQUEST_TIMEOUT_S: float = 30.0
 # call (issue #104 declared the JSON contract; the actual subprocess.run-
 # backed hook lands in a follow-up PR so the Critic can gate it independently).
 SkillExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
+
+
+class ModelResponseChunkEvent(BaseModel):
+    """Trace event payload emitted per SSE delta during streaming (#199).
+
+    Emitted for each chunk from ``adapter.stream()`` so a KPI consumer can
+    split "model latency" (time-to-first-token) from "network latency"
+    (inter-chunk gaps) without waiting for the terminal ``model_response``.
+    """
+
+    step: int = Field(description="Agent-loop step index (0-based).")
+    delta_index: int = Field(description="Zero-based chunk ordinal within this step.")
+    content_so_far: str = Field(
+        description="Concatenated assistant content up to and including this delta.",
+    )
+    chunk_duration_ms: int = Field(
+        description="Wall-clock milliseconds since the previous chunk "
+        "(or stream start for delta_index 0).",
+    )
+
+
+@dataclass
+class _StreamingToolCallAccumulator:
+    """Accumulates partial tool-call deltas indexed by stream position."""
+
+    id: str | None = None
+    type: str | None = None
+    name: str | None = None
+    arguments: str = ""
 
 
 def resolve_trace_backend(env: dict[str, str] | None = None) -> str:
@@ -512,6 +546,119 @@ def _serialize_tool_result(result: Any) -> str:
     return json.dumps(payload, default=str)
 
 
+def _assemble_streamed_response(
+    content_parts: list[str],
+    tool_call_acc: dict[int, _StreamingToolCallAccumulator],
+    finish_reason: str | None,
+) -> ModelResponse:
+    """Reconstruct a :class:`ModelResponse` from accumulated streaming deltas.
+
+    OpenAI-compatible streaming sends tool-call arguments as incremental
+    fragments keyed by a delta ``index``; this function reassembles them
+    into complete :class:`ModelToolCall` objects the agent loop can execute.
+    Content deltas are concatenated verbatim. A delta set with neither
+    ``id`` nor ``name`` is treated as noise (some servers emit placeholder
+    indexes) and dropped rather than producing a half-formed call that
+    would crash the executor.
+    """
+    tool_calls: list[ModelToolCall] = []
+    for idx in sorted(tool_call_acc):
+        acc = tool_call_acc[idx]
+        if acc.id and acc.name:
+            tool_calls.append(
+                ModelToolCall(
+                    id=acc.id,
+                    type="function",
+                    function=ToolCallFunction(
+                        name=acc.name,
+                        arguments=acc.arguments,
+                    ),
+                )
+            )
+    content = "".join(content_parts) or None
+    message = ModelMessage(
+        role="assistant",
+        content=content,
+        tool_calls=tool_calls or None,
+    )
+    return ModelResponse(
+        message=message,
+        tool_calls=tool_calls,
+        finish_reason=finish_reason,
+    )
+
+
+async def _consume_model_stream(
+    adapter: ModelAdapter,
+    messages: list[ModelMessage],
+    tools: list[ToolDefinition],
+    log: TraceLogger,
+    session_id: str,
+    step: int,
+) -> tuple[ModelResponse, int | None, int]:
+    """Consume ``adapter.stream()``, emit per-chunk trace events (issue #199).
+
+    For every SSE delta a ``model_response_chunk`` trace event is recorded
+    carrying ``delta_index``, ``content_so_far``, and ``chunk_duration_ms``
+    so a KPI consumer can observe model latency as it happens rather than
+    only at the terminal ``model_response``.
+
+    Returns ``(assembled_response, time_to_first_token_ms, chunk_count)``.
+    ``time_to_first_token_ms`` is measured from stream start to the first
+    delta carrying content or a tool-call fragment; it is ``None`` when the
+    stream produced no payload deltas.
+    """
+    stream_start = time.monotonic()
+    content_parts: list[str] = []
+    tool_call_acc: dict[int, _StreamingToolCallAccumulator] = {}
+    finish_reason: str | None = None
+    delta_index = 0
+    ttft_ms: int | None = None
+    prev_time = stream_start
+
+    async for chunk in adapter.stream(messages=messages, tools=tools):
+        now = time.monotonic()
+        chunk_duration_ms = int((now - prev_time) * 1000)
+        prev_time = now
+
+        if ttft_ms is None and (chunk.content or chunk.tool_calls):
+            ttft_ms = int((now - stream_start) * 1000)
+
+        if chunk.content:
+            content_parts.append(chunk.content)
+
+        for tc_chunk in chunk.tool_calls:
+            idx = tc_chunk.index if tc_chunk.index is not None else 0
+            acc = tool_call_acc.setdefault(idx, _StreamingToolCallAccumulator())
+            if tc_chunk.id:
+                acc.id = tc_chunk.id
+            if tc_chunk.type:
+                acc.type = tc_chunk.type
+            if tc_chunk.function:
+                if tc_chunk.function.name:
+                    acc.name = tc_chunk.function.name
+                if tc_chunk.function.arguments:
+                    acc.arguments += tc_chunk.function.arguments
+
+        if chunk.finish_reason:
+            finish_reason = chunk.finish_reason
+
+        log.record(
+            session_id,
+            kind="model_response_chunk",
+            payload=ModelResponseChunkEvent(
+                step=step,
+                delta_index=delta_index,
+                content_so_far="".join(content_parts),
+                chunk_duration_ms=chunk_duration_ms,
+            ).model_dump(),
+        )
+        delta_index += 1
+
+    response = _assemble_streamed_response(content_parts, tool_call_acc, finish_reason)
+    return response, ttft_ms, delta_index
+
+
 async def run_task(
     task: str,
     harness_dir: Path,
@@ -575,6 +722,7 @@ async def run_task(
     outcome_status = "success"
     outcome_reason = "final_answer"
     outcome_steps = 0
+    turn_ttfts: list[int] = []
 
     try:
         for step in range(max_steps):
@@ -589,7 +737,9 @@ async def run_task(
                 },
             )
             try:
-                response = await adapter.complete(messages=messages, tools=tool_definitions)
+                response, ttft_ms, chunk_count = await _consume_model_stream(
+                    adapter, messages, tool_definitions, log, session_id, step
+                )
             except Exception as exc:
                 outcome_status = "failed"
                 outcome_reason = "model_error"
@@ -604,6 +754,9 @@ async def run_task(
                 )
                 raise
 
+            if ttft_ms is not None:
+                turn_ttfts.append(ttft_ms)
+
             log.record(
                 session_id,
                 kind="model_response",
@@ -612,6 +765,8 @@ async def run_task(
                     "finish_reason": response.finish_reason,
                     "message": response.message.model_dump(mode="json", exclude_none=True),
                     "tool_calls": [call.model_dump(mode="json") for call in response.tool_calls],
+                    "time_to_first_token_ms": ttft_ms,
+                    "chunk_count": chunk_count,
                 },
             )
             messages.append(response.message)
@@ -681,6 +836,7 @@ async def run_task(
     finally:
         if created_adapter and isinstance(adapter, OpenAICompatibleAdapter):
             await adapter.aclose()
+        ttft_p50: int | None = int(statistics.median(turn_ttfts)) if turn_ttfts else None
         log.record(
             session_id,
             kind="outcome",
@@ -688,6 +844,7 @@ async def run_task(
                 "status": outcome_status,
                 "reason": outcome_reason,
                 "steps": outcome_steps,
+                "ttft_ms": ttft_p50,
             },
         )
 
@@ -743,7 +900,7 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
     except HarnessValidationError as exc:
         joined = ", ".join(exc.missing)
         print(
-            f"error: harness directory {exc.harness_dir} is missing required " f"entries: {joined}",
+            f"error: harness directory {exc.harness_dir} is missing required entries: {joined}",
             file=sys.stderr,
         )
         sys.exit(2)
