@@ -1,4 +1,4 @@
-"""Tests for the KPI computation and CLI (issue #39).
+"""Tests for the KPI computation and CLI (issues #39, #98, #101).
 
 Issue #98: verdicts are seeded through
 :func:`~foundry_x.observability.regression_report.record_verdict` so the tests
@@ -9,7 +9,10 @@ exercise the real persisted :class:`CriticVerdict` payload shape
 
 from __future__ import annotations
 
+import json
 import time
+
+import pytest
 
 from foundry_x.evolution.critic import CriticVerdict
 from foundry_x.observability.kpis import KpiSummary, compute_kpis, main
@@ -210,3 +213,90 @@ def test_main_omits_injection_block_section_when_clean(tmp_path, capsys):
     assert rc == 0
     # Compact output for a clean store — no extra section, no extra table.
     assert "Injection Blocked" not in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Issue #101: machine-readable JSON snapshot of the KPI summary.  The top-
+# level key set is the stable contract CI / dashboards depend on; the
+# pydantic round-trip guarantees the JSON shape matches KpiSummary.
+# ---------------------------------------------------------------------------
+
+
+def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", approved=True)
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    payload = json.loads(captured.out)
+    # Stable contract: every KpiSummary field is present at the top level
+    # so downstream tooling can `payload["cycle_time_seconds"]` etc.
+    assert set(payload.keys()) == {
+        "cycle_time_seconds",
+        "regression_rate",
+        "improvement_rate",
+        "injection_blocks",
+    }
+
+
+def test_main_json_round_trips_through_kpi_summary(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", approved=False, failed_checks=["task"])
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    parsed = KpiSummary.model_validate_json(captured.out)
+    assert parsed == compute_kpis(logger)
+
+
+def test_main_format_auto_detects_json_from_out_extension(tmp_path):
+    db = tmp_path / "traces.db"
+    out = tmp_path / "kpis.json"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", approved=True)
+
+    rc = main(["--db", str(db), "--out", str(out)])
+    assert rc == 0
+
+    assert out.exists()
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert "cycle_time_seconds" in payload
+    assert "regression_rate" in payload
+
+
+def test_main_explicit_markdown_format_overrides_json_extension(tmp_path):
+    db = tmp_path / "traces.db"
+    out = tmp_path / "anything.json"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", approved=True)
+
+    rc = main(["--db", str(db), "--format", "markdown", "--out", str(out)])
+    assert rc == 0
+
+    text = out.read_text(encoding="utf-8")
+    # Explicit --format wins over extension: Markdown table is written.
+    assert "Cycle Time" in text
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(text)
+
+
+def test_main_json_includes_injection_blocks_when_present(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    s1 = _seed_session(logger, "v1", approved=True, injection_block_count=2)
+    s2 = _seed_session(logger, "v1", approved=True, injection_block_count=1)
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert payload["injection_blocks"] == {s1: 2, s2: 1}
+    assert sum(payload["injection_blocks"].values()) == 3
