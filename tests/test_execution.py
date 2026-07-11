@@ -27,6 +27,8 @@ widen scope) this file ONLY adds tests; ``runner.py`` is untouched.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -36,7 +38,13 @@ from foundry_x.execution.harness_layout import (
     HarnessValidationError,
     validate as validate_harness_layout,
 )
-from foundry_x.execution.runner import main
+from foundry_x.execution.model_adapter import (
+    ModelMessage,
+    ModelResponse,
+    ModelToolCall,
+    ToolCallFunction,
+)
+from foundry_x.execution.runner import DEFAULT_TASK_TIMEOUT_S, main, run_task
 from foundry_x.trace.logger import TraceLogger
 
 
@@ -385,6 +393,73 @@ def test_run_task_fn_receives_logger_within_active_session(tmp_path, monkeypatch
     assert "tool_call" in kinds
     assert kinds.count("task_received") == 1
     assert kinds.count("task_completed") == 1
+
+
+def test_run_task_records_tool_call_duration_ms(tmp_path):
+    db = tmp_path / "traces.db"
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+    tool_call = ModelToolCall(
+        id="call_latency",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments=json.dumps({"command": "true"}),
+        ),
+    )
+
+    class Adapter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    message=ModelMessage(
+                        role="assistant",
+                        content=None,
+                        tool_calls=[tool_call],
+                    ),
+                    tool_calls=[tool_call],
+                    finish_reason="tool_calls",
+                )
+            return ModelResponse(
+                message=ModelMessage(role="assistant", content="done"),
+                finish_reason="stop",
+            )
+
+        async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+            return await self.complete(messages, tools, **kwargs)
+
+        async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+            if False:
+                yield None
+
+    async def executor(name, arguments):  # noqa: ANN001, ARG001
+        return {"status": "ok"}
+
+    async def drive() -> None:
+        logger = TraceLogger(db)
+        with logger.session(harness_version="0.1.0") as session_id:
+            await run_task(
+                "latency-check",
+                harness_dir,
+                logger,
+                session_id,
+                model_adapter=Adapter(),
+                skill_executor=executor,
+            )
+
+    asyncio.run(drive())
+
+    logger = TraceLogger(db)
+    events = logger.load_session(logger.list_sessions()[0].session_id)
+    tool_call_event = next(event for event in events if event.kind == "tool_call")
+    assert "duration_ms" in tool_call_event.payload
+    duration_ms = tool_call_event.payload["duration_ms"]
+    assert duration_ms >= 0
+    assert duration_ms < DEFAULT_TASK_TIMEOUT_S
 
 
 # --- harness layout validation (issue #90) ---------------------------------
