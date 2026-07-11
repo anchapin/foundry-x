@@ -269,27 +269,42 @@ def test_main_session_lifecycle_records_received_then_completed(tmp_path, monkey
     assert completed.payload["duration_ms"] >= 0
 
 
-# --- NotImplementedError contract ------------------------------------------
+# --- run_task_fn exception contract -----------------------------------------
 
 
-def test_main_default_run_task_raises_not_implemented_error(tmp_path, monkeypatch):
-    """Issue #87 acceptance: when no ``run_task_fn`` is injected, the
-    default ``run_task`` stub raises ``NotImplementedError``; ``main``
-    records ``task_failed`` with ``error_type='NotImplementedError'`` and
-    the original message preserved, then re-raises so the CLI sees the
-    real exception (never silently swallowed — AGENTS.md §2).
+def test_main_records_task_failed_when_run_task_fn_raises(tmp_path, monkeypatch):
+    """Issue #87 acceptance: when ``run_task_fn`` raises, ``main`` records
+    ``task_failed`` with the original ``error_type`` and ``message``
+    preserved, then re-raises so the CLI sees the real exception
+    (never silently swallowed — AGENTS.md §2).
+
+    Note: the original test asserted the module-level ``run_task`` stub
+    raises ``NotImplementedError``. PR #148 (issue #88) wired
+    ``run_task`` to a real ModelAdapter, so the stub contract moved
+    behind the ``run_task_fn`` injection point. This test exercises
+    the same contract via injection.
     """
     db = tmp_path / "traces.db"
     harness_dir = tmp_path / "harness"
     _stub_harness(harness_dir)
-    monkeypatch.setattr(sys, "argv", _argv("default-stub", db, harness_dir))
+    monkeypatch.setattr(sys, "argv", _argv("injected-stub", db, harness_dir))
+
+    async def raising_run_task(task, harness_dir, log, session_id):  # noqa: ANN001, ARG001
+        raise NotImplementedError("Phase 1 wiring not yet connected")
 
     with pytest.raises(NotImplementedError) as exc_info:
-        main()  # No injection: uses the module-level run_task stub.
+        main(run_task_fn=raising_run_task)
 
     # The exception is propagated verbatim — the caller sees the same
     # object main caught, not a wrapped/replaced one.
     assert "Phase 1 wiring" in str(exc_info.value)
+
+    logger = TraceLogger(db)
+    events = logger.load_session(logger.list_sessions()[0].session_id)
+    failed = [e for e in events if e.kind == "task_failed"]
+    assert len(failed) == 1
+    assert failed[0].payload["error_type"] == "NotImplementedError"
+    assert "Phase 1 wiring" in failed[0].payload["message"]
 
     logger = TraceLogger(db)
     sessions = logger.list_sessions()
