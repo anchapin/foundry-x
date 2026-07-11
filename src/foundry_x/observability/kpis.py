@@ -13,10 +13,12 @@ recorded by :class:`~foundry_x.trace.logger.TraceLogger`:
 
 * ``cycle_time_seconds`` — mean wall-clock time from the first
   ``task_received`` event to the first ``critic_verdict`` event per session.
-* ``regression_rate`` — fraction of sessions whose ``critic_verdict`` payload
-  carries ``regression: true``.
-* ``improvement_rate`` — fraction of ``critic_verdict`` events whose payload
-  verdict is ``"approved"``.
+* ``regression_rate`` — fraction of sessions with a ``critic_verdict`` in which
+  a task previously seen in ``passed_checks`` later appears in ``failed_checks``
+  (the persisted :class:`~foundry_x.observability.regression_report.VerdictRecord`
+  shape).
+* ``improvement_rate`` — fraction of ``critic_verdict`` events whose persisted
+  payload has ``approved: true``.
 
 When the source events are absent the function degrades gracefully,
 returning ``None`` (cycle time) or ``0.0`` so the CLI can print ``N/A``.
@@ -44,6 +46,7 @@ from typing import Sequence
 from pydantic import BaseModel
 
 from foundry_x.evolution.digester import INJECTION_BLOCKED_KIND
+from foundry_x.observability.regression_report import VerdictRecord
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 
@@ -127,30 +130,41 @@ def _cycle_time(logger: TraceLogger, session_ids: Sequence[str]) -> float | None
 
 
 def _verdict_rates(logger: TraceLogger, session_ids: Sequence[str]) -> tuple[float, float]:
+    """Derive regression and improvement rates from persisted Critic verdicts.
+
+    Verdicts are persisted as the :class:`VerdictRecord` shape
+    (``approved`` / ``passed_checks`` / ``failed_checks`` / ``notes``), not the
+    synthetic ``{"verdict", "regression"}`` payload the earlier implementation
+    assumed (issue #98). Uses ``logger.iter_events()`` per ADR-0003 (no raw SQL).
+
+    * *improvement_rate* = approved verdicts / total verdicts.
+    * *regression_rate* = sessions with >=1 regressed task / sessions with a
+      verdict, where a task regresses when it appears in ``failed_checks`` after
+      having appeared in ``passed_checks`` in an earlier verdict.
+    """
+
     total_verdicts = 0
     approved = 0
-    regression_sessions = 0
-    sessions_with_verdicts = 0
+    prior_passed: dict[str, str] = {}
+    sessions_with_verdicts: set[str] = set()
+    regression_sessions: set[str] = set()
 
     for sid in session_ids:
-        session_has_regression = False
-        session_had_verdict = False
         for event in logger.iter_events(sid, kind="critic_verdict"):
-            session_had_verdict = True
             total_verdicts += 1
-            payload = event.payload
-            if payload.get("verdict") == "approved":
+            sessions_with_verdicts.add(sid)
+            record = VerdictRecord(**event.payload)
+            if record.approved:
                 approved += 1
-            if payload.get("regression"):
-                session_has_regression = True
-        if session_had_verdict:
-            sessions_with_verdicts += 1
-            if session_has_regression:
-                regression_sessions += 1
+            for task in record.failed_checks:
+                if task in prior_passed:
+                    regression_sessions.add(sid)
+            for task in record.passed_checks:
+                prior_passed[task] = sid
 
     improvement_rate = approved / total_verdicts if total_verdicts else 0.0
     regression_rate = (
-        regression_sessions / sessions_with_verdicts if sessions_with_verdicts else 0.0
+        len(regression_sessions) / len(sessions_with_verdicts) if sessions_with_verdicts else 0.0
     )
     return regression_rate, improvement_rate
 
