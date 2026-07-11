@@ -27,21 +27,17 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from foundry_x.evolution.digester import FailureReport
 from foundry_x.evolution.evolver import (
     Evolver,
     EvolverGuardError,
     ProposedEdit,
 )
 
-
-def _make_diff(*lines: str) -> str:
-    header = "--- a/x\n+++ b/x\n"
-    hunk = "@@ -0,0 +1 @@\n"
-    return header + hunk + "".join(f"+{line}\n" for line in lines)
-
-
-_TINY_DIFF = _make_diff("one")
+# A minimal non-blank unified diff; these tests pin guardrails, not the
+# diff parser. ``+one\n`` is the smallest legal body the pydantic model
+# accepts and keeps the assertions independent of any future diff parser
+# changes.
+_TINY_DIFF = "+one\n"
 
 
 # ---------------------------------------------------------------------------
@@ -114,11 +110,11 @@ def test_diff_exceeding_line_cap_raises_evolver_guard_error() -> None:
     """A diff whose line count exceeds ``max_diff_lines`` is rejected.
 
     Pin for issue #94 acceptance criterion 2. With ``max_diff_lines=5``,
-    a properly-formatted diff with 6 content lines (total > 5) must surface
-    ``EvolverGuardError``; a diff at the cap (total == 5) still passes.
+    a 6-line diff must surface ``EvolverGuardError``; a 5-line diff at
+    the cap is the boundary and must still pass.
     """
     evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=5)
-    oversized = _make_diff(*[f"line {i}" for i in range(6)])
+    oversized = "\n".join(f"+line {i}" for i in range(6))
     edit = ProposedEdit(
         target_file="harness/hooks/a.py",
         rationale="x",
@@ -131,13 +127,12 @@ def test_diff_exceeding_line_cap_raises_evolver_guard_error() -> None:
 def test_diff_at_exact_line_cap_passes() -> None:
     """A diff whose line count equals ``max_diff_lines`` is accepted.
 
-    Boundary case: ``>`` semantics on the cap (total > max_diff_lines is
-    rejected; total == max_diff_lines is accepted).  Without this test a
-    regression that flips the comparison to ``>=`` would silently shrink
-    the allowed diff size by one line on every evolution run.
+    Boundary case: ``>=`` semantics on the cap. Without this test a
+    regression that flips the comparison to ``>=`` would silently
+    shrink the allowed diff size by one line on every evolution run.
     """
     evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=5)
-    at_cap = _make_diff("l0", "l1")
+    at_cap = "\n".join(f"+l{i}" for i in range(5))
     edit = ProposedEdit(
         target_file="harness/hooks/a.py",
         rationale="x",
@@ -151,35 +146,34 @@ def test_diff_at_exact_line_cap_passes() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_propose_n_plus_first_call_raises_rate_limit_error(tmp_path) -> None:
+def test_propose_n_plus_first_call_raises_rate_limit_error() -> None:
     """The ``(max_proposals_per_hour + 1)``-th ``propose()`` within the
-    rolling window returns ``[]`` when rate limit is breached.
+    rolling window raises ``EvolverGuardError``.
 
     Pin for issue #94 acceptance criterion 3. With
     ``max_proposals_per_hour=2``, two pre-existing timestamps fill the
     window; the next ``propose()`` must be rejected by the guard *before*
-    any body work runs (returning ``[]`` proves the guard fired first).
+    any body work runs (the body currently raises ``NotImplementedError``,
+    so the ``EvolverGuardError`` here proves the guard fired first).
     """
     evolver = Evolver(max_proposals_per_hour=2, max_diff_lines=200)
     evolver._record_proposals(2)  # fill the window to the cap
-    failure = FailureReport(session_id="s", summary="x", proposed_class="clean")
-    result = evolver.propose(tmp_path / "harness", failure=failure)
-    assert result == []
+    with pytest.raises(EvolverGuardError, match="rate limit exceeded"):
+        evolver.propose(Path("/nonexistent/harness"), failure=object())
 
 
-def test_propose_under_cap_reaches_body() -> None:
+def test_propose_under_cap_reaches_body_not_guard() -> None:
     """With headroom in the rate-limit window, ``propose()`` reaches its
     body rather than being blocked by the guard.
 
     Companion to the over-cap case: this test pins the *negative* of
-    criterion 3 — the guard does not over-fire. Returning an empty list
-    for ``proposed_class='clean'`` proves the guard ran AND passed AND
-    yielded control to the body.
+    criterion 3 — the guard does not over-fire. ``NotImplementedError``
+    (today's body) surfacing proves the guard ran AND passed AND yielded
+    control to the body.
     """
     evolver = Evolver(max_proposals_per_hour=3, max_diff_lines=200)
-    failure = FailureReport(session_id="s", summary="x", proposed_class="clean")
-    result = evolver.propose(Path("/nonexistent/harness"), failure=failure)
-    assert result == []
+    with pytest.raises(NotImplementedError):
+        evolver.propose(Path("/nonexistent/harness"), failure=object())
 
 
 # ---------------------------------------------------------------------------
