@@ -25,13 +25,18 @@ Issue #120 adds an auxiliary per-session ``injection_blocked`` count derived
 from the firewall events persisted by ``InjectionFirewallHook``. The
 counts are surfaced only when at least one session has ≥1 block, so a
 clean store does not grow the KPI output.
+
+Issue #82: this module previously opened a raw ``sqlite3`` connection on
+``logger.path`` and issued bespoke ``SELECT`` statements — see ADR-0003
+("No raw SQL strings in business logic"). The store schema is now reached
+exclusively through :class:`TraceLogger`'s ``list_sessions`` and
+``iter_events`` methods, which own the row format and yield events one at
+a time so a future streaming caller does not have to load everything.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import sqlite3
 import sys
 from datetime import datetime
 from typing import Sequence
@@ -39,7 +44,7 @@ from typing import Sequence
 from pydantic import BaseModel
 
 from foundry_x.evolution.digester import INJECTION_BLOCKED_KIND
-from foundry_x.trace.logger import TraceLogger
+from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 
 class KpiSummary(BaseModel):
@@ -66,23 +71,21 @@ def compute_kpis(
     Parameters
     ----------
     logger:
-        A :class:`~foundry_x.trace.logger.TraceLogger` whose ``.path``
-        points at a SQLite trace database.
+        A :class:`~foundry_x.trace.logger.TraceLogger`.
     harness_version:
         When provided, only sessions created with this harness version are
         considered.
     """
-    conn = sqlite3.connect(logger.path)
-    try:
-        session_ids = _session_ids(conn, harness_version)
-        if not session_ids:
-            return KpiSummary()
+    # Issue #82: ``list_sessions`` and ``iter_events`` are the only paths
+    # to the underlying store; raw SQL is centralized on the logger.
+    sessions = logger.list_sessions(harness_version=harness_version)
+    if not sessions:
+        return KpiSummary()
 
-        cycle_time = _cycle_time(conn, session_ids)
-        regression_rate, improvement_rate = _verdict_rates(conn, session_ids)
-        injection_blocks = _injection_blocks(conn, session_ids)
-    finally:
-        conn.close()
+    session_ids = [s.session_id for s in sessions]
+    cycle_time = _cycle_time(logger, session_ids)
+    regression_rate, improvement_rate = _verdict_rates(logger, session_ids)
+    injection_blocks = _injection_blocks(logger, session_ids)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -92,67 +95,58 @@ def compute_kpis(
     )
 
 
-def _session_ids(conn: sqlite3.Connection, harness_version: str | None) -> list[str]:
-    if harness_version is not None:
-        rows = conn.execute(
-            "SELECT session_id FROM sessions WHERE harness_version = ?",
-            (harness_version,),
-        ).fetchall()
-    else:
-        rows = conn.execute("SELECT session_id FROM sessions").fetchall()
-    return [row[0] for row in rows]
+def _first_event_of_kind(logger: TraceLogger, session_id: str, kind: str) -> TraceEvent | None:
+    """Return the first event of *kind* in *session_id* via iter_events.
+
+    ``iter_events`` orders by timestamp and yields one row at a time, so
+    we stop at the first match without scanning the rest of the session.
+    """
+    for event in logger.iter_events(session_id, kind=kind):
+        return event
+    return None
 
 
-def _cycle_time(conn: sqlite3.Connection, session_ids: list[str]) -> float | None:
+def _cycle_time(logger: TraceLogger, session_ids: Sequence[str]) -> float | None:
     deltas: list[float] = []
     for sid in session_ids:
-        start = conn.execute(
-            "SELECT timestamp FROM events "
-            "WHERE session_id = ? AND kind = 'task_received' "
-            "ORDER BY timestamp LIMIT 1",
-            (sid,),
-        ).fetchone()
-        end = conn.execute(
-            "SELECT timestamp FROM events "
-            "WHERE session_id = ? AND kind = 'critic_verdict' "
-            "ORDER BY timestamp LIMIT 1",
-            (sid,),
-        ).fetchone()
-        if start and end:
-            t0 = datetime.fromisoformat(start[0])
-            t1 = datetime.fromisoformat(end[0])
-            delta = (t1 - t0).total_seconds()
-            if delta > 0:
-                deltas.append(delta)
+        start_event = _first_event_of_kind(logger, sid, "task_received")
+        end_event = _first_event_of_kind(logger, sid, "critic_verdict")
+        if start_event is None or end_event is None:
+            continue
+        try:
+            t0 = datetime.fromisoformat(start_event.timestamp)
+            t1 = datetime.fromisoformat(end_event.timestamp)
+        except ValueError:
+            continue
+        delta = (t1 - t0).total_seconds()
+        if delta > 0:
+            deltas.append(delta)
     if not deltas:
         return None
     return sum(deltas) / len(deltas)
 
 
-def _verdict_rates(conn: sqlite3.Connection, session_ids: list[str]) -> tuple[float, float]:
+def _verdict_rates(logger: TraceLogger, session_ids: Sequence[str]) -> tuple[float, float]:
     total_verdicts = 0
     approved = 0
     regression_sessions = 0
     sessions_with_verdicts = 0
 
     for sid in session_ids:
-        rows = conn.execute(
-            "SELECT payload FROM events " "WHERE session_id = ? AND kind = 'critic_verdict'",
-            (sid,),
-        ).fetchall()
-        if not rows:
-            continue
-        sessions_with_verdicts += 1
         session_has_regression = False
-        for (payload_str,) in rows:
-            payload = json.loads(payload_str)
+        session_had_verdict = False
+        for event in logger.iter_events(sid, kind="critic_verdict"):
+            session_had_verdict = True
             total_verdicts += 1
+            payload = event.payload
             if payload.get("verdict") == "approved":
                 approved += 1
             if payload.get("regression"):
                 session_has_regression = True
-        if session_has_regression:
-            regression_sessions += 1
+        if session_had_verdict:
+            sessions_with_verdicts += 1
+            if session_has_regression:
+                regression_sessions += 1
 
     improvement_rate = approved / total_verdicts if total_verdicts else 0.0
     regression_rate = (
@@ -161,7 +155,7 @@ def _verdict_rates(conn: sqlite3.Connection, session_ids: list[str]) -> tuple[fl
     return regression_rate, improvement_rate
 
 
-def _injection_blocks(conn: sqlite3.Connection, session_ids: list[str]) -> dict[str, int]:
+def _injection_blocks(logger: TraceLogger, session_ids: Sequence[str]) -> dict[str, int]:
     """Per-session count of ``injection_blocked`` events (issue #120).
 
     Returns a ``session_id -> count`` map including only sessions with at
@@ -169,16 +163,14 @@ def _injection_blocks(conn: sqlite3.Connection, session_ids: list[str]) -> dict[
     path can decide whether to add an extra section based on the map being
     non-empty (per the issue's "show … when at least one is present").
     """
-    if not session_ids:
-        return {}
-    placeholders = ",".join("?" for _ in session_ids)
-    rows = conn.execute(
-        f"SELECT session_id, COUNT(*) FROM events "
-        f"WHERE kind = ? AND session_id IN ({placeholders}) "
-        f"GROUP BY session_id",
-        (INJECTION_BLOCKED_KIND, *session_ids),
-    ).fetchall()
-    return {sid: int(count) for sid, count in rows if count}
+    blocks: dict[str, int] = {}
+    for sid in session_ids:
+        # ``iter_events(kind=...)`` pushes the kind filter down to the
+        # underlying store, so we only ever see injection_blocked rows.
+        count = sum(1 for _ in logger.iter_events(sid, kind=INJECTION_BLOCKED_KIND))
+        if count:
+            blocks[sid] = count
+    return blocks
 
 
 def _format_value(value: float | None) -> str:
