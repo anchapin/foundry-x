@@ -1,21 +1,35 @@
-"""Tests for the KPI computation and CLI (issue #39)."""
+"""Tests for the KPI computation and CLI (issue #39).
+
+Issue #98: verdicts are seeded through
+:func:`~foundry_x.observability.regression_report.record_verdict` so the tests
+exercise the real persisted :class:`CriticVerdict` payload shape
+(``approved`` / ``passed_checks`` / ``failed_checks``) rather than a synthetic
+``{"verdict", "regression"}`` fixture that ``record_verdict`` never emits.
+"""
 
 from __future__ import annotations
 
 import time
 
+from foundry_x.evolution.critic import CriticVerdict
 from foundry_x.observability.kpis import KpiSummary, compute_kpis, main
+from foundry_x.observability.regression_report import record_verdict
 from foundry_x.trace.logger import TraceLogger
 
 
 def _seed_session(
     logger: TraceLogger,
     harness_version: str,
-    verdict: str | None = None,
-    regression: bool = False,
+    approved: bool | None = None,
+    passed_checks: list[str] | None = None,
+    failed_checks: list[str] | None = None,
     injection_block_count: int = 0,
 ) -> str:
-    """Create a session with task_received + optional critic_verdict.
+    """Create a session with task_received + optional persisted critic_verdict.
+
+    When ``approved`` is not ``None`` a real CriticVerdict is persisted via
+    ``record_verdict`` (issue #98), so the trace store holds the same
+    ``VerdictRecord`` payload the production path writes.
 
     Issue #120 adds the optional ``injection_block_count`` parameter: when
     >0, that many ``injection_blocked`` events are planted so the per-
@@ -23,13 +37,17 @@ def _seed_session(
     """
     with logger.session(harness_version=harness_version) as sid:
         logger.record(sid, kind="task_received", payload={"prompt": "do work"})
-        if verdict is not None:
+        if approved is not None:
             # Small delay so cycle-time is measurably positive.
             time.sleep(0.01)
-            logger.record(
+            record_verdict(
+                logger,
                 sid,
-                kind="critic_verdict",
-                payload={"verdict": verdict, "regression": regression},
+                CriticVerdict(
+                    approved=approved,
+                    passed_checks=passed_checks or [],
+                    failed_checks=failed_checks or [],
+                ),
             )
         for i in range(injection_block_count):
             logger.record(
@@ -48,10 +66,11 @@ def test_compute_kpis_with_planted_data(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
 
-    # 2 approved, 1 rejected (with regression) → improvement 2/3, regression 1/3
-    _seed_session(logger, "v1", verdict="approved")
-    _seed_session(logger, "v1", verdict="approved")
-    _seed_session(logger, "v1", verdict="rejected", regression=True)
+    # 2 approved, 1 rejected → improvement 2/3. The rejected session fails
+    # "bench", which the two prior sessions passed → 1 regressed session of 3.
+    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", approved=False, failed_checks=["bench"])
 
     summary = compute_kpis(logger)
 
@@ -62,6 +81,35 @@ def test_compute_kpis_with_planted_data(tmp_path):
     assert summary.improvement_rate == 2 / 3
     assert summary.regression_rate == 1 / 3
     assert summary.injection_blocks == {}
+
+
+def test_regression_rate_counts_prior_pass_now_failing(tmp_path):
+    """A task passing then failing in a later verdict counts as a regression."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _seed_session(logger, "v1", approved=True, passed_checks=["smoke"])
+    _seed_session(logger, "v1", approved=False, failed_checks=["smoke"])
+
+    summary = compute_kpis(logger)
+
+    # 1 of 2 sessions regressed; 1 of 2 verdicts approved.
+    assert summary.regression_rate == 1 / 2
+    assert summary.improvement_rate == 1 / 2
+
+
+def test_no_regression_when_failure_never_passed(tmp_path):
+    """A failing task that was never previously passing is not a regression."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _seed_session(logger, "v1", approved=True, passed_checks=["smoke"])
+    _seed_session(logger, "v1", approved=False, failed_checks=["brand_new"])
+
+    summary = compute_kpis(logger)
+
+    assert summary.regression_rate == 0.0
+    assert summary.improvement_rate == 1 / 2
 
 
 def test_compute_kpis_empty_db(tmp_path):
@@ -77,8 +125,8 @@ def test_compute_kpis_empty_db(tmp_path):
 def test_compute_kpis_harness_version_filter(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", verdict="approved")
-    _seed_session(logger, "v2", verdict="rejected")
+    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v2", approved=False)
 
     summary = compute_kpis(logger, harness_version="v1")
     assert summary.improvement_rate == 1.0
@@ -90,8 +138,8 @@ def test_compute_kpis_harness_version_filter(tmp_path):
 def test_main_prints_markdown_table(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", verdict="approved")
-    _seed_session(logger, "v1", verdict="rejected")
+    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", approved=False)
 
     rc = main(["--db", str(db)])
     captured = capsys.readouterr()
@@ -116,10 +164,10 @@ def test_injection_blocks_counted_per_session(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
 
-    s1 = _seed_session(logger, "v1", verdict="approved", injection_block_count=2)
-    s2 = _seed_session(logger, "v1", verdict="approved", injection_block_count=1)
+    s1 = _seed_session(logger, "v1", approved=True, injection_block_count=2)
+    s2 = _seed_session(logger, "v1", approved=True, injection_block_count=1)
     # Clean session contributes nothing to the map.
-    _seed_session(logger, "v1", verdict="approved")
+    _seed_session(logger, "v1", approved=True)
 
     summary = compute_kpis(logger)
 
@@ -130,7 +178,7 @@ def test_injection_blocks_counted_per_session(tmp_path):
 def test_injection_blocks_empty_when_no_events(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", verdict="approved")
+    _seed_session(logger, "v1", approved=True)
 
     summary = compute_kpis(logger)
     assert summary.injection_blocks == {}
@@ -139,7 +187,7 @@ def test_injection_blocks_empty_when_no_events(tmp_path):
 def test_main_renders_injection_block_section_when_present(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    s1 = _seed_session(logger, "v1", verdict="approved", injection_block_count=3)
+    s1 = _seed_session(logger, "v1", approved=True, injection_block_count=3)
 
     rc = main(["--db", str(db)])
     captured = capsys.readouterr()
@@ -155,7 +203,7 @@ def test_main_renders_injection_block_section_when_present(tmp_path, capsys):
 def test_main_omits_injection_block_section_when_clean(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", verdict="approved")
+    _seed_session(logger, "v1", approved=True)
 
     rc = main(["--db", str(db)])
     captured = capsys.readouterr()
