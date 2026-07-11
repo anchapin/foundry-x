@@ -3,8 +3,14 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field, field_validator
+
+if TYPE_CHECKING:
+    from foundry_x.trace.logger import TraceLogger
+
+PROPOSED_EDIT_KIND: str = "proposed_edit"
 
 # Sliding window for the rate limiter. One hour matches the SECURITY.md
 # "max N proposals per hour" guardrail.
@@ -145,6 +151,8 @@ class Evolver:
         self,
         max_proposals_per_hour: int = 10,
         max_diff_lines: int = 200,
+        trace_logger: TraceLogger | None = None,
+        session_id: str | None = None,
     ) -> None:
         if max_proposals_per_hour < 1:
             raise EvolverGuardError("max_proposals_per_hour must be >= 1")
@@ -152,6 +160,8 @@ class Evolver:
             raise EvolverGuardError("max_diff_lines must be >= 1")
         self.max_proposals_per_hour = max_proposals_per_hour
         self.max_diff_lines = max_diff_lines
+        self._trace_logger: TraceLogger | None = trace_logger
+        self._session_id: str | None = session_id
         self._proposal_times: deque[datetime] = deque()
 
     def _purge_old(self, now: datetime | None = None) -> None:
@@ -169,11 +179,16 @@ class Evolver:
                 f"the last hour (cap={self.max_proposals_per_hour})"
             )
 
-    def _record_proposals(self, count: int = 1) -> None:
-        """Stamp ``count`` proposals at the current time into the window."""
+    def _record_proposals(self, count: int = 1, edit: ProposedEdit | None = None) -> None:
         now = datetime.now(timezone.utc)
         for _ in range(count):
             self._proposal_times.append(now)
+        if edit is not None and self._trace_logger is not None and self._session_id is not None:
+            self._trace_logger.record(
+                self._session_id,
+                PROPOSED_EDIT_KIND,
+                edit.model_dump(mode="json"),
+            )
 
     def _validate_edit(self, edit: ProposedEdit) -> None:
         """Reject an edit whose unified diff exceeds the line cap."""
