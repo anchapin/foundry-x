@@ -33,14 +33,20 @@ if __name__ == "__main__":
 """
 
 
+_CASES = sorted(
+    p.name for p in (Path(__file__).parent.parent / "fixtures" / TASK.name).iterdir() if p.is_dir()
+)
+
+
+@pytest.mark.parametrize("case", _CASES)
 @pytest.mark.benchmark
-def test_sort_a_list(benchmark_workspace: Path) -> None:
-    """Deterministic pass/fail check for TASK."""
-    fixture_dir = Path(__file__).parent.parent / "fixtures" / TASK.name
+def test_sort_a_list(benchmark_workspace: Path, case: str) -> None:
+    """Deterministic pass/fail check for TASK across edge-case fixtures (issue #112)."""
+    fixture_dir = Path(__file__).parent.parent / "fixtures" / TASK.name / case
     (benchmark_workspace / "input.txt").write_text((fixture_dir / "input.txt").read_text())
 
     run_solution(benchmark_workspace, GOLDEN_SOLUTION)
 
     actual = (benchmark_workspace / "output.txt").read_text()
     expected = (fixture_dir / "expected.txt").read_text()
-    assert actual == expected, f"task {TASK.name}: output mismatch"
+    assert actual == expected, f"task {TASK.name}/{case}: output mismatch"
