@@ -1,0 +1,9 @@
+{
+  "schema": "foundry-x/proposed-edit/v1",
+  "target_file": "harness/system_prompt.txt",
+  "issue_reference": "anchapin/foundry-x#204",
+  "rationale": "harness/system_prompt.txt:17-18 is a pointer to harness/skills/, not an inventory. On a context-window-constrained local model (e.g. MiniMax-M3) the agent burns its first turn list_dir-ing the skills directory before any productive work. Enumerating each manifest skill name (sorted ascending, no .json suffix) in the prompt removes that first-turn tool call and the latency it costs. The existing pointer line is retained (out of scope to drop it) and only the names are embedded, not the full input_schema. NOTE: per AGENTS.md section 2 and ADR-0004 this file is a ProposedEdit artifact, NOT a direct edit. harness/system_prompt.txt is agent DNA evolved only through the Evolver->Critic gate; this proposal must pass the Critic benchmark gate (ADR-0004) and receive a second human reviewer before it is applied.",
+  "old_text": "You have access to the tool surface declared in `harness/skills/`. Respect\nthe schema of each skill exactly; do not invent new tools.\n",
+  "new_text": "You have access to the tool surface declared in `harness/skills/`. Respect\nthe schema of each skill exactly; do not invent new tools. The current\nskills are:\n\n- edit_file\n- example_skill\n- write_file\n",
+  "unified_diff": "--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -15,4 +15,9 @@\n 5. When a task is ambiguous, surface the ambiguity explicitly instead of guessing.\n \n You have access to the tool surface declared in `harness/skills/`. Respect\n-the schema of each skill exactly; do not invent new tools.\n+the schema of each skill exactly; do not invent new tools. The current\n+skills are:\n+\n+- edit_file\n+- example_skill\n+- write_file\n"
+}
