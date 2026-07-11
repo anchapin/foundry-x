@@ -50,6 +50,20 @@ def _argv(task: str, trace_path: Path, harness_dir: Path | None = None) -> list[
     return argv
 
 
+def _stub_harness(harness_dir: Path) -> Path:
+    """Build a minimal valid harness layout under ``harness_dir``.
+
+    The Runner validates the harness layout (system_prompt.txt, hooks/,
+    skills/) on entry; without these stubs, main() aborts with a
+    HarnessValidationError before reaching the run_task branch under test.
+    """
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    (harness_dir / "system_prompt.txt").write_text("stub harness\n")
+    (harness_dir / "hooks").mkdir(exist_ok=True)
+    (harness_dir / "skills").mkdir(exist_ok=True)
+    return harness_dir
+
+
 # --- argparse surface ------------------------------------------------------
 
 
@@ -77,6 +91,7 @@ def test_main_accepts_all_documented_cli_flags(tmp_path, monkeypatch):
     """
     db = tmp_path / "traces.db"
     harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -116,6 +131,7 @@ def test_main_harness_dir_falls_back_to_foundry_harness_dir_env(tmp_path, monkey
     leg of that chain by capturing what ``run_task`` actually receives.
     """
     env_dir = tmp_path / "from_env"
+    _stub_harness(env_dir)
     db = tmp_path / "traces.db"
     monkeypatch.setenv("FOUNDRY_HARNESS_DIR", str(env_dir))
     monkeypatch.setattr(
@@ -143,6 +159,7 @@ def test_main_trace_path_falls_back_to_foundry_trace_path_env(tmp_path, monkeypa
     """
     env_trace = tmp_path / "from_env_traces.db"
     harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
     monkeypatch.setenv("FOUNDRY_TRACE_PATH", str(env_trace))
     monkeypatch.setattr(
         sys,
@@ -168,7 +185,9 @@ def test_main_cli_harness_dir_overrides_env(tmp_path, monkeypatch):
     provided it replaces the env-derived default wholesale.
     """
     env_dir = tmp_path / "from_env"
+    _stub_harness(env_dir)
     cli_dir = tmp_path / "from_cli"
+    _stub_harness(cli_dir)
     db = tmp_path / "traces.db"
     monkeypatch.setenv("FOUNDRY_HARNESS_DIR", str(env_dir))
     monkeypatch.setattr(
@@ -199,6 +218,7 @@ def test_main_inserts_resolved_harness_dir_into_sys_path(tmp_path, monkeypatch):
     already present.
     """
     harness_dir = tmp_path / "harness_subdir"
+    _stub_harness(harness_dir)
     db = tmp_path / "traces.db"
     monkeypatch.setattr(sys, "argv", _argv("x", db, harness_dir))
 
@@ -224,6 +244,7 @@ def test_main_session_lifecycle_records_received_then_completed(tmp_path, monkey
     """
     db = tmp_path / "traces.db"
     harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
     monkeypatch.setattr(sys, "argv", _argv("happy", db, harness_dir))
 
     async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
@@ -260,6 +281,7 @@ def test_main_default_run_task_raises_not_implemented_error(tmp_path, monkeypatc
     """
     db = tmp_path / "traces.db"
     harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
     monkeypatch.setattr(sys, "argv", _argv("default-stub", db, harness_dir))
 
     with pytest.raises(NotImplementedError) as exc_info:
@@ -296,6 +318,7 @@ def test_run_task_fn_injection_replaces_default(tmp_path, monkeypatch):
     """
     db = tmp_path / "traces.db"
     harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
     monkeypatch.setattr(sys, "argv", _argv("injected", db, harness_dir))
 
     captured: dict[str, object] = {}
@@ -327,6 +350,7 @@ def test_run_task_fn_receives_logger_within_active_session(tmp_path, monkeypatch
     """
     db = tmp_path / "traces.db"
     harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
     monkeypatch.setattr(sys, "argv", _argv("logger-check", db, harness_dir))
 
     async def stub_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
