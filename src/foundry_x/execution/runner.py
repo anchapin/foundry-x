@@ -27,6 +27,7 @@ from foundry_x.execution.model_adapter import (
     ModelResponse,
     ModelRetryEvent,
     ModelToolCall,
+    ModelUsage,
     OpenAICompatibleAdapter,
     ToolCallFunction,
     ToolDefinition,
@@ -553,6 +554,7 @@ def _assemble_streamed_response(
     content_parts: list[str],
     tool_call_acc: dict[int, _StreamingToolCallAccumulator],
     finish_reason: str | None,
+    usage: ModelUsage | None = None,
 ) -> ModelResponse:
     """Reconstruct a :class:`ModelResponse` from accumulated streaming deltas.
 
@@ -588,6 +590,7 @@ def _assemble_streamed_response(
         message=message,
         tool_calls=tool_calls,
         finish_reason=finish_reason,
+        usage=usage,
     )
 
 
@@ -615,6 +618,7 @@ async def _consume_model_stream(
     content_parts: list[str] = []
     tool_call_acc: dict[int, _StreamingToolCallAccumulator] = {}
     finish_reason: str | None = None
+    usage: ModelUsage | None = None
     delta_index = 0
     ttft_ms: int | None = None
     prev_time = stream_start
@@ -646,6 +650,9 @@ async def _consume_model_stream(
         if chunk.finish_reason:
             finish_reason = chunk.finish_reason
 
+        if chunk.usage is not None:
+            usage = chunk.usage
+
         log.record(
             session_id,
             kind="model_response_chunk",
@@ -658,7 +665,7 @@ async def _consume_model_stream(
         )
         delta_index += 1
 
-    response = _assemble_streamed_response(content_parts, tool_call_acc, finish_reason)
+    response = _assemble_streamed_response(content_parts, tool_call_acc, finish_reason, usage)
     return response, ttft_ms, delta_index
 
 
@@ -670,30 +677,47 @@ async def run_task(
     model_adapter: ModelAdapter | None = None,
     *,
     skill_executor: SkillExecutor | None = None,
+    limits: RunLimits | None = None,
 ) -> None:
     """Drive one task through the asyncio agent loop (issue #89, ADR-0010).
 
     Reads ``harness/system_prompt.txt`` and the OpenAI-compatible tool surface
     declared in ``harness/skills/*.json``, exchanges turns with the
     ``model_adapter`` until the model emits a final assistant message, the
-    ``max_steps`` cap is reached, or the wall-clock cap fires, and records
-    every step into the trace store:
+    ``max_steps`` cap is reached, the running token total exceeds
+    ``limits.token_budget`` (issue #197), or the wall-clock cap fires, and
+    records every step into the trace store:
 
     1. ``user_prompt`` — the task enters the agent conversation
        (the lifecycle ``task_received`` marker from ``main()`` is preserved).
-    2. ``model_request`` / ``model_response`` — every chat completion round-trip.
+    2. ``model_request`` / ``model_response`` — every chat completion round-trip;
+       the ``model_response`` payload carries the latest ``ModelResponse.usage``
+       (when reported) so a token counter is observable per turn.
     3. ``tool_call`` / ``tool_result`` — one pair per ``ToolCall`` the model
        emits, bracketed by ``HookRegistry.run_pre`` and ``HookRegistry.run_post``
        fan-out so the prompt-input firewall (SECURITY.md) and future hooks
        observe every step.
-    4. ``outcome`` — terminal event with ``status`` and ``reason`` so the Phase
-       2 Digester can attribute success vs. truncation vs. failure.
+    4. ``outcome`` — terminal event with ``status``, ``reason``, ``steps``, and
+       a running ``tokens_total`` so the Phase 2 Digester can attribute success
+       vs. truncation vs. failure vs. budget exhaustion, and the KPI consumer
+       (PRD §5) can read the budget it actually used.
 
     The tool surface is data-driven: a skill lands as soon as its JSON file
     does (issue #104, #105). Skill execution is delegated to ``skill_executor``
     (default: ``_default_skill_executor`` — a stub that acknowledges the call);
     real ``subprocess.run``-backed executors are wired in a follow-up so the
     Critic gate (ADR-0004) can evaluate them independently.
+
+    Token-budget enforcement (issue #197): the loop accumulates
+    ``response.usage.total_tokens`` across steps. When the running total
+    exceeds ``limits.token_budget`` after a ``model_response`` is recorded,
+    the loop emits a ``task_aborted`` event with ``reason="token_budget"``
+    and terminates with ``outcome.status="failed"``,
+    ``outcome.reason="token_budget"``. The token-budget check lives in
+    ``run_task`` (not :func:`run_with_limits`) because ``run_task`` owns the
+    running counter; :func:`run_with_limits` continues to own the wall-clock
+    cap (matches the existing wall_clock + ``task_aborted`` pairing in
+    SECURITY.md "Runaway detection").
 
     On any model error the loop records a ``model_error`` event, sets
     ``outcome.status="failed"`` and ``outcome.reason="model_error"``, and
@@ -739,6 +763,8 @@ async def run_task(
     outcome_reason = "final_answer"
     outcome_steps = 0
     turn_ttfts: list[int] = []
+    tokens_used = 0
+    token_budget = limits.token_budget if limits is not None else None
 
     try:
         for step in range(max_steps):
@@ -772,6 +798,8 @@ async def run_task(
 
             if ttft_ms is not None:
                 turn_ttfts.append(ttft_ms)
+            step_tokens = response.usage.total_tokens if response.usage is not None else 0
+            tokens_used += step_tokens
 
             log.record(
                 session_id,
@@ -783,9 +811,27 @@ async def run_task(
                     "tool_calls": [call.model_dump(mode="json") for call in response.tool_calls],
                     "time_to_first_token_ms": ttft_ms,
                     "chunk_count": chunk_count,
+                    "usage": response.usage.model_dump(mode="json")
+                    if response.usage is not None
+                    else None,
+                    "tokens_used": tokens_used,
                 },
             )
             messages.append(response.message)
+
+            if token_budget is not None and tokens_used > token_budget:
+                outcome_status = "failed"
+                outcome_reason = "token_budget"
+                log.record(
+                    session_id,
+                    kind="task_aborted",
+                    payload={
+                        "reason": "token_budget",
+                        "tokens_used": tokens_used,
+                        "token_budget": token_budget,
+                    },
+                )
+                break
 
             if not response.tool_calls:
                 outcome_reason = "final_answer"
@@ -861,6 +907,7 @@ async def run_task(
                 "reason": outcome_reason,
                 "steps": outcome_steps,
                 "ttft_ms": ttft_p50,
+                "tokens_total": tokens_used,
             },
         )
 
@@ -931,10 +978,19 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
     with logger.session(harness_version=harness_version, model_id=model_id) as session_id:
         logger.record(session_id, kind="task_received", payload={"prompt": args.task})
         start = time.monotonic()
+        # ``run_task`` accepts the ``limits`` kwarg so it can enforce the
+        # ``FOUNDRY_TOKEN_BUDGET`` cap (issue #197); injected ``run_task_fn``
+        # stubs in the test suite keep the older four-positional-arg
+        # signature for clarity, so the kwarg is only passed when we are
+        # calling the module-level :func:`run_task`.
+        if run_task_fn is not None:
+            task_coro = task(args.task, harness_dir, logger, session_id)
+        else:
+            task_coro = task(args.task, harness_dir, logger, session_id, limits=limits)
         try:
             asyncio.run(
                 run_with_limits(
-                    task(args.task, harness_dir, logger, session_id),
+                    task_coro,
                     logger,
                     session_id,
                     limits,

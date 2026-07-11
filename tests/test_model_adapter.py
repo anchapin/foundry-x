@@ -127,6 +127,10 @@ async def test_run_task_calls_injected_adapter_and_records_trace(tmp_path):
     assert "time_to_first_token_ms" in response_event.payload
     assert "chunk_count" in response_event.payload
     assert response_event.payload["chunk_count"] >= 1
+    # Issue #197: model_response carries usage and tokens_used.
+    assert "usage" in response_event.payload
+    assert "tokens_used" in response_event.payload
+    assert response_event.payload["tokens_used"] == 0
     chunk_event = next(event for event in events if event.kind == "model_response_chunk")
     assert chunk_event.payload["delta_index"] == 0
     assert chunk_event.payload["content_so_far"] == "runner response"
@@ -138,19 +142,8 @@ async def test_run_task_calls_injected_adapter_and_records_trace(tmp_path):
     # Issue #199: outcome event also carries ttft_ms (p50 across turns).
     assert "ttft_ms" in outcome_event.payload
     assert outcome_event.payload["ttft_ms"] >= 0
-    assert "chunk_count" in response_event.payload
-    assert response_event.payload["chunk_count"] >= 1
-    chunk_event = next(event for event in events if event.kind == "model_response_chunk")
-    assert chunk_event.payload["delta_index"] == 0
-    assert chunk_event.payload["content_so_far"] == "runner response"
-    assert chunk_event.payload["chunk_duration_ms"] >= 0
-    outcome_event = next(event for event in events if event.kind == "outcome")
-    assert outcome_event.payload["status"] == "success"
-    assert outcome_event.payload["reason"] == "final_answer"
-    assert outcome_event.payload["steps"] == 1
-    # Issue #199: outcome event also carries ttft_ms (p50 across turns).
-    assert "ttft_ms" in outcome_event.payload
-    assert outcome_event.payload["ttft_ms"] >= 0
+    # Issue #197: outcome event also carries tokens_total.
+    assert outcome_event.payload["tokens_total"] == 0
 
 
 @pytest.mark.asyncio
@@ -254,6 +247,56 @@ async def test_complete_posts_request_and_parses_response():
     assert response.message.content == "done"
     assert response.tool_calls == []
     assert response.finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_complete_parses_usage_block():
+    """OpenAI-compatible chat-completion responses (and the llama-server
+    ``/v1/chat/completions`` route that mirrors them) carry a top-level
+    ``usage`` object — issue #197 wires it through :class:`ModelUsage` so
+    ``run_task`` can read ``usage.total_tokens`` against
+    ``FOUNDRY_TOKEN_BUDGET``. The canonical wire shape has
+    ``prompt_tokens`` / ``completion_tokens`` / ``total_tokens``; the
+    adapter must accept all three and forward them verbatim.
+    """
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 25,
+                    "completion_tokens": 12,
+                    "total_tokens": 37,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="foundry-test",
+            client=client,
+        )
+        response = await adapter.complete(
+            messages=[ModelMessage(role="user", content="hi")],
+            tools=[],
+        )
+
+    assert response.usage is not None
+    assert response.usage.prompt_tokens == 25
+    assert response.usage.completion_tokens == 12
+    assert response.usage.total_tokens == 37
 
 
 @pytest.mark.asyncio
