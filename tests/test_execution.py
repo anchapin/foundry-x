@@ -32,6 +32,10 @@ from pathlib import Path
 
 import pytest
 
+from foundry_x.execution.harness_layout import (
+    HarnessValidationError,
+    validate as validate_harness_layout,
+)
 from foundry_x.execution.runner import main
 from foundry_x.trace.logger import TraceLogger
 
@@ -381,3 +385,159 @@ def test_run_task_fn_receives_logger_within_active_session(tmp_path, monkeypatch
     assert "tool_call" in kinds
     assert kinds.count("task_received") == 1
     assert kinds.count("task_completed") == 1
+
+
+# --- harness layout validation (issue #90) ---------------------------------
+
+
+def test_validate_accepts_valid_harness_layout(tmp_path):
+    """``validate()`` returns ``None`` on a layout that satisfies the runner.
+
+    Acceptance criterion: a harness checkout exposing
+    ``system_prompt.txt``, ``hooks/``, and ``skills/`` is treated as
+    valid; ``validate()`` is a pure pre-flight (no side effects), so
+    the absence of an exception is the contract.
+    """
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+
+    assert validate_harness_layout(harness_dir) is None
+
+
+def test_validate_reports_all_three_missing_entries_for_empty_dir(tmp_path):
+    """An empty ``harness_dir`` reports every required entry in a single
+    ``HarnessValidationError`` so the operator can fix all gaps in one
+    pass instead of cycling one error at a time.
+    """
+    harness_dir = tmp_path / "harness"
+    harness_dir.mkdir()
+
+    with pytest.raises(HarnessValidationError) as exc_info:
+        validate_harness_layout(harness_dir)
+
+    assert sorted(exc_info.value.missing) == sorted(["system_prompt.txt", "hooks", "skills"])
+    assert exc_info.value.harness_dir == harness_dir
+    message = str(exc_info.value)
+    assert str(harness_dir) in message
+
+
+def test_validate_reports_missing_system_prompt(tmp_path):
+    """With ``hooks/`` and ``skills/`` present but no ``system_prompt.txt``,
+    only the prompt is reported.
+    """
+    harness_dir = tmp_path / "harness"
+    harness_dir.mkdir()
+    (harness_dir / "hooks").mkdir()
+    (harness_dir / "skills").mkdir()
+
+    with pytest.raises(HarnessValidationError) as exc_info:
+        validate_harness_layout(harness_dir)
+
+    assert exc_info.value.missing == ["system_prompt.txt"]
+
+
+def test_validate_reports_missing_hooks_dir(tmp_path):
+    """With the prompt and ``skills/`` present but no ``hooks/``, only
+    the hooks directory is reported.
+    """
+    harness_dir = tmp_path / "harness"
+    harness_dir.mkdir()
+    (harness_dir / "system_prompt.txt").write_text("stub\n")
+    (harness_dir / "skills").mkdir()
+
+    with pytest.raises(HarnessValidationError) as exc_info:
+        validate_harness_layout(harness_dir)
+
+    assert exc_info.value.missing == ["hooks"]
+
+
+def test_validate_reports_missing_skills_dir(tmp_path):
+    """With the prompt and ``hooks/`` present but no ``skills/``, only
+    the skills directory is reported.
+    """
+    harness_dir = tmp_path / "harness"
+    harness_dir.mkdir()
+    (harness_dir / "system_prompt.txt").write_text("stub\n")
+    (harness_dir / "hooks").mkdir()
+
+    with pytest.raises(HarnessValidationError) as exc_info:
+        validate_harness_layout(harness_dir)
+
+    assert exc_info.value.missing == ["skills"]
+
+
+# --- main() integration with harness validation ----------------------------
+
+
+def test_main_exits_non_zero_and_prints_missing_entries_when_harness_invalid(
+    tmp_path, monkeypatch, capsys
+):
+    """Issue #90 acceptance: ``main()`` invokes ``validate(args.harness_dir)``
+    before ``sys.path`` injection; on failure it writes the harness_dir and
+    each missing entry to ``stderr`` and ``sys.exit(2)``s -- the operator
+    sees the gap, not a Python traceback.
+    """
+    bad = tmp_path / "bad_harness"
+    bad.mkdir()
+    (bad / "system_prompt.txt").write_text("stub\n")
+    (bad / "skills").mkdir()
+    # ``hooks/`` deliberately missing so a single-entry list is asserted below.
+
+    db = tmp_path / "traces.db"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "fx-runner",
+            "--task",
+            "x",
+            "--harness-dir",
+            str(bad),
+            "--trace-path",
+            str(db),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 2
+
+    captured = capsys.readouterr()
+    # The harness_dir is named explicitly so the error is actionable.
+    assert str(bad) in captured.err
+    # Every missing entry is named; order is stable (hooks is the only miss).
+    assert "hooks" in captured.err
+    # No traceback on the user-facing path (AGENTS.md §1 "evidence over opinion").
+    assert "Traceback" not in captured.err
+    # No trace session was opened because the runner aborts before TraceLogger.
+    assert not db.exists() or not TraceLogger(db).list_sessions()
+
+
+def test_main_does_not_pollute_sys_path_when_harness_invalid(tmp_path, monkeypatch):
+    """``main()`` runs ``validate()`` strictly *before* ``sys.path.insert``;
+    a malformed harness checkout therefore never lands on the import path
+    and cannot be picked up by subsequent imports in the same process.
+    """
+    bad = tmp_path / "bad_harness"
+    bad.mkdir()
+    expected = str(bad.resolve())
+    sys.path[:] = [p for p in sys.path if p != expected]
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "fx-runner",
+            "--task",
+            "x",
+            "--harness-dir",
+            str(bad),
+            "--trace-path",
+            str(tmp_path / "traces.db"),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        main()
+
+    assert expected not in sys.path

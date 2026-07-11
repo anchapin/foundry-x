@@ -25,10 +25,23 @@ def _argv(task: str, trace_path: Path, harness_dir: Path, monkeypatch) -> None:
     )
 
 
+def _stub_harness(harness_dir: Path) -> None:
+    """Build a minimal valid harness layout under ``harness_dir`` (issue #90).
+
+    ``main()`` validates the harness layout before touching ``sys.path``;
+    these stubs satisfy the gate so the terminal-event unit under test runs.
+    """
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    (harness_dir / "system_prompt.txt").write_text("stub harness\n")
+    (harness_dir / "hooks").mkdir(exist_ok=True)
+    (harness_dir / "skills").mkdir(exist_ok=True)
+
+
 def test_main_records_task_failed_and_reraises(tmp_path, monkeypatch):
     """Acceptance test for issue #10: a failing run_task records both
     task_received and task_failed (with error_type) and still propagates."""
     db = tmp_path / "traces.db"
+    _stub_harness(tmp_path)
     _argv("do something risky", db, tmp_path, monkeypatch)
 
     async def failing_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
@@ -55,6 +68,7 @@ def test_main_records_task_completed_on_success(tmp_path, monkeypatch):
     """Acceptance test for issue #10: a succeeding run_task records a
     task_completed event with a non-negative duration_ms."""
     db = tmp_path / "traces.db"
+    _stub_harness(tmp_path)
     _argv("no-op task", db, tmp_path, monkeypatch)
 
     async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
@@ -78,6 +92,7 @@ def test_main_terminal_event_after_timeout(tmp_path, monkeypatch):
     """A wall-clock timeout (re-raised TimeoutError) still produces a
     terminal task_failed event, so the session always has an outcome."""
     db = tmp_path / "traces.db"
+    _stub_harness(tmp_path)
     monkeypatch.setenv("FOUNDRY_TASK_TIMEOUT", "0.05")
     _argv("slow task", db, tmp_path, monkeypatch)
 
