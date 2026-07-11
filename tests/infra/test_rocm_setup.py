@@ -47,8 +47,9 @@ def test_rocm_setup_help_exits_zero() -> None:
     result = _run_rocm_setup("--help")
 
     assert result.returncode == 0
-    assert "usage: rocm_setup.sh [--smoke-test <gguf>]" in result.stdout
+    assert "usage: rocm_setup.sh [--check-rocm] [--smoke-test <gguf>]" in result.stdout
     assert "--smoke-test <gguf>" in result.stdout
+    assert "--check-rocm" in result.stdout
 
 
 def test_rocm_setup_smoke_test_requires_model_path() -> None:
@@ -93,6 +94,22 @@ done
 """,
     )
 
+    # The build path now runs the ROCm pre-flight gate (issue #210) before
+    # touching git/cmake. Satisfy all four checks with a fake /opt/rocm tree
+    # so the smoke-test path reaches the build the way a real host would.
+    fake_rocm = tmp_path / "rocm"
+    (fake_rocm / ".info").mkdir(parents=True)
+    (fake_rocm / "bin").mkdir(parents=True)
+    (fake_rocm / ".info" / "version").write_text("6.2.0\n", encoding="utf-8")
+    _write_executable(
+        fake_rocm / "bin" / "rocminfo",
+        "#!/usr/bin/env bash\ncat <<'EOF'\n  Name:                    gfx1032\nEOF\n",
+    )
+    amdgpu_probe = tmp_path / "sys_module_amdgpu"
+    amdgpu_probe.mkdir()
+    kfd_probe = tmp_path / "dev_kfd"
+    kfd_probe.touch()
+
     result = _run_rocm_setup(
         "--smoke-test",
         str(cli_model),
@@ -100,6 +117,9 @@ done
             "LLAMACPP_DIR": str(llamacpp_dir),
             "LLAMACPP_SMOKE_MODEL": str(env_model),
             "LLAMACPP_SMOKE_TIMEOUT": "1",
+            "ROCM_PATH": str(fake_rocm),
+            "AMDGPU_PROBE": str(amdgpu_probe),
+            "KFD_PROBE": str(kfd_probe),
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
         },
     )
