@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import subprocess
 import sys
@@ -79,6 +80,16 @@ _DEFAULT_TRACE_BACKEND: str = "sqlite"
 # attributable rather than open-ended.
 _MAX_AGENT_STEPS_ENV = "FOUNDRY_MAX_AGENT_STEPS"
 _DEFAULT_MAX_AGENT_STEPS: int = 16
+
+# Per-request httpx timeout (issue #201). ``FOUNDRY_REQUEST_TIMEOUT_S`` caps a
+# single chat-completion HTTP round-trip so a stuck model endpoint cannot hang
+# the agent loop indefinitely. The wall-clock ``RunLimits`` cap guards the
+# whole session; this guards each step (SECURITY.md "Runaway detection"). A
+# non-positive value falls back to the default; a non-numeric or non-finite
+# value raises at process start (AGENTS.md §2 — fail fast, do not silently
+# swallow).
+_REQUEST_TIMEOUT_ENV = "FOUNDRY_REQUEST_TIMEOUT_S"
+_DEFAULT_REQUEST_TIMEOUT_S: float = 30.0
 
 
 # Skill-executor protocol (issue #89, ADR-0010). A callable that maps a skill
@@ -179,6 +190,8 @@ def build_model_adapter(env: dict[str, str] | None = None) -> OpenAICompatibleAd
     ``OPENCODE_SERVER_URL`` remains the primary endpoint knob from
     ``.env.example``; ``LLAMACPP_HOST`` is accepted as a local-first fallback.
     API keys are read only from environment and never persisted here.
+    ``FOUNDRY_REQUEST_TIMEOUT_S`` is plumbed into the owned
+    :class:`httpx.AsyncClient` as the per-request cap (issue #201).
     """
     source = env if env is not None else os.environ
     base_url = (
@@ -197,6 +210,7 @@ def build_model_adapter(env: dict[str, str] | None = None) -> OpenAICompatibleAd
         base_url=base_url,
         model=_resolve_model_request_name(source),
         api_key=api_key or None,
+        timeout=_resolve_request_timeout(source),
     )
 
 
@@ -336,6 +350,34 @@ def _resolve_max_steps(env: dict[str, str] | None = None) -> int:
         return _DEFAULT_MAX_AGENT_STEPS
     value = int(raw)
     return value if value > 0 else _DEFAULT_MAX_AGENT_STEPS
+
+
+def _resolve_request_timeout(env: dict[str, str] | None = None) -> float:
+    """Resolve the per-request httpx timeout in seconds (issue #201).
+
+    ``FOUNDRY_REQUEST_TIMEOUT_S`` caps a single chat-completion HTTP
+    round-trip so a model endpoint that accepts the connection but never
+    completes the response cannot hang the agent loop. The wall-clock
+    :class:`RunLimits` cap guards the whole session; this guards each step.
+
+    Resolution rules:
+
+    - Empty / absent → :data:`_DEFAULT_REQUEST_TIMEOUT_S`.
+    - Non-positive (``<= 0``) → :data:`_DEFAULT_REQUEST_TIMEOUT_S` (the cap
+      cannot be disabled per-request; a stuck step would otherwise hang the
+      session until the wall-clock cap fires).
+    - Non-numeric or non-finite (``inf`` / ``nan``) → :class:`ValueError` so a
+      typo in ``.env`` surfaces at process start rather than silently
+      disabling the guard (AGENTS.md §2).
+    """
+    source = env if env is not None else os.environ
+    raw = source.get(_REQUEST_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_REQUEST_TIMEOUT_S
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError(f"FOUNDRY_REQUEST_TIMEOUT_S={raw!r} is not a finite number")
+    return value if value > 0 else _DEFAULT_REQUEST_TIMEOUT_S
 
 
 def _load_tool_definitions(skills_dir: Path) -> list[ToolDefinition]:
