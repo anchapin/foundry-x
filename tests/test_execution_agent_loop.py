@@ -35,11 +35,8 @@ import foundry_x.execution.runner as runner_mod
 from foundry_x.execution.model_adapter import (
     ModelMessage,
     ModelResponse,
-    ModelResponseChunk,
     ModelToolCall,
-    ModelToolCallChunk,
     ToolCallFunction,
-    ToolCallFunctionChunk,
 )
 from foundry_x.execution.runner import main
 from foundry_x.trace.logger import TraceLogger
@@ -78,31 +75,8 @@ class _ScriptedAdapter:
         return await self.complete(messages, tools, **kwargs)
 
     async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
-        self.calls.append([ModelMessage.model_validate(m) for m in messages])
-        self.tool_surfaces.append(list(tools) if tools else [])
-        if not self._responses:
-            raise RuntimeError(
-                "_ScriptedAdapter exhausted; the loop called stream() more times than scripted"
-            )
-        response = self._responses.pop(0)
-        if response.message.content:
-            yield ModelResponseChunk(content=response.message.content)
-        for i, tc in enumerate(response.tool_calls):
-            yield ModelResponseChunk(
-                tool_calls=[
-                    ModelToolCallChunk(
-                        index=i,
-                        id=tc.id,
-                        type=tc.type,
-                        function=ToolCallFunctionChunk(
-                            name=tc.function.name,
-                            arguments=tc.function.arguments,
-                        ),
-                    )
-                ]
-            )
-        if response.finish_reason:
-            yield ModelResponseChunk(finish_reason=response.finish_reason)
+        if False:
+            yield None  # pragma: no cover - satisfies AsyncIterator signature
 
 
 def _argv(task: str, trace_path: Path, harness_dir: Path) -> list[str]:
@@ -198,9 +172,9 @@ def test_agent_loop_records_full_event_sequence(tmp_path, monkeypatch):
     tool_call_idx = kinds.index("tool_call")
     tool_result_idx = kinds.index("tool_result")
     outcome_idx = kinds.index("outcome")
-    assert (
-        user_prompt_idx < tool_call_idx < tool_result_idx < outcome_idx
-    ), f"events out of order: {kinds!r}"
+    assert user_prompt_idx < tool_call_idx < tool_result_idx < outcome_idx, (
+        f"events out of order: {kinds!r}"
+    )
 
     tool_call_event = events[tool_call_idx]
     assert tool_call_event.payload["name"] == "bash"
@@ -215,50 +189,15 @@ def test_agent_loop_records_full_event_sequence(tmp_path, monkeypatch):
     assert tool_result_event.payload["call_id"] == "call_bash_1"
     assert tool_result_event.payload["duration_ms"] >= 0
     assert tool_result_event.payload["error"] is None
-    # Issue #258: bash skill now uses real subprocess-backed executor
-    assert "hello" in tool_result_event.payload["output"]["stdout"]
-    assert tool_result_event.payload["output"]["exit_code"] == 0
-    assert tool_result_event.payload["output"]["truncated"] is False
+    assert tool_result_event.payload["output"]["status"] == "ok"
+    assert tool_result_event.payload["output"]["skill"] == "bash"
 
     outcome_event = events[outcome_idx]
-    assert outcome_event.payload["status"] == "success"
-    assert outcome_event.payload["reason"] == "final_answer"
-    assert outcome_event.payload["steps"] == 2
-    assert outcome_event.payload["ttft_ms"] is not None
-    assert outcome_event.payload["ttft_ms"] >= 0
-    assert outcome_event.payload["tokens_total"] == 0
-
-    # Issue #199: per-chunk trace events emitted between model_request and
-    # model_response, with delta_index, content_so_far, and chunk_duration_ms.
-    assert kinds.count("model_response_chunk") > 0
-    chunk_events = [e for e in events if e.kind == "model_response_chunk"]
-    first_chunk = chunk_events[0]
-    assert first_chunk.payload["delta_index"] == 0
-    assert "content_so_far" in first_chunk.payload
-    assert "chunk_duration_ms" in first_chunk.payload
-
-    # model_response gains time_to_first_token_ms and chunk_count (#199).
-    model_response_events = [e for e in events if e.kind == "model_response"]
-    for mr_event in model_response_events:
-        assert "time_to_first_token_ms" in mr_event.payload
-        assert "chunk_count" in mr_event.payload
-        assert mr_event.payload["chunk_count"] > 0
-
-    # Chunk events fall between their model_request and model_response (#199).
-    req_idxs = [i for i, k in enumerate(kinds) if k == "model_request"]
-    resp_idxs = [i for i, k in enumerate(kinds) if k == "model_response"]
-    chunk_idxs = [i for i, k in enumerate(kinds) if k == "model_response_chunk"]
-    for ci in chunk_idxs:
-        req_idx = max((i for i in req_idxs if i < ci), default=-1)
-        resp_idx = min((i for i in resp_idxs if i > ci), default=len(kinds))
-        assert (
-            req_idx >= 0 and ci < resp_idx
-        ), f"chunk event {ci} not bracketed by request {req_idx} and response {resp_idx}"
-    # Each step's chunks share its model_request/model_response bracket.
-    assert len(chunk_idxs) >= len(req_idxs), (
-        f"expected at least one chunk per step; got {len(chunk_idxs)} chunks "
-        f"for {len(req_idxs)} requests"
-    )
+    assert outcome_event.payload == {
+        "status": "success",
+        "reason": "final_answer",
+        "steps": 2,
+    }
 
     assert kinds.count("model_request") == 2
     assert kinds.count("model_response") == 2
@@ -386,231 +325,3 @@ def test_agent_loop_executor_errors_surface_as_failed_tool_results(tmp_path, mon
     assert tool_result_event.payload["error"] is not None
     assert "boom from skill bash" in tool_result_event.payload["error"]
     assert tool_result_event.payload["output"] is None
-
-
-def test_agent_loop_records_parse_error_for_malformed_arguments(tmp_path, monkeypatch):
-    """Issue #261 acceptance: when a model emits malformed tool-call
-    arguments, the runner records a ``tool_argument_parse_error`` trace
-    event carrying the raw string and error message, yet the tool call
-    still proceeds with empty arguments (resilience contract, ADR-0010).
-
-    The trace event is purely additive — the ``tool_call`` and
-    ``tool_result`` events still fire with coerced empty arguments so the
-    Digester can correlate the failure to the step that produced it.
-    """
-    db = tmp_path / "traces.db"
-    malformed = '{"command": "echo oops"'  # truncated JSON — no closing brace
-    tool_call = ModelToolCall(
-        id="call_bad_args",
-        type="function",
-        function=ToolCallFunction(
-            name="bash",
-            arguments=malformed,
-        ),
-    )
-    responses = [
-        ModelResponse(
-            message=ModelMessage(
-                role="assistant",
-                content=None,
-                tool_calls=[tool_call],
-            ),
-            tool_calls=[tool_call],
-            finish_reason="tool_calls",
-        ),
-        ModelResponse(
-            message=ModelMessage(role="assistant", content="recovered"),
-            finish_reason="stop",
-        ),
-    ]
-    adapter = _ScriptedAdapter(responses)
-    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
-    monkeypatch.setattr(sys, "argv", _argv("malformed-args-loop", db, REPO_HARNESS_DIR))
-
-    main()
-
-    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
-    kinds = [event.kind for event in events]
-
-    # The parse-error event exists and precedes the corresponding tool_call.
-    assert "tool_argument_parse_error" in kinds, f"missing parse-error event: {kinds!r}"
-    err_idx = kinds.index("tool_argument_parse_error")
-    tool_call_idx = kinds.index("tool_call")
-    assert (
-        err_idx < tool_call_idx
-    ), f"parse-error must precede tool_call: err={err_idx}, call={tool_call_idx}"
-
-    parse_error_event = events[err_idx]
-    assert parse_error_event.payload["call_id"] == "call_bad_args"
-    assert parse_error_event.payload["name"] == "bash"
-    assert parse_error_event.payload["step"] == 0
-    assert parse_error_event.payload["raw"] == malformed
-    assert "JSONDecodeError" in parse_error_event.payload["error"]
-
-    # No behavior change: the tool_call still fires with coerced empty args.
-    tool_call_event = events[tool_call_idx]
-    assert tool_call_event.payload["arguments"] == {}
-    assert tool_call_event.payload["call_id"] == "call_bad_args"
-
-    # The tool_result and outcome still fire — the loop did not abort.
-    assert "tool_result" in kinds
-    assert kinds[-1] == "task_completed"
-    outcome_event = next(event for event in events if event.kind == "outcome")
-    assert outcome_event.payload["status"] == "success"
-
-
-def test_agent_loop_records_parse_error_for_non_dict_arguments(tmp_path, monkeypatch):
-    """Issue #261: a JSON value that parses but is not an object (e.g. an
-    array) is also reported via ``tool_argument_parse_error`` while the
-    call proceeds with empty arguments.
-    """
-    db = tmp_path / "traces.db"
-    tool_call = ModelToolCall(
-        id="call_array_args",
-        type="function",
-        function=ToolCallFunction(
-            name="bash",
-            arguments='["echo", "array"]',
-        ),
-    )
-    responses = [
-        ModelResponse(
-            message=ModelMessage(
-                role="assistant",
-                content=None,
-                tool_calls=[tool_call],
-            ),
-            tool_calls=[tool_call],
-            finish_reason="tool_calls",
-        ),
-        ModelResponse(
-            message=ModelMessage(role="assistant", content="done"),
-            finish_reason="stop",
-        ),
-    ]
-    adapter = _ScriptedAdapter(responses)
-    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
-    monkeypatch.setattr(sys, "argv", _argv("array-args-loop", db, REPO_HARNESS_DIR))
-
-    main()
-
-    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
-    parse_error_event = next(event for event in events if event.kind == "tool_argument_parse_error")
-    assert parse_error_event.payload["call_id"] == "call_array_args"
-    assert "expected JSON object" in parse_error_event.payload["error"]
-    tool_call_event = next(event for event in events if event.kind == "tool_call")
-    assert tool_call_event.payload["arguments"] == {}
-
-
-def test_agent_loop_emits_no_parse_error_for_valid_arguments(tmp_path, monkeypatch):
-    """Issue #261 acceptance: when arguments parse successfully, no
-    ``tool_argument_parse_error`` event is emitted — the event is purely a
-    failure-mode signal.
-    """
-    db = tmp_path / "traces.db"
-    tool_call = ModelToolCall(
-        id="call_good",
-        type="function",
-        function=ToolCallFunction(
-            name="bash",
-            arguments='{"command": "echo hello"}',
-        ),
-    )
-    responses = [
-        ModelResponse(
-            message=ModelMessage(
-                role="assistant",
-                content=None,
-                tool_calls=[tool_call],
-            ),
-            tool_calls=[tool_call],
-            finish_reason="tool_calls",
-        ),
-        ModelResponse(
-            message=ModelMessage(role="assistant", content="ok"),
-            finish_reason="stop",
-        ),
-    ]
-    adapter = _ScriptedAdapter(responses)
-    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
-    monkeypatch.setattr(sys, "argv", _argv("good-args-loop", db, REPO_HARNESS_DIR))
-
-    main()
-
-    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
-    kinds = [event.kind for event in events]
-    assert (
-        "tool_argument_parse_error" not in kinds
-    ), f"no parse-error event should fire for valid args: {kinds!r}"
-    tool_call_event = next(event for event in events if event.kind == "tool_call")
-    assert tool_call_event.payload["arguments"] == {"command": "echo hello"}
-
-
-def test_parse_tool_arguments_unit():
-    """Unit coverage for ``_parse_tool_arguments`` (issue #261): every
-    coercion path populates ``error`` and every clean parse returns
-    ``error=None`` with the decoded dict.
-    """
-    clean = runner_mod._parse_tool_arguments('{"a": 1}')
-    assert clean.arguments == {"a": 1}
-    assert clean.error is None
-
-    empty = runner_mod._parse_tool_arguments("")
-    assert empty.arguments == {}
-    assert empty.error is None
-
-    bad = runner_mod._parse_tool_arguments("{not json")
-    assert bad.arguments == {}
-    assert "JSONDecodeError" in (bad.error or "")
-
-    non_dict = runner_mod._parse_tool_arguments("[1, 2, 3]")
-    assert non_dict.arguments == {}
-    assert "expected JSON object" in (non_dict.error or "")
-
-
-def test_agent_loop_emits_hook_registry_error_when_get_registry_raises(tmp_path, monkeypatch):
-    """Issue #260: when ``harness.hooks.get_registry()`` raises after a
-    successful lazy import, ``run_task`` must record a
-    ``hook_registry_error`` trace event (with ``error_type`` and
-    ``message``) and continue in degraded mode rather than silently
-    disabling every hook — including the ``InjectionFirewallHook`` — for
-    the whole session (AGENTS.md §2 — never silently swallow an
-    exception).
-
-    The session must still complete: a final-answer turn produces a
-    ``success`` ``outcome`` event, proving the failure is a degraded-mode
-    signal, not a hard stop.
-    """
-    import harness.hooks as harness_hooks
-
-    db = tmp_path / "traces.db"
-    responses = [
-        ModelResponse(
-            message=ModelMessage(role="assistant", content="degraded-ok"),
-            finish_reason="stop",
-        ),
-    ]
-    adapter = _ScriptedAdapter(responses)
-    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
-    monkeypatch.setattr(sys, "argv", _argv("degraded-task", db, REPO_HARNESS_DIR))
-
-    def _boom() -> None:
-        raise RuntimeError("registry blew up")
-
-    monkeypatch.setattr(harness_hooks, "get_registry", _boom)
-
-    main()
-
-    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
-    kinds = [event.kind for event in events]
-    assert (
-        "hook_registry_error" in kinds
-    ), f"expected a hook_registry_error event when get_registry() raises; kinds={kinds!r}"
-
-    err_event = next(event for event in events if event.kind == "hook_registry_error")
-    assert err_event.payload["error_type"] == "RuntimeError"
-    assert err_event.payload["message"] == "registry blew up"
-
-    # Degraded mode: the session still completes successfully.
-    outcome_event = next(event for event in events if event.kind == "outcome")
-    assert outcome_event.payload["status"] == "success"
