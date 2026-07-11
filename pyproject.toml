@@ -12,6 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
+fx-runner = "foundry_x.execution.runner:main"
 fx-trace = "foundry_x.observability.cli:main"
 foundry-kpis = "foundry_x.observability.kpis:main"
 foundry-trace = "foundry_x.trace.cli:main"
