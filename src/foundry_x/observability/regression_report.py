@@ -24,6 +24,7 @@ class _Regression:
     task: str
     was_passing_session: str
     now_failing_session: str
+    now_failing_version: str
 
 
 @dataclass
@@ -31,6 +32,7 @@ class _NewPass:
     task: str
     was_failing_session: str
     now_passing_session: str
+    now_passing_version: str
 
 
 def record_verdict(logger: TraceLogger, session_id: str, verdict: CriticVerdict) -> None:
@@ -79,12 +81,14 @@ def _load_verdict_events(
 
 def _compute(
     events: list[tuple[str, str, VerdictRecord]],
+    versions: dict[str, str],
 ) -> tuple[list[_Regression], list[_NewPass]]:
     prior_passed: dict[str, str] = {}
     prior_failed: dict[str, str] = {}
     regressions: list[_Regression] = []
     new_passes: list[_NewPass] = []
     for session_id, _timestamp, verdict in events:
+        session_version = versions.get(session_id, "")
         for task in verdict.failed_checks:
             if task in prior_passed:
                 regressions.append(
@@ -92,6 +96,7 @@ def _compute(
                         task=task,
                         was_passing_session=prior_passed[task],
                         now_failing_session=session_id,
+                        now_failing_version=session_version,
                     )
                 )
         for task in verdict.passed_checks:
@@ -101,6 +106,7 @@ def _compute(
                         task=task,
                         was_failing_session=prior_failed[task],
                         now_passing_session=session_id,
+                        now_passing_version=session_version,
                     )
                 )
         for task in verdict.passed_checks:
@@ -116,8 +122,22 @@ def generate_regression_report(logger: TraceLogger, since: str | None = None) ->
     total = len(events)
     approvals = sum(1 for _sid, _ts, v in events if v.approved)
     rejections = total - approvals
-    regressions, new_passes = _compute(events)
+    versions = _session_versions(logger)
+    regressions, new_passes = _compute(events, versions)
     return _render(total, approvals, rejections, regressions, new_passes)
+
+
+def _session_versions(logger: TraceLogger) -> dict[str, str]:
+    """Build a ``session_id -> harness_version`` map for every known session.
+
+    The map is consumed by :func:`_compute` so each regression / new-pass row
+    can surface the manifest version of its *current-state* session (issue
+    #103: regression_report gains a column showing the manifest version of
+    each verdict's source session). Sessions whose row is missing are
+    rendered as an empty string rather than ``None`` so the Markdown table
+    stays a 4-column shape.
+    """
+    return {s.session_id: s.harness_version for s in logger.list_sessions()}
 
 
 def _render(
@@ -140,18 +160,24 @@ def _render(
         "",
     ]
     if regressions:
-        lines.append("| Task | Was passing (session) | Now failing (session) |")
-        lines.append("| --- | --- | --- |")
+        lines.append("| Task | Was passing (session) | Now failing (session) | Manifest version |")
+        lines.append("| --- | --- | --- | --- |")
         for reg in regressions:
-            lines.append(f"| {reg.task} | {reg.was_passing_session} | {reg.now_failing_session} |")
+            lines.append(
+                f"| {reg.task} | {reg.was_passing_session} | "
+                f"{reg.now_failing_session} | {reg.now_failing_version} |"
+            )
     else:
         lines.append("_None._")
     lines += ["", "## New Passes", ""]
     if new_passes:
-        lines.append("| Task | Was failing (session) | Now passing (session) |")
-        lines.append("| --- | --- | --- |")
+        lines.append("| Task | Was failing (session) | Now passing (session) | Manifest version |")
+        lines.append("| --- | --- | --- | --- |")
         for pas in new_passes:
-            lines.append(f"| {pas.task} | {pas.was_failing_session} | {pas.now_passing_session} |")
+            lines.append(
+                f"| {pas.task} | {pas.was_failing_session} | "
+                f"{pas.now_passing_session} | {pas.now_passing_version} |"
+            )
     else:
         lines.append("_None._")
     lines.append("")
