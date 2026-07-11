@@ -224,6 +224,7 @@ def test_agent_loop_records_full_event_sequence(tmp_path, monkeypatch):
     assert outcome_event.payload["steps"] == 2
     assert outcome_event.payload["ttft_ms"] is not None
     assert outcome_event.payload["ttft_ms"] >= 0
+    assert outcome_event.payload["tokens_total"] == 0
 
     # Issue #199: per-chunk trace events emitted between model_request and
     # model_response, with delta_index, content_so_far, and chunk_duration_ms.

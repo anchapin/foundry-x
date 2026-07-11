@@ -56,8 +56,11 @@ from foundry_x.execution import runner as runner_mod
 from foundry_x.execution.model_adapter import (
     ModelMessage,
     ModelResponse,
+    ModelResponseChunk,
     ModelToolCall,
+    ModelToolCallChunk,
     ToolCallFunction,
+    ToolCallFunctionChunk,
 )
 from foundry_x.execution.runner import _resolve_max_steps, main
 from foundry_x.trace.logger import TraceLogger
@@ -91,8 +94,30 @@ class _ScriptedAdapter:
         return await self.complete(messages, tools, **kwargs)
 
     async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
-        if False:
-            yield None  # pragma: no cover - satisfies AsyncIterator signature
+        self.calls += 1
+        if not self._responses:
+            raise RuntimeError(
+                "_ScriptedAdapter exhausted; the loop called complete() more times than scripted"
+            )
+        response = self._responses.pop(0)
+        if response.message.content:
+            yield ModelResponseChunk(content=response.message.content)
+        for i, tc in enumerate(response.tool_calls):
+            yield ModelResponseChunk(
+                tool_calls=[
+                    ModelToolCallChunk(
+                        index=i,
+                        id=tc.id,
+                        type=tc.type,
+                        function=ToolCallFunctionChunk(
+                            name=tc.function.name,
+                            arguments=tc.function.arguments,
+                        ),
+                    )
+                ]
+            )
+        if response.finish_reason:
+            yield ModelResponseChunk(finish_reason=response.finish_reason)
 
 
 def _tool_call_response(call_id: str) -> ModelResponse:
@@ -308,8 +333,25 @@ def test_wall_clock_caps_loop(tmp_path, monkeypatch):
             return await self.complete(messages, tools, **kwargs)
 
         async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
-            if False:
-                yield None
+            self.calls += 1
+            await asyncio.sleep(0.5)
+            response = _tool_call_response(f"call_slow_{self.calls}")
+            for i, tc in enumerate(response.tool_calls):
+                yield ModelResponseChunk(
+                    tool_calls=[
+                        ModelToolCallChunk(
+                            index=i,
+                            id=tc.id,
+                            type=tc.type,
+                            function=ToolCallFunctionChunk(
+                                name=tc.function.name,
+                                arguments=tc.function.arguments,
+                            ),
+                        )
+                    ]
+                )
+            if response.finish_reason:
+                yield ModelResponseChunk(finish_reason=response.finish_reason)
 
     adapter = _SlowAdapter()
 
