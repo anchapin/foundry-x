@@ -225,7 +225,7 @@ def resolve_trace_backend(env: dict[str, str] | None = None) -> str:
     if backend not in _SUPPORTED_TRACE_BACKENDS:
         valid = ", ".join(sorted(_SUPPORTED_TRACE_BACKENDS))
         raise ValueError(
-            f"Unsupported FOUNDRY_TRACE_BACKEND={backend!r}; " f"valid options are: {valid}"
+            f"Unsupported FOUNDRY_TRACE_BACKEND={backend!r}; valid options are: {valid}"
         )
     return backend
 
