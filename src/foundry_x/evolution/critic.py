@@ -31,8 +31,10 @@ class Critic:
     the harness inside a temporary directory and runs pytest there — the live
     ``harness_dir`` is never mutated.
 
-    Benchmark-subset selection (ADR-0004 step 2) is deferred until the
-    ``benchmarks/`` subsystem wires ``@pytest.mark.benchmark`` (ADR-0005).
+    Benchmark-subset selection (ADR-0004 step 2) uses ``-m benchmark`` by
+    default so every ``@pytest.mark.benchmark`` task gates the edit
+    (ADR-0005, issue #185). The verdict's ``passed_checks`` lists every
+    benchmark tag the run covered.
     """
 
     def __init__(
@@ -48,7 +50,10 @@ class Critic:
         # harness/scripts/load_check.py --harness-dir <copy>` so a broken
         # `harness/skills/*.json` or an unimportable hook fails the gate
         # *before* pytest runs. Out of scope for #107.
-        self.pytest_args = pytest_args or ["-q", "tests/test_smoke.py"]
+        # Default selection runs the full benchmark suite via ``-m benchmark``
+        # (ADR-0005, issue #185) — a harness edit that breaks any
+        # ``@pytest.mark.benchmark`` task is caught at the gate.
+        self.pytest_args = pytest_args or ["-q", "-m", "benchmark"]
         # In-process registry wiring (issue #108): the Critic can now
         # enumerate benchmark tasks without spawning pytest. Stored as
         # ``None`` so the registry is loaded lazily on first access --
@@ -119,6 +124,9 @@ class Critic:
             )
             if pytest_result.returncode == 0:
                 passed_checks.append("pytest")
+                # Record every benchmark tag the run covered (issue #185).
+                covered_tags = sorted({tag for task in self.benchmark_tasks for tag in task.tags})
+                passed_checks.extend(f"benchmark:{tag}" for tag in covered_tags)
             else:
                 failed_checks.append("pytest")
 

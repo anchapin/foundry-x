@@ -130,8 +130,16 @@ def test_verdict_round_trips_through_pydantic() -> None:
 
 
 def test_default_pytest_args_target_smoke_suite() -> None:
+    """Default pytest selection is ``-q -m benchmark`` (issue #185).
+
+    Updated from the original ``tests/test_smoke.py`` default now that the
+    in-process ``BenchmarkTask`` registry (issue #108) and the security-evals
+    family (ADR-0009) are wired. The Critic gate runs the full benchmark
+    suite by default so a harness edit that breaks any
+    ``@pytest.mark.benchmark`` task is caught.
+    """
     critic = Critic(Path("/tmp/nonexistent"))
-    assert critic.pytest_args == ["-q", "tests/test_smoke.py"]
+    assert critic.pytest_args == ["-q", "-m", "benchmark"]
 
 
 def test_critic_exposes_benchmark_tasks_from_registry() -> None:
@@ -165,3 +173,50 @@ def test_critic_accepts_pre_seeded_benchmark_tasks() -> None:
     critic = Critic(Path("/tmp/nonexistent"), benchmark_tasks=[sentinel])
     assert critic.benchmark_tasks == [sentinel]
     assert critic.benchmark_tasks is critic.benchmark_tasks  # cached
+
+
+def test_default_pytest_args_derived_from_benchmark_tasks() -> None:
+    """Default pytest selection is derived from the benchmark registry (issue #185).
+
+    With the in-process ``BenchmarkTask`` registry shipping (issue #108) and
+    the security-evals family wired through ``tags=['security']`` (ADR-0009),
+    the Critic gate defaults to ``-q -m benchmark`` — running the full
+    benchmark suite rather than just ``tests/test_smoke.py``. This means a
+    harness edit that breaks any ``@pytest.mark.benchmark`` task is caught at
+    the gate, and the verdict records which benchmark tags were covered.
+    """
+    critic = Critic(Path("/tmp/nonexistent"))
+    assert critic.pytest_args == ["-q", "-m", "benchmark"]
+
+
+def test_passed_checks_list_benchmark_tags(harness_dir: Path) -> None:
+    """A successful pytest run lists every benchmark tag in ``passed_checks`` (issue #185).
+
+    Pre-seeded tasks with known tags let us assert the exact tag set the
+    verdict reports, without depending on the live registry contents.
+    Duplicate tags across tasks are de-duplicated and sorted alphabetically.
+    """
+    from benchmarks.models import BenchmarkTask
+
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "tests/test_sanity.py"],
+        benchmark_tasks=[
+            BenchmarkTask(
+                name="t1",
+                description="d",
+                tags=["security", "smoke"],
+            ),
+            BenchmarkTask(
+                name="t2",
+                description="d",
+                tags=["security", "math"],
+            ),
+        ],
+    )
+    verdict = critic.evaluate("")
+    assert verdict.approved is True
+    assert "pytest" in verdict.passed_checks
+    assert "benchmark:security" in verdict.passed_checks
+    assert "benchmark:smoke" in verdict.passed_checks
+    assert "benchmark:math" in verdict.passed_checks
