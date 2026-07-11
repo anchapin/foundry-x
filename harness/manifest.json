@@ -1,0 +1,13 @@
+{
+  "version": "0.1.0",
+  "model_target": "minimax-coding-plan/MiniMax-M3",
+  "hooks": [
+    "base",
+    "injection_firewall"
+  ],
+  "skills": [
+    "edit_file.json",
+    "example_skill.json",
+    "write_file.json"
+  ]
+}
