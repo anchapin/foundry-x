@@ -616,3 +616,84 @@ def test_main_does_not_pollute_sys_path_when_harness_invalid(tmp_path, monkeypat
         main()
 
     assert expected not in sys.path
+
+
+# --- fx-runner console script registration (issue #198) ---------------------
+
+
+def test_fx_runner_help_prints_documented_argparse_surface(tmp_path):
+    """Issue #198 acceptance: ``fx-runner --help`` exits zero and prints the
+    documented argparse surface (``--task``, ``--harness-dir``, ``--trace-path``).
+
+    Guards the ``[project.scripts]`` entry in ``pyproject.toml``: if the
+    registration is removed or the target moves, the subprocess fails to
+    resolve the command and this test fails first.
+    """
+    import shutil
+    import subprocess
+
+    runner = shutil.which("fx-runner")
+    assert (
+        runner is not None
+    ), "fx-runner console script not on PATH; install with 'uv pip install -e .'"
+
+    result = subprocess.run(
+        [runner, "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    for flag in ("--task", "--harness-dir", "--trace-path"):
+        assert flag in result.stdout, f"{flag} missing from --help output"
+
+
+def test_fx_runner_console_script_lands_session_in_trace_store(tmp_path):
+    """Issue #198 acceptance: invoking the ``fx-runner`` console script via
+    subprocess opens exactly one session and lands it in the SQLite trace
+    store.
+
+    The subprocess is expected to exit non-zero: without a model endpoint
+    (``OPENCODE_SERVER_URL`` / ``LLAMACPP_HOST``) ``build_model_adapter``
+    raises ``ValueError``, which ``main`` records as ``task_failed`` before
+    re-raising. What matters for this acceptance criterion is that the
+    session was opened and persisted — the operator can inspect it in the
+    trace store regardless of the runner outcome.
+    """
+    import os
+    import shutil
+    import subprocess
+
+    runner = shutil.which("fx-runner")
+    assert (
+        runner is not None
+    ), "fx-runner console script not on PATH; install with 'uv pip install -e .'"
+
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+    db = tmp_path / "traces.db"
+
+    result = subprocess.run(
+        [
+            runner,
+            "--task",
+            "hello",
+            "--harness-dir",
+            str(harness_dir),
+            "--trace-path",
+            str(db),
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": "."},
+    )
+
+    sessions = TraceLogger(db).list_sessions()
+    assert len(sessions) == 1, (
+        f"expected exactly 1 session in trace store, got {len(sessions)}; "
+        f"returncode={result.returncode} "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+    events = TraceLogger(db).load_session(sessions[0].session_id)
+    kinds = [e.kind for e in events]
+    assert "task_received" in kinds
