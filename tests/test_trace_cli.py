@@ -571,3 +571,225 @@ def test_redact_audit_log_appends_across_invocations(tmp_path, capsys):
     assert len(lines) == 2
     assert json.loads(lines[0])["action"] == "redact-key"
     assert json.loads(lines[1])["action"] == "redact-session"
+
+
+# --- Issue #195: seed-sample-trace -------------------------------------------
+# Offline smoke subcommand — plants a deterministic session so the Digester,
+# KPI, and regression-report CLIs have something to chew on without standing
+# up llama-server. Mirrors the event vocabulary the runner emits.
+
+
+_REQUIRED_SEED_KINDS: tuple[str, ...] = (
+    "task_received",
+    "user_prompt",
+    "model_request",
+    "model_response",
+    "tool_call",
+    "tool_result",
+    "outcome",
+)
+
+
+def _parse_seeded_session_id(stdout: str) -> str:
+    """Extract the ``session_id`` printed by ``seed-sample-trace``.
+
+    The CLI emits ``seeded session_id=<uuid>`` on success; this helper
+    trims that down to just the UUID so assertions stay readable.
+    """
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("seeded session_id="):
+            return line.split("=", 1)[1]
+    raise AssertionError(f"no seeded session_id line in stdout:\n{stdout}")
+
+
+def test_seed_sample_trace_plants_required_event_kinds(tmp_path, capsys):
+    """Acceptance criterion: planted session has all 7 required event kinds.
+
+    Issue #195 calls out ``task_received``, ``user_prompt``,
+    ``model_request``, ``model_response``, ``tool_call``, ``tool_result``,
+    and ``outcome`` as the kinds a real run emits and the offline seed must
+    reproduce. Every one of them must be present in the planted session.
+    """
+    db = tmp_path / "traces.db"
+    assert not db.exists()
+
+    rc = main(["seed-sample-trace", "--db", str(db)])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    session_id = _parse_seeded_session_id(captured.out)
+
+    events = TraceLogger(db).load_session(session_id)
+    kinds = [event.kind for event in events]
+
+    # Acceptance criterion: ">= 6 events".
+    assert len(events) >= 6
+    for required_kind in _REQUIRED_SEED_KINDS:
+        assert required_kind in kinds, f"missing required kind {required_kind!r}: {kinds}"
+
+    # Kind order in the planted session follows the runner's emission order
+    # so the timeline renderer shows a faithful shape.
+    assert kinds.index("task_received") < kinds.index("user_prompt")
+    assert kinds.index("user_prompt") < kinds.index("model_request")
+    assert kinds.index("model_request") < kinds.index("model_response")
+    assert kinds.index("model_response") < kinds.index("tool_call")
+    assert kinds.index("tool_call") < kinds.index("tool_result")
+    assert kinds.index("tool_result") < kinds.index("outcome")
+
+
+def test_seed_sample_trace_creates_persistent_session_row(tmp_path, capsys):
+    """Seeded session lands in the sessions table with the expected metadata.
+
+    The KPI CLI filters by ``harness_version`` and the regression-report
+    CLI iterates sessions via ``list_sessions``. Both must see the planted
+    session, so the ``session()`` context manager must have committed the
+    start-of-life row before ``record()`` calls landed.
+    """
+    db = tmp_path / "traces.db"
+
+    rc = main(["seed-sample-trace", "--db", str(db)])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    session_id = _parse_seeded_session_id(captured.out)
+
+    sessions = TraceLogger(db).list_sessions()
+    assert len(sessions) == 1
+    planted = sessions[0]
+    assert planted.session_id == session_id
+    # Default harness version is "seed-sample" so the planted row is
+    # trivially filterable by the KPI / regression-report CLIs.
+    assert planted.harness_version == "seed-sample"
+    assert planted.model_id == "seeded-llama-sample"
+    # ``session()`` sets ended_at on exit; the seeded session is closed
+    # before ``record()`` is called, so ended_at is populated.
+    assert planted.ended_at is not None
+
+
+def test_seed_sample_trace_honors_harness_version_override(tmp_path, capsys):
+    """``--harness-version`` lets the seeded session simulate a candidate.
+
+    Issue #195 acceptance criterion: ``--harness-version`` flag lets the
+    seeded session simulate a candidate version. The compare-kpis CLI
+    filters sessions by harness version, so the planted row must surface
+    under the override value.
+    """
+    db = tmp_path / "traces.db"
+
+    rc = main(
+        [
+            "seed-sample-trace",
+            "--db",
+            str(db),
+            "--harness-version",
+            "1.0.0-candidate",
+        ]
+    )
+
+    assert rc == 0
+
+    sessions = TraceLogger(db).list_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].harness_version == "1.0.0-candidate"
+
+    only_candidate = TraceLogger(db).list_sessions(harness_version="1.0.0-candidate")
+    assert len(only_candidate) == 1
+    assert only_candidate[0].session_id == sessions[0].session_id
+
+
+def test_seed_sample_trace_payloads_are_secret_free(tmp_path):
+    """Acceptance criterion: planted payloads contain no real secrets.
+
+    SECURITY.md §Secrets forbids persisting raw tokens, keys, or PEM
+    blocks. The seed command plants synthetic placeholder content; this
+    test walks the planted session and asserts the redaction scanners
+    matched nothing. A regression that pulled real credentials into the
+    seed would silently leak them into ``logs/traces.db`` on every
+    developer machine, so we pin the property here.
+    """
+    from foundry_x.trace.logger import _redact, _redact_value
+
+    db = tmp_path / "traces.db"
+    rc = main(["seed-sample-trace", "--db", str(db)])
+    assert rc == 0
+
+    sessions = TraceLogger(db).list_sessions()
+    assert len(sessions) == 1
+    sid = sessions[0].session_id
+
+    # Sanity check the redaction helper: a sentinel token MUST be redacted
+    # so the test below is actually proving something (i.e. we'd catch a
+    # regression in the redaction layer too).
+    assert "[REDACTED" in _redact_value("sk-abcdefghijklmnopqrstuvwxyz")
+    assert _redact({"api_key": "anything"}) == {"api_key": "[REDACTED:secret]"}
+
+    for event in TraceLogger(db).load_session(sid):
+        redacted_payload = _redact(event.payload)
+        # ``_redact`` is idempotent: re-applying it to a payload that
+        # already contains no secret-shaped substrings must return the
+        # same shape. A regression that introduced a token would surface
+        # as ``[REDACTED:...]`` markers on the second pass.
+        assert redacted_payload == _redact(redacted_payload)
+        for value in _iter_payload_strings(redacted_payload):
+            assert "[REDACTED" not in value, (
+                f"seed planted a secret-shaped substring in " f"{event.kind!r}: {value!r}"
+            )
+
+
+def _iter_payload_strings(payload):
+    """Yield every string value nested inside ``payload``.
+
+    Walks dicts and lists recursively so a deeply-nested tool-call
+    argument cannot hide a secret-shaped substring from the scanner.
+    """
+    if isinstance(payload, dict):
+        for value in payload.values():
+            yield from _iter_payload_strings(value)
+    elif isinstance(payload, list):
+        for item in payload:
+            yield from _iter_payload_strings(item)
+    elif isinstance(payload, str):
+        yield payload
+
+
+def test_seed_sample_trace_creates_parent_directory(tmp_path):
+    """``--db`` path is created if its parent does not yet exist.
+
+    Mirrors the ``TraceLogger`` constructor's behavior so a developer can
+    point the seed at a fresh ``logs/traces.db`` without mkdir-ing first.
+    """
+    nested_db = tmp_path / "deep" / "nested" / "traces.db"
+    assert not nested_db.parent.exists()
+
+    rc = main(["seed-sample-trace", "--db", str(nested_db)])
+
+    assert rc == 0
+    assert nested_db.exists()
+    sessions = TraceLogger(nested_db).list_sessions()
+    assert len(sessions) == 1
+
+
+def test_seed_sample_trace_is_visible_to_existing_subcommands(tmp_path, capsys):
+    """``session-list`` and ``session-show`` see the planted session.
+
+    The point of the seed is to give downstream CLIs something to chew on
+    — this is the end-to-end check that the planted row is consumable.
+    """
+    db = tmp_path / "traces.db"
+
+    rc = main(["seed-sample-trace", "--db", str(db)])
+    assert rc == 0
+    session_id = _parse_seeded_session_id(capsys.readouterr().out)
+
+    rc = main(["session-list", "--db", str(db)])
+    assert rc == 0
+    listing = capsys.readouterr().out
+    assert session_id in listing
+    assert "seed-sample" in listing
+
+    rc = main(["session-show", session_id, "--db", str(db)])
+    assert rc == 0
+    timeline = capsys.readouterr().out
+    for required_kind in _REQUIRED_SEED_KINDS:
+        assert required_kind in timeline
