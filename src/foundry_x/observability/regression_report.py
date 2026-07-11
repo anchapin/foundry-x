@@ -218,6 +218,19 @@ def _session_versions(logger: TraceLogger) -> dict[str, str]:
     return {s.session_id: s.harness_version for s in logger.list_sessions()}
 
 
+def _session_versions(logger: TraceLogger) -> dict[str, str]:
+    """Build a ``session_id -> harness_version`` map for every known session.
+
+    The map is consumed by :func:`_compute` so each regression / new-pass row
+    can surface the manifest version of its *current-state* session (issue
+    #103: regression_report gains a column showing the manifest version of
+    each verdict's source session). Sessions whose row is missing are
+    rendered as an empty string rather than ``None`` so the Markdown table
+    stays a 4-column shape.
+    """
+    return {s.session_id: s.harness_version for s in logger.list_sessions()}
+
+
 def _render(
     total: int,
     approvals: int,
