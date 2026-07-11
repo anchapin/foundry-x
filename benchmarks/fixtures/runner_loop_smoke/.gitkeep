@@ -1,0 +1,2 @@
+# placeholder -- runner_loop_smoke drives Runner.run_task against an in-memory
+# stub ModelAdapter (issue #174); it does not read any seed data from fixtures.
