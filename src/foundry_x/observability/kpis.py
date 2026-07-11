@@ -567,6 +567,26 @@ def render_history_markdown(entries: Sequence[KpiHistoryEntry]) -> str:
     return "\n".join(lines)
 
 
+def _resolve_format(args_format: str | None, out: str | None) -> str:
+    """Return ``"markdown"`` or ``"json"``.
+
+    The explicit ``--format`` flag always wins. When unset, the format is
+    inferred from the ``--out`` file extension (``.json`` → JSON);
+    otherwise Markdown is returned. Issue #101 keeps the decision local to
+    the CLI layer so the pydantic model remains the single source of truth.
+    """
+    if args_format is not None:
+        return args_format
+    if out is not None and Path(out).suffix.lower() == ".json":
+        return "json"
+    return "markdown"
+
+
+def _render_json(summary: KpiSummary) -> str:
+    """Serialize a KPI summary as a stable JSON snapshot (issue #101)."""
+    return summary.model_dump_json(indent=2)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="foundry-kpis",
