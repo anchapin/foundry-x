@@ -1465,6 +1465,17 @@ async def run_task(
                     output = None
                     error = f"{type(exc).__name__}: {exc}"
                 duration_ms = int((time.monotonic() - start) * 1000)
+                log.record(
+                    session_id,
+                    kind="tool_call",
+                    payload={
+                        "step": step,
+                        "call_id": tool_call.id,
+                        "name": tool_call.function.name,
+                        "arguments": arguments,
+                        "duration_ms": duration_ms,
+                    },
+                )
                 result = hook_result_cls(name=call.name, output=output, error=error)
 
                 if registry is not None:
