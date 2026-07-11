@@ -77,9 +77,73 @@ The threat-model rationale for the `read_only`, `tmpfs`, and narrowed
 `extra_hosts` choices is documented inline in `docker-compose.yml` so
 the comment travels with the change.
 
+## ROCm GPU sandbox (RX 6600 XT)
+
+The default compose path runs on CPU. For operators who want to evolve
+the harness against the local ROCm-built llama-server
+(`infra/llama-cpp/`), issue #115 ships an *override* file that
+re-attaches the host AMD GPU without changing the CPU-only default:
+
+```bash
+docker compose \
+    -f infra/docker/docker-compose.yml \
+    -f infra/docker/docker-compose.rocm.yml \
+    run --rm foundryx --task "your ROCm benchmark task prompt"
+```
+
+`docker-compose.rocm.yml` declares only the ROCm-specific bits; every
+other field (read-only mounts, tmpfs caps, narrowed egress, ulimits,
+capability drops) is inherited from `docker-compose.yml` via Compose
+v2's merge-by-service. The override MUST NOT redeclare any base-file
+key -- see the hardening test below.
+
+| Override field | Value | Why |
+|---|---|---|
+| `devices` | `/dev/kfd`, `/dev/dri` | KFD compute + DRM render nodes |
+| `group_add` | `video`, `render` | `/dev/dri/renderD*` is group-gated |
+| `environment.HSA_OVERRIDE_GFX_VERSION` | `10.3.0` | RX 6600 XT (gfx1032) on older kernels |
+| `environment.ROCM_PATH` | `/opt/rocm` | Standard ROCm install path |
+
+### Manual smoke test (confirms `/health` from inside the container)
+
+After starting the host llama-server (e.g. via
+`infra/llama-cpp/rocm_setup.sh --smoke-test <gguf>`), the cheapest
+proof the GPU is actually wired through is to call `/health` from
+inside the override-launched container:
+
+```bash
+docker compose \
+    -f infra/docker/docker-compose.yml \
+    -f infra/docker/docker-compose.rocm.yml \
+    run --rm \
+    --entrypoint curl foundryx http://llamacpp:8080/health
+```
+
+Expect a JSON body containing `ok` (typically `{"status":"ok"}`). If
+the request hangs or fails, the host llama-server is most likely not
+running, or `LLAMACPP_HOST` does not match the override's `extra_hosts`
+alias -- see `docker-compose.yml` "THREAT MODEL: egress".
+
+To confirm the GPU devices are visible inside the container:
+
+```bash
+docker compose \
+    -f infra/docker/docker-compose.yml \
+    -f infra/docker/docker-compose.rocm.yml \
+    run --rm \
+    --entrypoint sh foundryx -c 'ls -l /dev/kfd /dev/dri/renderD128 2>&1'
+```
+
+Expect both paths present and the render node readable. If `/dev/kfd`
+is absent, the host kernel does not have `amdgpu` loaded -- see
+`infra/llama-cpp/README.md` "ROCm pitfalls".
+
 ## Verification
 
 `tests/test_compose_sandbox.py` statically validates the Compose file
 enforces these properties (read-only source mounts, writable logs,
 memory limit, non-host network, **read-only root FS**, **tmpfs caps**,
 **narrowed extra_hosts**) so the guardrail cannot regress silently.
+`tests/test_compose_rocm.py` does the same for the ROCm override
+(devices, group_add, env vars) and asserts the override does NOT
+silently shadow the base file's hardening keys.
