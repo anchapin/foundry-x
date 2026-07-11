@@ -66,6 +66,22 @@ class KpiSummary(BaseModel):
     injection_blocks: dict[str, int] = {}
 
 
+class KpiComparison(BaseModel):
+    """Baseline-vs-candidate harness-version comparison (issue #100).
+
+    ``deltas`` holds the raw ``candidate - baseline`` difference for each
+    numeric KPI; the rendering layer interprets the sign per the PRD's
+    "good direction" — improvement-rate up is good, regression-rate and
+    cycle-time down are good. ``injection_blocks`` is intentionally
+    excluded from the comparison because it is an auxiliary signal, not
+    one of the three PRD success-metric KPIs.
+    """
+
+    baseline: KpiSummary
+    candidate: KpiSummary
+    deltas: dict[str, float | None]
+
+
 def compute_kpis(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -97,6 +113,44 @@ def compute_kpis(
         improvement_rate=improvement_rate,
         injection_blocks=injection_blocks,
     )
+
+
+def compare_kpis(
+    logger: TraceLogger,
+    baseline_version: str,
+    candidate_version: str,
+) -> KpiComparison:
+    """Compute a baseline-vs-candidate comparison (issue #100).
+
+    Each version is reduced to its own :class:`KpiSummary` via
+    :func:`compute_kpis`, then the candidate-minus-baseline deltas are
+    derived for the three PRD KPIs. The sign convention (which direction
+    is "good") is applied at render time, not here, so the structured
+    ``deltas`` stay sign-agnostic for JSON consumers.
+    """
+    baseline = compute_kpis(logger, harness_version=baseline_version)
+    candidate = compute_kpis(logger, harness_version=candidate_version)
+    return KpiComparison(
+        baseline=baseline,
+        candidate=candidate,
+        deltas=_compute_deltas(baseline, candidate),
+    )
+
+
+def _compute_deltas(
+    baseline: KpiSummary,
+    candidate: KpiSummary,
+) -> dict[str, float | None]:
+    def _delta(b: float | None, c: float | None) -> float | None:
+        if b is None or c is None:
+            return None
+        return c - b
+
+    return {
+        "cycle_time_seconds": _delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds),
+        "regression_rate": _delta(baseline.regression_rate, candidate.regression_rate),
+        "improvement_rate": _delta(baseline.improvement_rate, candidate.improvement_rate),
+    }
 
 
 def _first_event_of_kind(logger: TraceLogger, session_id: str, kind: str) -> TraceEvent | None:
@@ -194,6 +248,31 @@ def _format_value(value: float | None) -> str:
     return f"{value:.2f}"
 
 
+def _format_delta(
+    baseline: float | None,
+    candidate: float | None,
+    higher_is_better: bool,
+) -> str:
+    """Render a candidate-minus-baseline delta with a PRD sign convention.
+
+    Per issue #100 an *improvement-rate* increase is marked ``positive``
+    (good) while a *regression-rate* or *cycle-time* increase is marked
+    ``negative`` (bad). ``higher_is_better`` selects which polarity the
+    PRD treats as favorable for the given KPI. A near-zero change is
+    ``neutral``; an unmeasurable side (``None``) yields ``N/A``.
+    """
+    if baseline is None or candidate is None:
+        return "N/A"
+    delta = candidate - baseline
+    if abs(delta) < 1e-9:
+        mark = "neutral"
+    elif (delta > 0) is higher_is_better:
+        mark = "positive"
+    else:
+        mark = "negative"
+    return f"{delta:+.2f} ({mark})"
+
+
 def _render_markdown(summary: KpiSummary) -> str:
     lines = [
         "| KPI | Value |",
@@ -239,6 +318,37 @@ def _render_json(summary: KpiSummary) -> str:
     return summary.model_dump_json(indent=2)
 
 
+def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> str:
+    """Render baseline / candidate / delta columns for the three PRD KPIs.
+
+    Issue #100 requires the comparison to surface a delta column whose
+    sign convention follows the PRD: improvement-rate up is good,
+    regression-rate and cycle-time up are bad.
+    """
+    lines = [
+        "| KPI | Baseline | Candidate | Delta |",
+        "| --- | --- | --- | --- |",
+        "| Cycle Time (seconds) | "
+        f"{_format_value(baseline.cycle_time_seconds)} | "
+        f"{_format_value(candidate.cycle_time_seconds)} | "
+        f"{_format_delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds, higher_is_better=False)} |",
+        "| Regression Rate | "
+        f"{_format_value(baseline.regression_rate)} | "
+        f"{_format_value(candidate.regression_rate)} | "
+        f"{_format_delta(baseline.regression_rate, candidate.regression_rate, higher_is_better=False)} |",
+        "| Improvement Rate | "
+        f"{_format_value(baseline.improvement_rate)} | "
+        f"{_format_value(candidate.improvement_rate)} | "
+        f"{_format_delta(baseline.improvement_rate, candidate.improvement_rate, higher_is_better=True)} |",
+    ]
+    return "\n".join(lines)
+
+
+def _render_comparison_json(comparison: KpiComparison) -> str:
+    """Serialize a baseline-vs-candidate comparison as JSON (issue #100)."""
+    return comparison.model_dump_json(indent=2)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="foundry-kpis",
@@ -253,6 +363,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--harness-version",
         default=None,
         help="Only consider sessions with this harness version.",
+    )
+    parser.add_argument(
+        "--baseline-harness-version",
+        default=None,
+        help=(
+            "Baseline harness version for a baseline-vs-candidate comparison"
+            " (issue #100). Must be paired with --candidate-harness-version."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-harness-version",
+        default=None,
+        help=(
+            "Candidate harness version for a baseline-vs-candidate comparison"
+            " (issue #100). Must be paired with --baseline-harness-version."
+        ),
     )
     parser.add_argument(
         "--format",
@@ -270,10 +396,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    baseline_version = args.baseline_harness_version
+    candidate_version = args.candidate_harness_version
+    if (baseline_version is None) != (candidate_version is None):
+        parser.error(
+            "--baseline-harness-version and --candidate-harness-version must be supplied together"
+        )
+
     fmt = _resolve_format(args.format, args.out)
     logger = TraceLogger(args.db)
-    summary = compute_kpis(logger, harness_version=args.harness_version)
-    output = _render_json(summary) if fmt == "json" else _render_markdown(summary)
+
+    if baseline_version is not None and candidate_version is not None:
+        comparison = compare_kpis(logger, baseline_version, candidate_version)
+        if fmt == "json":
+            output = _render_comparison_json(comparison)
+        else:
+            output = _render_comparison_markdown(comparison.baseline, comparison.candidate)
+    else:
+        summary = compute_kpis(logger, harness_version=args.harness_version)
+        output = _render_json(summary) if fmt == "json" else _render_markdown(summary)
 
     if args.out:
         Path(args.out).write_text(output, encoding="utf-8")
