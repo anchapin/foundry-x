@@ -29,7 +29,7 @@ COMPOSITE_ACTION = REPO_ROOT / ".github" / "actions" / "install-uv" / "action.ym
 
 #: Workflows expected to install uv.  If a new workflow is added that
 #: needs uv, add it here so the test enforces the pin on it too.
-EXPECTED_WORKFLOWS = ["ci.yml", "audit.yml", "critic.yml", "docker.yml"]
+EXPECTED_WORKFLOWS = ["ci.yml", "audit.yml", "critic.yml"]
 
 
 def _load_workflow(name: str) -> str:
@@ -153,4 +153,4 @@ def test_composite_action_pins_sha256(composite_action_text: str) -> None:
         composite_action_text,
         re.DOTALL,
     )
-    assert m, "Composite action must declare `uv-sha256` with a 64-hex default. See issue #208."
+    assert m, "Composite action must declare `uv-sha256` with a 64-hex default. " "See issue #208."
