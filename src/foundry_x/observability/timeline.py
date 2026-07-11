@@ -35,6 +35,22 @@ def _error_marker() -> str:
     return "!"
 
 
+def _format_latency(payload: dict[str, Any]) -> str:
+    duration_ms = payload.get("duration_ms")
+    if isinstance(duration_ms, bool) or not isinstance(duration_ms, (int, float)):
+        return ""
+    return f"{duration_ms:g}ms"
+
+
+def _with_latency(summary: str, payload: dict[str, Any]) -> str:
+    latency = _format_latency(payload)
+    if not latency:
+        return summary
+    if not summary:
+        return latency
+    return f"{summary} ({latency})"
+
+
 def _extract_summary(payload: dict[str, Any]) -> str:
     """Return a one-line human summary for an event payload.
 
@@ -44,19 +60,19 @@ def _extract_summary(payload: dict[str, Any]) -> str:
     """
     name = payload.get("name")
     if isinstance(name, str) and name:
-        return name
+        return _with_latency(name, payload)
     for key in ("prompt", "text", "message", "error"):
         value = payload.get(key)
         if value is None:
             continue
         text = str(value).replace("\n", " ").strip()
         if text:
-            return text[:_SUMMARY_LIMIT]
+            return _with_latency(text[:_SUMMARY_LIMIT], payload)
     for key in ("status", "result"):
         value = payload.get(key)
         if value is not None:
-            return str(value)
-    return ""
+            return _with_latency(str(value), payload)
+    return _with_latency("", payload)
 
 
 def format_timeline(

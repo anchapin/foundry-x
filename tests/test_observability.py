@@ -100,6 +100,19 @@ def test_format_timeline_truncates_long_prompt():
     assert len(summary_part) == 60
 
 
+def test_format_timeline_tool_latency_when_present():
+    events = [_event("tool_call", timedelta(seconds=0.0), {"name": "read_file", "duration_ms": 42})]
+    output = format_timeline(events)
+    assert "read_file (42ms)" in output
+
+
+def test_format_timeline_omits_tool_latency_when_missing():
+    output = format_timeline(_sample_events())
+    tool_call_line = next(ln for ln in output.splitlines() if re.search(r"#2", ln))
+    assert "read_file" in tool_call_line
+    assert "ms)" not in tool_call_line
+
+
 # --- failure report render tests ---
 
 
