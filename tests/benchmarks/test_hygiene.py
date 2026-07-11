@@ -169,7 +169,11 @@ def test_every_benchmark_test_carries_marker(pytester: pytest.Pytester) -> None:
         py_file = Path(path_str)
         if not py_file.is_absolute():
             py_file = (REPO_ROOT / path_str).resolve()
-        markers = _function_markers(py_file).get(test_name, set())
+        # Parametrised tests generate nodeids like
+        # ``test_fix_import_error[missing_module]``; strip the bracketed
+        # suffix so the AST lookup finds the bare function definition.
+        bare_name = test_name.split("[", 1)[0]
+        markers = _function_markers(py_file).get(bare_name, set())
         if "benchmark" not in markers:
             missing.append(f"{nodeid} (markers present: {sorted(markers) or 'none'})")
 

@@ -24,4 +24,6 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: uv pip audit
-        run: uv pip audit
+        # `uv pip audit` was removed in uv 0.9.x; use `uvx pip-audit`
+        # which runs the canonical PyPA tool via uv's ephemeral env.
+        run: uvx pip-audit
