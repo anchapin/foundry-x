@@ -15,6 +15,7 @@ from foundry_x.execution.model_adapter import (
     ModelRequest,
     ModelResponse,
     ModelResponseChunk,
+    ModelRetryEvent,
     ModelToolCallChunk,
     OpenAICompatibleAdapter,
     ToolCallFunctionChunk,
@@ -442,3 +443,252 @@ async def test_adapter_request_timeout_wraps_read_timeout():
         with pytest.raises(ModelAdapterError) as exc_info:
             await adapter.complete(messages=[ModelMessage(role="user", content="hello")], tools=[])
         assert isinstance(exc_info.value.__cause__, httpx.ReadTimeout)
+
+# ---------------------------------------------------------------------------
+# Issue #200 — bounded retry on transient ModelAdapter failures
+# ---------------------------------------------------------------------------
+
+_SUCCESS_BODY = {
+    "choices": [
+        {
+            "message": {"role": "assistant", "content": "done"},
+            "finish_reason": "stop",
+        }
+    ]
+}
+
+
+async def _no_sleep(_seconds: float) -> None:
+    """No-op replacement for ``asyncio.sleep`` in retry tests."""
+
+
+def _make_status_handler(statuses: list[int]):
+    """Return a MockTransport handler that replays *statuses* then 200."""
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        idx = calls["count"]
+        calls["count"] += 1
+        if idx < len(statuses):
+            return httpx.Response(statuses[idx], text="transient")
+        return httpx.Response(200, json=_SUCCESS_BODY)
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_post_json_retries_503_then_succeeds(monkeypatch):
+    """503 → 503 → 200 yields a ModelResponse with two model_retry events."""
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    retries: list[ModelRetryEvent] = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_make_status_handler([503, 503]))
+    ) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="foundry-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        response = await adapter.complete(
+            messages=[ModelMessage(role="user", content="hello")],
+        )
+
+    assert response.message.content == "done"
+    assert len(retries) == 2
+    assert retries[0].attempt == 1
+    assert retries[0].error_type == "HTTPStatusError"
+    assert retries[1].attempt == 2
+    assert retries[1].error_type == "HTTPStatusError"
+    assert all(r.backoff_ms >= 0 for r in retries)
+
+
+@pytest.mark.asyncio
+async def test_retries_on_connect_error(monkeypatch):
+    """httpx.ConnectError is retried, then succeeds on the third attempt."""
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    retries: list[ModelRetryEvent] = []
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            raise httpx.ConnectError("boom", request=request)
+        return httpx.Response(200, json=_SUCCESS_BODY)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test",
+            model="foundry-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        response = await adapter.complete(
+            messages=[ModelMessage(role="user", content="hello")],
+        )
+
+    assert response.message.content == "done"
+    assert len(retries) == 2
+    assert retries[0].error_type == "ConnectError"
+
+
+@pytest.mark.asyncio
+async def test_no_retry_on_400_client_error():
+    """HTTP 400 is not retryable — adapter raises immediately."""
+    retries: list[ModelRetryEvent] = []
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(400, text="bad request")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test",
+            model="foundry-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        with pytest.raises(ModelAdapterHTTPError) as exc_info:
+            await adapter.complete(
+                messages=[ModelMessage(role="user", content="hello")],
+            )
+
+    assert exc_info.value.status_code == 400
+    assert calls["count"] == 1
+    assert retries == []
+
+
+@pytest.mark.asyncio
+async def test_no_retry_on_response_parse_error():
+    """ModelAdapterResponseError is not retried (issue #200)."""
+    retries: list[ModelRetryEvent] = []
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(200, json={"choices": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test",
+            model="foundry-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        with pytest.raises(ModelAdapterResponseError):
+            await adapter.complete(
+                messages=[ModelMessage(role="user", content="hello")],
+            )
+
+    assert calls["count"] == 1
+    assert retries == []
+
+
+@pytest.mark.asyncio
+async def test_retries_exhausted_raises_http_error(monkeypatch):
+    """All retries exhausted → ModelAdapterHTTPError on final attempt."""
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    retries: list[ModelRetryEvent] = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(503, text="down"))
+    ) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test",
+            model="foundry-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        with pytest.raises(ModelAdapterHTTPError) as exc_info:
+            await adapter.complete(
+                messages=[ModelMessage(role="user", content="hello")],
+            )
+
+    assert exc_info.value.status_code == 503
+    assert len(retries) == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_429_is_retryable(monkeypatch):
+    """HTTP 429 (rate-limit) is in the retryable set."""
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    retries: list[ModelRetryEvent] = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_make_status_handler([429]))
+    ) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test",
+            model="foundry-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        response = await adapter.complete(
+            messages=[ModelMessage(role="user", content="hello")],
+        )
+
+    assert response.message.content == "done"
+    assert len(retries) == 1
+    assert retries[0].error_type == "HTTPStatusError"
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_503_then_succeeds(monkeypatch):
+    """The SSE stream retries a 503 connection error, then yields chunks."""
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            return httpx.Response(503, text="down")
+        body = (
+            "data: "
+            + json.dumps({"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]})
+            + "\n\ndata: [DONE]\n\n"
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    retries: list[ModelRetryEvent] = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test",
+            model="foundry-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        chunks = []
+        async for chunk in adapter.stream(
+            messages=[ModelMessage(role="user", content="hello")],
+        ):
+            chunks.append(chunk)
+
+    assert calls["count"] == 3
+    assert len(retries) == 2
+    assert retries[0].error_type == "HTTPStatusError"
+    assert len(chunks) == 1
+    assert chunks[0].content == "hi"
+
+
+@pytest.mark.asyncio
+async def test_resolve_adapter_max_retries_from_env():
+    from foundry_x.execution.model_adapter import resolve_adapter_max_retries
+
+    assert resolve_adapter_max_retries({}) == 2
+    assert resolve_adapter_max_retries({"FOUNDRY_ADAPTER_MAX_RETRIES": "5"}) == 5
+    assert resolve_adapter_max_retries({"FOUNDRY_ADAPTER_MAX_RETRIES": "0"}) == 0
+    assert resolve_adapter_max_retries({"FOUNDRY_ADAPTER_MAX_RETRIES": "  3 "}) == 3
+
+    with pytest.raises(ValueError):
+        resolve_adapter_max_retries({"FOUNDRY_ADAPTER_MAX_RETRIES": "abc"})

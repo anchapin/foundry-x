@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import AsyncIterator, Sequence
+import os
+import random
+from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Literal, Protocol, Self, TypeAlias, runtime_checkable
 
 import httpx
@@ -11,6 +14,23 @@ JsonObject: TypeAlias = dict[str, JsonValue]
 
 _JSON_OBJECT_ADAPTER = TypeAdapter(JsonObject)
 _RESERVED_REQUEST_KEYS = frozenset({"model", "messages", "tools", "stream"})
+
+# Bounded retry on transient failures (issue #200). A single llama-server
+# hiccup (5xx, connect failure, read timeout) must not abort a multi-step
+# agent loop. Retries are bounded by FOUNDRY_ADAPTER_MAX_RETRIES (default 2)
+# and fire only on explicitly transient conditions — never on 4xx client
+# errors (other than 408/429), never on response-parsing failures, and
+# never on exceptions from an injected skill executor.
+_ADAPTER_MAX_RETRIES_ENV = "FOUNDRY_ADAPTER_MAX_RETRIES"
+_DEFAULT_ADAPTER_MAX_RETRIES = 2
+_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
+_RETRYABLE_TRANSPORT_ERRORS: tuple[type[Exception], ...] = (
+    httpx.ConnectError,
+    httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+)
+_BASE_BACKOFF_MS = 500
+_MAX_BACKOFF_MS = 8000
 
 
 class ToolCallFunction(BaseModel):
@@ -169,6 +189,22 @@ class ModelAdapterResponseError(ModelAdapterError):
     """Raised when the endpoint response cannot be parsed as a model response."""
 
 
+class ModelRetryEvent(BaseModel):
+    """Emitted when the adapter retries a transient failure (issue #200).
+
+    Each retry during ``_post_json`` or the SSE ``stream`` path produces one
+    event. The payload is fully typed (no ``Any``) so the trace store and the
+    Phase 2 Digester can reason about retry behaviour without schema drift.
+    """
+
+    attempt: int = Field(ge=1, description="1-based index of the failed attempt.")
+    error_type: str = Field(min_length=1, description="Class name of the retried exception.")
+    backoff_ms: int = Field(ge=0, description="Jittered backoff (ms) before the next attempt.")
+
+
+RetryCallback: TypeAlias = Callable[[ModelRetryEvent], None]
+
+
 MessageInput: TypeAlias = ModelMessage | dict[str, JsonValue]
 ToolInput: TypeAlias = ToolDefinition | dict[str, JsonValue]
 
@@ -214,6 +250,8 @@ class OpenAICompatibleAdapter:
         client: httpx.AsyncClient | None = None,
         timeout: float = 60.0,
         chat_completions_path: str | None = None,
+        max_retries: int = _DEFAULT_ADAPTER_MAX_RETRIES,
+        on_retry: RetryCallback | None = None,
     ) -> None:
         base = base_url.strip().rstrip("/")
         if not base:
@@ -228,6 +266,8 @@ class OpenAICompatibleAdapter:
         self._client = client or httpx.AsyncClient(timeout=timeout)
         self._owns_client = client is None
         self._headers = _auth_headers(api_key)
+        self.max_retries = max_retries
+        self.on_retry = on_retry
 
     async def __aenter__(self) -> Self:
         return self
@@ -265,46 +305,121 @@ class OpenAICompatibleAdapter:
         **kwargs: JsonValue,
     ) -> AsyncIterator[ModelResponseChunk]:
         request = _build_request(self.model, messages, tools, stream=True, extra_params=kwargs)
-        async with self._client.stream(
-            "POST",
-            self._chat_completions_url,
-            json=request.to_openai_payload(),
-            headers=self._headers,
-        ) as response:
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                raise ModelAdapterHTTPError(
-                    status_code=exc.response.status_code,
-                    response_body=exc.response.text,
-                ) from exc
-            async for line in response.aiter_lines():
-                chunk = _parse_sse_line(line)
-                if chunk is None:
-                    continue
-                yield chunk
+        payload = request.to_openai_payload()
 
-    async def _post_json(self, payload: JsonObject) -> JsonObject:
-        try:
-            response = await self._client.post(
+        for attempt in range(self.max_retries + 1):
+            cm = self._client.stream(
+                "POST",
                 self._chat_completions_url,
                 json=payload,
                 headers=self._headers,
             )
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise ModelAdapterHTTPError(
-                status_code=exc.response.status_code,
-                response_body=exc.response.text,
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise ModelAdapterError(f"model endpoint request failed: {exc}") from exc
+            # Phase 1 — establish connection and check status (retryable).
+            try:
+                response = await cm.__aenter__()
+            except _RETRYABLE_TRANSPORT_ERRORS as exc:
+                if attempt >= self.max_retries:
+                    raise ModelAdapterError(
+                        f"model endpoint request failed: {exc}",
+                    ) from exc
+                backoff_ms = _compute_backoff_ms(attempt)
+                self._emit_retry(attempt + 1, exc, backoff_ms)
+                await asyncio.sleep(backoff_ms / 1000)
+                continue
+            except httpx.HTTPError as exc:
+                raise ModelAdapterError(
+                    f"model endpoint request failed: {exc}",
+                ) from exc
 
-        try:
-            data = response.json()
-        except json.JSONDecodeError as exc:
-            raise ModelAdapterResponseError("model endpoint returned invalid JSON") from exc
-        return _JSON_OBJECT_ADAPTER.validate_python(data)
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                await cm.__aexit__(type(exc), exc, exc.__traceback__)
+                status = exc.response.status_code
+                if not _is_retryable_status(status) or attempt >= self.max_retries:
+                    raise ModelAdapterHTTPError(
+                        status_code=status,
+                        response_body=exc.response.text,
+                    ) from exc
+                backoff_ms = _compute_backoff_ms(attempt)
+                self._emit_retry(attempt + 1, exc, backoff_ms)
+                await asyncio.sleep(backoff_ms / 1000)
+                continue
+
+            # Phase 2 — stream the body.  Mid-stream failures are NOT
+            # retried; issue #200 explicitly excludes partially-received
+            # SSE from the retry boundary.
+            try:
+                async for line in response.aiter_lines():
+                    chunk = _parse_sse_line(line)
+                    if chunk is None:
+                        continue
+                    yield chunk
+            finally:
+                await cm.__aexit__(None, None, None)
+            return
+
+    def _emit_retry(self, attempt: int, exc: Exception, backoff_ms: int) -> None:
+        """Invoke the ``on_retry`` callback if one is wired (issue #200)."""
+        if self.on_retry is None:
+            return
+        self.on_retry(
+            ModelRetryEvent(
+                attempt=attempt,
+                error_type=type(exc).__name__,
+                backoff_ms=backoff_ms,
+            )
+        )
+
+    async def _post_json(self, payload: JsonObject) -> JsonObject:
+        """POST *payload* with bounded retry on transient failures (issue #200).
+
+        Retries fire only on ``httpx.ConnectError``, ``httpx.ReadTimeout``,
+        ``httpx.RemoteProtocolError``, and HTTP 408 / 429 / 5xx — never on
+        other 4xx, ``ModelAdapterResponseError``, or any non-HTTP exception.
+        Each retry invokes ``on_retry`` (if wired) with a
+        :class:`ModelRetryEvent` before the jittered backoff sleep.
+        """
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = await self._client.post(
+                    self._chat_completions_url,
+                    json=payload,
+                    headers=self._headers,
+                )
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if not _is_retryable_status(status) or attempt >= self.max_retries:
+                    raise ModelAdapterHTTPError(
+                        status_code=status,
+                        response_body=exc.response.text,
+                    ) from exc
+                backoff_ms = _compute_backoff_ms(attempt)
+                self._emit_retry(attempt + 1, exc, backoff_ms)
+                await asyncio.sleep(backoff_ms / 1000)
+                continue
+            except _RETRYABLE_TRANSPORT_ERRORS as exc:
+                if attempt >= self.max_retries:
+                    raise ModelAdapterError(
+                        f"model endpoint request failed: {exc}",
+                    ) from exc
+                backoff_ms = _compute_backoff_ms(attempt)
+                self._emit_retry(attempt + 1, exc, backoff_ms)
+                await asyncio.sleep(backoff_ms / 1000)
+                continue
+            except httpx.HTTPError as exc:
+                raise ModelAdapterError(
+                    f"model endpoint request failed: {exc}",
+                ) from exc
+
+            try:
+                data = response.json()
+            except json.JSONDecodeError as exc:
+                raise ModelAdapterResponseError("model endpoint returned invalid JSON") from exc
+            return _JSON_OBJECT_ADAPTER.validate_python(data)
+
+        raise ModelAdapterError("model endpoint request failed: retries exhausted")
 
     @property
     def _chat_completions_url(self) -> str:
@@ -325,6 +440,41 @@ def _default_chat_completions_path(base_url: str) -> str:
     if path.endswith("/v1") or path == "v1":
         return "/chat/completions"
     return "/v1/chat/completions"
+
+
+def resolve_adapter_max_retries(env: dict[str, str] | None = None) -> int:
+    """Resolve the adapter retry cap from ``FOUNDRY_ADAPTER_MAX_RETRIES``.
+
+    An empty / absent value yields :data:`_DEFAULT_ADAPTER_MAX_RETRIES`
+    (``2``). A non-negative integer overrides it; ``0`` disables retries
+    entirely (equivalent to the pre-issue-#200 single-shot behaviour).
+    A non-integer value propagates :class:`ValueError` so a typo in
+    ``.env`` surfaces at startup (AGENTS.md §2).
+    """
+    source = env if env is not None else os.environ
+    raw = source.get(_ADAPTER_MAX_RETRIES_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_ADAPTER_MAX_RETRIES
+    value = int(raw)
+    return max(0, value)
+
+
+def _compute_backoff_ms(attempt: int) -> int:
+    """Exponential backoff with full jitter for retry attempt *attempt*.
+
+    ``attempt`` is 0-based (the first retry is attempt 0). The ceiling
+    doubles each attempt starting from :data:`_BASE_BACKOFF_MS`, capped at
+    :data:`_MAX_BACKOFF_MS`. The actual sleep is a uniform random value in
+    ``[0, ceiling]`` (full-jitter strategy, AWS Architecture Blog) so
+    concurrent retry bursts do not synchronise.
+    """
+    ceiling = min(_BASE_BACKOFF_MS * (2**attempt), _MAX_BACKOFF_MS)
+    return random.randint(0, ceiling)  # noqa: S311 — jitter, not crypto
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    """Return ``True`` for HTTP status codes that warrant a retry."""
+    return status_code in _RETRYABLE_STATUS_CODES
 
 
 def _build_request(
