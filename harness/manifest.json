@@ -3,7 +3,8 @@
   "model_target": "minimax-coding-plan/MiniMax-M3",
   "hooks": [
     "base",
-    "injection_firewall"
+    "injection_firewall",
+    "context_pruning"
   ],
   "skills": [
     "edit_file.json",
