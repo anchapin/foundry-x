@@ -42,6 +42,22 @@ def test_sqlite_and_jsonl_roundtrip(tmp_path, backend):
     assert events[1].session_id == sid
 
 
+def test_unknown_backend_raises_value_error(tmp_path):
+    """An unsupported backend raises ValueError at construction (issue #272).
+
+    Previously an invalid backend was stored unchecked and then silently
+    dropped every recorded event (the ``record()`` if/elif chain had no
+    ``else``) while ``session()`` mis-routed to sqlite. The error message
+    must name both valid backends so a misspelling is immediately obvious.
+    """
+    path = tmp_path / "traces.db"
+    with pytest.raises(ValueError) as excinfo:
+        TraceLogger(path, backend="csv")
+    message = str(excinfo.value)
+    assert "sqlite" in message
+    assert "jsonl" in message
+
+
 def test_jsonl_backend_writes_ndjson_file(tmp_path):
     """The jsonl backend writes one JSON object per line ending with '}'."""
     path = tmp_path / "traces.jsonl"

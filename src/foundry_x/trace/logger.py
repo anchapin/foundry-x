@@ -169,8 +169,25 @@ def _redact(
     return payload
 
 
+_VALID_BACKENDS = ("sqlite", "jsonl")
+
+
 class TraceLogger:
     def __init__(self, path: str | Path, backend: str = "sqlite") -> None:
+        # Fail fast on an unknown backend (issue #272): previously an
+        # invalid value (e.g. a misspelled ``"csv"``) was stored unchecked
+        # and then silently dropped every event in ``record()`` (whose
+        # ``if sqlite / elif jsonl`` chain had no ``else``) while
+        # ``session()`` mis-routed to sqlite. That violated AGENTS.md §2
+        # ("never silently swallow") and ADR-0007 (traces are ground
+        # truth). Validating at construction closes every downstream
+        # branch — ``record``, ``session`` and ``_end_session`` are all
+        # guaranteed a known backend thereafter.
+        if backend not in _VALID_BACKENDS:
+            raise ValueError(
+                f"unsupported backend {backend!r}; expected one of "
+                f"{', '.join(repr(b) for b in _VALID_BACKENDS)}",
+            )
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.backend = backend
