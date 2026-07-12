@@ -661,18 +661,18 @@ class TraceLogger:
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY e.timestamp"
-        with sqlite3.connect(self.path) as conn:
-            cursor = conn.execute(query, params)
-            for event_id, sid, ts, k, payload in cursor:
-                yield TraceEvent.model_validate(
-                    {
-                        "event_id": event_id,
-                        "session_id": sid,
-                        "timestamp": ts,
-                        "kind": k,
-                        "payload": json.loads(payload),
-                    }
-                )
+        assert self._conn is not None  # backend == "sqlite"
+        cursor = self._conn.execute(query, params)
+        for event_id, sid, ts, k, payload in cursor:
+            yield TraceEvent.model_validate(
+                {
+                    "event_id": event_id,
+                    "session_id": sid,
+                    "timestamp": ts,
+                    "kind": k,
+                    "payload": json.loads(payload),
+                }
+            )
 
     def _load_session_jsonl(self, session_id: str) -> list[TraceEvent]:
         """Replay events for a session from a JSONL trace file.
