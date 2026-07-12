@@ -29,7 +29,7 @@ COMPOSITE_ACTION = REPO_ROOT / ".github" / "actions" / "install-uv" / "action.ym
 
 #: Workflows expected to install uv.  If a new workflow is added that
 #: needs uv, add it here so the test enforces the pin on it too.
-EXPECTED_WORKFLOWS = ["ci.yml", "audit.yml", "critic.yml"]
+EXPECTED_WORKFLOWS = ["ci.yml", "audit.yml", "critic.yml", "docker.yml"]
 
 
 def _load_workflow(name: str) -> str:
