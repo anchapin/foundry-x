@@ -487,6 +487,7 @@ async def test_adapter_request_timeout_wraps_read_timeout():
             await adapter.complete(messages=[ModelMessage(role="user", content="hello")], tools=[])
         assert isinstance(exc_info.value.__cause__, httpx.ReadTimeout)
 
+
 # ---------------------------------------------------------------------------
 # Issue #200 — bounded retry on transient ModelAdapter failures
 # ---------------------------------------------------------------------------
