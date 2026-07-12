@@ -29,6 +29,7 @@ def _make_fixture_harness(
     include_hooks: bool = False,
     hooks_init: str = "",
     hooks_base: str = "",
+    manifest: dict | None = None,
 ) -> Path:
     """Build a temporary harness tree under ``tmp_path``.
 
@@ -36,7 +37,9 @@ def _make_fixture_harness(
     (written as JSON) or a raw ``str`` (written verbatim — used to inject
     deliberately-broken JSON). ``include_hooks`` controls whether the
     fixture also contains a minimal ``harness/hooks`` package so the script
-    can complete its import check.
+    can complete its import check. ``manifest`` (issue #277), when given,
+    is written to ``harness/manifest.json`` so cross-ref validation can be
+    exercised.
     """
     harness = tmp_path / "harness"
     skills_dir = harness / "skills"
@@ -50,6 +53,8 @@ def _make_fixture_harness(
         hooks_dir.mkdir()
         (hooks_dir / "__init__.py").write_text(hooks_init, encoding="utf-8")
         (hooks_dir / "base.py").write_text(hooks_base, encoding="utf-8")
+    if manifest is not None:
+        (harness / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return harness
 
 
@@ -135,3 +140,94 @@ def test_load_check_exits_2_for_missing_dir() -> None:
     )
     assert proc.returncode == 2
     assert "does not exist" in proc.stderr
+
+
+_MINIMAL_HOOKS_BASE = textwrap.dedent(
+    """\
+    # Minimal hooks package: provides HookRegistry for load_check.
+    class HookRegistry:
+        def __init__(self) -> None:
+            self._hooks = []
+        def register(self, hook: object) -> None:
+            self._hooks.append(hook)
+
+    def get_registry() -> HookRegistry:
+        return HookRegistry()
+    """
+)
+
+
+_VALID_SKILL = {
+    "name": "real",
+    "version": "0.1.0",
+    "description": "valid",
+    "input_schema": {"type": "object"},
+    "output_schema": {"type": "object"},
+}
+
+
+@pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
+def test_load_check_fails_when_manifest_references_missing_skill(tmp_path: Path) -> None:
+    """A manifest naming a skill absent from disk must trip the Critic gate
+    (issue #277). The fixture is otherwise valid so that only the manifest
+    cross-ref check fails, proving the gate catches manifest↔disk drift."""
+    _make_fixture_harness(
+        tmp_path,
+        skills={"real.json": _VALID_SKILL},
+        include_hooks=True,
+        hooks_init="",
+        hooks_base=_MINIMAL_HOOKS_BASE,
+        manifest={
+            "version": "0.1.0",
+            "model_target": "test/model",
+            "hooks": ["base"],
+            "skills": ["real.json", "ghost.json"],
+        },
+    )
+    proc = subprocess.run(
+        [sys.executable, str(LOAD_CHECK), "--harness-dir", str(tmp_path / "harness")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+    )
+    assert proc.returncode != 0, (
+        f"load_check should fail on manifest/disk drift; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert (
+        "ghost.json" in proc.stderr
+    ), f"stderr must name the missing skill (issue #277); got {proc.stderr!r}"
+
+
+@pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
+def test_load_check_fails_when_manifest_references_missing_hook(tmp_path: Path) -> None:
+    """A manifest naming a hook absent from disk must trip the Critic gate
+    (issue #277). Symmetric to the missing-skill case."""
+    _make_fixture_harness(
+        tmp_path,
+        skills={"real.json": _VALID_SKILL},
+        include_hooks=True,
+        hooks_init="",
+        hooks_base=_MINIMAL_HOOKS_BASE,
+        manifest={
+            "version": "0.1.0",
+            "model_target": "test/model",
+            "hooks": ["base", "phantom"],
+            "skills": ["real.json"],
+        },
+    )
+    proc = subprocess.run(
+        [sys.executable, str(LOAD_CHECK), "--harness-dir", str(tmp_path / "harness")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+    )
+    assert proc.returncode != 0, (
+        f"load_check should fail on manifest/disk drift; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert (
+        "phantom" in proc.stderr
+    ), f"stderr must name the missing hook (issue #277); got {proc.stderr!r}"

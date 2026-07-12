@@ -2,13 +2,14 @@
 
 The Critic gate now runs ``harness/scripts/load_check.py`` against the
 sandbox copy as a precondition (issue #187; ADR-0004). Every fixture
-harness exercised by ``Critic.evaluate`` must therefore contain the four
+harness exercised by ``Critic.evaluate`` must therefore contain the five
 artefacts load_check validates:
 
 * a ``skills/`` directory (empty is fine -- ``glob("*.json")`` yields none)
 * a non-empty ``system_prompt.txt``
 * an importable ``hooks`` package that exposes ``get_registry()``
 * the ``scripts/load_check.py`` script itself
+* a ``manifest.json`` whose cross-refs resolve on disk (issue #277)
 
 ``install_load_check_prerequisites`` adds the load_check-only artefacts to
 an existing harness fixture so each test module only has to specify what is
@@ -40,15 +41,22 @@ _MINIMAL_HOOKS_INIT = (
     "    return HookRegistry()\n"
 )
 
+# Minimal ``harness/manifest.json`` (issue #277): empty ``hooks`` and
+# ``skills`` arrays satisfy the cross-ref validation because the fixture's
+# ``skills/`` dir and ``hooks/`` package have no entries to resolve. No
+# ``VERSION`` file is seeded, so the version cross-check is skipped.
+_MINIMAL_MANIFEST = '{"version": "0.0.0", "model_target": "test", "hooks": [], "skills": []}'
+
 
 def install_load_check_prerequisites(harness_dir: Path) -> None:
     """Add load_check-only artefacts to an existing harness fixture.
 
     Idempotent: safe to call after the test module has already created
     ``tests/`` and ``system_prompt.txt``. Creates an empty ``skills/``
-    dir, a minimal ``hooks`` package exposing ``get_registry()``, and
-    copies the real ``scripts/load_check.py`` into the fixture so the
-    Critic can spawn it against the sandbox copy.
+    dir, a minimal ``hooks`` package exposing ``get_registry()``, a
+    minimal ``manifest.json`` (issue #277), and copies the real
+    ``scripts/load_check.py`` into the fixture so the Critic can spawn it
+    against the sandbox copy.
     """
     scripts_dir = harness_dir / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
@@ -57,3 +65,4 @@ def install_load_check_prerequisites(harness_dir: Path) -> None:
     hooks_dir = harness_dir / "hooks"
     hooks_dir.mkdir(exist_ok=True)
     (hooks_dir / "__init__.py").write_text(_MINIMAL_HOOKS_INIT, encoding="utf-8")
+    (harness_dir / "manifest.json").write_text(_MINIMAL_MANIFEST, encoding="utf-8")
