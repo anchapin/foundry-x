@@ -139,6 +139,23 @@ class _StreamingToolCallAccumulator:
     arguments: str = ""
 
 
+@dataclass
+class _ParsedToolArguments:
+    """Decoded tool-call arguments plus any parse failure (issue #261).
+
+    ``arguments`` is the decoded dict on success or ``{}`` when ``error``
+    is set, preserving ADR-0010's resilience contract (the loop proceeds
+    with empty arguments rather than aborting on a malformed wire value).
+    ``error`` carries the human-readable failure reason so the runner can
+    stamp a ``tool_argument_parse_error`` trace event for Digester/operator
+    visibility; it is ``None`` on a clean parse so no spurious event fires
+    for a legitimate no-argument call.
+    """
+
+    arguments: dict[str, Any]
+    error: str | None
+
+
 def resolve_trace_backend(env: dict[str, str] | None = None) -> str:
     """Resolve the trace backend from ``FOUNDRY_TRACE_BACKEND`` (issue #13).
 
@@ -515,7 +532,7 @@ async def _default_skill_executor(name: str, arguments: dict[str, Any]) -> dict[
     }
 
 
-def _parse_tool_arguments(raw: str) -> dict[str, Any]:
+def _parse_tool_arguments(raw: str) -> _ParsedToolArguments:
     """Parse an OpenAI-compatible tool-call ``arguments`` JSON string.
 
     Some models emit ``""`` (no arguments) and a few emit partially-formed
@@ -524,14 +541,26 @@ def _parse_tool_arguments(raw: str) -> dict[str, Any]:
     abort the loop and leave the session without an ``outcome`` event).
     Non-dict JSON values are also collapsed to ``{}`` for the same reason:
     the loop cares about the *executor contract*, not the wire shape.
+
+    When coercion occurs (issue #261), ``error`` is populated so the caller
+    can emit a ``tool_argument_parse_error`` trace event — the resilience
+    contract (proceed with empty arguments) is unchanged, only observability
+    is added so the Digester can distinguish a correct no-arg call from
+    garbage JSON. An empty-string argument is a legitimate no-arg call and
+    therefore returns ``error=None``.
     """
     if not raw:
-        return {}
+        return _ParsedToolArguments(arguments={}, error=None)
     try:
         decoded = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    return dict(decoded) if isinstance(decoded, dict) else {}
+    except json.JSONDecodeError as exc:
+        return _ParsedToolArguments(arguments={}, error=f"JSONDecodeError: {exc}")
+    if not isinstance(decoded, dict):
+        return _ParsedToolArguments(
+            arguments={},
+            error=f"expected JSON object, got {type(decoded).__name__}",
+        )
+    return _ParsedToolArguments(arguments=dict(decoded), error=None)
 
 
 def _serialize_tool_result(result: Any) -> str:
@@ -838,7 +867,21 @@ async def run_task(
                 break
 
             for tool_call in response.tool_calls:
-                arguments = _parse_tool_arguments(tool_call.function.arguments)
+                parsed = _parse_tool_arguments(tool_call.function.arguments)
+                arguments = parsed.arguments
+
+                if parsed.error is not None:
+                    log.record(
+                        session_id,
+                        kind="tool_argument_parse_error",
+                        payload={
+                            "step": step,
+                            "call_id": tool_call.id,
+                            "name": tool_call.function.name,
+                            "raw": tool_call.function.arguments,
+                            "error": parsed.error,
+                        },
+                    )
 
                 call = hook_call_cls(name=tool_call.function.name, arguments=arguments)
                 if registry is not None:
