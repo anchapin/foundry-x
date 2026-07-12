@@ -476,7 +476,7 @@ def _load_tool_definitions(skills_dir: Path) -> list[ToolDefinition]:
     return definitions
 
 
-def _resolve_hook_registry() -> Any | None:
+def _resolve_hook_registry(log: TraceLogger, session_id: str) -> Any | None:
     """Return the harness hook registry, or ``None`` if no harness is wired.
 
     The foundry's AGENTS.md §7 self-reference rule forbids depending on the
@@ -488,6 +488,17 @@ def _resolve_hook_registry() -> Any | None:
     (``harness/hooks/injection_firewall.py``) is already registered there
     via ``harness/hooks/__init__``, so SECURITY.md "Prompt-input firewall"
     runs by default.
+
+    A *missing* harness (``ImportError``) is a legitimate degraded state
+    and returns ``None`` without comment. A harness that IS importable but
+    whose :func:`get_registry` raises is a different matter: every hook —
+    including the security-critical ``InjectionFirewallHook`` — would be
+    silently disabled for the entire session with no trace signal
+    (AGENTS.md §2 — never silently swallow an exception). Issue #260
+    requires that case to record a ``hook_registry_error`` trace event
+    carrying ``error_type`` and ``message`` so the Digester and the
+    operator can observe that the firewall layer is off, while still
+    completing the session in degraded mode (``registry is None``).
     """
     try:
         from harness.hooks import get_registry
@@ -495,7 +506,15 @@ def _resolve_hook_registry() -> Any | None:
         return None
     try:
         return get_registry()
-    except Exception:
+    except Exception as exc:
+        log.record(
+            session_id,
+            kind="hook_registry_error",
+            payload={
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            },
+        )
         return None
 
 
@@ -776,7 +795,7 @@ async def run_task(
 
         adapter.on_retry = _on_retry
 
-    registry = _resolve_hook_registry()
+    registry = _resolve_hook_registry(log, session_id)
     hook_call_cls, hook_result_cls = _import_hook_types()
 
     executor = skill_executor or _default_skill_executor
