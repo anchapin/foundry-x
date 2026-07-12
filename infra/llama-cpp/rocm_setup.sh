@@ -10,6 +10,11 @@ HIPCC="${ROCM_PATH}/llvm/bin/clang++"
 # matrix out of the box (infra/llama-cpp/README.md "ROCm pitfalls").
 ROCM_MIN_VERSION="${ROCM_MIN_VERSION:-5.7}"
 
+# Optional SHA256 checksum for model integrity verification (issue #284).
+# When set, the smoke test verifies the model file matches this digest
+# before launching the server. Leave empty to skip verification.
+LLAMACPP_MODEL_SHA256="${LLAMACPP_MODEL_SHA256:-}"
+
 # Overrideable probes so the four pre-flight checks are hermetic under
 # test (tests/infra/test_rocm_sanity.py). On a real host the defaults
 # match the kernel/runtime layout documented in infra/llama-cpp/README.md.
@@ -162,7 +167,7 @@ hint, exactly as before.
 
 Env vars: LLAMACPP_REF (b9957), LLAMACPP_SMOKE_MODEL,
           LLAMACPP_SMOKE_PORT (8765), LLAMACPP_SMOKE_NGL (0),
-          LLAMACPP_SMOKE_TIMEOUT (60),
+          LLAMACPP_SMOKE_TIMEOUT (60), LLAMACPP_MODEL_SHA256 (empty),
           ROCM_PATH (/opt/rocm), ROCM_MIN_VERSION (5.7),
           AMDGPU_PROBE (/sys/module/amdgpu), KFD_PROBE (/dev/kfd)
 USAGE
@@ -264,6 +269,27 @@ if [[ ! -r "$SMOKE_TEST_MODEL" ]]; then
     echo "       pass --smoke-test <path-to-gguf> or set LLAMACPP_SMOKE_MODEL." >&2
     exit 1
 fi
+
+# --- Model integrity verification (issue #284) ----------------------
+# When LLAMACPP_MODEL_SHA256 is set, compute the sha256sum of the model
+# file and refuse to proceed if it does not match. This ensures Phase-3
+# quantization sweeps use a known-good GGUF (ADR-0007 provenance).
+if [[ -n "$LLAMACPP_MODEL_SHA256" ]]; then
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        echo "error: 'sha256sum' is required for model verification but was not found." >&2
+        exit 1
+    fi
+    actual_sha="$(sha256sum "$SMOKE_TEST_MODEL" | awk '{print $1}')"
+    if [[ "$actual_sha" != "$LLAMACPP_MODEL_SHA256" ]]; then
+        echo "error: model SHA256 mismatch" >&2
+        echo "       expected: $LLAMACPP_MODEL_SHA256" >&2
+        echo "       actual:   $actual_sha" >&2
+        echo "       file:     $SMOKE_TEST_MODEL" >&2
+        exit 1
+    fi
+    echo "    sha256:   $actual_sha (verified)"
+fi
+# -------------------------------------------------------------------
 
 if ! command -v curl >/dev/null 2>&1; then
     echo "error: 'curl' is required for the smoke test but was not found." >&2
