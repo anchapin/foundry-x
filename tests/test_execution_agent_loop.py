@@ -384,3 +384,183 @@ def test_agent_loop_executor_errors_surface_as_failed_tool_results(tmp_path, mon
     assert tool_result_event.payload["error"] is not None
     assert "boom from skill bash" in tool_result_event.payload["error"]
     assert tool_result_event.payload["output"] is None
+
+
+def test_agent_loop_records_parse_error_for_malformed_arguments(tmp_path, monkeypatch):
+    """Issue #261 acceptance: when a model emits malformed tool-call
+    arguments, the runner records a ``tool_argument_parse_error`` trace
+    event carrying the raw string and error message, yet the tool call
+    still proceeds with empty arguments (resilience contract, ADR-0010).
+
+    The trace event is purely additive — the ``tool_call`` and
+    ``tool_result`` events still fire with coerced empty arguments so the
+    Digester can correlate the failure to the step that produced it.
+    """
+    db = tmp_path / "traces.db"
+    malformed = '{"command": "echo oops"'  # truncated JSON — no closing brace
+    tool_call = ModelToolCall(
+        id="call_bad_args",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments=malformed,
+        ),
+    )
+    responses = [
+        ModelResponse(
+            message=ModelMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[tool_call],
+            ),
+            tool_calls=[tool_call],
+            finish_reason="tool_calls",
+        ),
+        ModelResponse(
+            message=ModelMessage(role="assistant", content="recovered"),
+            finish_reason="stop",
+        ),
+    ]
+    adapter = _ScriptedAdapter(responses)
+    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
+    monkeypatch.setattr(sys, "argv", _argv("malformed-args-loop", db, REPO_HARNESS_DIR))
+
+    main()
+
+    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
+    kinds = [event.kind for event in events]
+
+    # The parse-error event exists and precedes the corresponding tool_call.
+    assert "tool_argument_parse_error" in kinds, f"missing parse-error event: {kinds!r}"
+    err_idx = kinds.index("tool_argument_parse_error")
+    tool_call_idx = kinds.index("tool_call")
+    assert (
+        err_idx < tool_call_idx
+    ), f"parse-error must precede tool_call: err={err_idx}, call={tool_call_idx}"
+
+    parse_error_event = events[err_idx]
+    assert parse_error_event.payload["call_id"] == "call_bad_args"
+    assert parse_error_event.payload["name"] == "bash"
+    assert parse_error_event.payload["step"] == 0
+    assert parse_error_event.payload["raw"] == malformed
+    assert "JSONDecodeError" in parse_error_event.payload["error"]
+
+    # No behavior change: the tool_call still fires with coerced empty args.
+    tool_call_event = events[tool_call_idx]
+    assert tool_call_event.payload["arguments"] == {}
+    assert tool_call_event.payload["call_id"] == "call_bad_args"
+
+    # The tool_result and outcome still fire — the loop did not abort.
+    assert "tool_result" in kinds
+    assert kinds[-1] == "task_completed"
+    outcome_event = next(event for event in events if event.kind == "outcome")
+    assert outcome_event.payload["status"] == "success"
+
+
+def test_agent_loop_records_parse_error_for_non_dict_arguments(tmp_path, monkeypatch):
+    """Issue #261: a JSON value that parses but is not an object (e.g. an
+    array) is also reported via ``tool_argument_parse_error`` while the
+    call proceeds with empty arguments.
+    """
+    db = tmp_path / "traces.db"
+    tool_call = ModelToolCall(
+        id="call_array_args",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments='["echo", "array"]',
+        ),
+    )
+    responses = [
+        ModelResponse(
+            message=ModelMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[tool_call],
+            ),
+            tool_calls=[tool_call],
+            finish_reason="tool_calls",
+        ),
+        ModelResponse(
+            message=ModelMessage(role="assistant", content="done"),
+            finish_reason="stop",
+        ),
+    ]
+    adapter = _ScriptedAdapter(responses)
+    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
+    monkeypatch.setattr(sys, "argv", _argv("array-args-loop", db, REPO_HARNESS_DIR))
+
+    main()
+
+    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
+    parse_error_event = next(event for event in events if event.kind == "tool_argument_parse_error")
+    assert parse_error_event.payload["call_id"] == "call_array_args"
+    assert "expected JSON object" in parse_error_event.payload["error"]
+    tool_call_event = next(event for event in events if event.kind == "tool_call")
+    assert tool_call_event.payload["arguments"] == {}
+
+
+def test_agent_loop_emits_no_parse_error_for_valid_arguments(tmp_path, monkeypatch):
+    """Issue #261 acceptance: when arguments parse successfully, no
+    ``tool_argument_parse_error`` event is emitted — the event is purely a
+    failure-mode signal.
+    """
+    db = tmp_path / "traces.db"
+    tool_call = ModelToolCall(
+        id="call_good",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments='{"command": "echo hello"}',
+        ),
+    )
+    responses = [
+        ModelResponse(
+            message=ModelMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[tool_call],
+            ),
+            tool_calls=[tool_call],
+            finish_reason="tool_calls",
+        ),
+        ModelResponse(
+            message=ModelMessage(role="assistant", content="ok"),
+            finish_reason="stop",
+        ),
+    ]
+    adapter = _ScriptedAdapter(responses)
+    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
+    monkeypatch.setattr(sys, "argv", _argv("good-args-loop", db, REPO_HARNESS_DIR))
+
+    main()
+
+    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
+    kinds = [event.kind for event in events]
+    assert (
+        "tool_argument_parse_error" not in kinds
+    ), f"no parse-error event should fire for valid args: {kinds!r}"
+    tool_call_event = next(event for event in events if event.kind == "tool_call")
+    assert tool_call_event.payload["arguments"] == {"command": "echo hello"}
+
+
+def test_parse_tool_arguments_unit():
+    """Unit coverage for ``_parse_tool_arguments`` (issue #261): every
+    coercion path populates ``error`` and every clean parse returns
+    ``error=None`` with the decoded dict.
+    """
+    clean = runner_mod._parse_tool_arguments('{"a": 1}')
+    assert clean.arguments == {"a": 1}
+    assert clean.error is None
+
+    empty = runner_mod._parse_tool_arguments("")
+    assert empty.arguments == {}
+    assert empty.error is None
+
+    bad = runner_mod._parse_tool_arguments("{not json")
+    assert bad.arguments == {}
+    assert "JSONDecodeError" in (bad.error or "")
+
+    non_dict = runner_mod._parse_tool_arguments("[1, 2, 3]")
+    assert non_dict.arguments == {}
+    assert "expected JSON object" in (non_dict.error or "")
