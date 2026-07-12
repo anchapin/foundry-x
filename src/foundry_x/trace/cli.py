@@ -365,6 +365,10 @@ _SEED_TOOL_OUTPUT = "def authenticate(user, password):\n    return False\n"
 _SEED_TOOL_CALL_ID = "call-seed-0001"
 _SEED_DURATION_MS = 12
 _SEED_MODEL_ID = "seeded-llama-sample"
+# Issue #271: deterministic token-usage figures planted on the
+# ``model_response`` event so the KPI summary and timeline CLIs have token
+# data to surface without a live llama-server. All literal placeholders.
+_SEED_USAGE = {"prompt_tokens": 42, "completion_tokens": 18, "total_tokens": 60}
 # Default harness version used when ``--harness-version`` is omitted. Picked
 # to be obviously a synthetic seed (``seed-sample``) so real-run sessions
 # don't collide with the planted one in regression reports.
@@ -430,6 +434,10 @@ def _seed_sample_trace(args: argparse.Namespace) -> int:
                         },
                     }
                 ],
+                # Issue #271: token-usage accounting so the KPI summary and
+                # timeline renderers have a token surface to exercise.
+                "usage": _SEED_USAGE,
+                "tokens_used": _SEED_USAGE["total_tokens"],
             },
         )
         logger.record(
