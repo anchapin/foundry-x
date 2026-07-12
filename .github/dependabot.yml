@@ -1,0 +1,72 @@
+# Dependabot — keeps content-pinned artifacts fresh (issue #283).
+#
+# The repo deliberately content-pins three classes of artifact so that
+# a silent drift breaks the build loudly instead of shipping a
+# compromised or unreproducible image. Each pin can rot, so Dependabot
+# opens a CI-verified bump PR per stale dependency on a weekly cadence:
+#
+#   1. GitHub Actions — the SHA-pinned `uses:` lines in
+#      .github/workflows/* (e.g. actions/checkout@<sha> # v4).
+#   2. Docker base image — the digest-pinned python:3.11-slim@sha256:...
+#      in infra/docker/Dockerfile, present in BOTH the builder stage
+#      (line 38) and the runtime stage (line 94). Digest was introduced
+#      by issue #124; Dependabot keeps it current.
+#   3. Python deps via uv — pyproject.toml + uv.lock. uv.lock is
+#      canonical per ADR-0002, so we use the native `uv` ecosystem
+#      (not `pip`) and restrict VERSION updates to DIRECT dependencies
+#      only. Transitive resolution stays owned by `uv sync --frozen`;
+#      security updates still reach the full transitive graph.
+#
+# Each bump PR triggers the existing CI workflows (.github/workflows/*)
+# so the bump is verified before merge (docs/SECURITY.md "Dependencies").
+# Commits follow Conventional Commits via commit-message.include: scope
+# → `chore(deps): bump ...` (ADR-0008).
+#
+# Out of scope (per #283): Renovate, weekly scheduled CI runs.
+
+version: 2
+updates:
+  # GitHub Actions — bumps SHA-pinned `uses:` lines in workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels:
+      - "dependencies"
+
+  # Docker base image — bumps the digest-pinned python:3.11-slim in
+  # infra/docker/Dockerfile (builder + runtime stages, issue #124).
+  - package-ecosystem: "docker"
+    directory: "/infra/docker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels:
+      - "dependencies"
+
+  # Python deps via uv — native ecosystem reads pyproject.toml +
+  # uv.lock (canonical per ADR-0002). Restricted to DIRECT deps so
+  # transitive resolution stays owned by `uv sync --frozen`; security
+  # updates still cover the full transitive graph (issue #283).
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    allow:
+      - dependency-type: "direct"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels:
+      - "dependencies"
