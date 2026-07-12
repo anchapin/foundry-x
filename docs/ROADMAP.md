@@ -2,7 +2,15 @@
 
 This project follows a three-phase development cycle.
 
+> **Live status.** For the most current phase progress — including shipped
+> components, open stubs, and open issue counts — see the "Current-state
+> briefing" in [`docs/ISSUE_GENERATION_PROMPT.md` §0](ISSUE_GENERATION_PROMPT.md).
+
 ## Phase 1: Foundation -- the execution and trace layer
+
+**Status: SHIPPED** (as of 929b327, 2026-07-11) — TraceLogger, Runner,
+ModelAdapter, harness schema, Docker sandbox, llama.cpp ROCm all
+implemented and tested.
 
 **Goal:** Establish the bridge between the agent and the LLM.
 
@@ -14,6 +22,17 @@ This project follows a three-phase development cycle.
 
 ## Phase 2: The Evolution Engine -- the meta-agent layer
 
+**Status: MOSTLY SHIPPED** (as of 929b327, 2026-07-11) — The full
+Digester → Evolver → Critic chain exists with pydantic models, pytest
+coverage, and CI gates. Two known stubs remain:
+
+1. **`Evolver.propose()` body** (`src/foundry_x/evolution/evolver.py`) —
+   guardrails are implemented and tested, but the meta-agent body that
+   turns a `FailureReport` into `ProposedEdit`(s) raises
+   `NotImplementedError`.
+2. **`_default_skill_executor`** (`src/foundry_x/execution/runner.py`) —
+   returns a benign ack envelope; does *not* actually run bash/edit/grep/write.
+
 **Goal:** Create the automated feedback loop.
 
 **Milestones:**
@@ -23,6 +42,10 @@ This project follows a three-phase development cycle.
 - Implement the `Critic`: a gatekeeper that runs unit tests (or simple syntax checks) on new harness configurations before allowing a "production" deployment.
 
 ## Phase 3: Optimization and Scaling
+
+**Status: NOT STARTED** (as of 929b327, 2026-07-11) — Quantization
+sweep, context pruning at scale, real-LLM benchmark runs, and token
+budget enforcement (plumbed but not counted) remain to be implemented.
 
 **Goal:** Hardware and model performance tuning.
 
