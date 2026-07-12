@@ -74,18 +74,22 @@ def _compose_config(docker: str, compose_files: list[Path]) -> subprocess.Comple
     resolve exactly as they do in a real run. ``check=False`` lets the
     caller assert on ``returncode`` rather than raising.
     """
-    args: list[str] = []
+    cmd: list[str] = [docker, "compose"]
     for f in compose_files:
-        args.extend(["-f", f.name])
-    args.extend(["config", "--quiet"])
-    return subprocess.run(
-        [docker, "compose", *args],
+        cmd.extend(["-f", f.name])
+    cmd.extend(["config", "--quiet"])
+    proc = subprocess.run(
+        cmd,
         cwd=COMPOSE_DIR,
         capture_output=True,
         text=True,
         timeout=30,
         check=False,
     )
+    # Stash the command on the result so failure assertions can echo the exact
+    # invocation that failed (a CI reader otherwise only has stdout/stderr).
+    proc.cmd = cmd  # type: ignore[attr-defined]
+    return proc
 
 
 def test_base_compose_config_is_valid() -> None:
@@ -101,8 +105,7 @@ def test_base_compose_config_is_valid() -> None:
     assert BASE_COMPOSE.exists(), f"missing base compose file: {BASE_COMPOSE}"
     result = _compose_config(docker, [BASE_COMPOSE])
     assert result.returncode == 0, (
-        "docker compose -f docker-compose.yml config --quiet failed "
-        "(Compose-spec violation):\n"
+        f"{' '.join(result.cmd)} failed (Compose-spec violation):\n"  # type: ignore[attr-defined]
         f"{result.stdout}{result.stderr}"
     )
 
@@ -123,8 +126,7 @@ def test_merged_base_and_rocm_override_config_is_valid() -> None:
     assert ROCM_COMPOSE.exists(), f"missing override file: {ROCM_COMPOSE}"
     result = _compose_config(docker, [BASE_COMPOSE, ROCM_COMPOSE])
     assert result.returncode == 0, (
-        "docker compose -f docker-compose.yml -f docker-compose.rocm.yml "
-        "config --quiet failed (Compose-spec violation in the merged "
-        "config):\n"
+        f"{' '.join(result.cmd)} failed (Compose-spec violation in the "  # type: ignore[attr-defined]
+        f"merged config):\n"
         f"{result.stdout}{result.stderr}"
     )
