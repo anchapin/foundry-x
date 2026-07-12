@@ -113,6 +113,35 @@ def test_format_timeline_omits_tool_latency_when_missing():
     assert "ms)" not in tool_call_line
 
 
+# ---------------------------------------------------------------------------
+# Issue #271: timeline shows cumulative token count on model_response lines.
+# ---------------------------------------------------------------------------
+
+
+def test_format_timeline_shows_cumulative_tokens_on_model_response():
+    events = [
+        _event("model_response", timedelta(seconds=0.0), {"tokens_used": 120}),
+        _event(
+            "model_response",
+            timedelta(seconds=0.5),
+            {"tokens_used": 345},
+        ),
+    ]
+    output = format_timeline(events)
+
+    lines = output.splitlines()
+    first = next(ln for ln in lines if "#1" in ln)
+    second = next(ln for ln in lines if "#2" in ln)
+    assert "tokens:120" in first
+    assert "tokens:345" in second
+
+
+def test_format_timeline_omits_tokens_when_usage_missing():
+    events = [_event("model_response", timedelta(seconds=0.0), {"finish_reason": "stop"})]
+    output = format_timeline(events)
+    assert "tokens:" not in output
+
+
 # --- failure report render tests ---
 
 
