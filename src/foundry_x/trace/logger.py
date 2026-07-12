@@ -201,15 +201,33 @@ class TraceLogger:
         # supersedes in ADR-0003.
         self._conn: sqlite3.Connection | None = None
         if backend == "sqlite":
-            with sqlite3.connect(self.path) as conn:
-                conn.executescript(_SCHEMA)
-                # Non-destructive migration for pre-issue-#8 databases that
-                # predate the ``ended_at`` column (issue #8). Guarded by a
-                # pragma check so freshly-created databases are untouched and
-                # existing ``logs/*.db`` files do not break.
-                columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
-                if "ended_at" not in columns:
-                    conn.execute("ALTER TABLE sessions ADD COLUMN ended_at TEXT")
+            self._conn = sqlite3.connect(self.path)
+            # WAL is a persistent database property (stored in the file
+            # header), so this also benefits raw ``sqlite3.connect`` readers
+            # opened against the same file later.
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.executescript(_SCHEMA)
+            # Non-destructive migration for pre-issue-#8 databases that
+            # predate the ``ended_at`` column (issue #8). Guarded by a
+            # pragma check so freshly-created databases are untouched and
+            # existing ``logs/*.db`` files do not break.
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)")}
+            if "ended_at" not in columns:
+                self._conn.execute("ALTER TABLE sessions ADD COLUMN ended_at TEXT")
+            self._conn.commit()
+
+    def close(self) -> None:
+        """Close the reused sqlite connection (issue #274).
+
+        Optional lifecycle hook: the connection is also released by garbage
+        collection when the logger falls out of scope, so existing callers
+        that never call ``close()`` keep working. Tests and long-running
+        services that construct many loggers can call this to release the
+        connection (and its ``-wal``/``-shm`` sidecar handles) deterministically.
+        """
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
 
     @contextmanager
     def session(
@@ -242,8 +260,9 @@ class TraceLogger:
                     + "\n"
                 )
         else:
-            with sqlite3.connect(self.path) as conn:
-                conn.execute(
+            assert self._conn is not None  # backend == "sqlite"
+            with self._conn:
+                self._conn.execute(
                     "INSERT INTO sessions "
                     "(session_id, started_at, harness_version, model_id, metadata) "
                     "VALUES (?, ?, ?, ?, ?)",
@@ -293,8 +312,9 @@ class TraceLogger:
                         + "\n"
                     )
             else:
-                with sqlite3.connect(self.path) as conn:
-                    conn.execute(
+                assert self._conn is not None  # backend == "sqlite"
+                with self._conn:
+                    self._conn.execute(
                         "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
                         (ended_at, session_id),
                     )
@@ -340,8 +360,9 @@ class TraceLogger:
         )
         if self.backend == "sqlite":
             data = event.model_dump()
-            with sqlite3.connect(self.path) as conn:
-                conn.execute(
+            assert self._conn is not None  # backend == "sqlite"
+            with self._conn:
+                self._conn.execute(
                     "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
                     (
                         data["event_id"],
@@ -407,7 +428,8 @@ class TraceLogger:
         ``regression_report._load_verdict_events``) previously called
         ``list_sessions()`` and then looped ``iter_events(sid)`` once per
         session per kind. Each ``iter_events`` call opened a fresh
-        ``sqlite3.connect`` (11 connect sites across the codebase), so
+        ``sqlite3.connect`` (11 connect sites across the codebase, prior
+        to issue #274 collapsing them onto one reused connection), so
         for Phase-3 scale (many sessions/day) the Digester→Critic
         feedback path paid S*K round-trips for what is logically a single
         ordered scan.
@@ -439,24 +461,24 @@ class TraceLogger:
         yield from self._query_events_sqlite(kind=kind, harness_version=harness_version)
 
     def _list_sessions_sqlite(self, harness_version: str | None = None) -> Sequence[TraceSession]:
-        with sqlite3.connect(self.path) as conn:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
-            selected = [
-                "session_id",
-                "started_at",
-                "harness_version",
-                "model_id",
-                "metadata",
-            ]
-            if "ended_at" in columns:
-                selected.append("ended_at")
-            query = "SELECT " + ", ".join(selected) + " FROM sessions"
-            params: tuple[Any, ...] = ()
-            if harness_version is not None:
-                query += " WHERE harness_version = ?"
-                params = (harness_version,)
-            query += " ORDER BY started_at"
-            rows = conn.execute(query, params).fetchall()
+        assert self._conn is not None  # backend == "sqlite"
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        selected = [
+            "session_id",
+            "started_at",
+            "harness_version",
+            "model_id",
+            "metadata",
+        ]
+        if "ended_at" in columns:
+            selected.append("ended_at")
+        query = "SELECT " + ", ".join(selected) + " FROM sessions"
+        params: tuple[Any, ...] = ()
+        if harness_version is not None:
+            query += " WHERE harness_version = ?"
+            params = (harness_version,)
+        query += " ORDER BY started_at"
+        rows = self._conn.execute(query, params).fetchall()
         sessions: list[TraceSession] = []
         for row in rows:
             values = dict(zip(selected, row))
@@ -543,26 +565,25 @@ class TraceLogger:
         # without buffering the full result set in Python memory, which is
         # what callers like a future Digester need for long sessions.
         query = (
-            "SELECT event_id, session_id, timestamp, kind, payload "
-            "FROM events WHERE session_id = ?"
+            "SELECT event_id, session_id, timestamp, kind, payload FROM events WHERE session_id = ?"
         )
         params: list[Any] = [session_id]
         if kind is not None:
             query += " AND kind = ?"
             params.append(kind)
         query += " ORDER BY timestamp"
-        with sqlite3.connect(self.path) as conn:
-            cursor = conn.execute(query, params)
-            for event_id, sid, ts, k, payload in cursor:
-                yield TraceEvent.model_validate(
-                    {
-                        "event_id": event_id,
-                        "session_id": sid,
-                        "timestamp": ts,
-                        "kind": k,
-                        "payload": json.loads(payload),
-                    }
-                )
+        assert self._conn is not None  # backend == "sqlite"
+        cursor = self._conn.execute(query, params)
+        for event_id, sid, ts, k, payload in cursor:
+            yield TraceEvent.model_validate(
+                {
+                    "event_id": event_id,
+                    "session_id": sid,
+                    "timestamp": ts,
+                    "kind": k,
+                    "payload": json.loads(payload),
+                }
+            )
 
     def _query_events_sqlite(
         self,
@@ -589,18 +610,18 @@ class TraceLogger:
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY e.timestamp"
-        with sqlite3.connect(self.path) as conn:
-            cursor = conn.execute(query, params)
-            for event_id, sid, ts, k, payload in cursor:
-                yield TraceEvent.model_validate(
-                    {
-                        "event_id": event_id,
-                        "session_id": sid,
-                        "timestamp": ts,
-                        "kind": k,
-                        "payload": json.loads(payload),
-                    }
-                )
+        assert self._conn is not None  # backend == "sqlite"
+        cursor = self._conn.execute(query, params)
+        for event_id, sid, ts, k, payload in cursor:
+            yield TraceEvent.model_validate(
+                {
+                    "event_id": event_id,
+                    "session_id": sid,
+                    "timestamp": ts,
+                    "kind": k,
+                    "payload": json.loads(payload),
+                }
+            )
 
     def _load_session_jsonl(self, session_id: str) -> list[TraceEvent]:
         """Replay events for a session from a JSONL trace file.
@@ -643,9 +664,10 @@ class TraceLogger:
         return True
 
     def _delete_session_sqlite(self, session_id: str) -> None:
-        with sqlite3.connect(self.path) as conn:
-            conn.execute("DELETE FROM events WHERE session_id = ?", (session_id,))
-            conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        assert self._conn is not None  # backend == "sqlite"
+        with self._conn:
+            self._conn.execute("DELETE FROM events WHERE session_id = ?", (session_id,))
+            self._conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
 
     def _delete_session_jsonl(self, session_id: str) -> None:
         if not self.path.exists():
@@ -693,9 +715,10 @@ class TraceLogger:
         event_index: int,
         key: str,
     ) -> bool:
-        with sqlite3.connect(self.path) as conn:
-            rows = conn.execute(
-                "SELECT event_id, payload FROM events WHERE session_id = ? " "ORDER BY timestamp",
+        assert self._conn is not None  # backend == "sqlite"
+        with self._conn:
+            rows = self._conn.execute(
+                "SELECT event_id, payload FROM events WHERE session_id = ? ORDER BY timestamp",
                 (session_id,),
             ).fetchall()
             if event_index < 0 or event_index >= len(rows):
@@ -703,7 +726,7 @@ class TraceLogger:
             event_id, payload_text = rows[event_index]
             payload = json.loads(payload_text)
             payload[key] = "[REDACTED]"
-            conn.execute(
+            self._conn.execute(
                 "UPDATE events SET payload = ? WHERE event_id = ?",
                 (json.dumps(payload), event_id),
             )

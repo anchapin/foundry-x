@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted. 2026-07-10.
+Accepted. 2026-07-10. The "revisit when concurrent writers" note in
+Consequences below was superseded by
+[ADR-0013](./0013-wal-mode-and-connection-reuse.md) (WAL mode + one reused
+connection) on 2026-07-12; this ADR is otherwise unchanged.
 
 ## Context
 
