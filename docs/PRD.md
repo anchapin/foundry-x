@@ -37,6 +37,20 @@ Must support containerization (Docker) to keep the Linux Mint host safe during a
 
 ## 5. Success Metrics (KPIs)
 
-- **Cycle Time:** Time taken from "Agent Failure" to "Harness Edit Proposal."
-- **Regression Rate:** Number of previously solved tasks that break after a harness edit.
-- **Improvement Rate:** Success rate on a standardized coding benchmark (for example a subset of HumanEval) before vs. after harness evolution.
+These three KPIs are the project's definition of progress; every issue
+carries exactly one `kpi-*` label matching its primary KPI. Canonical
+term definitions live in [docs/CONTEXT.md](./CONTEXT.md); the
+evaluation surface is the pytest-marked task suite under
+[`benchmarks/`](../benchmarks/) governed by
+[ADR-0005](./adr/0005-pytest-as-evaluation-framework.md).
+
+- **Cycle Time** (`kpi-cycle-time`): Time taken from "Agent Failure"
+  to "Harness Edit Proposal."
+- **Regression Rate** (`kpi-regression-rate`): Number of previously
+  solved tasks that break after a harness edit.
+- **Improvement Rate** (`kpi-improvement-rate`): Success rate on the
+  benchmark suite under `benchmarks/tasks/`
+  (`uv run pytest -m benchmark`) before vs. after harness evolution.
+  An external standardized benchmark such as HumanEval is not adopted
+  today; ADR-0005 defers any such framework until a concrete
+  limitation forces an ADR.
