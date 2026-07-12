@@ -1,0 +1,57 @@
+# Runtime image build + size regression guard (issue #286).
+#
+# infra/docker/Dockerfile:23-25 lists image-size reduction as an
+# acceptance criterion for #116, but it was a one-time manual check.
+# This workflow converts it into an enforced CI ceiling: it builds
+# foundryx:latest, then asserts the byte count stays under the baseline
+# recorded in tests/infra/image_size_baseline.json (+15% margin).
+#
+# Triggered only on paths that can affect the image, so day-to-day PRs
+# do not pay the build cost. The assertion itself lives in
+# tests/infra/test_docker_build.py::test_runtime_image_size_within_baseline
+# so the logic is testable locally and has a single source of truth.
+
+name: docker
+
+on:
+  pull_request:
+    paths:
+      - "infra/docker/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "tests/infra/test_docker_build.py"
+      - "tests/infra/image_size_baseline.json"
+      - ".github/workflows/docker.yml"
+      - ".github/actions/install-uv/**"
+  push:
+    branches: [main]
+
+jobs:
+  image-size:
+    name: build + size ceiling (issue #286)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv (hash-verified)
+        uses: ./.github/actions/install-uv
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      # BuildKit is the default on Docker Engine 23+ (ubuntu-latest),
+      # so the Dockerfile's `RUN --mount=type=cache,...` resolves. The
+      # build context is the repo root (matches docker-compose.yml).
+      - name: Build sandbox image
+        run: docker build -f infra/docker/Dockerfile -t foundryx:latest .
+
+      # Captures `docker image inspect foundryx:latest --format '{{.Size}}'`
+      # (acceptance criterion 1) and asserts it against the baseline +
+      # margin (criterion 2). On breach pytest fails with a message
+      # naming baseline, observed size, and the file to bump (criterion 3).
+      - name: Assert image size against baseline
+        run: uv run pytest tests/infra/test_docker_build.py -v
