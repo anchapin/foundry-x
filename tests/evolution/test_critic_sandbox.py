@@ -5,6 +5,7 @@ from pathlib import Path
 
 from foundry_x.evolution.critic import Critic
 from foundry_x.evolution.evolver import ProposedEdit
+from tests._harness_fixture import install_load_check_prerequisites
 
 
 def _write_harness(tmp_path: Path, test_source: str) -> Path:
@@ -14,6 +15,10 @@ def _write_harness(tmp_path: Path, test_source: str) -> Path:
     (harness_dir / "system_prompt.txt").write_text("original\n")
     (harness_dir / "marker.txt").write_text("safe\n")
     (tests_dir / "test_gate.py").write_text(test_source)
+    # load_check prerequisites (issue #187): the Critic gates on
+    # harness/scripts/load_check.py before pytest, so the fixture must be
+    # load-check-compliant.
+    install_load_check_prerequisites(harness_dir)
     return harness_dir
 
 
