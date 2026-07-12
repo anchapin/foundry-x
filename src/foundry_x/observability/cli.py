@@ -71,11 +71,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     regression.add_argument(
         "--format",
-        default="markdown",
+        default=None,
         choices=("markdown", "json"),
         help=(
-            "Output format. ``json`` emits the structured RegressionAnalysis "
-            "(grep-friendly, includes the filtered rows)."
+            "Output format (issue #269). Default: 'markdown'. ``json`` emits "
+            "the structured RegressionAnalysis (model_dump_json). When --out "
+            "ends in '.json', 'json' is selected automatically (mirrors the "
+            "kpis / timeline --format / --out convention)."
         ),
     )
 
@@ -167,7 +169,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "regression-report":
         logger = TraceLogger(args.db)
         analysis = analyze_regressions(logger, since=args.since, task=args.task)
-        if args.format == "json":
+        fmt = _resolve_format(args.format, args.out)
+        if fmt == "json":
             rendered = analysis.model_dump_json(indent=2) + "\n"
         else:
             rendered = analysis.report

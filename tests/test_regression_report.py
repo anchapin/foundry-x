@@ -4,6 +4,7 @@ import json
 
 from foundry_x.evolution.critic import CriticVerdict
 from foundry_x.observability.regression_report import (
+    RegressionAnalysis,
     analyze_regressions,
     generate_regression_report,
     record_verdict,
@@ -401,3 +402,70 @@ def test_cli_regression_report_format_json_unfiltered(tmp_path, capsys):
     payload = json.loads(captured.out)
     assert {row["task"] for row in payload["regressions"]} == {"task-A", "task-B"}
     assert {row["task"] for row in payload["new_passes"]} == {"task-A", "task-B"}
+
+
+def test_cli_regression_report_json_parses_as_regression_analysis(tmp_path, capsys):
+    """Issue #269: --format json emits a payload that round-trips through the
+    RegressionAnalysis pydantic model, with the expected regressions count."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions(logger)
+
+    rc = cli_main(["regression-report", "--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    analysis = RegressionAnalysis.model_validate_json(captured.out)
+    # _plant_mixed_sessions yields 2 regressions (task-A in B, task-B in C).
+    assert len(analysis.regressions) == 2
+    assert {r.task for r in analysis.regressions} == {"task-A", "task-B"}
+    assert analysis.total == 3
+    assert analysis.approvals == 0
+    assert analysis.rejections == 3
+
+
+def test_cli_regression_report_out_json_autoselects_format(tmp_path):
+    """Issue #269: --out report.json selects json even without --format."""
+    db = tmp_path / "traces.db"
+    out = tmp_path / "report.json"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions(logger)
+
+    rc = cli_main(["regression-report", "--db", str(db), "--out", str(out)])
+    assert rc == 0
+    assert out.exists()
+    analysis = RegressionAnalysis.model_validate_json(out.read_text(encoding="utf-8"))
+    assert {r.task for r in analysis.regressions} == {"task-A", "task-B"}
+
+
+def test_cli_regression_report_out_markdown_stays_markdown(tmp_path):
+    """Issue #269: a non-.json --out keeps the markdown default."""
+    db = tmp_path / "traces.db"
+    out = tmp_path / "report.md"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions(logger)
+
+    rc = cli_main(["regression-report", "--db", str(db), "--out", str(out)])
+    assert rc == 0
+    body = out.read_text(encoding="utf-8")
+    assert "## Regressed Tasks" in body
+
+
+def test_cli_regression_report_format_json_with_fail_on_regression_gates(tmp_path, capsys):
+    """Issue #269: --fail-on-regression gates exit code under json output too."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions(logger)
+
+    rc = cli_main(
+        [
+            "regression-report",
+            "--db",
+            str(db),
+            "--format",
+            "json",
+            "--fail-on-regression",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert json.loads(captured.out)["regressions"]
