@@ -255,7 +255,7 @@ def _redact_key(args: argparse.Namespace) -> int:
         )
         return 1
     sys.stdout.write(
-        f"Redacted key '{args.key}' on event {args.event_index} " f"of session {args.session_id}.\n"
+        f"Redacted key '{args.key}' on event {args.event_index} of session {args.session_id}.\n"
     )
     _write_audit(
         args,

@@ -390,8 +390,7 @@ class InjectionFirewallHook:
             self._tracer(payload)
         except Exception:
             _log.exception(
-                "injection_firewall: tracer raised on block of tool %r; "
-                "isolating and continuing",
+                "injection_firewall: tracer raised on block of tool %r; isolating and continuing",
                 tool_name,
             )
 

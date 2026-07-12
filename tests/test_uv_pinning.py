@@ -127,9 +127,9 @@ def test_uv_version_sanity_check(lines: list[str]) -> None:
         (i for i, ln in enumerate(lines) if "astral-sh/uv/releases/download" in ln),
         None,
     )
-    assert install_idx is not None, (
-        "Dockerfile must fetch uv from astral-sh/uv/releases/download " "(issue #124)."
-    )
+    assert (
+        install_idx is not None
+    ), "Dockerfile must fetch uv from astral-sh/uv/releases/download (issue #124)."
     post = lines[install_idx:]
     assert any("uv --version" in ln for ln in post), (
         "Dockerfile must run `uv --version` after installing uv so a "
