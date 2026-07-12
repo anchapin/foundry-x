@@ -23,6 +23,9 @@
 #     layer hit).
 #   - `docker images foundryx:latest` reports a smaller byte count than
 #     the single-stage predecessor; record before/after in the PR.
+#     Now enforced as a regression ceiling by issue #286: see
+#     tests/infra/test_docker_build.py::test_runtime_image_size_within_baseline
+#     and tests/infra/image_size_baseline.json.
 #
 # Requires BuildKit (Docker 23+ default; `docker compose build` uses
 # BuildKit by default). On legacy builders, the `--mount=type=cache`
@@ -62,7 +65,11 @@ ARG UV_TARGET=uv-x86_64-unknown-linux-gnu
 RUN set -eux; \
     curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_TARGET}.tar.gz" -o /tmp/uv.tar.gz; \
     echo "${UV_SHA256}  /tmp/uv.tar.gz" | sha256sum -c -; \
-    tar -xzf /tmp/uv.tar.gz -C /usr/local --strip-components=1; \
+    # Extract into /usr/local/bin (on PATH in the python slim base), not
+    # /usr/local: the release tarball is flat (uv, uvx at the archive root
+    # under a single top dir), so --strip-components=1 lands uv directly in
+    # the target dir. /usr/local is NOT on PATH, which broke `uv --version`.
+    tar -xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1; \
     rm -f /tmp/uv.tar.gz; \
     uv --version
 

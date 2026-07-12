@@ -1,0 +1,9 @@
+{
+  "_doc": "Baseline for the foundryx:latest runtime image size regression guard (issue #286). The acceptance criterion in infra/docker/Dockerfile:23-25 ('docker images foundryx:latest reports a smaller byte count') was a one-time manual check from #116; this file + tests/infra/test_docker_build.py convert it into an enforced CI ceiling. To legitimately grow the image: rebuild locally, read `docker image inspect foundryx:latest --format '{{.Size}}'`, update baseline_bytes below to the new size, and commit in the same PR. The test fails loudly otherwise, naming this file.",
+  "image": "foundryx:latest",
+  "baseline_bytes": 144733128,
+  "margin_percent": 15,
+  "recorded_at": "2026-07-12",
+  "recorded_from": "docker build -f infra/docker/Dockerfile on x86_64-unknown-linux-gnu; python:3.11-slim (digest-pinned), uv 0.9.30, uv sync --frozen --no-dev",
+  "human_readable": "138 MiB (144733128 bytes); ceiling at 15% margin = 166443098 bytes (~159 MiB)"
+}
