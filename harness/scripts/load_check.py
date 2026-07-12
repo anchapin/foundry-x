@@ -2,11 +2,15 @@
 """Smoke-test that the harness tree is loadable. Used by the Critic (ADR-0004)
 to gate ``ProposedEdit`` proposals before they are marked active.
 
-Validates five invariants:
+Validates six invariants:
 
 * the harness directory itself exists
 * every ``harness/skills/*.json`` parses and carries the five required keys
   (``name``, ``version``, ``description``, ``input_schema``, ``output_schema``)
+* every ``harness/skills/<stem>.json`` has ``doc['name'] == <stem>`` (issue
+  #278): the runner globs by filename but exposes the internal ``name`` as
+  the tool name, so a filename/name divergence would let the model see one
+  tool name while debugging references point at another
 * ``harness/system_prompt.txt`` exists and is non-empty
 * ``import harness.hooks`` succeeds and the registry instantiates
 * ``harness/manifest.json`` cross-refs resolve on disk (issue #277)
@@ -77,6 +81,21 @@ def _check_skills(harness_dir: Path) -> list[str]:
         missing = [k for k in _REQUIRED_SKILL_KEYS if k not in doc]
         if missing:
             failures.append(f"{path}: missing required keys {missing!r}")
+        # Issue #278: the runner discovers skills by globbing skills/*.json
+        # (filename) but exposes doc['name'] as the tool name (runner.py
+        # _load_tool_definitions). A filename/name divergence means the model
+        # sees one tool name while debugging references point at another. Only
+        # check when 'name' is present -- a missing 'name' is already reported
+        # above and comparing an absent field against the stem would be noise.
+        if "name" not in missing:
+            name = doc.get("name")
+            stem = path.stem
+            if name != stem:
+                failures.append(
+                    f"{path}: skill name {name!r} must match filename stem "
+                    f"{stem!r} (issue #278; runner.py exposes doc['name'] as "
+                    f"the tool name while debugging references point at the file)"
+                )
     return failures
 
 
