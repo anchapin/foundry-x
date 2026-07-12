@@ -321,3 +321,145 @@ def test_model_response_event_records_null_token_usage_when_missing(tmp_path, ba
     assert len(events) == 1
     assert "token_usage" in events[0].payload
     assert events[0].payload["token_usage"] is None
+
+
+# --- query_events: cross-session streaming query (issue #273) ----------------
+
+
+def _seed_multi_session_fixture(logger: TraceLogger) -> dict[str, list[str]]:
+    """Plant three sessions across two harness versions with mixed kinds.
+
+    Returns a ``session_id -> [event_id, ...]`` map in insertion order so
+    the equivalence tests can compare ``query_events`` against the
+    per-session ``iter_events`` baseline without re-deriving it.
+    """
+    planted: dict[str, list[str]] = {}
+    # Session 1 / version v1: task_received + critic_verdict.
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "s1"})
+        logger.record(sid, kind="critic_verdict", payload={"approved": True})
+        planted[sid] = [e.event_id for e in logger.load_session(sid)]
+    # Session 2 / version v1: critic_verdict only.
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="critic_verdict", payload={"approved": False})
+        planted[sid] = [e.event_id for e in logger.load_session(sid)]
+    # Session 3 / version v2: task_received + injection_blocked.
+    with logger.session(harness_version="v2") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "s3"})
+        logger.record(sid, kind="injection_blocked", payload={"markers": ["x"]})
+        planted[sid] = [e.event_id for e in logger.load_session(sid)]
+    return planted
+
+
+def _by_event_id(events):
+    return [e.event_id for e in events]
+
+
+@_BACKENDS
+def test_query_events_unfiltered_matches_nested_loop_on_multi_session(tmp_path, backend):
+    """query_events() with no filter yields the same rows as list_sessions +
+    iter_events, in the same per-event ordering (issue #273 acceptance).
+
+    The nested-loop baseline walks sessions in the order ``list_sessions``
+    returns them (started_at ASC) and within each session pulls events in
+    timestamp order via ``iter_events``. ``query_events`` promises the
+    same timestamp ordering extended across sessions, so for distinct
+    timestamps the two sequences must be identical.
+    """
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    _seed_multi_session_fixture(logger)
+
+    # Nested-loop baseline: list_sessions + iter_events.
+    nested: list = []
+    for session in logger.list_sessions():
+        nested.extend(logger.iter_events(session.session_id))
+
+    actual = list(logger.query_events())
+
+    assert _by_event_id(actual) == _by_event_id(nested)
+    # Sanity: the fixture planted 5 event rows total (2 + 1 + 2);
+    # session_start/session_end markers are not events and must not
+    # appear here.
+    assert len(actual) == 5
+
+
+@_BACKENDS
+def test_query_events_kind_filter_matches_nested_loop_baseline(tmp_path, backend):
+    """query_events(kind=...) yields exactly the rows the per-session
+    nested loop would have produced, in the same order (issue #273).
+    """
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    _seed_multi_session_fixture(logger)
+
+    kind = "critic_verdict"
+    nested: list = []
+    for session in logger.list_sessions():
+        nested.extend(logger.iter_events(session.session_id, kind=kind))
+
+    actual = list(logger.query_events(kind=kind))
+
+    assert _by_event_id(actual) == _by_event_id(nested)
+    # Sanity: two sessions planted a critic_verdict (sessions 1 and 2).
+    assert len(actual) == 2
+    assert {e.kind for e in actual} == {kind}
+
+
+@_BACKENDS
+def test_query_events_harness_version_filter_scopes_to_matching_sessions(tmp_path, backend):
+    """query_events(harness_version=...) returns only events from sessions
+    whose harness version matches, on both backends (issue #273).
+    """
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    _seed_multi_session_fixture(logger)
+
+    v1_nested: list = []
+    v2_nested: list = []
+    for session in logger.list_sessions():
+        bucket = v1_nested if session.harness_version == "v1" else v2_nested
+        bucket.extend(logger.iter_events(session.session_id))
+
+    v1_actual = list(logger.query_events(harness_version="v1"))
+    v2_actual = list(logger.query_events(harness_version="v2"))
+
+    assert _by_event_id(v1_actual) == _by_event_id(v1_nested)
+    assert _by_event_id(v2_actual) == _by_event_id(v2_nested)
+    # Sanity: v1 has sessions 1 (2 events) and 2 (1 event); v2 has session 3
+    # (2 events). The v1/v2 buckets are disjoint.
+    assert len(v1_actual) == 3
+    assert len(v2_actual) == 2
+    assert set(_by_event_id(v1_actual)).isdisjoint(_by_event_id(v2_actual))
+
+
+@_BACKENDS
+def test_query_events_kind_and_harness_version_filter_compose(tmp_path, backend):
+    """kind + harness_version compose: only matching-kind events from
+    matching-version sessions are yielded (issue #273).
+    """
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    _seed_multi_session_fixture(logger)
+
+    # task_received lives in sessions 1 (v1) and 3 (v2). Filtering to v2
+    # must narrow the result to session 3's task_received only.
+    actual = list(logger.query_events(kind="task_received", harness_version="v2"))
+    assert len(actual) == 1
+    assert actual[0].kind == "task_received"
+
+    # Cross-check against the nested-loop baseline with the same filters.
+    nested: list = []
+    for session in logger.list_sessions(harness_version="v2"):
+        nested.extend(logger.iter_events(session.session_id, kind="task_received"))
+    assert _by_event_id(actual) == _by_event_id(nested)
+
+
+@_BACKENDS
+def test_query_events_empty_store_yields_nothing(tmp_path, backend):
+    """An empty trace store yields no rows without raising (issue #273)."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    assert list(logger.query_events()) == []
+    assert list(logger.query_events(kind="anything")) == []
+    assert list(logger.query_events(harness_version="missing")) == []

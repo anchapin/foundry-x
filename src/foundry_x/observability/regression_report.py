@@ -87,29 +87,30 @@ def _load_verdict_events(
 ) -> list[tuple[str, str, VerdictRecord]]:
     """Stream every ``critic_verdict`` event through :class:`TraceLogger`.
 
-    Issue #82: this helper previously opened a raw ``sqlite3`` connection
-    on ``logger.path`` and ran a bespoke ``SELECT`` — see ADR-0003
-    "No raw SQL strings in business logic". The schema is now owned by
-    :class:`TraceLogger`; we walk sessions via ``list_sessions`` and pull
-    events row-by-row via ``iter_events``. The ``since`` filter is applied
-    after the fetch (the issue's ``iter_events`` signature deliberately
-    does not include a timestamp filter — keeping the surface narrow).
+    Issue #273 — previously walked ``list_sessions()`` and called
+    ``iter_events(sid)`` once per session, opening a fresh connection per
+    session. :meth:`TraceLogger.query_events` collapses that nested loop
+    into a single streaming cursor across all sessions; the ``since``
+    filter is still applied after the fetch (the issue's
+    ``query_events`` signature deliberately does not include a timestamp
+    filter — keeping the surface narrow).
     """
     events: list[tuple[str, str, VerdictRecord]] = []
-    for session in logger.list_sessions():
-        for event in logger.iter_events(session.session_id, kind=VERDICT_KIND):
-            if since is not None and event.timestamp < since:
-                continue
-            events.append(
-                (
-                    event.session_id,
-                    event.timestamp,
-                    VerdictRecord(**event.payload),
-                )
+    for event in logger.query_events(kind=VERDICT_KIND):
+        if since is not None and event.timestamp < since:
+            continue
+        events.append(
+            (
+                event.session_id,
+                event.timestamp,
+                VerdictRecord(**event.payload),
             )
+        )
     # Preserve the previous ORDER BY timestamp ASC, rowid ASC ordering
     # (issue #82: deterministic ordering keeps the regression-pairing
-    # logic stable across runs).
+    # logic stable across runs). ``query_events`` already returns rows in
+    # timestamp order; this stable re-sort guarantees identical tie-
+    # breaking to the prior per-session nested loop.
     events.sort(key=lambda row: row[1])
     return events
 
