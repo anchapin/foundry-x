@@ -678,10 +678,11 @@ def append_kpi_history(
 
     Each run produces exactly one line. The three PRD-KPI fields are
     emitted via :meth:`KpiSummary.model_dump` with ``injection_blocks``
-    excluded (the "minus per-session map" half of the round-trip
-    contract), then ``timestamp`` and the optional ``harness_version``
-    are added. Parent directories are created on demand so the
-    operator does not have to ``mkdir`` before the first run.
+    and ``token_totals`` excluded (the "minus per-session maps" half of
+    the round-trip contract), then ``timestamp`` and the optional
+    ``harness_version`` are added. Parent directories are created on
+    demand so the operator does not have to ``mkdir`` before the first
+    run.
 
     The file is opened in append mode and a single ``\\n``-terminated
     line is written per call, so concurrent appends from independent
@@ -690,7 +691,7 @@ def append_kpi_history(
     previous line.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = summary.model_dump(mode="json", exclude={"injection_blocks"})
+    payload = summary.model_dump(mode="json", exclude={"injection_blocks", "token_totals"})
     payload["timestamp"] = _now_iso()
     if harness_version is not None:
         payload["harness_version"] = harness_version
