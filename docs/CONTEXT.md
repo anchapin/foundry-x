@@ -159,6 +159,21 @@ subset of the broader kind vocabulary above.
   first-failure walk would under-report. It is exposed as a separate
   constant `INJECTION_BLOCKED_KIND` so tests can pin the contract.
 
+- **`model_response`** — emitted by `run_task` for every chat-completion
+  round-trip the runner performs. Payload contract (issue #191):
+  `{"step": int, "finish_reason": str | null, "message": <serialized
+  ModelMessage>, "tool_calls": list[dict], "token_usage": dict | null}`.
+  The `token_usage` field carries `{"prompt_tokens": int,
+  "completion_tokens": int, "total_tokens": int}` when the
+  `OpenAICompatibleAdapter` surfaces the wire-level `usage` object on
+  the response, or `null` when the endpoint omits it. The runner also
+  emits a `RuntimeWarning` on missing telemetry so the gap is
+  observable in operator logs without crashing the loop. The Phase 3
+  `Digester` reads `token_usage` to compute per-step token deltas, and
+  the PRD "Improvement Rate" KPI uses the same field to attribute the
+  cost of a harness edit. Consumers MUST treat `null` as missing data,
+  not as a zero reading.
+
 ## Artifacts on disk
 
 - `harness/system_prompt.txt` — the agent's persona and operating rules.
