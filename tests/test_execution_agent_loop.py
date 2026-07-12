@@ -564,3 +564,51 @@ def test_parse_tool_arguments_unit():
     non_dict = runner_mod._parse_tool_arguments("[1, 2, 3]")
     assert non_dict.arguments == {}
     assert "expected JSON object" in (non_dict.error or "")
+
+
+def test_agent_loop_emits_hook_registry_error_when_get_registry_raises(tmp_path, monkeypatch):
+    """Issue #260: when ``harness.hooks.get_registry()`` raises after a
+    successful lazy import, ``run_task`` must record a
+    ``hook_registry_error`` trace event (with ``error_type`` and
+    ``message``) and continue in degraded mode rather than silently
+    disabling every hook — including the ``InjectionFirewallHook`` — for
+    the whole session (AGENTS.md §2 — never silently swallow an
+    exception).
+
+    The session must still complete: a final-answer turn produces a
+    ``success`` ``outcome`` event, proving the failure is a degraded-mode
+    signal, not a hard stop.
+    """
+    import harness.hooks as harness_hooks
+
+    db = tmp_path / "traces.db"
+    responses = [
+        ModelResponse(
+            message=ModelMessage(role="assistant", content="degraded-ok"),
+            finish_reason="stop",
+        ),
+    ]
+    adapter = _ScriptedAdapter(responses)
+    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
+    monkeypatch.setattr(sys, "argv", _argv("degraded-task", db, REPO_HARNESS_DIR))
+
+    def _boom() -> None:
+        raise RuntimeError("registry blew up")
+
+    monkeypatch.setattr(harness_hooks, "get_registry", _boom)
+
+    main()
+
+    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
+    kinds = [event.kind for event in events]
+    assert (
+        "hook_registry_error" in kinds
+    ), f"expected a hook_registry_error event when get_registry() raises; kinds={kinds!r}"
+
+    err_event = next(event for event in events if event.kind == "hook_registry_error")
+    assert err_event.payload["error_type"] == "RuntimeError"
+    assert err_event.payload["message"] == "registry blew up"
+
+    # Degraded mode: the session still completes successfully.
+    outcome_event = next(event for event in events if event.kind == "outcome")
+    assert outcome_event.payload["status"] == "success"
