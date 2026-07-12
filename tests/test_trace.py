@@ -252,3 +252,72 @@ def test_explain_query_plan_uses_composite_index(tmp_path):
         ).fetchall()
     plan_text = " ".join(str(row) for row in plan_rows)
     assert "idx_events_session_kind" in plan_text
+
+
+# --- model_response token_usage (issue #191) -------------------------------
+
+
+@_BACKENDS
+def test_model_response_event_carries_token_usage_on_both_backends(tmp_path, backend):
+    """The ``model_response`` payload contract (issue #191) lands on both
+    trace backends: prompt_tokens / completion_tokens / total_tokens round
+    trip through ``record()`` -> ``load_session()`` unchanged. The Phase 3
+    Digester and the PRD "Improvement Rate" KPI rely on this telemetry
+    staying structured in the store; a flattening or string-coercion
+    regression here would silently break per-step token deltas.
+    """
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    token_usage = {
+        "prompt_tokens": 42,
+        "completion_tokens": 17,
+        "total_tokens": 59,
+    }
+    with logger.session(harness_version="0.1.0", model_id="m") as sid:
+        logger.record(
+            sid,
+            kind="model_response",
+            payload={
+                "step": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "done"},
+                "tool_calls": [],
+                "token_usage": token_usage,
+            },
+        )
+
+    events = logger.load_session(sid)
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["token_usage"] == token_usage
+    assert payload["token_usage"]["prompt_tokens"] == 42
+    assert payload["token_usage"]["completion_tokens"] == 17
+    assert payload["token_usage"]["total_tokens"] == 59
+
+
+@_BACKENDS
+def test_model_response_event_records_null_token_usage_when_missing(tmp_path, backend):
+    """When the model adapter omits ``usage`` (issue #191 acceptance), the
+    runner records ``token_usage=None`` so the Digester can distinguish
+    "missing telemetry" from "zero tokens consumed". An omitted key would
+    be ambiguous downstream and force the consumer to guess.
+    """
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="0.1.0", model_id="m") as sid:
+        logger.record(
+            sid,
+            kind="model_response",
+            payload={
+                "step": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "done"},
+                "tool_calls": [],
+                "token_usage": None,
+            },
+        )
+
+    events = logger.load_session(sid)
+    assert len(events) == 1
+    assert "token_usage" in events[0].payload
+    assert events[0].payload["token_usage"] is None
