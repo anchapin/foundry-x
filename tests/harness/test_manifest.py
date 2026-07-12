@@ -98,6 +98,6 @@ def test_manifest_version_matches_harness_version_file(manifest: dict) -> None:
     if not version_file.exists():
         pytest.skip("harness/VERSION not present")
     text = version_file.read_text(encoding="utf-8").strip()
-    assert manifest["version"] == text, (
-        f"manifest version {manifest['version']!r} disagrees with " f"harness/VERSION ({text!r})"
-    )
+    assert (
+        manifest["version"] == text
+    ), f"manifest version {manifest['version']!r} disagrees with harness/VERSION ({text!r})"

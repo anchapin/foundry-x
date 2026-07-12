@@ -203,6 +203,6 @@ def test_list_dir_navigation(benchmark_workspace: Path) -> None:
         f"task {TASK.name}: corrected workspace must exit 0; "
         f"got rc={good.returncode} stdout={good.stdout!r} stderr={good.stderr!r}"
     )
-    assert good.stdout == expected_stdout, (
-        f"task {TASK.name}: stdout mismatch " f"(got {good.stdout!r}, expected {expected_stdout!r})"
-    )
+    assert (
+        good.stdout == expected_stdout
+    ), f"task {TASK.name}: stdout mismatch (got {good.stdout!r}, expected {expected_stdout!r})"

@@ -254,9 +254,9 @@ def test_runner_loop_smoke(benchmark_workspace: Path) -> None:
 
         # --- Terminal outcome ----------------------------------------------
         outcome_event = next(event for event in events if event.kind == "outcome")
-        assert outcome_event.payload["reason"] == "final_answer", (
-            f"expected outcome.reason='final_answer'; got " f"{outcome_event.payload!r}"
-        )
+        assert (
+            outcome_event.payload["reason"] == "final_answer"
+        ), f"expected outcome.reason='final_answer'; got {outcome_event.payload!r}"
         assert outcome_event.payload["status"] == "success"
         assert outcome_event.payload["steps"] >= 1
 

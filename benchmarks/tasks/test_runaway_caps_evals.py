@@ -412,10 +412,9 @@ def test_wall_clock_caps_loop(tmp_path, monkeypatch):
     # regression that swallows the TimeoutError after the cap fires is
     # caught here too.
     failed = [event.payload for event in events if event.kind == "task_failed"]
-    assert len(failed) == 1, (
-        f"TimeoutError from the cap must surface as a single task_failed "
-        f"event; got {len(failed)}"
-    )
+    assert (
+        len(failed) == 1
+    ), f"TimeoutError from the cap must surface as a single task_failed event; got {len(failed)}"
     assert failed[0]["error_type"] == "TimeoutError"
 
 

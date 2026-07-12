@@ -409,8 +409,7 @@ def _render_markdown(summary: KpiSummary) -> str:
         grand_total = sum(summary.token_totals.values())
         lines.append("")
         lines.append(
-            f"Token Usage: {grand_total} token(s) across "
-            f"{len(summary.token_totals)} session(s)."
+            f"Token Usage: {grand_total} token(s) across {len(summary.token_totals)} session(s)."
         )
         lines.append("")
         lines.append("| Session | Tokens |")
