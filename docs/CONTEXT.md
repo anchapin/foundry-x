@@ -117,6 +117,7 @@ The "Failure-signalling subset" subsection below cross-references the
 | **`tool_call`** | `Runner.run_task` (one per emitted tool call) | `{"step": int, "call_id": str, "name": str, "arguments": dict, "duration_ms": int}` — added in issue #173; per-tool-call latency for KPI slicing. | no |
 | **`tool_result`** | `Runner.run_task` (one per tool execution) | `{"step": int, "call_id": str, "name": str, "duration_ms": int, "output": Any \| null, "error": str \| null}` — non-null `error` flips the event onto the Digester's failure path via `FAILURE_PAYLOAD_KEYS`. | when `error` is non-null |
 | **`outcome`** | `Runner.run_task` (always emitted in `finally`) | `{"status": "success" \| "truncated" \| "failed", "reason": "final_answer" \| "model_error" \| "max_steps", "steps": int}` — terminal status the Digester attributes to the session. | when `status == "failed"` |
+| **`hook_registry_error`** | `Runner.run_task` via `_resolve_hook_registry` (issue #260) | `{"error_type": str, "message": str}` — emitted when `harness.hooks.get_registry()` raises after a successful lazy import. The session continues in degraded mode (`registry is None`, so no hook fan-out including the `InjectionFirewallHook`), but the event records that the firewall layer is off so the Digester and operator have a signal (AGENTS.md §2). | **yes** (security-critical hooks disabled) |
 
 ### Hooks
 
