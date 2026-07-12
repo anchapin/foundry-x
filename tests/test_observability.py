@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from foundry_x.evolution.digester import FailureReport
 from foundry_x.observability.cli import main as cli_main
 from foundry_x.observability.render import render_failure_report
-from foundry_x.observability.timeline import format_timeline
+from foundry_x.observability.timeline import (
+    build_timeline_records,
+    format_timeline,
+    render_timeline_json,
+)
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 
@@ -142,6 +149,54 @@ def test_format_timeline_omits_tokens_when_usage_missing():
     assert "tokens:" not in output
 
 
+# ---------------------------------------------------------------------------
+# Issue #270: structured JSON timeline output.
+# ---------------------------------------------------------------------------
+
+
+def test_build_timeline_records_has_one_record_per_event():
+    records = build_timeline_records(_sample_events())
+    assert [r.step for r in records] == [1, 2, 3, 4, 5]
+    assert [r.kind for r in records] == [
+        "user_prompt",
+        "tool_call",
+        "tool_result",
+        "error",
+        "outcome",
+    ]
+
+
+def test_build_timeline_records_offsets_are_relative_deltas():
+    records = build_timeline_records(_sample_events())
+    assert records[0].offset_seconds == 0.0
+    assert records[1].offset_seconds == 0.3
+    assert records[2].offset_seconds == 0.8
+    assert records[3].offset_seconds == 1.2
+
+
+def test_build_timeline_records_marks_errors_with_is_error_flag():
+    records = build_timeline_records(_sample_events())
+    # The 4th event is the "error" kind; only it carries is_error=True.
+    assert records[3].is_error is True
+    assert all(not r.is_error for i, r in enumerate(records) if i != 3)
+
+
+def test_build_timeline_records_empty_events_returns_empty_list():
+    assert build_timeline_records([]) == []
+
+
+def test_render_timeline_json_emits_parseable_array_with_required_keys():
+    payload = json.loads(render_timeline_json(_sample_events()))
+    assert isinstance(payload, list)
+    assert len(payload) == len(_sample_events())
+    for entry in payload:
+        assert set(entry) == {"step", "offset_seconds", "kind", "summary", "is_error"}
+
+
+def test_render_timeline_json_empty_events_emits_empty_array():
+    assert json.loads(render_timeline_json([])) == []
+
+
 # --- failure report render tests ---
 
 
@@ -252,3 +307,67 @@ def test_cli_timeline_jsonl_backend(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "user_prompt" in out
     assert "hi" in out
+
+
+# ---------------------------------------------------------------------------
+# Issue #270: fx-trace timeline --format json / --out .json
+# ---------------------------------------------------------------------------
+
+
+def test_cli_timeline_format_json_emits_parseable_array(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+
+    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid, "--format", "json"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert isinstance(payload, list)
+    # _populate_session records three events.
+    assert len(payload) == 3
+    for entry in payload:
+        assert set(entry) == {"step", "offset_seconds", "kind", "summary", "is_error"}
+    assert [entry["kind"] for entry in payload] == [
+        "user_prompt",
+        "tool_call",
+        "tool_result",
+    ]
+
+
+def test_cli_timeline_out_json_autoselects_json_format(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+    out_path = tmp_path / "timeline.json"
+
+    rc = cli_main(
+        [
+            "timeline",
+            "--db",
+            str(db),
+            "--session-id",
+            sid,
+            "--out",
+            str(out_path),
+        ]
+    )
+
+    assert rc == 0
+    # Nothing on stdout when --out is set.
+    assert capsys.readouterr().out == ""
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    assert isinstance(payload, list)
+    assert len(payload) == 3
+
+
+def test_cli_timeline_default_format_is_markdown(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+
+    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Markdown output carries the step markers, not a JSON array.
+    assert out.lstrip().startswith("#")
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(out)
