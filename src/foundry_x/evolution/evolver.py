@@ -21,9 +21,13 @@ _RATE_WINDOW = timedelta(hours=1)
 # ``VERSION``) that are NOT editable by the evolution loop, so the allowed
 # set is enumerated explicitly rather than "everything under harness/".
 _HARNESS_ROOT = "harness"
-# ``system_prompt.txt`` is a leaf file; ``hooks`` and ``skills`` are
-# subtrees the Evolver may edit arbitrarily deep beneath.
+# Leaf files the Evolver may propose edits to. Each is a single file, not
+# a directory — no path may sit beneath a leaf entry.
 _HARNESS_PROMPT_FILE = "system_prompt.txt"
+_HARNESS_MANIFEST = "manifest.json"
+_HARNESS_LEAF_FILES = frozenset({_HARNESS_PROMPT_FILE, _HARNESS_MANIFEST})
+# ``hooks`` and ``skills`` are subtrees the Evolver may edit arbitrarily
+# deep beneath.
 _HARNESS_SUBDIRS = frozenset({"hooks", "skills"})
 
 
@@ -52,10 +56,10 @@ def _confine_to_harness_tree(raw: str) -> str:
 
     Enforces the ADR-0004 invariant — "edits only land in ``harness/``" —
     at the model boundary rather than only in the Critic. Accepts paths
-    beneath ``harness/system_prompt.txt`` (the file itself),
-    ``harness/hooks/...`` and ``harness/skills/...``. Absolute paths,
-    traversal escapes (``../../etc/passwd``), and anything outside the
-    three allowed subtrees raise ``ValueError`` (surfaced as a pydantic
+    beneath ``harness/system_prompt.txt``, ``harness/manifest.json`` (leaf
+    files), ``harness/hooks/...`` and ``harness/skills/...``. Absolute
+    paths, traversal escapes (``../../etc/passwd``), and anything outside
+    the allowed targets raise ``ValueError`` (surfaced as a pydantic
     ``ValidationError`` by the field validator).
 
     Returns the canonical POSIX form so ``harness/./hooks/../hooks/a.py``
@@ -73,11 +77,12 @@ def _confine_to_harness_tree(raw: str) -> str:
     if len(normalized) < 2 or normalized[0] != _HARNESS_ROOT:
         raise ValueError(f"target_file must live under {_HARNESS_ROOT}/, got: {raw!r}")
     entry = normalized[1]
-    if entry == _HARNESS_PROMPT_FILE:
-        # The prompt is a leaf file: nothing may sit beneath it.
+    if entry in _HARNESS_LEAF_FILES:
+        # Leaf files (system_prompt.txt, manifest.json): nothing may sit
+        # beneath them.
         if len(normalized) != 2:
             raise ValueError(
-                f"target_file treats {_HARNESS_ROOT}/{_HARNESS_PROMPT_FILE} "
+                f"target_file treats {_HARNESS_ROOT}/{entry} "
                 f"as a directory: {raw!r}"
             )
     elif entry in _HARNESS_SUBDIRS:
@@ -91,8 +96,8 @@ def _confine_to_harness_tree(raw: str) -> str:
     else:
         raise ValueError(
             f"target_file points at a non-editable harness entry "
-            f"({entry!r}); only {_HARNESS_PROMPT_FILE}, hooks/, and skills/ "
-            f"may be edited: {raw!r}"
+            f"({entry!r}); only system_prompt.txt, manifest.json, hooks/, "
+            f"and skills/ may be edited: {raw!r}"
         )
     canonical = "/".join(normalized)
     if any("\\" in p or "\x00" in p for p in normalized):
@@ -116,7 +121,7 @@ class ProposedEdit(BaseModel):
     @field_validator("target_file")
     @classmethod
     def _target_file_within_harness_tree(cls, value: str) -> str:
-        """Confine edits to harness/{system_prompt.txt,hooks/,skills/}.
+        """Confine edits to harness/{system_prompt.txt,manifest.json,hooks/,skills/}.
 
         Enforces the ADR-0004 self-modification guardrail at the model
         boundary (ADR-0006) so an out-of-tree proposal cannot reach the
