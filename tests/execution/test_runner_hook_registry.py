@@ -127,4 +127,8 @@ class TestResolveHookRegistry:
 
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     pytest.main([__file__, "-v"])
+=======
+    pytest.main([__file__, "-v"])
+>>>>>>> 66ceef6 (fix: resolve #260 — emit trace event when hook registry resolution fails)
