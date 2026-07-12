@@ -51,6 +51,25 @@ def _with_latency(summary: str, payload: dict[str, Any]) -> str:
     return f"{summary} ({latency})"
 
 
+def _with_token_total(summary: str, payload: dict[str, Any]) -> str:
+    """Annotate a ``model_response`` line with its cumulative token count.
+
+    Issue #271 — the runner records a running ``tokens_used`` counter on
+    every ``model_response`` event (issue #197). Showing that running
+    total inline lets an operator watch a session burn through its
+    ``FOUNDRY_TOKEN_BUDGET`` without leaving the timeline. A missing or
+    non-integer ``tokens_used`` (endpoint that omits accounting, or an
+    event written before the field landed) yields no annotation.
+    """
+    tokens = payload.get("tokens_used")
+    if isinstance(tokens, bool) or not isinstance(tokens, int):
+        return summary
+    annotation = f"tokens:{tokens}"
+    if not summary:
+        return annotation
+    return f"{summary} [{annotation}]"
+
+
 def _extract_summary(payload: dict[str, Any]) -> str:
     """Return a one-line human summary for an event payload.
 
@@ -108,6 +127,10 @@ def format_timeline(
 
         kind = event.kind.ljust(_KIND_COLUMN)
         summary = _extract_summary(event.payload)
+        # Issue #271: show the cumulative token total on model_response
+        # lines so token consumption is visible alongside latency/summaries.
+        if event.kind == "model_response":
+            summary = _with_token_total(summary, event.payload)
         step = f"#{index}".ljust(_STEP_NUM_WIDTH + 1)
 
         lines.append(f"{prefix}{step} {offset:>{_OFFSET_WIDTH}}  {kind} {summary}".rstrip())

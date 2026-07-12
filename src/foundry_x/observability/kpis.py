@@ -67,12 +67,22 @@ class KpiSummary(BaseModel):
     of ``injection_blocked`` events per session, sourced from the firewall
     hook. Empty by default; populated only when the trace store has at
     least one ``injection_blocked`` event.
+
+    Issue #271 adds ``token_totals``: a ``session_id -> int`` map of the
+    cumulative ``total_tokens`` consumed per session, summed from the
+    ``usage`` payloads the runner records on each ``model_response`` event
+    (issue #191). Empty by default; populated only when at least one
+    ``model_response`` event carries a ``usage`` dict, so a trace store
+    with no token data (e.g. an endpoint that never reports usage) keeps
+    the summary compact. Like ``injection_blocks`` this is an auxiliary
+    operator signal, not one of the three PRD success-metric KPIs.
     """
 
     cycle_time_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
     injection_blocks: dict[str, int] = {}
+    token_totals: dict[str, int] = {}
 
 
 class KpiComparison(BaseModel):
@@ -140,12 +150,14 @@ def compute_kpis(
     cycle_time = _cycle_time(logger, harness_version=harness_version)
     regression_rate, improvement_rate = _verdict_rates(logger, harness_version=harness_version)
     injection_blocks = _injection_blocks(logger, harness_version=harness_version)
+    token_totals = _token_totals(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
         regression_rate=regression_rate,
         improvement_rate=improvement_rate,
         injection_blocks=injection_blocks,
+        token_totals=token_totals,
     )
 
 
@@ -296,6 +308,46 @@ def _injection_blocks(
     return blocks
 
 
+def _token_totals(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> dict[str, int]:
+    """Per-session cumulative token totals (issue #271).
+
+    Sums ``usage.total_tokens`` across every ``model_response`` event the
+    runner records (issue #191). The runner itself keeps a running
+    ``tokens_used`` counter (issue #197); summing the per-response
+    ``total_tokens`` reproduces that cumulative figure without depending on
+    the ``tokens_used`` key being present, so events written before that
+    field landed still contribute.
+
+    A ``model_response`` whose ``usage`` is missing or ``None`` (an
+    OpenAI-compatible endpoint that omits accounting) contributes zero and
+    does **not** seed the session into the map — only sessions with at
+    least one event carrying a ``usage`` dict appear, mirroring the
+    ``_injection_blocks`` "show only when present" contract.
+
+    Like the other per-session helpers this uses one
+    :meth:`TraceLogger.query_events` cursor (issue #273) with the kind and
+    ``harness_version`` filters pushed down, so a multi-session store is a
+    single ordered scan rather than S round-trips.
+    """
+    totals: dict[str, int] = {}
+    for event in logger.query_events(
+        kind="model_response",
+        harness_version=harness_version,
+    ):
+        usage = event.payload.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        step_total = usage.get("total_tokens", 0)
+        # ``bool`` is a subclass of ``int``; guard against truthy flags.
+        if isinstance(step_total, bool) or not isinstance(step_total, int):
+            continue
+        totals[event.session_id] = totals.get(event.session_id, 0) + step_total
+    return totals
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -348,6 +400,22 @@ def _render_markdown(summary: KpiSummary) -> str:
         lines.append("| Session | injection_blocked |")
         lines.append("| --- | --- |")
         for sid, count in sorted(summary.injection_blocks.items()):
+            lines.append(f"| {sid} | {count} |")
+    # Issue #271: surface per-session token consumption only when at least
+    # one ``model_response`` carried a ``usage`` payload; a trace store with
+    # no token accounting (budget never plumbed, or an endpoint that omits
+    # usage) keeps the summary compact.
+    if summary.token_totals:
+        grand_total = sum(summary.token_totals.values())
+        lines.append("")
+        lines.append(
+            f"Token Usage: {grand_total} token(s) across "
+            f"{len(summary.token_totals)} session(s)."
+        )
+        lines.append("")
+        lines.append("| Session | Tokens |")
+        lines.append("| --- | --- |")
+        for sid, count in sorted(summary.token_totals.items()):
             lines.append(f"| {sid} | {count} |")
     return "\n".join(lines)
 
@@ -423,10 +491,11 @@ def append_kpi_history(
 
     Each run produces exactly one line. The three PRD-KPI fields are
     emitted via :meth:`KpiSummary.model_dump` with ``injection_blocks``
-    excluded (the "minus per-session map" half of the round-trip
-    contract), then ``timestamp`` and the optional ``harness_version``
-    are added. Parent directories are created on demand so the
-    operator does not have to ``mkdir`` before the first run.
+    and ``token_totals`` excluded (the "minus per-session maps" half of
+    the round-trip contract), then ``timestamp`` and the optional
+    ``harness_version`` are added. Parent directories are created on
+    demand so the operator does not have to ``mkdir`` before the first
+    run.
 
     The file is opened in append mode and a single ``\\n``-terminated
     line is written per call, so concurrent appends from independent
@@ -435,7 +504,7 @@ def append_kpi_history(
     previous line.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = summary.model_dump(mode="json", exclude={"injection_blocks"})
+    payload = summary.model_dump(mode="json", exclude={"injection_blocks", "token_totals"})
     payload["timestamp"] = _now_iso()
     if harness_version is not None:
         payload["harness_version"] = harness_version

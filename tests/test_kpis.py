@@ -131,6 +131,7 @@ def test_compute_kpis_empty_db(tmp_path):
     assert summary.regression_rate == 0.0
     assert summary.improvement_rate == 0.0
     assert summary.injection_blocks == {}
+    assert summary.token_totals == {}
 
 
 def test_compute_kpis_harness_version_filter(tmp_path):
@@ -247,6 +248,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "regression_rate",
         "improvement_rate",
         "injection_blocks",
+        "token_totals",
     }
 
 
@@ -466,3 +468,182 @@ def test_main_comparison_requires_both_versions(tmp_path):
     with pytest.raises(SystemExit) as exc:
         main(["--db", str(db), "--baseline-harness-version", "v1"])
     assert exc.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #271: per-session ``token_totals`` is surfaced by the
+# ``foundry-kpis`` CLI when ``model_response`` events carry ``token_usage``.
+# A trace store with no token accounting stays compact (no token section or
+# map entries). Mirrors the ``injection_blocked`` "show only when present"
+# contract so the JSON contract is additive, not breaking.
+# ---------------------------------------------------------------------------
+
+
+def _seed_model_response_usage(
+    logger: TraceLogger,
+    harness_version: str,
+    usage_payloads: list[dict[str, int] | None],
+) -> str:
+    """Plant a session whose ``model_response`` events carry ``token_usage``.
+
+    Each entry in *usage_payloads* becomes one ``model_response`` event whose
+    ``usage`` key matches the runner's wire format
+    (``{"prompt_tokens", "completion_tokens", "total_tokens"}``) and whose
+    ``tokens_used`` is the running cumulative total, exactly as
+    :func:`~foundry_x.execution.runner.run_task` records it (issues #191, #197).
+    A ``None`` entry simulates an endpoint that omits usage accounting.
+    """
+    with logger.session(harness_version=harness_version) as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+        running = 0
+        for step, usage in enumerate(usage_payloads):
+            if usage is not None:
+                running += usage["total_tokens"]
+            logger.record(
+                sid,
+                kind="model_response",
+                payload={
+                    "step": step,
+                    "finish_reason": "stop",
+                    "usage": usage,
+                    "tokens_used": running,
+                },
+            )
+    return sid
+
+
+def test_token_totals_sums_total_tokens_per_session(tmp_path):
+    """``token_totals`` accumulates ``usage.total_tokens`` per session."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    s1 = _seed_model_response_usage(
+        logger,
+        "v1",
+        [
+            {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+        ],
+    )
+
+    summary = compute_kpis(logger)
+
+    assert summary.token_totals == {s1: 45}
+
+
+def test_token_totals_multiple_sessions(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    s1 = _seed_model_response_usage(
+        logger, "v1", [{"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10}]
+    )
+    s2 = _seed_model_response_usage(
+        logger, "v1", [{"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50}]
+    )
+
+    summary = compute_kpis(logger)
+
+    assert summary.token_totals == {s1: 10, s2: 50}
+    assert sum(summary.token_totals.values()) == 60
+
+
+def test_token_totals_skips_events_with_null_usage(tmp_path):
+    """A ``model_response`` with ``usage: None`` contributes zero tokens."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    s1 = _seed_model_response_usage(
+        logger,
+        "v1",
+        [None, {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}],
+    )
+
+    summary = compute_kpis(logger)
+
+    assert summary.token_totals == {s1: 10}
+
+
+def test_token_totals_omits_session_with_no_usage(tmp_path):
+    """A session whose ``model_response`` events all omit ``usage`` is absent."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _seed_model_response_usage(logger, "v1", [None, None])
+
+    summary = compute_kpis(logger)
+
+    assert summary.token_totals == {}
+
+
+def test_token_totals_empty_when_no_model_response_events(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", approved=True)
+
+    summary = compute_kpis(logger)
+
+    assert summary.token_totals == {}
+
+
+def test_token_totals_respects_harness_version_filter(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_model_response_usage(
+        logger, "v1", [{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}]
+    )
+    _seed_model_response_usage(
+        logger, "v2", [{"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6}]
+    )
+
+    summary_v1 = compute_kpis(logger, harness_version="v1")
+    summary_v2 = compute_kpis(logger, harness_version="v2")
+
+    assert list(summary_v1.token_totals.values()) == [2]
+    assert list(summary_v2.token_totals.values()) == [6]
+
+
+def test_main_markdown_renders_token_usage_section(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    s1 = _seed_model_response_usage(
+        logger, "v1", [{"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}]
+    )
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    output = captured.out
+    assert "Token Usage" in output
+    assert "150 token(s) across 1 session(s)" in output
+    assert "| Session | Tokens |" in output
+    assert s1 in output
+    assert "| 150 |" in output
+
+
+def test_main_markdown_omits_token_usage_when_clean(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", approved=True)
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    # Compact output for a store with no token accounting.
+    assert "Token Usage" not in captured.out
+
+
+def test_main_json_includes_token_totals(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    s1 = _seed_model_response_usage(
+        logger, "v1", [{"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}]
+    )
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert payload["token_totals"] == {s1: 10}
