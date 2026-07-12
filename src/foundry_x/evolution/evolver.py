@@ -69,7 +69,7 @@ def _confine_to_harness_tree(raw: str) -> str:
     path = Path(raw)
     if path.is_absolute():
         raise ValueError(
-            f"target_file must be relative to the harness root, got absolute " f"path: {raw!r}"
+            f"target_file must be relative to the harness root, got absolute path: {raw!r}"
         )
     normalized = _normalize_relative_parts(path.parts)
     if normalized is None:
@@ -81,10 +81,7 @@ def _confine_to_harness_tree(raw: str) -> str:
         # Leaf files (system_prompt.txt, manifest.json): nothing may sit
         # beneath them.
         if len(normalized) != 2:
-            raise ValueError(
-                f"target_file treats {_HARNESS_ROOT}/{entry} "
-                f"as a directory: {raw!r}"
-            )
+            raise ValueError(f"target_file treats {_HARNESS_ROOT}/{entry} as a directory: {raw!r}")
     elif entry in _HARNESS_SUBDIRS:
         # hooks/ and skills/ are directories: an edit must target a file
         # inside them, not the directory itself.

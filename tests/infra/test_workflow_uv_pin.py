@@ -153,4 +153,4 @@ def test_composite_action_pins_sha256(composite_action_text: str) -> None:
         composite_action_text,
         re.DOTALL,
     )
-    assert m, "Composite action must declare `uv-sha256` with a 64-hex default. " "See issue #208."
+    assert m, "Composite action must declare `uv-sha256` with a 64-hex default. See issue #208."

@@ -167,8 +167,7 @@ _CLASS_CAUSE_TEMPLATES: dict[str, str] = {
         "reset/cleanup between steps."
     ),
     "tool-error": (
-        "Tool execution raised an error (matched: {match}). Inspect the "
-        "failing call's traceback."
+        "Tool execution raised an error (matched: {match}). Inspect the failing call's traceback."
     ),
     # Issue #120: structured ``injection_blocked`` events aggregate into a
     # single ``injection-attempt`` report. The template references the first

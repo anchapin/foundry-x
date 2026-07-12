@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fnmatch
+import hashlib
 import json
 import math
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -98,6 +101,22 @@ _DEFAULT_MAX_AGENT_STEPS: int = 16
 # swallow).
 _REQUEST_TIMEOUT_ENV = "FOUNDRY_REQUEST_TIMEOUT_S"
 _DEFAULT_REQUEST_TIMEOUT_S: float = 30.0
+
+_WORKSPACE_ROOT_ENV = "FOUNDRY_WORKSPACE_ROOT"
+
+
+def _resolve_workspace_root(env: dict[str, str] | None = None) -> Path:
+    """Resolve the agent workspace root for file-operation skill executors.
+
+    ``FOUNDRY_WORKSPACE_ROOT`` is the explicit override. When absent or
+    empty the current working directory is used as the workspace root.
+    The returned path is always absolute.
+    """
+    source = env if env is not None else os.environ
+    raw = source.get(_WORKSPACE_ROOT_ENV, "").strip()
+    if raw:
+        return Path(raw).resolve()
+    return Path.cwd()
 
 
 # Skill-executor protocol (issue #89, ADR-0010). A callable that maps a skill
@@ -551,6 +570,264 @@ async def _default_skill_executor(name: str, arguments: dict[str, Any]) -> dict[
     }
 
 
+def _resolve_path(path: str, workspace_root: Path) -> Path:
+    """Resolve ``path`` against ``workspace_root`` and check it does not escape.
+
+    Absolute paths are resolved as-is and must be inside ``workspace_root``.
+    Relative paths are joined with ``workspace_root`` first. Path escapes
+    (``..`` segments or absolute paths pointing outside ``workspace_root``)
+    raise ``ValueError``.
+    """
+    if Path(path).is_absolute():
+        resolved = Path(path).resolve()
+    else:
+        resolved = (workspace_root / path).resolve()
+    try:
+        resolved.relative_to(workspace_root.resolve())
+    except ValueError:
+        raise ValueError(f"path {path!r} escapes workspace root") from None
+    return resolved
+
+
+async def _exec_list_dir(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Execute the ``list_dir`` skill (issue #259)."""
+    path_str = arguments.get("path", ".")
+    glob_pattern = arguments.get("glob")
+    include_hidden = bool(arguments.get("include_hidden", False))
+    max_entries = int(arguments.get("max_entries", 1000))
+
+    try:
+        resolved = _resolve_path(path_str, workspace_root)
+    except ValueError as exc:
+        return {"entries": [], "truncated": False, "error": str(exc)}
+
+    if not resolved.exists() or not resolved.is_dir():
+        return {"entries": [], "truncated": False}
+
+    raw_entries: list[tuple[str, str, int]] = []
+    try:
+        scan_iter = os.scandir(resolved)
+    except OSError:
+        return {"entries": [], "truncated": False}
+
+    with scan_iter:
+        for entry in scan_iter:
+            if not include_hidden and entry.name.startswith("."):
+                continue
+            if glob_pattern is not None and not fnmatch.fnmatch(entry.name, glob_pattern):
+                continue
+            if entry.is_symlink():
+                kind = "symlink"
+            elif entry.is_dir(follow_symlinks=False):
+                kind = "dir"
+            elif entry.is_file(follow_symlinks=False):
+                kind = "file"
+            else:
+                kind = "other"
+            size = 0 if kind != "file" else entry.stat(follow_symlinks=False).st_size
+            raw_entries.append((entry.name, kind, size))
+
+    raw_entries.sort(key=lambda triple: triple[0])
+    truncated = len(raw_entries) > max_entries
+    visible = raw_entries[:max_entries]
+
+    return {
+        "entries": [{"name": name, "kind": kind, "size": size} for name, kind, size in visible],
+        "truncated": truncated,
+    }
+
+
+async def _exec_grep_search(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Execute the ``grep_search`` skill (issue #259)."""
+    pattern_str = arguments.get("pattern", "")
+    path_str = arguments.get("path", ".")
+    glob_pattern = arguments.get("glob")
+    include_hidden = bool(arguments.get("include_hidden", False))
+    context_lines = int(arguments.get("context_lines", 0))
+    max_matches = int(arguments.get("max_matches", 1000))
+    max_file_bytes = int(arguments.get("max_file_bytes", 1048576))
+    max_match_text_bytes = int(arguments.get("max_match_text_bytes", 4096))
+
+    if len(pattern_str) > 4096:
+        return {"matches": [], "truncated": False, "error": "pattern exceeds 4096 character limit"}
+
+    for feature in ("(?P<", "(?=", "(?!", "(?<=", "(?<!", "(?#", "(?<!"):
+        if feature in pattern_str:
+            return {
+                "matches": [],
+                "truncated": False,
+                "error": "pattern uses disallowed regex feature",
+            }
+    if "**" in pattern_str:
+        return {"matches": [], "truncated": False, "error": "pattern uses disallowed regex feature"}
+
+    try:
+        compiled = re.compile(pattern_str, flags=re.DOTALL)
+    except re.error as exc:
+        return {"matches": [], "truncated": False, "error": f"invalid regex: {exc}"}
+
+    try:
+        resolved = _resolve_path(path_str, workspace_root)
+    except ValueError as exc:
+        return {"matches": [], "truncated": False, "error": str(exc)}
+
+    if not resolved.exists() or not resolved.is_dir():
+        return {"matches": [], "truncated": False}
+
+    matches: list[dict[str, Any]] = []
+    truncated = False
+
+    try:
+        sorted_files = sorted(resolved.rglob("*"), key=lambda p: (str(p.parent), p.name))
+    except OSError:
+        return {"matches": [], "truncated": False}
+
+    for file_path in sorted_files:
+        if not include_hidden and any(part.startswith(".") for part in file_path.parts):
+            continue
+        if not file_path.is_file():
+            continue
+        if glob_pattern is not None and not fnmatch.fnmatch(file_path.name, glob_pattern):
+            continue
+
+        rel_path = file_path.relative_to(resolved)
+        file_str = rel_path.as_posix()
+
+        try:
+            file_size = file_path.stat().st_size
+        except OSError:
+            continue
+
+        if file_size > max_file_bytes:
+            matches.append(
+                {"file": file_str, "line": 0, "text": "<skipped: file exceeds max_file_bytes>"}
+            )
+            if len(matches) >= max_matches:
+                truncated = True
+                break
+            continue
+
+        try:
+            raw_bytes = file_path.read_bytes()
+        except OSError:
+            continue
+
+        text = raw_bytes.decode("utf-8", errors="replace")
+        lines = text.splitlines(keepends=True)
+
+        for line_no, line_text in enumerate(lines, start=1):
+            if compiled.search(line_text):
+                context_start = max(0, line_no - context_lines - 1)
+                context_end = min(len(lines), line_no + context_lines)
+                context_slice = lines[context_start:context_end]
+                joined = "".join(context_slice)
+                if len(joined.encode("utf-8")) > max_match_text_bytes:
+                    cut = joined.encode("utf-8")[:max_match_text_bytes]
+                    null_pos = cut.rfind(b"\n")
+                    if null_pos > 0:
+                        joined = cut[:null_pos].decode("utf-8", errors="replace")
+                    else:
+                        joined = cut.decode("utf-8", errors="replace")
+                    truncated = True
+                matches.append({"file": file_str, "line": line_no, "text": joined.rstrip("\n")})
+                if len(matches) >= max_matches:
+                    truncated = True
+                    break
+
+        if truncated:
+            break
+
+    return {"matches": matches, "truncated": truncated}
+
+
+async def _exec_edit_file(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Execute the ``edit_file`` skill (issue #259)."""
+    path_str = arguments.get("path", "")
+    old_string = arguments.get("old_string", "")
+    new_string = arguments.get("new_string", "")
+
+    if not path_str or not old_string:
+        return {
+            "path": path_str,
+            "sha256": "",
+            "replacements_made": 0,
+            "error": "path and old_string are required",
+        }
+
+    try:
+        resolved = _resolve_path(path_str, workspace_root)
+    except ValueError as exc:
+        return {"path": path_str, "sha256": "", "replacements_made": 0, "error": str(exc)}
+
+    try:
+        original = resolved.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {
+            "path": path_str,
+            "sha256": "",
+            "replacements_made": 0,
+            "error": f"file not found: {path_str}",
+        }
+    except OSError as exc:
+        return {"path": path_str, "sha256": "", "replacements_made": 0, "error": str(exc)}
+
+    if old_string not in original:
+        sha = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        return {"path": str(resolved), "sha256": sha, "replacements_made": 0}
+
+    new_content = original.replace(old_string, new_string)
+    try:
+        resolved.write_text(new_content, encoding="utf-8")
+    except OSError as exc:
+        return {"path": str(resolved), "sha256": "", "replacements_made": 0, "error": str(exc)}
+
+    sha = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
+    replacements = original.count(old_string)
+    return {"path": str(resolved), "sha256": sha, "replacements_made": replacements}
+
+
+async def _exec_write_file(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Execute the ``write_file`` skill (issue #259)."""
+    path_str = arguments.get("path", "")
+    content = arguments.get("content", "")
+
+    if not path_str:
+        return {"path": "", "sha256": "", "bytes_written": 0, "error": "path is required"}
+
+    try:
+        resolved = _resolve_path(path_str, workspace_root)
+    except ValueError as exc:
+        return {"path": path_str, "sha256": "", "bytes_written": 0, "error": str(exc)}
+
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        return {"path": str(resolved), "sha256": "", "bytes_written": 0, "error": str(exc)}
+
+    sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    bytes_written = len(content.encode("utf-8"))
+    return {"path": str(resolved), "sha256": sha, "bytes_written": bytes_written}
+
+
+async def _file_operation_skill_executor(
+    name: str, arguments: dict[str, Any], workspace_root: Path
+) -> dict[str, Any]:
+    """Dispatch to the correct file-operation skill executor (issue #259).
+
+    Skills that are not file operations fall through to the default stub.
+    """
+    if name == "list_dir":
+        return await _exec_list_dir(arguments, workspace_root)
+    if name == "grep_search":
+        return await _exec_grep_search(arguments, workspace_root)
+    if name == "edit_file":
+        return await _exec_edit_file(arguments, workspace_root)
+    if name == "write_file":
+        return await _exec_write_file(arguments, workspace_root)
+    return await _default_skill_executor(name, arguments)
+
+
 def _parse_tool_arguments(raw: str) -> _ParsedToolArguments:
     """Parse an OpenAI-compatible tool-call ``arguments`` JSON string.
 
@@ -726,6 +1003,7 @@ async def run_task(
     *,
     skill_executor: SkillExecutor | None = None,
     limits: RunLimits | None = None,
+    workspace_root: Path | None = None,
 ) -> None:
     """Drive one task through the asyncio agent loop (issue #89, ADR-0010).
 
@@ -798,8 +1076,19 @@ async def run_task(
     registry = _resolve_hook_registry(log, session_id)
     hook_call_cls, hook_result_cls = _import_hook_types()
 
-    executor = skill_executor or _default_skill_executor
+    resolved_workspace_root = (
+        workspace_root if workspace_root is not None else _resolve_workspace_root()
+    )
     max_steps = _resolve_max_steps()
+
+    if skill_executor is not None:
+        executor = skill_executor
+    else:
+
+        async def _file_op_executor(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
+
+        executor = _file_op_executor
 
     log.record(
         session_id,
@@ -1005,6 +1294,12 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         "--trace-path",
         default=os.environ.get("FOUNDRY_TRACE_PATH", "./logs/traces.db"),
     )
+    parser.add_argument(
+        "--workspace-root",
+        default=os.environ.get(_WORKSPACE_ROOT_ENV),
+        help="Root directory for file-operation skill executors. "
+        "Defaults to the current working directory.",
+    )
     args = parser.parse_args()
 
     harness_dir = Path(args.harness_dir).resolve()
@@ -1019,6 +1314,8 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         sys.exit(2)
     if str(harness_dir) not in sys.path:
         sys.path.insert(0, str(harness_dir))
+
+    workspace_root = Path(args.workspace_root).resolve() if args.workspace_root else None
 
     logger = TraceLogger(args.trace_path, backend=resolve_trace_backend())
     harness_version = resolve_harness_version(harness_dir)
@@ -1036,7 +1333,14 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         if run_task_fn is not None:
             task_coro = task(args.task, harness_dir, logger, session_id)
         else:
-            task_coro = task(args.task, harness_dir, logger, session_id, limits=limits)
+            task_coro = task(
+                args.task,
+                harness_dir,
+                logger,
+                session_id,
+                limits=limits,
+                workspace_root=workspace_root,
+            )
         try:
             asyncio.run(
                 run_with_limits(
