@@ -2,10 +2,6 @@
 
 This project follows a three-phase development cycle.
 
-> **Live status.** For the most current phase progress — including shipped
-> components, open stubs, and open issue counts — see the "Current-state
-> briefing" in [`docs/ISSUE_GENERATION_PROMPT.md` §0](ISSUE_GENERATION_PROMPT.md).
-
 ## Phase 1: Foundation -- the execution and trace layer
 
 **Status: SHIPPED** (as of 929b327, 2026-07-11) — TraceLogger, Runner,
