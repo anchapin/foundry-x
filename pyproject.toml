@@ -41,6 +41,7 @@ extend-exclude = ["benchmarks/fixtures"]
 [tool.pytest.ini_options]
 testpaths = ["tests", "benchmarks"]
 pythonpath = ["."]
+norecursedirs = ["benchmarks/fixtures"]
 markers = [
     "benchmark: deterministic gatekeeping benchmark task (ADR-0004, ADR-0005)",
 ]
