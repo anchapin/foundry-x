@@ -128,17 +128,18 @@ def compute_kpis(
     harness_version:
         When provided, only sessions created with this harness version are
         considered.
-    """
-    # Issue #82: ``list_sessions`` and ``iter_events`` are the only paths
-    # to the underlying store; raw SQL is centralized on the logger.
-    sessions = logger.list_sessions(harness_version=harness_version)
-    if not sessions:
-        return KpiSummary()
 
-    session_ids = [s.session_id for s in sessions]
-    cycle_time = _cycle_time(logger, session_ids)
-    regression_rate, improvement_rate = _verdict_rates(logger, session_ids)
-    injection_blocks = _injection_blocks(logger, session_ids)
+    Issue #273 — the per-session helpers below each call
+    :meth:`TraceLogger.query_events` exactly once per event kind. The
+    previous shape issued ``list_sessions()`` and then ``iter_events(sid)``
+    once per session per kind (S*K connect sites); the new shape is K
+    streaming cursors total, with the ``harness_version`` filter pushed
+    down to the store so a multi-session fixture does not need to be
+    materialized in Python.
+    """
+    cycle_time = _cycle_time(logger, harness_version=harness_version)
+    regression_rate, improvement_rate = _verdict_rates(logger, harness_version=harness_version)
+    injection_blocks = _injection_blocks(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -186,23 +187,30 @@ def _compute_deltas(
     }
 
 
-def _first_event_of_kind(logger: TraceLogger, session_id: str, kind: str) -> TraceEvent | None:
-    """Return the first event of *kind* in *session_id* via iter_events.
+def _cycle_time(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> float | None:
+    """Mean wall-clock time from ``task_received`` to ``critic_verdict``.
 
-    ``iter_events`` orders by timestamp and yields one row at a time, so
-    we stop at the first match without scanning the rest of the session.
+    Issue #273 — previously looped every session id and called
+    ``iter_events`` twice per session to find the first event of each
+    kind. Now two :meth:`TraceLogger.query_events` cursors stream every
+    qualifying event in timestamp order; ``setdefault`` keeps the first
+    (earliest) event per session, which is exactly the prior
+    first-event-of-kind semantics.
     """
-    for event in logger.iter_events(session_id, kind=kind):
-        return event
-    return None
+    start_events: dict[str, TraceEvent] = {}
+    for event in logger.query_events(kind="task_received", harness_version=harness_version):
+        start_events.setdefault(event.session_id, event)
+    end_events: dict[str, TraceEvent] = {}
+    for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
+        end_events.setdefault(event.session_id, event)
 
-
-def _cycle_time(logger: TraceLogger, session_ids: Sequence[str]) -> float | None:
     deltas: list[float] = []
-    for sid in session_ids:
-        start_event = _first_event_of_kind(logger, sid, "task_received")
-        end_event = _first_event_of_kind(logger, sid, "critic_verdict")
-        if start_event is None or end_event is None:
+    for sid, start_event in start_events.items():
+        end_event = end_events.get(sid)
+        if end_event is None:
             continue
         try:
             t0 = datetime.fromisoformat(start_event.timestamp)
@@ -217,13 +225,21 @@ def _cycle_time(logger: TraceLogger, session_ids: Sequence[str]) -> float | None
     return sum(deltas) / len(deltas)
 
 
-def _verdict_rates(logger: TraceLogger, session_ids: Sequence[str]) -> tuple[float, float]:
+def _verdict_rates(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> tuple[float, float]:
     """Derive regression and improvement rates from persisted Critic verdicts.
 
     Verdicts are persisted as the :class:`VerdictRecord` shape
     (``approved`` / ``passed_checks`` / ``failed_checks`` / ``notes``), not the
     synthetic ``{"verdict", "regression"}`` payload the earlier implementation
-    assumed (issue #98). Uses ``logger.iter_events()`` per ADR-0003 (no raw SQL).
+    assumed (issue #98).
+
+    Issue #273 — a single :meth:`TraceLogger.query_events` cursor walks
+    every ``critic_verdict`` row across all matching sessions in
+    timestamp order, so the ``prior_passed`` tracker sees verdicts in
+    the same order the previous per-session nested loop produced.
 
     * *improvement_rate* = approved verdicts / total verdicts.
     * *regression_rate* = sessions with >=1 regressed task / sessions with a
@@ -237,18 +253,17 @@ def _verdict_rates(logger: TraceLogger, session_ids: Sequence[str]) -> tuple[flo
     sessions_with_verdicts: set[str] = set()
     regression_sessions: set[str] = set()
 
-    for sid in session_ids:
-        for event in logger.iter_events(sid, kind="critic_verdict"):
-            total_verdicts += 1
-            sessions_with_verdicts.add(sid)
-            record = VerdictRecord(**event.payload)
-            if record.approved:
-                approved += 1
-            for task in record.failed_checks:
-                if task in prior_passed:
-                    regression_sessions.add(sid)
-            for task in record.passed_checks:
-                prior_passed[task] = sid
+    for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
+        total_verdicts += 1
+        sessions_with_verdicts.add(event.session_id)
+        record = VerdictRecord(**event.payload)
+        if record.approved:
+            approved += 1
+        for task in record.failed_checks:
+            if task in prior_passed:
+                regression_sessions.add(event.session_id)
+        for task in record.passed_checks:
+            prior_passed[task] = event.session_id
 
     improvement_rate = approved / total_verdicts if total_verdicts else 0.0
     regression_rate = (
@@ -257,21 +272,27 @@ def _verdict_rates(logger: TraceLogger, session_ids: Sequence[str]) -> tuple[flo
     return regression_rate, improvement_rate
 
 
-def _injection_blocks(logger: TraceLogger, session_ids: Sequence[str]) -> dict[str, int]:
+def _injection_blocks(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> dict[str, int]:
     """Per-session count of ``injection_blocked`` events (issue #120).
 
     Returns a ``session_id -> count`` map including only sessions with at
     least one block. Sessions without blocks are omitted so the rendering
     path can decide whether to add an extra section based on the map being
     non-empty (per the issue's "show … when at least one is present").
+
+    Issue #273 — one :meth:`TraceLogger.query_events` cursor replaces
+    the previous per-session ``iter_events`` loop; the kind filter is
+    pushed down so only ``injection_blocked`` rows cross the boundary.
     """
     blocks: dict[str, int] = {}
-    for sid in session_ids:
-        # ``iter_events(kind=...)`` pushes the kind filter down to the
-        # underlying store, so we only ever see injection_blocked rows.
-        count = sum(1 for _ in logger.iter_events(sid, kind=INJECTION_BLOCKED_KIND))
-        if count:
-            blocks[sid] = count
+    for event in logger.query_events(
+        kind=INJECTION_BLOCKED_KIND,
+        harness_version=harness_version,
+    ):
+        blocks[event.session_id] = blocks.get(event.session_id, 0) + 1
     return blocks
 
 
