@@ -636,6 +636,44 @@ class TraceLogger:
                 }
             )
 
+    def _query_events_sqlite(
+        self,
+        kind: str | None = None,
+        harness_version: str | None = None,
+    ) -> Iterator[TraceEvent]:
+        # Issue #273 — one streaming cursor across all matching sessions.
+        # The optional ``harness_version`` filter is implemented as a JOIN
+        # against the sessions table rather than a Python-side filter so
+        # the database prunes non-matching sessions before rows cross the
+        # process boundary. ``ORDER BY timestamp`` preserves the promise
+        # ``iter_events`` makes within a single session, extended to the
+        # cross-session stream.
+        query = "SELECT e.event_id, e.session_id, e.timestamp, e.kind, e.payload FROM events e"
+        params: list[Any] = []
+        conditions: list[str] = []
+        if harness_version is not None:
+            query += " JOIN sessions s ON e.session_id = s.session_id"
+            conditions.append("s.harness_version = ?")
+            params.append(harness_version)
+        if kind is not None:
+            conditions.append("e.kind = ?")
+            params.append(kind)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY e.timestamp"
+        with sqlite3.connect(self.path) as conn:
+            cursor = conn.execute(query, params)
+            for event_id, sid, ts, k, payload in cursor:
+                yield TraceEvent.model_validate(
+                    {
+                        "event_id": event_id,
+                        "session_id": sid,
+                        "timestamp": ts,
+                        "kind": k,
+                        "payload": json.loads(payload),
+                    }
+                )
+
     def _load_session_jsonl(self, session_id: str) -> list[TraceEvent]:
         """Replay events for a session from a JSONL trace file.
 
