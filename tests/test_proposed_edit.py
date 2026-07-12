@@ -28,6 +28,11 @@ def test_harness_system_prompt_accepted():
     assert edit.target_file == "harness/system_prompt.txt"
 
 
+def test_harness_manifest_json_accepted():
+    edit = _make("harness/manifest.json")
+    assert edit.target_file == "harness/manifest.json"
+
+
 def test_source_file_rejected():
     with pytest.raises(ValidationError, match="harness"):
         _make("src/foundry_x/trace/logger.py")
@@ -64,6 +69,7 @@ def test_skills_subtree_accepted_deep():
         "harness/hooks",  # directory, not a file
         "harness/skills",  # directory, not a file
         "harness/system_prompt.txt/extra",  # file treated as a directory
+        "harness/manifest.json/extra",  # file treated as a directory
         "harness/README.md",  # arbitrary non-allowed harness entry
     ],
 )
@@ -95,8 +101,12 @@ def test_blank_target_still_rejected():
 # --- the pure helper is independently testable ------------------------------
 
 
-def test_helper_returns_canonical_for_valid_path():
-    assert _confine_to_harness_tree("harness/system_prompt.txt") == ("harness/system_prompt.txt")
+def test_helper_returns_canonical_for_prompt():
+    assert _confine_to_harness_tree("harness/system_prompt.txt") == "harness/system_prompt.txt"
+
+
+def test_helper_returns_canonical_for_manifest():
+    assert _confine_to_harness_tree("harness/manifest.json") == "harness/manifest.json"
 
 
 def test_helper_raises_value_error_for_source_path():
@@ -107,3 +117,8 @@ def test_helper_raises_value_error_for_source_path():
 def test_helper_raises_value_error_for_traversal():
     with pytest.raises(ValueError):
         _confine_to_harness_tree("../../etc/passwd")
+
+
+def test_helper_rejects_manifest_beneath_directory():
+    with pytest.raises(ValueError):
+        _confine_to_harness_tree("harness/manifest.json/subpath")
