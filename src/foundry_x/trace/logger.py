@@ -169,6 +169,9 @@ def _redact(
     return payload
 
 
+_VALID_BACKENDS = ("sqlite", "jsonl")
+
+
 class TraceLogger:
     def __init__(self, path: str | Path, backend: str = "sqlite") -> None:
         # Fail fast on an unknown backend (issue #272): previously an
