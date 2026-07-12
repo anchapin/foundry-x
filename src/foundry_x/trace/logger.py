@@ -368,6 +368,49 @@ class TraceLogger:
             return
         yield from self._iter_events_sqlite(session_id, kind=kind)
 
+    def query_events(
+        self,
+        kind: str | None = None,
+        harness_version: str | None = None,
+    ) -> Iterator[TraceEvent]:
+        """Yield :class:`TraceEvent` rows across **all** matching sessions.
+
+        Issue #273 — every cross-session consumer (``compute_kpis``,
+        ``_verdict_rates``, ``_injection_blocks`` and
+        ``regression_report._load_verdict_events``) previously called
+        ``list_sessions()`` and then looped ``iter_events(sid)`` once per
+        session per kind. Each ``iter_events`` call opened a fresh
+        ``sqlite3.connect`` (11 connect sites across the codebase), so
+        for Phase-3 scale (many sessions/day) the Digester→Critic
+        feedback path paid S*K round-trips for what is logically a single
+        ordered scan.
+
+        ``query_events`` collapses that to one streaming cursor. Rows are
+        yielded in timestamp order — the same order ``iter_events``
+        promises within a session — so callers that need
+        first-event-per-session semantics can use ``setdefault`` on a
+        ``session_id -> event`` map as they stream.
+
+        Parameters
+        ----------
+        kind:
+            When provided, only events whose ``kind`` column equals this
+            value are yielded. Pushed down to the underlying store as a
+            ``WHERE kind = ?`` clause (sqlite) or an inline filter
+            (jsonl) so the kind-bounded cursor never materializes the
+            other rows.
+        harness_version:
+            When provided, only events belonging to sessions whose
+            ``harness_version`` matches are yielded. Implemented as a
+            JOIN against the ``sessions`` table (sqlite) or by tracking
+            ``session_start`` marker lines inline (jsonl). ``None`` means
+            no filter — events from every session qualify.
+        """
+        if self.backend == "jsonl":
+            yield from self._query_events_jsonl(kind=kind, harness_version=harness_version)
+            return
+        yield from self._query_events_sqlite(kind=kind, harness_version=harness_version)
+
     def _list_sessions_sqlite(self, harness_version: str | None = None) -> Sequence[TraceSession]:
         with sqlite3.connect(self.path) as conn:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
@@ -481,6 +524,44 @@ class TraceLogger:
             query += " AND kind = ?"
             params.append(kind)
         query += " ORDER BY timestamp"
+        with sqlite3.connect(self.path) as conn:
+            cursor = conn.execute(query, params)
+            for event_id, sid, ts, k, payload in cursor:
+                yield TraceEvent.model_validate(
+                    {
+                        "event_id": event_id,
+                        "session_id": sid,
+                        "timestamp": ts,
+                        "kind": k,
+                        "payload": json.loads(payload),
+                    }
+                )
+
+    def _query_events_sqlite(
+        self,
+        kind: str | None = None,
+        harness_version: str | None = None,
+    ) -> Iterator[TraceEvent]:
+        # Issue #273 — one streaming cursor across all matching sessions.
+        # The optional ``harness_version`` filter is implemented as a JOIN
+        # against the sessions table rather than a Python-side filter so
+        # the database prunes non-matching sessions before rows cross the
+        # process boundary. ``ORDER BY timestamp`` preserves the promise
+        # ``iter_events`` makes within a single session, extended to the
+        # cross-session stream.
+        query = "SELECT e.event_id, e.session_id, e.timestamp, e.kind, e.payload FROM events e"
+        params: list[Any] = []
+        conditions: list[str] = []
+        if harness_version is not None:
+            query += " JOIN sessions s ON e.session_id = s.session_id"
+            conditions.append("s.harness_version = ?")
+            params.append(harness_version)
+        if kind is not None:
+            conditions.append("e.kind = ?")
+            params.append(kind)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY e.timestamp"
         with sqlite3.connect(self.path) as conn:
             cursor = conn.execute(query, params)
             for event_id, sid, ts, k, payload in cursor:
@@ -654,6 +735,49 @@ class TraceLogger:
                     continue
                 if kind is not None and record.get("kind") != kind:
                     continue
+                yield TraceEvent.model_validate(record)
+
+    def _query_events_jsonl(
+        self,
+        kind: str | None = None,
+        harness_version: str | None = None,
+    ) -> Iterator[TraceEvent]:
+        # Issue #273 — stream the JSONL file exactly once, yielding every
+        # matching event in append order (which is timestamp order for a
+        # well-formed append-only trace). The optional ``harness_version``
+        # filter is resolved inline by tracking each ``session_start``
+        # marker as we walk: the file format guarantees a session's start
+        # line precedes its event lines, so by the time we reach an event
+        # its session's harness version is already known. Sessions whose
+        # start marker we have not yet seen (a corrupted / mid-write file)
+        # are excluded when a filter is set, matching the sqlite JOIN
+        # semantics.
+        if not self.path.exists():
+            return
+        session_versions: dict[str, str] = {}
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                record: dict[str, Any] = json.loads(line)
+                record_kind = record.get("kind")
+                if record_kind == "session_start":
+                    sid = record.get("session_id")
+                    if sid is not None and sid not in session_versions:
+                        session_versions[sid] = record.get("harness_version", "")
+                    continue
+                # Only real events (lines carrying an ``event_id``) qualify.
+                # ``session_end`` markers and any future non-event lines are
+                # skipped here so they never reach the caller.
+                if "event_id" not in record:
+                    continue
+                if kind is not None and record_kind != kind:
+                    continue
+                if harness_version is not None:
+                    sid = record.get("session_id")
+                    if session_versions.get(sid) != harness_version:
+                        continue
                 yield TraceEvent.model_validate(record)
 
 
