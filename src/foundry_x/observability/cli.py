@@ -4,8 +4,10 @@ import argparse
 import sys
 from pathlib import Path
 
+from foundry_x.evolution.digester import Digester
 from foundry_x.observability.kpis import _resolve_format
 from foundry_x.observability.regression_report import analyze_regressions
+from foundry_x.observability.render import render_failure_report
 from foundry_x.observability.session_summary import (
     build_session_summary,
     render_session_summary,
@@ -111,6 +113,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write the timeline to this path instead of stdout.",
     )
 
+    # Issue #268: human-readable failure analysis for a single session.
+    # Calls Digester.digest() then render_failure_report() so a developer
+    # can read the classified FailureReport without writing Python (ADR-0007).
+    failure_report = sub.add_parser(
+        "failure-report",
+        help="Render the classified FailureReport for a single session.",
+    )
+    failure_report.add_argument(
+        "--db",
+        required=True,
+        help="Path to the trace store (sqlite .db or jsonl).",
+    )
+    failure_report.add_argument(
+        "--session-id",
+        required=True,
+        help="Session UUID whose events should be digested and rendered.",
+    )
+
     # Issue #184: cross-session outcome roll-up. Lets an Operator read
     # a single table over every (or filtered) session before opening
     # any one of them in detail. Does not call the Digester or Critic.
@@ -200,6 +220,20 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(rendered)
             if not rendered.endswith("\n"):
                 sys.stdout.write("\n")
+        return 0
+
+    if args.command == "failure-report":
+        backend = _infer_backend(args.db)
+        logger = TraceLogger(args.db, backend=backend)
+        events = logger.load_session(args.session_id)
+        if not events:
+            sys.stderr.write(f"session {args.session_id} not found or empty\n")
+            return 2
+        report = Digester().digest(args.session_id, events)
+        rendered = render_failure_report(report)
+        sys.stdout.write(rendered)
+        if not rendered.endswith("\n"):
+            sys.stdout.write("\n")
         return 0
 
     if args.command == "session-summary":

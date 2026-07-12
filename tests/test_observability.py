@@ -371,3 +371,48 @@ def test_cli_timeline_default_format_is_markdown(tmp_path, capsys):
     assert out.lstrip().startswith("#")
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
+
+
+# ---------------------------------------------------------------------------
+# Issue #268: fx-trace failure-report subcommand.
+# ---------------------------------------------------------------------------
+
+
+def _populate_failing_session(db_path) -> str:
+    """Record a session whose ``error`` event trips the Digester."""
+    logger = TraceLogger(db_path)
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "user_prompt", {"prompt": "Fix the bug in auth.py"})
+        logger.record(sid, "tool_call", {"name": "read_file"})
+        logger.record(sid, "error", {"message": "permission denied"})
+    return sid
+
+
+def test_cli_failure_report_prints_rendered_report(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_failing_session(db)
+
+    rc = cli_main(["failure-report", "--db", str(db), "--session-id", sid])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    # render_failure_report emits an h1 heading (see render.py:10).
+    assert "# Failure Report" in captured.out
+    assert sid in captured.out
+    assert "## Summary" in captured.out
+    assert "## Suspected Causes" in captured.out
+    assert "## Failed Steps" in captured.out
+    assert "## Classification:" in captured.out
+
+
+def test_cli_failure_report_missing_session_returns_nonzero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = cli_main(["failure-report", "--db", str(db), "--session-id", "ghost-session"])
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "ghost-session" in captured.err
