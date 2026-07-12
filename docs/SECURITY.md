@@ -38,7 +38,7 @@ We design against these threats:
   `.github/workflows/ci.yml`.
 - **Lint gate.** Every change must pass `uv run ruff check .`. CI
   blocks merges. Enforced via `.github/workflows/ci.yml`.
-- **Pre-commit hooks (recommended):** `ruff` and a `git-secrets`
+- **Pre-commit hooks (recommended):** `ruff` and a `gitleaks`
   check to block common credential patterns.
 - **Trace sanitization.** Trace writers MUST redact values matching
   secret-like patterns (`sk-...`, `Bearer ...`, PEM blocks) before
@@ -49,7 +49,7 @@ We design against these threats:
   either truncated or flagged for human review.
 - **Rate limits.** The `Evolver` is rate-limited: max N proposals per
   hour, max M lines of harness diff per proposal. Defaults live in
-  `harness/hooks/`.
+  `src/foundry_x/evolution/evolver.py`.
 - **Runaway detection.** The runner monitors wall-clock per task and
   total tokens per evolution cycle; exceeding the cap aborts the run.
 - **Sandbox.** Run benchmarks and evolution inside a Docker
