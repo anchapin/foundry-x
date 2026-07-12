@@ -178,7 +178,7 @@ def _index_names(conn: sqlite3.Connection) -> set[str]:
     return {
         row[0]
         for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' " "AND name LIKE 'idx_%'",
+            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'",
         )
     }
 
@@ -227,11 +227,10 @@ def test_composite_index_migrated_on_pre_existing_database(tmp_path):
             "CREATE INDEX idx_events_session ON events(session_id);"
         )
         conn.execute(
-            "INSERT INTO sessions VALUES " "('s1','2026-01-01','0.1.0',NULL,'{}',NULL)",
+            "INSERT INTO sessions VALUES ('s1','2026-01-01','0.1.0',NULL,'{}',NULL)",
         )
         conn.execute(
-            "INSERT INTO events VALUES "
-            "('e1','s1','2026-01-01','user_prompt','{\"text\":\"hi\"}')",
+            "INSERT INTO events VALUES ('e1','s1','2026-01-01','user_prompt','{\"text\":\"hi\"}')",
         )
 
     # Re-open through TraceLogger — the constructor runs _SCHEMA which
@@ -261,9 +260,7 @@ def test_explain_query_plan_uses_composite_index(tmp_path):
 
     with sqlite3.connect(db) as conn:
         plan_rows = conn.execute(
-            "EXPLAIN QUERY PLAN "
-            "SELECT event_id FROM events "
-            "WHERE session_id = ? AND kind = ?",
+            "EXPLAIN QUERY PLAN SELECT event_id FROM events WHERE session_id = ? AND kind = ?",
             (sid, "critic_verdict"),
         ).fetchall()
     plan_text = " ".join(str(row) for row in plan_rows)
@@ -479,3 +476,91 @@ def test_query_events_empty_store_yields_nothing(tmp_path, backend):
     assert list(logger.query_events()) == []
     assert list(logger.query_events(kind="anything")) == []
     assert list(logger.query_events(harness_version="missing")) == []
+
+
+# --- WAL mode + single reused connection (issue #274) -----------------------
+
+
+def test_sqlite_trace_store_enables_wal_mode(tmp_path):
+    """``TraceLogger.__init__`` flips the sqlite backend into WAL journal mode.
+
+    Issue #274 acceptance criterion. WAL is a persistent database property
+    stored in the file header, so a fresh ``sqlite3.connect`` opened against
+    the same file (the way the Digester/KPI readers and the trace CLI open
+    it) must also report ``wal``. With the previous rollback-journal default
+    this would return ``delete``.
+    """
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    with sqlite3.connect(db) as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+
+    assert mode.lower() == "wal"
+
+
+def test_reader_iter_events_without_busy_while_writer_holds_open_session(tmp_path):
+    """A separate reader reads committed events while the writer holds an open
+    write transaction, without raising ``SQLITE_BUSY`` (issue #274).
+
+    Models the Phase-3 access pattern the change exists to fix: the Runner
+    (writer, one reused connection) is mid-session, and the Digester/KPI
+    reader (a separate connection) walks the events. Without WAL a writer
+    holding a write lock blocks readers; with WAL the reader sees the last
+    committed snapshot immediately.
+
+    The writer deliberately holds an *uncommitted* write transaction on its
+    reused connection (``BEGIN`` + ``INSERT`` without commit) so a lock is
+    genuinely held during the read — exercising the WAL guarantee rather
+    than reading during an idle window.
+    """
+    db = tmp_path / "traces.db"
+    writer = TraceLogger(db)
+    with writer.session(harness_version="0.1.0") as sid:
+        writer.record(sid, kind="user_prompt", payload={"text": "committed-event"})
+
+    # Hold an open write transaction on the writer's reused connection to
+    # model a Runner mid-session. ``record``/``session`` commit per op, so we
+    # open the transaction manually here. Reaching into ``_conn`` is a test
+    # affordance; the property under test is the WAL read/write separation.
+    writer_conn = writer._conn
+    assert writer_conn is not None
+    writer_conn.execute("BEGIN")
+    writer_conn.execute(
+        "INSERT INTO events VALUES ('held-tx', ?, '2026-01-01', 'tool_call', '{}')",
+        (sid,),
+    )
+    try:
+        # A separate reader connection with a short busy_timeout: under WAL it
+        # returns immediately; without WAL a held write lock forces it to
+        # block until timeout and then raise SQLITE_BUSY.
+        with sqlite3.connect(db, timeout=0.5) as reader:
+            rows = reader.execute(
+                "SELECT event_id FROM events WHERE session_id = ? ORDER BY timestamp",
+                (sid,),
+            ).fetchall()
+    finally:
+        writer_conn.rollback()
+
+    # The committed event is visible to the reader; the uncommitted
+    # ``held-tx`` row is not (snapshot isolation in WAL).
+    assert [row[0] for row in rows] != []
+    assert "held-tx" not in {row[0] for row in rows}
+    writer.close()
+
+
+def test_close_releases_reused_connection(tmp_path):
+    """``close()`` deterministically releases the reused sqlite connection.
+
+    Issue #274 — calling ``close()`` twice is a no-op and subsequent reads
+    through the public API are not exercised here (the connection is gone);
+    this test pins the lifecycle contract so a future refactor cannot
+    silently drop the release path.
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    assert logger._conn is not None
+    logger.close()
+    assert logger._conn is None
+    # Idempotent: a second close must not raise.
+    logger.close()
