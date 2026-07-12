@@ -180,7 +180,9 @@ subset of the broader kind vocabulary above.
 - `harness/hooks/*.py` — middleware that runs around every tool call.
 - `harness/skills/*.json` — tool definitions the agent can invoke.
 - `logs/` — trace store (gitignored). Per-run SQLite databases plus
-  exports.
+  exports. Manage unbounded growth with `foundry-trace prune` (issue #275):
+  `--keep-last N` retains the N most recent sessions, `--older-than DAYS`
+  drops aged ones; both support `--dry-run` and work on sqlite/jsonl.
 - `benchmarks/` — pytest-marked tasks the Critic uses to gate harness
   changes.
 - `docs/adr/` — recorded architecture decisions, numbered sequentially.

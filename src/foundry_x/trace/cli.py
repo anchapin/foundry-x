@@ -4,7 +4,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -267,6 +267,83 @@ def _redact_key(args: argparse.Namespace) -> int:
             "timestamp": _now_ts(),
         },
     )
+    return 0
+
+
+# --- Issue #275: delete-session / prune --------------------------------------
+# These subcommands expose retention management for the trace store.  ADR-0003
+# flags unbounded growth as the trigger to "revisit" the store; Phase-3's
+# mandate of many real benchmark runs/day makes a prune CLI essential for
+# keeping ``logs/`` under control and Digester/KPI queries fast.
+
+
+def _delete_session(args: argparse.Namespace) -> int:
+    """Implement ``delete-session`` (issue #275).
+
+    Removes one session and all its events via ``TraceLogger.delete_session``.
+    Idempotent: exits 0 whether or not the session existed, mirroring the
+    contract of the underlying primitive.
+    """
+    logger = _logger_for(args.db)
+    count = len(logger.load_session(args.session_id))
+    logger.delete_session(args.session_id)
+    sys.stdout.write(f"Deleted session {args.session_id}: {count} event(s) removed.\n")
+    return 0
+
+
+def _prune(args: argparse.Namespace) -> int:
+    """Implement ``prune`` (issue #275).
+
+    Two modes:
+    * ``--keep-last N`` — retain only the N most recent sessions (by
+      ``started_at``) and remove the rest.
+    * ``--older-than DAYS`` — remove sessions whose ``started_at`` is
+      older than the given number of days.
+
+    ``--dry-run`` reports what *would* be removed without touching the
+    store. Both modes work on sqlite and jsonl backends. Exits 0 on
+    success, 1 on argument errors (neither / both flags given, or DAYS
+    not a positive integer).
+    """
+    logger = _logger_for(args.db)
+    sessions = list(logger.list_sessions())
+
+    if args.keep_last is not None and args.older_than is not None:
+        sys.stderr.write("prune: use --keep-last OR --older-than, not both.\n")
+        return 1
+    if args.keep_last is None and args.older_than is None:
+        sys.stderr.write("prune: specify --keep-last or --older-than.\n")
+        return 1
+
+    if args.keep_last is not None:
+        if args.keep_last < 0:
+            sys.stderr.write("prune: --keep-last must be >= 0.\n")
+            return 1
+        to_delete = sessions[: max(0, len(sessions) - args.keep_last)]
+    else:
+        assert args.older_than is not None
+        if args.older_than <= 0:
+            sys.stderr.write("prune: --older-than must be a positive integer.\n")
+            return 1
+        cutoff = datetime.now(timezone.utc) - timedelta(days=args.older_than)
+        to_delete = [s for s in sessions if datetime.fromisoformat(s.started_at) < cutoff]
+
+    if not to_delete:
+        sys.stdout.write("Nothing to prune.\n")
+        return 0
+
+    count = len(to_delete)
+    if args.dry_run:
+        for session in to_delete:
+            sys.stdout.write(
+                f"  would delete {session.session_id}  started_at={session.started_at}\n"
+            )
+        sys.stdout.write(f"Dry run: {count} session(s) would be deleted.\n")
+        return 0
+
+    for session in to_delete:
+        logger.delete_session(session.session_id)
+    sys.stdout.write(f"Deleted {count} session(s).\n")
     return 0
 
 
@@ -544,6 +621,49 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Append a JSONL audit-log record to this path.",
     )
     redact_key_parser.set_defaults(func=_redact_key)
+
+    # Issue #275: delete-session / prune — retention management.
+    delete_session_parser = sub.add_parser(
+        "delete-session",
+        help="Remove a session and all its events (idempotent).",
+    )
+    delete_session_parser.add_argument("session_id", help="Session to delete.")
+    delete_session_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    delete_session_parser.set_defaults(func=_delete_session)
+
+    prune_parser = sub.add_parser(
+        "prune",
+        help="Remove old sessions based on retention policy.",
+    )
+    prune_parser.add_argument(
+        "--keep-last",
+        type=int,
+        default=None,
+        help="Keep only the N most recent sessions.",
+    )
+    prune_parser.add_argument(
+        "--older-than",
+        type=int,
+        default=None,
+        metavar="DAYS",
+        help="Remove sessions older than DAYS.",
+    )
+    prune_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Report what would be deleted without removing anything.",
+    )
+    prune_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    prune_parser.set_defaults(func=_prune)
 
     # Issue #195: offline smoke subcommand. Plants a deterministic session
     # so the Digester, KPI, and regression-report CLIs have realistic input

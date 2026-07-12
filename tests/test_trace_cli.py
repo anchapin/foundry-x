@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -571,6 +572,208 @@ def test_redact_audit_log_appends_across_invocations(tmp_path, capsys):
     assert len(lines) == 2
     assert json.loads(lines[0])["action"] == "redact-key"
     assert json.loads(lines[1])["action"] == "redact-session"
+
+
+# --- Issue #275: delete-session / prune --------------------------------------
+# Retention-management subcommands. ``delete-session`` is the thin CLI
+# wrapper over ``TraceLogger.delete_session``; ``prune`` adds two
+# retention modes (``--keep-last N`` and ``--older-than DAYS``) plus a
+# ``--dry-run`` flag. Both must work on sqlite and jsonl backends.
+
+
+def _populate_multi(tmp_path, backend: str, count: int) -> tuple[str, list[str]]:
+    """Plant ``count`` single-event sessions and return (db_path, session_ids).
+
+    Sessions are created in insertion order; ``list_sessions`` returns them
+    ascending by ``started_at``, so session_ids[0] is the oldest.
+    """
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    sids: list[str] = []
+    for _ in range(count):
+        with logger.session(harness_version="0.1.0") as sid:
+            logger.record(sid, "tool_call", {"name": "read_file"})
+            sids.append(sid)
+    return str(path), sids
+
+
+def _backdate(path, backend: str, session_id: str, started_at: str) -> None:
+    """Rewrite a session's ``started_at`` so ``--older-than`` is testable.
+
+    The normal ``logger.session()`` API stamps ``started_at`` with "now",
+    which makes age-based retention untestable without freezing the clock.
+    Going directly to the store keeps the helper backend-aware and avoids
+    monkey-patching ``datetime.now`` for every test.
+    """
+    if backend == "sqlite":
+        import sqlite3
+
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE session_id = ?",
+                (started_at, session_id),
+            )
+    else:
+        lines = Path(path).read_text(encoding="utf-8").splitlines(keepends=True)
+        rewritten: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                rewritten.append(line)
+                continue
+            try:
+                record = json.loads(stripped)
+            except json.JSONDecodeError:
+                rewritten.append(line)
+                continue
+            if record.get("session_id") == session_id and record.get("kind") == "session_start":
+                record["started_at"] = started_at
+                rewritten.append(json.dumps(record) + "\n")
+            else:
+                rewritten.append(line)
+        Path(path).write_text("".join(rewritten), encoding="utf-8")
+
+
+_OLDEST_TS = "2020-01-01T00:00:00+00:00"
+
+
+@_BACKENDS
+def test_delete_session_removes_one_and_exits_zero(tmp_path, backend, capsys):
+    db, sids = _populate_multi(tmp_path, backend, count=2)
+
+    rc = main(["delete-session", sids[0], "--db", db])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert sids[0] in out
+    assert "1 event(s) removed" in out
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    assert sids[0] not in [s.session_id for s in logger.list_sessions()]
+    assert sids[1] in [s.session_id for s in logger.list_sessions()]
+
+
+@_BACKENDS
+def test_delete_session_unknown_is_idempotent(tmp_path, backend, capsys):
+    db, _ = _populate_multi(tmp_path, backend, count=1)
+
+    rc = main(["delete-session", "never-existed", "--db", db])
+
+    assert rc == 0
+    assert "0 event(s) removed" in capsys.readouterr().out
+
+
+def test_delete_session_empty_store_exits_zero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["delete-session", "anything", "--db", str(db)])
+
+    assert rc == 0
+    assert "0 event(s) removed" in capsys.readouterr().out
+
+
+@_BACKENDS
+def test_prune_keep_last_keeps_n_most_recent(tmp_path, backend, capsys):
+    db, sids = _populate_multi(tmp_path, backend, count=4)
+
+    rc = main(["prune", "--keep-last", "2", "--db", db])
+
+    assert rc == 0
+    remaining = [s.session_id for s in TraceLogger(db, backend=backend).list_sessions()]
+    assert remaining == sids[2:]  # oldest two removed, two most recent kept
+
+
+@_BACKENDS
+def test_prune_keep_last_zero_removes_all(tmp_path, backend, capsys):
+    db, _ = _populate_multi(tmp_path, backend, count=3)
+
+    rc = main(["prune", "--keep-last", "0", "--db", db])
+
+    assert rc == 0
+    assert TraceLogger(db, backend=backend).list_sessions() == []
+
+
+@_BACKENDS
+def test_prune_older_than_removes_old_sessions(tmp_path, backend, capsys):
+    db, sids = _populate_multi(tmp_path, backend, count=3)
+    # Backdate the first (oldest) session to 2020 so it is unambiguously
+    # older than 1 day; the other two stay "now".
+    _backdate(tmp_path / f"traces{_suffix(backend)}", backend, sids[0], _OLDEST_TS)
+
+    rc = main(["prune", "--older-than", "1", "--db", db])
+
+    assert rc == 0
+    remaining = [s.session_id for s in TraceLogger(db, backend=backend).list_sessions()]
+    assert sids[0] not in remaining
+    assert sids[1] in remaining
+    assert sids[2] in remaining
+
+
+@_BACKENDS
+def test_prune_dry_run_does_not_mutate(tmp_path, backend, capsys):
+    db, sids = _populate_multi(tmp_path, backend, count=4)
+
+    rc = main(["prune", "--keep-last", "2", "--dry-run", "--db", db])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "would delete" in out
+    assert "Dry run" in out
+    # Store untouched after a dry run.
+    remaining = [s.session_id for s in TraceLogger(db, backend=backend).list_sessions()]
+    assert remaining == sids
+
+
+@_BACKENDS
+def test_prune_empty_store_reports_nothing(tmp_path, backend, capsys):
+    path = tmp_path / f"traces{_suffix(backend)}"
+    TraceLogger(path, backend=backend)
+
+    rc = main(["prune", "--keep-last", "3", "--db", str(path)])
+
+    assert rc == 0
+    assert "Nothing to prune" in capsys.readouterr().out
+
+
+def test_prune_neither_flag_returns_nonzero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["prune", "--db", str(db)])
+
+    assert rc == 1
+    assert "specify --keep-last or --older-than" in capsys.readouterr().err
+
+
+def test_prune_both_flags_returns_nonzero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["prune", "--keep-last", "1", "--older-than", "5", "--db", str(db)])
+
+    assert rc == 1
+    assert "not both" in capsys.readouterr().err
+
+
+def test_prune_negative_keep_last_returns_nonzero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["prune", "--keep-last", "-1", "--db", str(db)])
+
+    assert rc == 1
+    assert "must be >= 0" in capsys.readouterr().err
+
+
+def test_prune_nonpositive_older_than_returns_nonzero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["prune", "--older-than", "0", "--db", str(db)])
+
+    assert rc == 1
+    assert "positive integer" in capsys.readouterr().err
 
 
 # --- Issue #195: seed-sample-trace -------------------------------------------
