@@ -13,6 +13,24 @@ from benchmarks.registry import load_all_tasks
 
 _NOTES_TAIL_CHARS = 4000
 
+_INJECTION_PATTERNS: tuple[str, ...] = (
+    "ignore previous instructions",
+    "<<system>>",
+    "<<assistant>>",
+    "<|",
+    "end of context above",
+)
+
+
+def _contains_injection(text: str) -> bool:
+    """Return True if *text* contains injection-like patterns.
+
+    Scans for three categories flagged in docs/SECURITY.md:46-50:
+    instruction override, role-tag injection, and ignored-context override.
+    """
+    lower = text.lower()
+    return any(pattern.lower() in lower for pattern in _INJECTION_PATTERNS)
+
 
 class CriticVerdict(BaseModel):
     """Result of a Critic gate run against a proposed harness edit (ADR-0006)."""
@@ -43,22 +61,17 @@ class Critic:
         benchmark_path: Path | None = None,
         pytest_args: list[str] | None = None,
         benchmark_tasks: list[BenchmarkTask] | None = None,
+        max_diff_lines: int = 200,
     ) -> None:
         self.harness_dir = harness_dir
         self.benchmark_path = benchmark_path
-        # Default selection runs the full benchmark suite via ``-m benchmark``
-        # (ADR-0005, issue #185) — a harness edit that breaks any
-        # ``@pytest.mark.benchmark`` task is caught at the gate.
         self.pytest_args = pytest_args or ["-q", "-m", "benchmark"]
-        # In-process registry wiring (issue #108): the Critic can now
-        # enumerate benchmark tasks without spawning pytest. Stored as
-        # ``None`` so the registry is loaded lazily on first access --
-        # importing ``foundry_x.evolution.critic`` must not eagerly pull
-        # in every task module (and the pytest import chain those tasks
-        # transitively trigger).
         self._benchmark_tasks: list[BenchmarkTask] | None = (
             list(benchmark_tasks) if benchmark_tasks is not None else None
         )
+        if max_diff_lines < 1:
+            raise ValueError("max_diff_lines must be >= 1")
+        self.max_diff_lines = max_diff_lines
 
     @property
     def benchmark_tasks(self) -> list[BenchmarkTask]:
@@ -79,15 +92,17 @@ class Critic:
         Steps (ADR-0004):
 
         1. Copy ``harness_dir`` into a fresh ``TemporaryDirectory``.
-        2. Apply ``proposed_diff`` via ``git apply``. A patch that does not
+        2. Reject diffs containing injection-like text (``content_rejected``).
+        3. Reject diffs exceeding ``max_diff_lines`` (``diff_too_large``).
+        4. Apply ``proposed_diff`` via ``git apply``. A patch that does not
            apply cleanly is rejected immediately (``failed_checks=["git apply"]``).
-        3. Run ``harness/scripts/load_check.py`` against the sandbox copy
+        5. Run ``harness/scripts/load_check.py`` against the sandbox copy
            (issue #187). A harness that fails to load -- broken
            ``skills/*.json``, an unimportable hook, an empty system prompt
            -- is rejected *before* pytest is spawned, so the verdict names
            the precondition (``failed_checks=["load_check"]``) rather than
            a confusing downstream pytest error.
-        4. Run pytest with ``self.pytest_args`` in the sandbox.
+        6. Run pytest with ``self.pytest_args`` in the sandbox.
 
         The verdict's ``approved`` flag is ``True`` only when every check that
         runs succeeds. All filesystem mutations are confined to the temp copy.
@@ -99,7 +114,26 @@ class Critic:
             passed_checks: list[str] = []
             failed_checks: list[str] = []
 
-            # 1. Apply the proposed diff to the sandbox copy only.
+            # 1. Reject diffs containing injection-like text (SECURITY.md §Prompt injection).
+            if _contains_injection(proposed_diff):
+                return CriticVerdict(
+                    approved=False,
+                    passed_checks=[],
+                    failed_checks=["content_rejected"],
+                    notes="diff contains injection-like text (SECURITY.md §Prompt injection)",
+                )
+
+            # 2. Reject diffs exceeding the line cap (SECURITY.md §Rate limits).
+            diff_line_count = len(proposed_diff.splitlines())
+            if diff_line_count > self.max_diff_lines:
+                return CriticVerdict(
+                    approved=False,
+                    passed_checks=[],
+                    failed_checks=["diff_too_large"],
+                    notes=f"diff has {diff_line_count} lines, cap is {self.max_diff_lines}",
+                )
+
+            # 3. Apply the proposed diff to the sandbox copy only.
             if proposed_diff.strip():
                 apply_result = subprocess.run(
                     ["git", "apply", "--whitespace=nowarn"],
@@ -117,7 +151,7 @@ class Critic:
                     )
                 passed_checks.append("git apply")
 
-            # 2. Precondition gate (issue #187): run harness/scripts/load_check.py
+            # 4. Precondition gate (issue #187): run harness/scripts/load_check.py
             #    against the sandbox copy. A harness tree that fails to load
             #    must fail the gate *before* pytest runs.
             load_check_script = sandbox_root / "scripts" / "load_check.py"
@@ -141,7 +175,7 @@ class Critic:
                 )
             passed_checks.append("load_check")
 
-            # 3. Run pytest in the sandbox.
+            # 5. Run pytest in the sandbox.
             pytest_result = subprocess.run(
                 [sys.executable, "-m", "pytest", *self.pytest_args],
                 cwd=sandbox_root,
