@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,42 @@ from benchmarks.models import BenchmarkTask
 from benchmarks.registry import load_all_tasks
 
 _NOTES_TAIL_CHARS = 4000
+
+# SECURITY.md Threat #2: prompt-injection patterns checked at the Critic gate
+# (issue #333). These are the same categories named in the firewall docstring
+# (harness/hooks/injection_firewall.py INJECTION_PATTERNS) but expressed as
+# plain strings rather than compiled regexes so the critic can scan a diff
+# without importing the harness package.
+_INJECTION_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("ignore_previous", r"ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions"),
+    ("disregard_previous", r"disregard\s+(?:all\s+)?(?:previous|prior|above)\s+instructions"),
+    ("forget_previous", r"forget\s+(?:all\s+)?(?:previous|prior|above)\s+instructions"),
+    ("new_instructions", r"(?:new|updated|real)\s+instructions\s*:"),
+    ("role_tag_colon", r"(?:^|\n|\r)\s*(?:system|assistant|developer|user)\s*:\s*"),
+    ("chatml_tag", r"<\|(?:im_start|im_end|system|assistant|user|begin_of_text|endoftext)\|>"),
+    ("ignored_context", r"end\s+of\s+context\s+above"),
+)
+
+
+def _scan_diff_for_injection(diff: str) -> list[str]:
+    """Return the names of any injection patterns found in *diff*.
+
+    Scans only the ``+`` (addition) lines of the unified diff after stripping
+    the diff prefix characters (``+/ /-``) so that the plain content is matched
+    against the patterns.  This avoids false negatives where a pattern's ``^``
+    anchor would fail to match because the diff line starts with ``+``.
+    """
+    triggered: list[str] = []
+    addition_lines: list[str] = []
+    for line in diff.splitlines():
+        if line.startswith("+"):
+            addition_lines.append(line[1:])
+    clean_content = "\n".join(addition_lines)
+    for name, pattern in _INJECTION_PATTERNS:
+        regex = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+        if regex.search(clean_content):
+            triggered.append(name)
+    return triggered
 
 
 class CriticVerdict(BaseModel):
@@ -43,6 +80,7 @@ class Critic:
         benchmark_path: Path | None = None,
         pytest_args: list[str] | None = None,
         benchmark_tasks: list[BenchmarkTask] | None = None,
+        max_diff_lines: int = 200,
     ) -> None:
         self.harness_dir = harness_dir
         self.benchmark_path = benchmark_path
@@ -50,6 +88,11 @@ class Critic:
         # (ADR-0005, issue #185) — a harness edit that breaks any
         # ``@pytest.mark.benchmark`` task is caught at the gate.
         self.pytest_args = pytest_args or ["-q", "-m", "benchmark"]
+        # Diff-size cap mirrors the SECURITY.md "max M lines of harness diff
+        # per proposal" guardrail and the Evolver default (issue #333).
+        if max_diff_lines < 1:
+            raise ValueError("max_diff_lines must be >= 1")
+        self.max_diff_lines = max_diff_lines
         # In-process registry wiring (issue #108): the Critic can now
         # enumerate benchmark tasks without spawning pytest. Stored as
         # ``None`` so the registry is loaded lazily on first access --
@@ -79,15 +122,21 @@ class Critic:
         Steps (ADR-0004):
 
         1. Copy ``harness_dir`` into a fresh ``TemporaryDirectory``.
-        2. Apply ``proposed_diff`` via ``git apply``. A patch that does not
+        2. Enforce the diff-size cap (``max_diff_lines``). An oversized diff
+           is rejected immediately (``failed_checks=["diff_size_cap"]``).
+        3. Scan the diff for prompt-injection markers (SECURITY.md Threat #2).
+           A diff carrying ``ignore previous instructions``-style phrases or
+           role-tag sequences is rejected immediately
+           (``failed_checks=["injection_detected"]``).
+        4. Apply ``proposed_diff`` via ``git apply``. A patch that does not
            apply cleanly is rejected immediately (``failed_checks=["git apply"]``).
-        3. Run ``harness/scripts/load_check.py`` against the sandbox copy
+        5. Run ``harness/scripts/load_check.py`` against the sandbox copy
            (issue #187). A harness that fails to load -- broken
            ``skills/*.json``, an unimportable hook, an empty system prompt
            -- is rejected *before* pytest is spawned, so the verdict names
            the precondition (``failed_checks=["load_check"]``) rather than
            a confusing downstream pytest error.
-        4. Run pytest with ``self.pytest_args`` in the sandbox.
+        6. Run pytest with ``self.pytest_args`` in the sandbox.
 
         The verdict's ``approved`` flag is ``True`` only when every check that
         runs succeeds. All filesystem mutations are confined to the temp copy.
@@ -99,8 +148,27 @@ class Critic:
             passed_checks: list[str] = []
             failed_checks: list[str] = []
 
-            # 1. Apply the proposed diff to the sandbox copy only.
+            # Gate 1: Diff-size cap (issue #333).
             if proposed_diff.strip():
+                line_count = len(proposed_diff.splitlines())
+                if line_count > self.max_diff_lines:
+                    return CriticVerdict(
+                        approved=False,
+                        passed_checks=[],
+                        failed_checks=["diff_size_cap"],
+                        notes=f"diff too large: {line_count} lines (cap={self.max_diff_lines})",
+                    )
+                # Gate 2: Injection scan (issue #333 / SECURITY.md Threat #2).
+                #    the diff payload for prompt-injection markers before the
+                #    sandbox is mutated.
+                injection_markers = _scan_diff_for_injection(proposed_diff)
+                if injection_markers:
+                    return CriticVerdict(
+                        approved=False,
+                        passed_checks=[],
+                        failed_checks=["injection_detected"],
+                        notes=f"injection pattern(s) in diff: {', '.join(injection_markers)}",
+                    )
                 apply_result = subprocess.run(
                     ["git", "apply", "--whitespace=nowarn"],
                     input=proposed_diff,
@@ -117,7 +185,7 @@ class Critic:
                     )
                 passed_checks.append("git apply")
 
-            # 2. Precondition gate (issue #187): run harness/scripts/load_check.py
+            # Gate 3: Precondition gate (issue #187).
             #    against the sandbox copy. A harness tree that fails to load
             #    must fail the gate *before* pytest runs.
             load_check_script = sandbox_root / "scripts" / "load_check.py"
@@ -141,7 +209,7 @@ class Critic:
                 )
             passed_checks.append("load_check")
 
-            # 3. Run pytest in the sandbox.
+            # Gate 4: Pytest benchmark suite.
             pytest_result = subprocess.run(
                 [sys.executable, "-m", "pytest", *self.pytest_args],
                 cwd=sandbox_root,
