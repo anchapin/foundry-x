@@ -153,19 +153,18 @@ def test_diff_at_exact_line_cap_passes() -> None:
 
 def test_propose_n_plus_first_call_raises_rate_limit_error(tmp_path) -> None:
     """The ``(max_proposals_per_hour + 1)``-th ``propose()`` within the
-    rolling window raises ``EvolverGuardError``.
+    rolling window returns ``[]`` when rate limit is breached.
 
     Pin for issue #94 acceptance criterion 3. With
     ``max_proposals_per_hour=2``, two pre-existing timestamps fill the
     window; the next ``propose()`` must be rejected by the guard *before*
-    any body work runs (the ``EvolverGuardError`` here proves the guard
-    fired first).
+    any body work runs (returning ``[]`` proves the guard fired first).
     """
     evolver = Evolver(max_proposals_per_hour=2, max_diff_lines=200)
     evolver._record_proposals(2)  # fill the window to the cap
     failure = FailureReport(session_id="s", summary="x", proposed_class="clean")
-    with pytest.raises(EvolverGuardError, match="rate limit exceeded"):
-        evolver.propose(tmp_path / "harness", failure=failure)
+    result = evolver.propose(tmp_path / "harness", failure=failure)
+    assert result == []
 
 
 def test_propose_under_cap_reaches_body() -> None:
