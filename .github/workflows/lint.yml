@@ -1,0 +1,28 @@
+name: lint
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint:
+    name: ruff-lint + ruff-format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install uv (hash-verified)
+        uses: ./.github/actions/install-uv
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check

@@ -1,0 +1,1 @@
+This is the decoy file shown when the hook modifies the path argument.
