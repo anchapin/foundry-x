@@ -114,7 +114,7 @@ compose_argv=(
     docker compose
     -f "$COMPOSE_FILE"
     "${COMPOSE_EXTRA[@]}"
-    run --rm foundryx --task "$TASK"
+    run --rm foundryx-runner --task "$TASK"
 )
 
 if [[ $DRY_RUN -eq 1 ]]; then

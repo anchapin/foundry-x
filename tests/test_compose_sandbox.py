@@ -27,8 +27,8 @@ def compose() -> dict:
 
 def _service(compose: dict) -> dict:
     services = compose["services"]
-    assert "foundryx" in services, "expected a 'foundryx' service"
-    return services["foundryx"]
+    assert "foundryx-runner" in services, "expected a 'foundryx-runner' service"
+    return services["foundryx-runner"]
 
 
 def test_src_and_harness_mounts_are_read_only(compose: dict) -> None:
@@ -93,7 +93,7 @@ _TMPFS_SIZE_CAP_PATTERN = r"(?:^|[,\s])size=\d+[kmg]"
 
 
 def test_read_only_root_filesystem(compose: dict) -> None:
-    """Acceptance #1: read_only: true on the foundryx service.
+    """Acceptance #1: read_only: true on the foundryx-runner service.
 
     Closes the writable-surface gap that issue #6 left open: a buggy or
     malicious hook cannot persist to /root, /etc, or the overlay in
@@ -102,7 +102,7 @@ def test_read_only_root_filesystem(compose: dict) -> None:
     """
     svc = _service(compose)
     assert svc.get("read_only") is True, (
-        "foundryx service must declare read_only: true (issue #123); "
+        "foundryx-runner service must declare read_only: true (issue #123); "
         "without it the container's root FS is writable and a buggy hook "
         "can persist past the run"
     )
@@ -115,7 +115,7 @@ def test_tmpfs_caps_present(compose: dict) -> None:
     host RAM. Mode 1777 matches the FHS defaults for /tmp-style dirs.
     """
     svc = _service(compose)
-    assert "tmpfs" in svc, "foundryx service must declare tmpfs: entries"
+    assert "tmpfs" in svc, "foundryx-runner service must declare tmpfs: entries"
 
     raw = svc["tmpfs"]
     entries: list[tuple[str, str]] = []
@@ -226,7 +226,7 @@ def _tmpfs_entry(compose: dict, mount_path: str) -> tuple[int, int] | None:
 
 
 def test_pids_limit_is_set(compose: dict) -> None:
-    """Issue #118: a top-level pids_limit on the foundryx service bounds the
+    """Issue #118: a top-level pids_limit on the foundryx-runner service bounds the
     total process count inside the container. Memory + CPU caps alone do not
     stop a fork-bomb (SECURITY.md threat #5)."""
     svc = _service(compose)
