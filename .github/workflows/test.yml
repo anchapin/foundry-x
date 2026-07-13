@@ -1,0 +1,44 @@
+name: test
+
+on:
+  pull_request:
+
+jobs:
+  test:
+    name: pytest (non-benchmark)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install uv (hash-verified)
+        uses: ./.github/actions/install-uv
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Pytest (non-benchmark)
+        run: uv run pytest -m "not benchmark"
+
+  benchmark:
+    name: pytest (benchmark only)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.changed_files, 'benchmarks/') || contains(github.event.pull_request.changed_files, 'benchmarks/**/*'))
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install uv (hash-verified)
+        uses: ./.github/actions/install-uv
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Pytest (benchmark only)
+        run: uv run pytest -m benchmark
