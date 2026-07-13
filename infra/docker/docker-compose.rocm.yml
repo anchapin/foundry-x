@@ -1,0 +1,74 @@
+# ROCm device passthrough override for the FoundryX sandbox.
+#
+# Resolves issue #115: re-attaches the host AMD GPU to the sandbox so
+# operators can evolve the harness against the local ROCm-built
+# llama-server (infra/llama-cpp) without leaving the container. The
+# guardrail in docs/SECURITY.md:54-59 mandates staying inside, but
+# the CPU-only compose path added by issue #6 exposes no /dev/kfd,
+# /dev/dri, or HSA_* environment, so operators were forced out.
+#
+# Usage (combined with the base file):
+#
+#   docker compose \
+#       -f infra/docker/docker-compose.yml \
+#       -f infra/docker/docker-compose.rocm.yml \
+#       run --rm foundryx --task "your ROCm benchmark task prompt"
+#
+# This file declares ONLY the fields ROCm needs. Compose v2 merges
+# services by name, so every other field (read-only mounts, tmpfs
+# caps, narrowed egress, ulimits, capability drops) is inherited from
+# the base file. The override MUST NOT redeclare any of those keys --
+# doing so would either shadow the base values (e.g. dropping
+# `cap_drop: ALL`) or attach a duplicate service. The static guard
+# tests/test_compose_rocm.py:test_override_does_not_shadow_base_hardening
+# enforces this contract.
+#
+# What this override adds:
+#
+#   devices:
+#     /dev/kfd     -- Kernel Fusion Driver; HSA's compute entry point
+#                     on AMD GPUs. Without this pass-through,
+#                     in-container ROCm cannot submit work to the GPU.
+#     /dev/dri      -- Direct Rendering Manager; on Navi 22 (RX 6600
+#                     XT) the ROCm runtime submits work via the render
+#                     node under /dev/dri/renderD*.
+#
+#   group_add:
+#     video, render -- /dev/dri/renderD* is gated by group membership;
+#                     device cgroup rules alone do NOT grant the right
+#                     to open the node. Without these, the device
+#                     pass-through resolves to EACCES at open() and
+#                     llama.cpp falls back to CPU silently.
+#
+#   environment:
+#     HSA_OVERRIDE_GFX_VERSION=10.3.0
+#                  -- RX 6600 XT reports as gfx1032, but HSA sometimes
+#                     rejects the agent on older kernels with "agent
+#                     refused"; the override forces the version string
+#                     HSA uses for capability negotiation. Matches
+#                     infra/llama-cpp/README.md "ROCm pitfalls".
+#     ROCM_PATH=/opt/rocm
+#                  -- Standard ROCm install path; lets in-container
+#                     tooling that probes the runtime find the host
+#                     install (e.g. /opt/rocm/lib). ROCm users build
+#                     llama.cpp against this path on the host
+#                     (infra/llama-cpp/rocm_setup.sh).
+#
+# The CPU-only default path (`docker-compose.yml` alone) is unchanged.
+# Issue #115 keeps CI and the standard benchmark path on CPU.
+
+services:
+  foundryx:
+    environment:
+      # Declared alongside the base file's environment block; Compose
+      # v2 merges environment dicts by key, so the existing
+      # LLAMACPP_HOST, FOUNDRY_TRACE_PATH, UV_CACHE_DIR entries are
+      # preserved.
+      HSA_OVERRIDE_GFX_VERSION: "10.3.0"
+      ROCM_PATH: "/opt/rocm"
+    devices:
+      - "/dev/kfd"
+      - "/dev/dri:/dev/dri"
+    group_add:
+      - video
+      - render

@@ -1,0 +1,29 @@
+name: audit
+
+on:
+  pull_request:
+  schedule:
+    # Weekly: Mondays 06:00 UTC.
+    - cron: "0 6 * * 1"
+
+jobs:
+  audit:
+    name: pip-audit (supply-chain)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv (hash-verified)
+        uses: ./.github/actions/install-uv
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: uv pip audit
+        # `uv pip audit` was removed in uv 0.9.x; use `uvx pip-audit`
+        # which runs the canonical PyPA tool via uv's ephemeral env.
+        run: uvx pip-audit

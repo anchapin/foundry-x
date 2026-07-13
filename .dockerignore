@@ -1,0 +1,71 @@
+# .dockerignore — keep secrets, the trace store, and build artifacts out of
+# the Docker build context for infra/docker/Dockerfile.
+#
+# Why: docs/SECURITY.md threat #4 (secret leakage) and ADR-0003 declare the
+# trace store as ground truth. Without this file the whole tree — including
+# `logs/`, `.env`, and `.git/` — crosses the daemon boundary on every build,
+# which is both a secret-leakage surface (SECURITY.md:63-69) and a
+# cycle-time drag (the daemon re-hashes everything on each build).
+#
+# Do NOT exclude src/, harness/, tests/, pyproject.toml, uv.lock, or infra/
+# — the Dockerfile COPYs them explicitly and the COPY would fail.
+
+# --- VCS metadata -----------------------------------------------------------
+.git/
+.gitignore
+.gitattributes
+
+# --- Secrets & credentials (SECURITY.md:61-69) -------------------------------
+.env
+.env.*
+*.pem
+*.key
+*.crt
+secrets/
+
+# --- Trace store (SECURITY.md:66-67: MUST NOT contain raw API keys) ---------
+logs/
+
+# --- Python build artifacts -------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.so
+*.pyd
+
+# --- Virtual environments ---------------------------------------------------
+.venv/
+venv/
+env/
+
+# --- Tool caches (re-created inside the image; never ship them) --------------
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.cache/
+
+# --- IDE / editor state ------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Node (defensive; not used today) ----------------------------------------
+node_modules/
+.npm/
+.yarn/
+
+# --- Databases (defensive — not currently checked in) ------------------------
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Worktree metadata (in case the build runs from a linked worktree) -------
+.worktrees/

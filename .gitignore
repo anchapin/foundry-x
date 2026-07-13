@@ -11,7 +11,12 @@ venv/
 logs/*.jsonl
 logs/*.db
 logs/*.sqlite
+logs/*.db-wal
+logs/*.db-shm
+logs/*.sqlite-wal
+logs/*.sqlite-shm
 logs/*.log
+logs/*.json
 !logs/.gitkeep
 
 .DS_Store

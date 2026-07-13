@@ -1,0 +1,179 @@
+# Sandboxed run path for benchmarks and evolution.
+#
+# Implements the docs/SECURITY.md:54-59 guardrail:
+#
+#   "Run benchmarks and evolution inside a Docker container with read-only
+#    mounts for the host filesystem (see infra/). The default local dev path
+#    runs unsandboxed but should be migrated to the container for any
+#    non-trivial evolution run."
+#
+# This file is that "infra/" run path. It wraps the existing Dockerfile
+# (infra/docker/Dockerfile — unchanged) with the runtime sandbox the
+# guardrail already mandates:
+#
+#   * src/, harness/, tests/ are bind-mounted READ-ONLY so a buggy hook
+#     cannot write outside the workspace (threat #6) and the live, evolved
+#     harness is exercised without an image rebuild.
+#   * logs/ is the only read-write host mount, so the TraceLogger
+#     (ADR-0003) persists traces to a host-visible SQLite DB.
+#   * A dedicated bridge network grants no broad host network access; the
+#     container reaches the host llama-server (infra/llama-cpp) solely via
+#     the narrowly-scoped `llamacpp` alias (see THREAT MODEL: egress below).
+#   * A read-only root filesystem with bounded tmpfs caps closes the
+#     writable-surface gap left by issue #6 (see THREAT MODEL: root FS below).
+#   * A memory + CPU cap contains runaway evolution runs (threat #5).
+#   * pids_limit + ulimits (nproc, nofile) close the fork-bomb / FD-exhaustion
+#     gap that memory + CPU caps alone do not catch (issue #118).
+#
+# See infra/docker/README.md for usage.
+#
+# ----------------------------------------------------------------------------
+# THREAT MODEL: root FS (resolves SECURITY.md threats #5 and #6)
+# ----------------------------------------------------------------------------
+# A buggy or malicious hook running inside the sandbox could write to the
+# container's own filesystem (e.g. /tmp, /var/tmp, /root/.cache) and persist
+# payloads there for the lifetime of the container, or fill the host disk by
+# exhausting /tmp. We close this with two complementary controls:
+#
+#   1. `read_only: true` mounts the container's root filesystem read-only.
+#      Bind mounts that need write access (only logs/, above) still work
+#      because the read-only flag applies to the overlay, not to explicit
+#      mounts or tmpfs.
+#   2. `tmpfs:` entries for /tmp, /var/tmp, /run with explicit size caps
+#      give the container the writable surface it actually needs
+#      (Python's tempfile, uv's cache via UV_CACHE_DIR, /run for PID files)
+#      while bounding the blast radius of a runaway. The caps are sized
+#      per-path: /tmp is the busiest (uv cache + Python tempfile + sqlite
+#      WAL) and gets 512m; /var/tmp is rarely written in this workload and
+#      stays at 256m; /run holds PID files only and is capped at 64m.
+#      Each cap is small enough that a misbehaving hook cannot exhaust
+#      host RAM before the memory limit (above) fires.
+#
+# ----------------------------------------------------------------------------
+# THREAT MODEL: egress (resolves SECURITY.md threat #5 + the loopback gap)
+# ----------------------------------------------------------------------------
+# The previous file declared `extra_hosts: host.docker.internal:host-gateway`,
+# which is convenient but too permissive: the alias resolves to the host's
+# entire loopback interface, so a compromised hook that learned of any
+# other host service (Docker API, SSH, an admin dashboard) could reach it
+# on any port — not just llama.cpp's 8080.
+#
+# We narrow the egress surface by:
+#
+#   * Replacing `host.docker.internal` with an intentionally specific
+#     alias, `llamacpp`, so the only DNS name pointing at the host is the
+#     one used by LLAMACPP_HOST. There is no longer a generic "host"
+#     alias the sandbox can use to enumerate services.
+#   * Pointing LLAMACPP_HOST at the alias plus port 8080 (the only
+#     llama.cpp port we expect to need), so even at the application layer
+#     the sandbox has no documented route to any other host service.
+#
+# This is a defence-in-depth narrowing, not a true L4 egress filter (which
+# would require iptables / network policy and is tracked separately). The
+# tests in tests/test_compose_sandbox.py assert that no extra_hosts entry
+# other than the LLAMACPP gateway exists, so this narrowing cannot
+# regress silently.
+
+services:
+  foundryx:
+    # Build context is the repo root so the Dockerfile can COPY pyproject,
+    # src, harness, and tests. The Compose file itself lives under infra/docker/.
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    image: foundryx:latest
+    init: true
+
+    # Pull runtime configuration from .env (LLAMACPP_HOST, FOUNDRY_*).
+    # `required: false` so `compose config` / CI validation does not hard-fail
+    # when .env is absent on a fresh clone; a real run copies .env.example first.
+    env_file:
+      - path: ../../.env
+        required: false
+
+    environment:
+      # Inside the default bridge network 127.0.0.1 is the container, not the
+      # host. The `llamacpp` alias added in extra_hosts is the only DNS name
+      # that resolves to the host loopback; LLAMACPP_HOST intentionally uses
+      # that alias plus port 8080 (see THREAT MODEL: egress in the header).
+      LLAMACPP_HOST: http://llamacpp:8080
+      # TraceLogger writes to a path inside the writable logs mount so events
+      # are visible on the host (acceptance criterion).
+      FOUNDRY_TRACE_PATH: /app/logs/traces.db
+      # Pin uv's cache to /tmp so the read-only root FS does not break
+      # `uv run` at the CLI boundary. /tmp is a capped tmpfs (see below).
+      UV_CACHE_DIR: /tmp/uv-cache
+
+    volumes:
+      # Read-only bind mounts of the host source (SECURITY.md threat #6).
+      # The live, evolved harness is used without an image rebuild.
+      - ../../src:/app/src:ro
+      - ../../harness:/app/harness:ro
+      - ../../tests:/app/tests:ro
+      # The ONLY read-write host mount: traces land on the host.
+      - ../../logs:/app/logs
+
+    # Read-only root filesystem (THREAT MODEL: root FS in the header).
+    # Closes the writable-surface gap that issue #6 left open: a buggy
+    # hook cannot persist to /root, /etc, or anywhere else on the overlay.
+    # The container still has a bounded writable surface via tmpfs (below)
+    # and the logs/ bind mount (above).
+    read_only: true
+
+    # Bounded writable tmpfs mounts (THREAT MODEL: root FS in the header).
+    # Sized per-path: /tmp is busiest (uv cache + Python tempfile + sqlite
+    # WAL) at 512m; /var/tmp rarely written, kept at 256m; /run holds only
+    # PID files at 64m. mode 1777 matches the FHS defaults.
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+      - /var/tmp:size=256m,mode=1777
+      - /run:size=64m,mode=1777
+
+    # Isolated bridge network: the container has no broad host network access.
+    # It reaches the host llama-server exclusively via the narrowly-scoped
+    # `llamacpp` alias (THREAT MODEL: egress in the header).
+    networks:
+      - sandbox
+
+    extra_hosts:
+      # Linux: make the host reachable as `llamacpp` so the container can
+      # talk to llama-server (infra/llama-cpp/README.md) on port 8080.
+      # The alias is intentionally narrow: it is only consumed by
+      # LLAMACPP_HOST, so the sandbox has no generic "host" name it could
+      # use to reach unrelated host services. See THREAT MODEL: egress.
+      - "llamacpp:host-gateway"
+
+    # Resource caps (SECURITY.md threat #5: resource exhaustion). Honoured by
+    # `docker compose` (Compose v2) for container creation. The `pids`
+    # field under deploy.resources.limits must agree with the top-level
+    # `pids_limit` (Compose Spec: "pids_limit must be consistent with the
+    # pids attribute in the Deploy Specification"); we set both to 256
+    # so swarm-mode and local-compose paths honour the same cap.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "2.0"
+          pids: 256
+
+    # Process and FD caps (issue #118). memory + CPU limits alone do not
+    # stop a fork-bomb or a FD-exhaustion loop: those can still take the
+    # host down before the memory cap fires. pids_limit bounds the total
+    # number of processes/threads inside the container; ulimits cap the
+    # per-process thread count (nproc) and open-file count (nofile) so a
+    # runaway hook cannot multiply its resource use inside one process.
+    pids_limit: 256
+    ulimits:
+      nproc: 512
+      nofile: 2048
+
+    # Drop all Linux capabilities and forbid privilege escalation — the runner
+    # needs none of them (supplementary hardening beyond SECURITY.md:56).
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  sandbox:
+    driver: bridge

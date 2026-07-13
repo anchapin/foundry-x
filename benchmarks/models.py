@@ -16,12 +16,18 @@ Field groups:
   receives and how its workspace is seeded.
 - **Evaluation contract:** ``expected_outcome``, ``difficulty_tier``,
   ``timeout_seconds`` -- how the Critic weights and bounds the run.
+- **Harness contract:** ``requires_skills`` -- the harness skills (by name)
+  the agent path must have available to attempt this task. Lets the Critic
+  flag a benchmark whose required skill is missing from the harness as
+  "not yet evaluable" instead of a spurious fail (issue #104, ADR-0004).
 - **Grouping:** ``tags`` -- free-form labels for selection / reporting.
 
 All fields beyond ``name`` and ``description`` are optional with sane
 defaults, so the minimal task shape authored under issue #30 keeps working
 (backwards compatible). New fields were added under issue #28 to give the
-Runner and Critic the structured contract ADR-0006 calls for.
+Runner and Critic the structured contract ADR-0006 calls for. The
+``requires_skills`` field was added under issue #104 alongside the
+seeding of the ``bash`` skill.
 """
 
 from __future__ import annotations
@@ -76,6 +82,18 @@ class BenchmarkTask(BaseModel):
         default=None,
         description=(
             "Optional wall-clock cap (seconds) for the Runner. ``None`` means no limit is enforced."
+        ),
+    )
+    requires_skills: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of harness skills (``harness/skills/<name>.json``) the agent "
+            "path must have available to attempt this task. The Critic uses this "
+            "list to flag a benchmark as 'not yet evaluable' when a required "
+            "skill is absent, instead of recording a spurious fail. Empty list "
+            "means the task does not require any named skill (e.g. tasks that "
+            "are satisfied by ``read_file``/``write_file`` alone). First non-empty "
+            "entry as of issue #104 is ``bash``."
         ),
     )
 

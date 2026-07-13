@@ -1,0 +1,27 @@
+name: critic
+
+on:
+  pull_request:
+    paths:
+      - "harness/**"
+      - "src/foundry_x/evolution/**"
+
+jobs:
+  critic:
+    name: benchmark gate (ADR-0004)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv (hash-verified)
+        uses: ./.github/actions/install-uv
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Critic benchmark suite
+        run: uv run pytest -m benchmark
