@@ -53,10 +53,10 @@ def test_workspace_is_unique_per_test(benchmark_workspace: Path) -> None:
     assert not leaked.exists()
 
 
-@pytest.mark.parametrize("benchmark_workspace", ["sample"], indirect=True)
+@pytest.mark.parametrize("benchmark_workspace", ["reverse_string"], indirect=True)
 def test_workspace_seeds_from_fixtures(benchmark_workspace: Path) -> None:
     """An indirect param seeds the workspace from ``fixtures/<name>/``."""
-    expected = FIXTURES_ROOT / "sample" / "expected.txt"
+    expected = FIXTURES_ROOT / "reverse_string" / "expected.txt"
     assert (benchmark_workspace / "expected.txt").read_text() == expected.read_text()
 
 
