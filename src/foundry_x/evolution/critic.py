@@ -60,7 +60,7 @@ DEFAULT_BASELINE_PATH: Path = Path("logs") / "critic_baseline.json"
 class CriticVerdict(BaseModel):
     """Result of a Critic gate run against a proposed harness edit (ADR-0006)."""
 
-    approved: bool
+    verdict: bool
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
     notes: str = ""

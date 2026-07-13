@@ -310,7 +310,7 @@ def _verdict_rates(
         total_verdicts += 1
         sessions_with_verdicts.add(event.session_id)
         record = VerdictRecord(**event.payload)
-        if record.approved:
+        if record.verdict:
             approved += 1
         for task in record.failed_checks:
             if task in prior_passed:

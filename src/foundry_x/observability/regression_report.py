@@ -13,7 +13,7 @@ VERDICT_KIND = "critic_verdict"
 class VerdictRecord(BaseModel):
     """Structured payload persisted for every Critic verdict (ADR-0006 boundary model)."""
 
-    approved: bool = False
+    verdict: bool = False
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
     notes: str = ""
@@ -73,7 +73,7 @@ class RegressionAnalysis(BaseModel):
 def record_verdict(logger: TraceLogger, session_id: str, verdict: CriticVerdict) -> None:
     """Persist a CriticVerdict as a ``critic_verdict`` trace event."""
     record = VerdictRecord(
-        approved=verdict.approved,
+        verdict=verdict.verdict,
         passed_checks=list(verdict.passed_checks),
         failed_checks=list(verdict.failed_checks),
         notes=verdict.notes,
@@ -187,7 +187,7 @@ def analyze_regressions(
     """
     events = _load_verdict_events(logger, since)
     total = len(events)
-    approvals = sum(1 for _sid, _ts, v in events if v.approved)
+    approvals = sum(1 for _sid, _ts, v in events if v.verdict)
     rejections = total - approvals
     versions = _session_versions(logger)
     regressions, new_passes = _compute(events, versions)

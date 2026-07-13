@@ -32,13 +32,13 @@ def test_regression_report_detects_regressions_and_new_passes(tmp_path):
     logger = TraceLogger(tmp_path / "traces.db")
     sid_a, sid_b, sid_c = _three_sessions(logger)
 
-    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_a, CriticVerdict(verdict=True, passed_checks=["task-A"]))
     record_verdict(
         logger,
         sid_b,
-        CriticVerdict(approved=False, failed_checks=["task-A"], passed_checks=["task-B"]),
+        CriticVerdict(verdict=False, failed_checks=["task-A"], passed_checks=["task-B"]),
     )
-    record_verdict(logger, sid_c, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_c, CriticVerdict(verdict=True, passed_checks=["task-A"]))
 
     report = generate_regression_report(logger)
 
@@ -61,9 +61,9 @@ def test_regression_summary_counts(tmp_path):
     logger = TraceLogger(tmp_path / "traces.db")
     sid_a, sid_b, sid_c = _three_sessions(logger)
 
-    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["t1"]))
-    record_verdict(logger, sid_b, CriticVerdict(approved=False, failed_checks=["t1"]))
-    record_verdict(logger, sid_c, CriticVerdict(approved=True, passed_checks=["t1"]))
+    record_verdict(logger, sid_a, CriticVerdict(verdict=True, passed_checks=["t1"]))
+    record_verdict(logger, sid_b, CriticVerdict(verdict=False, failed_checks=["t1"]))
+    record_verdict(logger, sid_c, CriticVerdict(verdict=True, passed_checks=["t1"]))
 
     summary = _section(generate_regression_report(logger), "Regression Summary")
     assert "Total verdicts: 3" in summary
@@ -75,11 +75,11 @@ def test_no_regressions_when_nothing_previously_passed(tmp_path):
     logger = TraceLogger(tmp_path / "traces.db")
     sid_a, sid_b = _three_sessions(logger)[:2]
 
-    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_a, CriticVerdict(verdict=True, passed_checks=["task-A"]))
     record_verdict(
         logger,
         sid_b,
-        CriticVerdict(approved=True, passed_checks=["task-A", "task-B"]),
+        CriticVerdict(verdict=True, passed_checks=["task-A", "task-B"]),
     )
 
     report = generate_regression_report(logger)
@@ -94,7 +94,7 @@ def test_record_verdict_roundtrips_through_logger(tmp_path):
             logger,
             sid,
             CriticVerdict(
-                approved=False,
+                verdict=False,
                 passed_checks=["p1"],
                 failed_checks=["f1"],
                 notes="boom",
@@ -105,7 +105,7 @@ def test_record_verdict_roundtrips_through_logger(tmp_path):
     verdict_events = [e for e in events if e.kind == "critic_verdict"]
     assert len(verdict_events) == 1
     payload = verdict_events[0].payload
-    assert payload["approved"] is False
+    assert payload["verdict"] is False
     assert payload["passed_checks"] == ["p1"]
     assert payload["failed_checks"] == ["f1"]
     assert payload["notes"] == "boom"
@@ -115,11 +115,11 @@ def test_since_filter_excludes_old_verdicts(tmp_path):
     logger = TraceLogger(tmp_path / "traces.db")
     sid_a, sid_b = _three_sessions(logger)[:2]
 
-    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_a, CriticVerdict(verdict=True, passed_checks=["task-A"]))
     record_verdict(
         logger,
         sid_b,
-        CriticVerdict(approved=False, failed_checks=["task-A"]),
+        CriticVerdict(verdict=False, failed_checks=["task-A"]),
     )
 
     full = generate_regression_report(logger)
@@ -135,11 +135,11 @@ def test_cli_regression_report_stdout(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     sid_a, sid_b = _three_sessions(logger)[:2]
-    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_a, CriticVerdict(verdict=True, passed_checks=["task-A"]))
     record_verdict(
         logger,
         sid_b,
-        CriticVerdict(approved=False, failed_checks=["task-A"]),
+        CriticVerdict(verdict=False, failed_checks=["task-A"]),
     )
 
     rc = cli_main(["regression-report", "--db", str(db)])
@@ -154,11 +154,11 @@ def test_cli_regression_report_out_file(tmp_path):
     out = tmp_path / "report.md"
     logger = TraceLogger(db)
     sid_a, sid_b = _three_sessions(logger)[:2]
-    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_a, CriticVerdict(verdict=True, passed_checks=["task-A"]))
     record_verdict(
         logger,
         sid_b,
-        CriticVerdict(approved=False, failed_checks=["task-A"]),
+        CriticVerdict(verdict=False, failed_checks=["task-A"]),
     )
 
     rc = cli_main(["regression-report", "--db", str(db), "--out", str(out)])
@@ -171,11 +171,11 @@ def test_cli_regression_report_fail_on_regression_exits_nonzero_with_regressions
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     sid_a, sid_b = _three_sessions(logger)[:2]
-    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_a, CriticVerdict(verdict=True, passed_checks=["task-A"]))
     record_verdict(
         logger,
         sid_b,
-        CriticVerdict(approved=False, failed_checks=["task-A"]),
+        CriticVerdict(verdict=False, failed_checks=["task-A"]),
     )
 
     rc = cli_main(
@@ -193,11 +193,11 @@ def test_cli_regression_report_fail_on_regression_exits_zero_when_clean(tmp_path
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     sid_a, sid_b = _three_sessions(logger)[:2]
-    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_a, CriticVerdict(verdict=True, passed_checks=["task-A"]))
     record_verdict(
         logger,
         sid_b,
-        CriticVerdict(approved=True, passed_checks=["task-A", "task-B"]),
+        CriticVerdict(verdict=True, passed_checks=["task-A", "task-B"]),
     )
 
     rc = cli_main(
@@ -216,11 +216,11 @@ def test_cli_regression_report_fail_on_regression_writes_out_before_exit(tmp_pat
     out = tmp_path / "report.md"
     logger = TraceLogger(db)
     sid_a, sid_b = _three_sessions(logger)[:2]
-    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_a, CriticVerdict(verdict=True, passed_checks=["task-A"]))
     record_verdict(
         logger,
         sid_b,
-        CriticVerdict(approved=False, failed_checks=["task-A"]),
+        CriticVerdict(verdict=False, failed_checks=["task-A"]),
     )
 
     rc = cli_main(
@@ -244,11 +244,11 @@ def test_cli_regression_report_without_fail_flag_does_not_gate_exit(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     sid_a, sid_b = _three_sessions(logger)[:2]
-    record_verdict(logger, sid_a, CriticVerdict(approved=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_a, CriticVerdict(verdict=True, passed_checks=["task-A"]))
     record_verdict(
         logger,
         sid_b,
-        CriticVerdict(approved=False, failed_checks=["task-A"]),
+        CriticVerdict(verdict=False, failed_checks=["task-A"]),
     )
 
     rc = cli_main(["regression-report", "--db", str(db)])
@@ -268,17 +268,17 @@ def _plant_mixed_sessions(logger: TraceLogger) -> tuple[str, str, str]:
     record_verdict(
         logger,
         sid_a,
-        CriticVerdict(approved=False, passed_checks=["task-A"], failed_checks=["task-B"]),
+        CriticVerdict(verdict=False, passed_checks=["task-A"], failed_checks=["task-B"]),
     )
     record_verdict(
         logger,
         sid_b,
-        CriticVerdict(approved=False, failed_checks=["task-A"], passed_checks=["task-B"]),
+        CriticVerdict(verdict=False, failed_checks=["task-A"], passed_checks=["task-B"]),
     )
     record_verdict(
         logger,
         sid_c,
-        CriticVerdict(approved=False, passed_checks=["task-A"], failed_checks=["task-B"]),
+        CriticVerdict(verdict=False, passed_checks=["task-A"], failed_checks=["task-B"]),
     )
     return sid_a, sid_b, sid_c
 
