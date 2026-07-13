@@ -99,6 +99,7 @@ class KpiSummary(BaseModel):
     evolver_time_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
+    aborted_benchmarks: int = 0
     injection_blocks: dict[str, int] = {}
     token_totals: dict[str, int] = {}
     regressed_tasks: list[RegressedTask] = Field(default_factory=list)
@@ -183,12 +184,14 @@ def compute_kpis(
         logger, harness_version=harness_version, since=since, until=until
     )
     token_totals = _token_totals(logger, harness_version=harness_version, since=since, until=until)
+    aborted_benchmarks = _aborted_benchmarks(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
         evolver_time_seconds=evolver_time,
         regression_rate=regression_rate,
         improvement_rate=improvement_rate,
+        aborted_benchmarks=aborted_benchmarks,
         injection_blocks=injection_blocks,
         token_totals=token_totals,
         regressed_tasks=regressed_tasks,
@@ -466,6 +469,29 @@ def _token_totals(
     return totals
 
 
+def _aborted_benchmarks(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> int:
+    """Count benchmark runs aborted due to token budget (issue #417).
+
+    Counts ``task_aborted`` events whose ``reason`` is ``"token_budget"``.
+    These are sessions where the Runner aborted the loop because the running
+    token total exceeded the configured ``token_budget`` in ``RunLimits``.
+    The count is used in the KPI summary to distinguish completed vs.
+    aborted benchmark runs.
+    """
+    count = 0
+    for event in logger.query_events(
+        kind="task_aborted",
+        harness_version=harness_version,
+    ):
+        reason = event.payload.get("reason")
+        if reason == "token_budget":
+            count += 1
+    return count
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -505,6 +531,7 @@ def _render_markdown(summary: KpiSummary) -> str:
         f"| Evolver Time (seconds) | {_format_value(summary.evolver_time_seconds)} |",
         f"| Regression Rate | {_format_value(summary.regression_rate)} |",
         f"| Improvement Rate | {_format_value(summary.improvement_rate)} |",
+        f"| Aborted (token budget) | {summary.aborted_benchmarks} |",
     ]
     # Issue #340: surface regressed tasks only when at least one task regressed.
     if summary.regressed_tasks:
@@ -599,6 +626,7 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{_format_value(baseline.improvement_rate)} | "
         f"{_format_value(candidate.improvement_rate)} | "
         f"{_format_delta(baseline.improvement_rate, candidate.improvement_rate, higher_is_better=True)} |",
+        f"| Aborted (token budget) | {baseline.aborted_benchmarks} | {candidate.aborted_benchmarks} | (count) |",
     ]
     return "\n".join(lines)
 
