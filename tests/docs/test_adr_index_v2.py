@@ -231,9 +231,13 @@ def test_adr_index_validation_precision() -> None:
     1. ADR numbers are validated against the correct range (0001-0010 currently)
     2. New ADRs can be added and validated
     """
+    # Current state validation
     numbers = sorted({num for num, _ in _adr_file_entries()})
-    assert numbers, "no ADR files found"
-    assert max(numbers) == numbers[-1], "max should be last after sorting"
+    max_expected = numbers[-1] if numbers else 0
+
+    # The test should properly validate current index state
+    assert 1 in numbers, "ADR 0001 should exist"
+    assert 10 in numbers, "ADR 0010 should exist"
 
     # ADR-0011 referenced but missing should be detectable
     # This is the exact issue being fixed
