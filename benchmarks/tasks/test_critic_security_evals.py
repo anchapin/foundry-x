@@ -239,9 +239,9 @@ def test_critic_accepts_sized_diff(tmp_path) -> None:
         "-original\n" + "".join("{}\n".format(line) for line in small_diff_lines)
     )
 
-    verdict = Critic(harness_dir=harness_dir, pytest_args=["-q", "tests/test_bench.py"]).evaluate(
-        small_diff
-    )
+    verdict = Critic(
+        harness_dir=harness_dir, use_sandbox=False, pytest_args=["-q", "tests/test_bench.py"]
+    ).evaluate(small_diff)
 
     assert verdict.approved is True, (
         f"Critic.evaluate() must accept diff within size cap; got approved={verdict.approved!r}, "
@@ -294,6 +294,9 @@ def test_critic_respects_custom_max_diff_lines(tmp_path) -> None:
         "+newcontent\n"
     )
     verdict2 = Critic(
-        harness_dir=harness_dir, max_diff_lines=5, pytest_args=["-q", "tests/test_bench.py"]
+        harness_dir=harness_dir,
+        max_diff_lines=5,
+        use_sandbox=False,
+        pytest_args=["-q", "tests/test_bench.py"],
     ).evaluate(within_cap)
     assert verdict2.approved is True
