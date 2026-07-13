@@ -25,6 +25,6 @@ format and process.
 | [0011](./0011-failure-report-class-taxonomy.md) | Digester `FailureReport` class taxonomy | Accepted |
 | [0012](./0012-manifest-json-as-evolver-target.md) | Expand Evolver target confinement to include `manifest.json` | Accepted |
 | [0013](./0013-wal-mode-and-connection-reuse.md) | WAL mode and a single reused SQLite connection | Accepted |
-| [0014](./0014-model-abstraction.md) | Model abstraction layer for model-swapping milestone | Proposed |
+| [0014](./0014-model-abstraction-layer.md) | Model abstraction layer for model-swapping milestone | Accepted |
 
 When adding a new ADR, append it to this table in the same PR.

@@ -70,16 +70,6 @@ def _seed_session(
                     "preview": f"block {i}",
                 },
             )
-        for i in range(injection_block_count):
-            logger.record(
-                sid,
-                kind="injection_blocked",
-                payload={
-                    "markers": ["ignore_previous"],
-                    "tool": "read_file",
-                    "preview": f"block {i}",
-                },
-            )
     return sid
 
 
@@ -259,6 +249,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "improvement_rate",
         "injection_blocks",
         "token_totals",
+        "tokens_pruned",
     }
 
 

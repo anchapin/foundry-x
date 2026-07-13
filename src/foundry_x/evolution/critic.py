@@ -50,6 +50,7 @@ def _scan_diff_for_injection(diff: str) -> list[str]:
             triggered.append(name)
     return triggered
 
+
 #: Default location of the regression baseline JSON written by the Critic
 #: (ADR-0004 step 3, issue #186). Relative to the process working directory
 #: so an invocation from the repo root lands at ``logs/critic_baseline.json``.

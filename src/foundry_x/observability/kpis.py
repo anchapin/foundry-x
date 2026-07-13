@@ -76,6 +76,13 @@ class KpiSummary(BaseModel):
     with no token data (e.g. an endpoint that never reports usage) keeps
     the summary compact. Like ``injection_blocks`` this is an auxiliary
     operator signal, not one of the three PRD success-metric KPIs.
+
+    Issue #418 adds ``tokens_pruned``: a ``session_id -> int`` map of the
+    cumulative tokens pruned per session, summed from the ``tokens_dropped``
+    fields the ``ContextPruningHook`` records on each ``context_pruned``
+    event. This measures how much context the hook discarded to stay within
+    the token budget. Empty by default; populated only when at least one
+    ``context_pruned`` event carries a non-zero ``tokens_dropped``.
     """
 
     cycle_time_seconds: float | None = None
@@ -83,47 +90,7 @@ class KpiSummary(BaseModel):
     improvement_rate: float = 0.0
     injection_blocks: dict[str, int] = {}
     token_totals: dict[str, int] = {}
-
-
-class KpiComparison(BaseModel):
-    """Baseline-vs-candidate harness-version comparison (issue #100).
-
-    ``deltas`` holds the raw ``candidate - baseline`` difference for each
-    numeric KPI; the rendering layer interprets the sign per the PRD's
-    "good direction" — improvement-rate up is good, regression-rate and
-    cycle-time down are good. ``injection_blocks`` is intentionally
-    excluded from the comparison because it is an auxiliary signal, not
-    one of the three PRD success-metric KPIs.
-    """
-
-    baseline: KpiSummary
-    candidate: KpiSummary
-    deltas: dict[str, float | None]
-
-
-class KpiHistoryEntry(BaseModel):
-    """One line in the append-only KPI history log (issue #183).
-
-    Carries the three PRD-KPI fields from :class:`KpiSummary` plus a
-    ``timestamp`` (ISO-8601, stamped at append time) and an optional
-    ``harness_version`` (preserved when the operator filtered the
-    run with ``--harness-version``). The per-session ``injection_blocks``
-    map is intentionally absent — the history is a one-row-per-run
-    summary, and per-session inventory is the trace store's job.
-
-    The serialized JSON line round-trips through :class:`KpiSummary`
-    because pydantic's default ``extra='ignore'`` policy silently
-    drops ``timestamp`` and ``harness_version`` on parse, leaving
-    only the three numeric KPIs. That round-trip — minus the per-
-    session map — is the on-disk contract the trend table relies on.
-    """
-
-    timestamp: str
-    harness_version: str | None = None
-    cycle_time_seconds: float | None = None
-    regression_rate: float = 0.0
-    improvement_rate: float = 0.0
-    injection_blocks: dict[str, int] = {}
+    tokens_pruned: dict[str, int] = {}
 
 
 class KpiComparison(BaseModel):
@@ -192,6 +159,7 @@ def compute_kpis(
     regression_rate, improvement_rate = _verdict_rates(logger, harness_version=harness_version)
     injection_blocks = _injection_blocks(logger, harness_version=harness_version)
     token_totals = _token_totals(logger, harness_version=harness_version)
+    tokens_pruned = _tokens_pruned(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -199,6 +167,7 @@ def compute_kpis(
         improvement_rate=improvement_rate,
         injection_blocks=injection_blocks,
         token_totals=token_totals,
+        tokens_pruned=tokens_pruned,
     )
 
 
@@ -389,6 +358,42 @@ def _token_totals(
     return totals
 
 
+def _tokens_pruned(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> dict[str, int]:
+    """Per-session cumulative tokens pruned by ContextPruningHook (issue #418).
+
+    Sums ``tokens_dropped`` across every ``context_pruned`` event the hook
+    records. ``tokens_dropped`` is the hook's conservative estimate of the
+    token content of the events it removed; because the hook operates on
+    events (not raw tokens), the figure reflects the token footprint of the
+    pruned events as captured at the time of pruning.
+
+    A ``context_pruned`` event whose ``tokens_dropped`` is missing or zero
+    does **not** seed the session into the map — only sessions with at
+    least one prune that reported a non-zero token drop appear, mirroring
+    the ``_token_totals`` / ``_injection_blocks`` "show only when present"
+    contract.
+
+    Like the other per-session helpers this uses one
+    :meth:`TraceLogger.query_events` cursor with the kind and
+    ``harness_version`` filters pushed down.
+    """
+    pruned: dict[str, int] = {}
+    for event in logger.query_events(
+        kind="context_pruned",
+        harness_version=harness_version,
+    ):
+        dropped = event.payload.get("tokens_dropped", 0)
+        if isinstance(dropped, bool) or not isinstance(dropped, int):
+            continue
+        if dropped <= 0:
+            continue
+        pruned[event.session_id] = pruned.get(event.session_id, 0) + dropped
+    return pruned
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -457,153 +462,19 @@ def _render_markdown(summary: KpiSummary) -> str:
         lines.append("| --- | --- |")
         for sid, count in sorted(summary.token_totals.items()):
             lines.append(f"| {sid} | {count} |")
-    return "\n".join(lines)
-
-
-def _resolve_format(args_format: str | None, out: str | None) -> str:
-    """Return ``"markdown"`` or ``"json"``.
-
-    The explicit ``--format`` flag always wins. When unset, the format is
-    inferred from the ``--out`` file extension (``.json`` → JSON);
-    otherwise Markdown is returned. Issue #101 keeps the decision local to
-    the CLI layer so the pydantic model remains the single source of truth.
-    """
-    if args_format is not None:
-        return args_format
-    if out is not None and Path(out).suffix.lower() == ".json":
-        return "json"
-    return "markdown"
-
-
-def _render_json(summary: KpiSummary) -> str:
-    """Serialize a KPI summary as a stable JSON snapshot (issue #101)."""
-    return summary.model_dump_json(indent=2)
-
-
-def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> str:
-    """Render baseline / candidate / delta columns for the three PRD KPIs.
-
-    Issue #100 requires the comparison to surface a delta column whose
-    sign convention follows the PRD: improvement-rate up is good,
-    regression-rate and cycle-time up are bad.
-    """
-    lines = [
-        "| KPI | Baseline | Candidate | Delta |",
-        "| --- | --- | --- | --- |",
-        "| Cycle Time (seconds) | "
-        f"{_format_value(baseline.cycle_time_seconds)} | "
-        f"{_format_value(candidate.cycle_time_seconds)} | "
-        f"{_format_delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds, higher_is_better=False)} |",
-        "| Regression Rate | "
-        f"{_format_value(baseline.regression_rate)} | "
-        f"{_format_value(candidate.regression_rate)} | "
-        f"{_format_delta(baseline.regression_rate, candidate.regression_rate, higher_is_better=False)} |",
-        "| Improvement Rate | "
-        f"{_format_value(baseline.improvement_rate)} | "
-        f"{_format_value(candidate.improvement_rate)} | "
-        f"{_format_delta(baseline.improvement_rate, candidate.improvement_rate, higher_is_better=True)} |",
-    ]
-    return "\n".join(lines)
-
-
-def _render_comparison_json(comparison: KpiComparison) -> str:
-    """Serialize a baseline-vs-candidate comparison as JSON (issue #100)."""
-    return comparison.model_dump_json(indent=2)
-
-
-def _now_iso() -> str:
-    """Return a UTC ISO-8601 timestamp with offset suffix.
-
-    Issue #183 uses this to stamp each appended history row. The
-    timezone-aware form keeps the line unambiguous when CI runs
-    across multiple regions; ``datetime.fromisoformat`` (Python 3.11+)
-    accepts the ``+00:00`` suffix without modification.
-    """
-    return datetime.now(timezone.utc).isoformat()
-
-
-def append_kpi_history(
-    path: Path,
-    summary: KpiSummary,
-    harness_version: str | None = None,
-) -> None:
-    """Append one KPI snapshot to the append-only JSONL history log (issue #183).
-
-    Each run produces exactly one line. The three PRD-KPI fields are
-    emitted via :meth:`KpiSummary.model_dump` with ``injection_blocks``
-    and ``token_totals`` excluded (the "minus per-session maps" half of
-    the round-trip contract), then ``timestamp`` and the optional
-    ``harness_version`` are added. Parent directories are created on
-    demand so the operator does not have to ``mkdir`` before the first
-    run.
-
-    The file is opened in append mode and a single ``\\n``-terminated
-    line is written per call, so concurrent appends from independent
-    ``foundry-kpis`` invocations interleave cleanly at line
-    boundaries rather than corrupting the JSON payload of the
-    previous line.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = summary.model_dump(mode="json", exclude={"injection_blocks", "token_totals"})
-    payload["timestamp"] = _now_iso()
-    if harness_version is not None:
-        payload["harness_version"] = harness_version
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(payload) + "\n")
-
-
-def read_kpi_history(path: Path) -> list[KpiHistoryEntry]:
-    """Read every line of the JSONL history log (issue #183).
-
-    Returns entries in file order — which, for an append-only log,
-    is chronological order. Blank lines are tolerated; lines that
-    fail pydantic validation are skipped so a single malformed entry
-    (e.g. written by a future schema-bumped version of the CLI)
-    does not blank the trend table. A missing file yields an empty
-    list so the caller can render the placeholder table without a
-    precondition check.
-    """
-    if not path.exists():
-        return []
-    entries: list[KpiHistoryEntry] = []
-    with path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                entries.append(KpiHistoryEntry.model_validate_json(stripped))
-            except ValidationError:
-                continue
-    return entries
-
-
-def render_history_markdown(entries: Sequence[KpiHistoryEntry]) -> str:
-    """Render a Markdown trend table from KPI history entries (issue #183).
-
-    The table preserves file order, which is the same as append order
-    for a JSONL log. Each row carries the timestamp plus the three
-    PRD KPIs formatted with two decimals; ``None`` cycle times render
-    as ``N/A`` (same convention as :func:`_render_markdown`).
-
-    An empty history renders a single placeholder line so CI summary
-    cells that template-embed the table are never completely blank.
-    Plotting (matplotlib, ASCII sparklines) is explicitly out of
-    scope per the issue; a pure table is the contract.
-    """
-    if not entries:
-        return "_No KPI history entries yet._"
-    lines = [
-        "| Timestamp | Cycle Time (s) | Regression Rate | Improvement Rate |",
-        "| --- | --- | --- | --- |",
-    ]
-    for entry in entries:
+    # Issue #418: surface per-session tokens pruned only when at least one
+    # ``context_pruned`` event carried a non-zero ``tokens_dropped``.
+    if summary.tokens_pruned:
+        grand_total = sum(summary.tokens_pruned.values())
+        lines.append("")
         lines.append(
-            f"| {entry.timestamp} | "
-            f"{_format_value(entry.cycle_time_seconds)} | "
-            f"{_format_value(entry.regression_rate)} | "
-            f"{_format_value(entry.improvement_rate)} |"
+            f"Tokens Pruned: {grand_total} token(s) across {len(summary.tokens_pruned)} session(s)."
         )
+        lines.append("")
+        lines.append("| Session | Tokens Pruned |")
+        lines.append("| --- | --- |")
+        for sid, count in sorted(summary.tokens_pruned.items()):
+            lines.append(f"| {sid} | {count} |")
     return "\n".join(lines)
 
 
@@ -677,12 +548,12 @@ def append_kpi_history(
     """Append one KPI snapshot to the append-only JSONL history log (issue #183).
 
     Each run produces exactly one line. The three PRD-KPI fields are
-    emitted via :meth:`KpiSummary.model_dump` with ``injection_blocks``
-    and ``token_totals`` excluded (the "minus per-session maps" half of
-    the round-trip contract), then ``timestamp`` and the optional
-    ``harness_version`` are added. Parent directories are created on
-    demand so the operator does not have to ``mkdir`` before the first
-    run.
+    emitted via :meth:`KpiSummary.model_dump` with ``injection_blocks``,
+    ``token_totals``, and ``tokens_pruned`` excluded (the "minus per-
+    session maps" half of the round-trip contract), then ``timestamp``
+    and the optional ``harness_version`` are added. Parent directories
+    are created on demand so the operator does not have to ``mkdir``
+    before the first run.
 
     The file is opened in append mode and a single ``\\n``-terminated
     line is written per call, so concurrent appends from independent
@@ -691,7 +562,9 @@ def append_kpi_history(
     previous line.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = summary.model_dump(mode="json", exclude={"injection_blocks", "token_totals"})
+    payload = summary.model_dump(
+        mode="json", exclude={"injection_blocks", "token_totals", "tokens_pruned"}
+    )
     payload["timestamp"] = _now_iso()
     if harness_version is not None:
         payload["harness_version"] = harness_version

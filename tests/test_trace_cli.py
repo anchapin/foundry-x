@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-import pytest
 
 from foundry_x.trace.cli import main
 from foundry_x.trace.logger import TraceEvent, TraceLogger
