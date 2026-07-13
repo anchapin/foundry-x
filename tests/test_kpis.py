@@ -322,6 +322,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "injection_blocks",
         "token_totals",
         "regressed_tasks",
+        "aborted_benchmarks",
     }
 
 

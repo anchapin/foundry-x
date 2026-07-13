@@ -120,9 +120,19 @@ class BenchmarkTask(BaseModel):
         description="Tier used to weight the task in the improvement-rate KPI (PRD S5).",
     )
     timeout_seconds: int | None = Field(
-        default=None,
+        default=300,
         description=(
-            "Optional wall-clock cap (seconds) for the Runner. ``None`` means no limit is enforced."
+            "Optional wall-clock cap (seconds) for the Runner. Default is 300s (5 minutes) "
+            "so benchmarks do not run open-ended (issue #417)."
+        ),
+    )
+    token_budget: int | None = Field(
+        default=50000,
+        description=(
+            "Optional total-token cap for the Runner. When set, the session is "
+            "aborted with ``task_aborted(reason='token_budget')`` if the running "
+            "token total exceeds this value. Default is 50000 tokens so benchmarks "
+            "do not run open-ended (issue #417)."
         ),
     )
     requires_skills: list[str] = Field(
@@ -170,6 +180,14 @@ class BenchmarkTask(BaseModel):
         """A non-positive cap is nonsensical; surface it at validation time."""
         if value is not None and value <= 0:
             raise ValueError("timeout_seconds must be a positive integer")
+        return value
+
+    @field_validator("token_budget")
+    @classmethod
+    def _token_budget_positive(cls, value: int | None) -> int | None:
+        """A non-positive cap is nonsensical; surface it at validation time."""
+        if value is not None and value <= 0:
+            raise ValueError("token_budget must be a positive integer")
         return value
 
 
