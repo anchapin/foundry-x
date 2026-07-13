@@ -1211,6 +1211,15 @@ async def run_task(
 
     max_steps = _resolve_max_steps()
 
+    if skill_executor is not None:
+        executor = skill_executor
+    else:
+
+        async def _file_op_executor(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
+
+        executor = _file_op_executor
+
     log.record(
         session_id,
         kind="user_prompt",
