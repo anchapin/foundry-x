@@ -1,5 +1,7 @@
 """Benchmark task: gate the list-files-before-edit harness rule (issue #205).
 
+Closes #344.
+
 harness/system_prompt.txt:11 declares operating rule #1:
     "Before any non-trivial edit, list the files you will change and
     why."
