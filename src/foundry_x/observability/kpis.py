@@ -419,6 +419,12 @@ def _render_markdown(summary: KpiSummary) -> str:
     return "\n".join(lines)
 
 
+def _infer_backend(path: str | Path) -> str:
+    """Return ``"jsonl"`` for ``.jsonl`` paths, ``"sqlite"`` otherwise."""
+    suffix = Path(path).suffix.lower()
+    return "jsonl" if suffix == ".jsonl" else "sqlite"
+
+
 def _resolve_format(args_format: str | None, out: str | None) -> str:
     """Return ``"markdown"`` or ``"json"``.
 
@@ -654,7 +660,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     fmt = _resolve_format(args.format, args.out)
-    logger = TraceLogger(args.db)
+    backend = _infer_backend(args.db)
+    logger = TraceLogger(args.db, backend=backend)
 
     if baseline_version is not None and candidate_version is not None:
         comparison = compare_kpis(logger, baseline_version, candidate_version)

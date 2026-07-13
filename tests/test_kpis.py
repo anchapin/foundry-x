@@ -94,6 +94,37 @@ def test_compute_kpis_with_planted_data(tmp_path):
     assert summary.injection_blocks == {}
 
 
+def test_compute_kpis_jsonl_backend_produces_identical_results(tmp_path):
+    """JSONL traces yield identical KPI values to SQLite (issue #339)."""
+    jsonl_path = tmp_path / "traces.jsonl"
+    sqlite_path = tmp_path / "traces.db"
+
+    jsonl_logger = TraceLogger(jsonl_path, backend="jsonl")
+    sqlite_logger = TraceLogger(sqlite_path, backend="sqlite")
+
+    # Plant identical data on both backends.
+    for _ in range(3):
+        _seed_session(jsonl_logger, "v1", approved=True, passed_checks=["bench"])
+        _seed_session(sqlite_logger, "v1", approved=True, passed_checks=["bench"])
+
+    _seed_session(jsonl_logger, "v1", approved=False, failed_checks=["bench"])
+    _seed_session(sqlite_logger, "v1", approved=False, failed_checks=["bench"])
+
+    jsonl_summary = compute_kpis(jsonl_logger)
+    sqlite_summary = compute_kpis(sqlite_logger)
+
+    # Cycle time is timing-dependent; both are positive and not None.
+    assert jsonl_summary.cycle_time_seconds is not None
+    assert sqlite_summary.cycle_time_seconds is not None
+    assert jsonl_summary.cycle_time_seconds > 0
+    assert sqlite_summary.cycle_time_seconds > 0
+    # Deterministic KPI values must match exactly.
+    assert jsonl_summary.regression_rate == sqlite_summary.regression_rate
+    assert jsonl_summary.improvement_rate == sqlite_summary.improvement_rate
+    assert jsonl_summary.injection_blocks == sqlite_summary.injection_blocks
+    assert jsonl_summary.token_totals == sqlite_summary.token_totals
+
+
 def test_regression_rate_counts_prior_pass_now_failing(tmp_path):
     """A task passing then failing in a later verdict counts as a regression."""
     db = tmp_path / "traces.db"
@@ -163,6 +194,23 @@ def test_main_prints_markdown_table(tmp_path, capsys):
     assert "Improvement Rate" in output
     # No injection blocks planted → no extra section.
     assert "Injection Blocked" not in output
+
+
+def test_main_jsonl_backend_infers_from_path(tmp_path, capsys):
+    """The CLI auto-detects .jsonl backend from the --db path (issue #339)."""
+    jsonl = tmp_path / "traces.jsonl"
+    logger = TraceLogger(jsonl, backend="jsonl")
+    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", approved=False, failed_checks=["bench"])
+
+    rc = main(["--db", str(jsonl)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    output = captured.out
+    assert "Cycle Time" in output
+    assert "Regression Rate" in output
+    assert "Improvement Rate" in output
 
 
 # ---------------------------------------------------------------------------
