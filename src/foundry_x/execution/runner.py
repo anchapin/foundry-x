@@ -1211,14 +1211,16 @@ async def run_task(
 
     max_steps = _resolve_max_steps()
 
-    if skill_executor is not None:
-        executor = skill_executor
-    else:
-
-        async def _file_op_executor(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _execute_skill(name: str, arguments: dict[str, Any]) -> Any:
+        if skill_executor is not None:
+            return await skill_executor(name, arguments)
+        if name == "bash":
+            return await _bash_skill_executor(name, arguments, workspace_dir=workspace_root)
+        if name in ("list_dir", "grep_search", "edit_file", "write_file"):
             return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
+        return await _default_skill_executor(name, arguments)
 
-        executor = _file_op_executor
+    max_steps = _resolve_max_steps()
 
     log.record(
         session_id,
