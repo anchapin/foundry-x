@@ -119,7 +119,10 @@ TASK = BenchmarkTask(
         "in CI (issue #175). Set FOUNDRY_RUN_LIVE_LLM=1 to enable."
     ),
 )
-def test_real_llm_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_real_llm_smoke(
+    llamacpp_server: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Phase-3 plumbing canary for the live llama-server path (issue #175).
 
     Drives :func:`run_task` with the sort_a_list prompt and the
