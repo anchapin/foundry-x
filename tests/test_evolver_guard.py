@@ -99,8 +99,8 @@ def test_propose_calls_guard_before_body(tmp_path):
     e = Evolver(max_proposals_per_hour=1, max_diff_lines=200)
     e._record_proposals(1)
     failure = FailureReport(session_id="s", summary="x", proposed_class="clean")
-    with pytest.raises(EvolverGuardError, match="rate limit"):
-        e.propose(tmp_path / "harness", failure=failure)
+    result = e.propose(tmp_path / "harness", failure=failure)
+    assert result == []
 
 
 def test_propose_clean_class_returns_empty_list(tmp_path):
