@@ -317,6 +317,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     # so downstream tooling can `payload["cycle_time_seconds"]` etc.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
+        "evolver_time_seconds",
         "regression_rate",
         "improvement_rate",
         "injection_blocks",
@@ -741,9 +742,9 @@ def test_session_rejects_none_harness_version(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Issue #337: cycle_time measures task_received → proposal_generated, not
-# task_received → critic_verdict. The meta-loop cycle is the Evolver step,
-# not the Critic review step.
+# Issue #419: cycle_time measures task_received → critic_verdict, including
+# the Critic review step in the full evolution cycle. evolver_time_seconds
+# is the auxiliary field for task_received → proposal_generated.
 # ---------------------------------------------------------------------------
 
 
@@ -771,8 +772,8 @@ def _seed_session_with_proposal(
     return sid, elapsed
 
 
-def test_cycle_time_uses_proposal_generated_event(tmp_path):
-    """Cycle time is measured from task_received to proposal_generated (issue #337)."""
+def test_evolver_time_uses_proposal_generated_event(tmp_path):
+    """Evolver time is measured from task_received to proposal_generated (issue #419)."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
 
@@ -780,16 +781,17 @@ def test_cycle_time_uses_proposal_generated_event(tmp_path):
 
     summary = compute_kpis(logger)
 
-    assert summary.cycle_time_seconds is not None
-    assert summary.cycle_time_seconds > 0.0
-    assert abs(summary.cycle_time_seconds - planted_elapsed) < 0.02
+    assert summary.evolver_time_seconds is not None
+    assert summary.evolver_time_seconds > 0.0
+    assert abs(summary.evolver_time_seconds - planted_elapsed) < 0.02
+    assert summary.cycle_time_seconds is None
 
 
-def test_cycle_time_proposal_generated_not_critic_verdict(tmp_path):
-    """Cycle time uses proposal_generated, not critic_verdict (issue #337).
+def test_cycle_time_uses_critic_verdict_event(tmp_path):
+    """Cycle time is measured from task_received to critic_verdict (issue #419).
 
-    A session with only critic_verdict (no proposal_generated) should have
-    no cycle_time measurement since the meta-loop was never closed.
+    A session with only critic_verdict (no proposal_generated) has
+    cycle_time but no evolver_time since the evolver step was skipped.
     """
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
@@ -808,4 +810,6 @@ def test_cycle_time_proposal_generated_not_critic_verdict(tmp_path):
 
     summary = compute_kpis(logger)
 
-    assert summary.cycle_time_seconds is None
+    assert summary.cycle_time_seconds is not None
+    assert summary.cycle_time_seconds > 0.0
+    assert summary.evolver_time_seconds is None

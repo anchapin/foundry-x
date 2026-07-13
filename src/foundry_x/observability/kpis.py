@@ -12,9 +12,12 @@ This module derives approximations of those metrics from the events already
 recorded by :class:`~foundry_x.trace.logger.TraceLogger`:
 
 * ``cycle_time_seconds`` — mean wall-clock time from the first
-  ``task_received`` event to the first ``proposal_generated`` event per session
-  (issue #337: the meta-loop cycle is task_received → proposal_generated,
-  not task_received → critic_verdict).
+  ``task_received`` event to the first ``critic_verdict`` event per session
+  (issue #419: the full evolution cycle includes the Critic review step).
+* ``evolver_time_seconds`` — mean wall-clock time from the first
+  ``task_received`` event to the first ``proposal_generated`` event per session.
+  This auxiliary field tracks the Evolver-only step so operators can see how
+  much time the Critic adds to the full cycle (issue #419).
 * ``regression_rate`` — fraction of sessions with a ``critic_verdict`` in which
   a task previously seen in ``passed_checks`` later appears in ``failed_checks``
   (the persisted :class:`~foundry_x.observability.regression_report.VerdictRecord`
@@ -93,6 +96,7 @@ class KpiSummary(BaseModel):
     """
 
     cycle_time_seconds: float | None = None
+    evolver_time_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
     injection_blocks: dict[str, int] = {}
@@ -171,6 +175,7 @@ def compute_kpis(
     materialized in Python.
     """
     cycle_time = _cycle_time(logger, harness_version=harness_version, since=since, until=until)
+    evolver_time = _evolver_time(logger, harness_version=harness_version, since=since, until=until)
     regression_rate, improvement_rate, regressed_tasks = _verdict_rates(
         logger, harness_version=harness_version, since=since, until=until
     )
@@ -181,6 +186,7 @@ def compute_kpis(
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
+        evolver_time_seconds=evolver_time,
         regression_rate=regression_rate,
         improvement_rate=improvement_rate,
         injection_blocks=injection_blocks,
@@ -224,6 +230,9 @@ def _compute_deltas(
 
     return {
         "cycle_time_seconds": _delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds),
+        "evolver_time_seconds": _delta(
+            baseline.evolver_time_seconds, candidate.evolver_time_seconds
+        ),
         "regression_rate": _delta(baseline.regression_rate, candidate.regression_rate),
         "improvement_rate": _delta(baseline.improvement_rate, candidate.improvement_rate),
     }
@@ -235,13 +244,13 @@ def _cycle_time(
     since: str | None = None,
     until: str | None = None,
 ) -> float | None:
-    """Mean wall-clock time from ``task_received`` to ``proposal_generated``.
+    """Mean wall-clock time from ``task_received`` to ``critic_verdict``.
 
-    Issue #337 — Cycle Time is defined as "Agent Failure to Harness Edit
-    Proposal" per PRD §5. The meta-loop cycle is task_received →
-    proposal_generated (the Evolver step), not task_received →
-    critic_verdict (which includes the Critic review step that is
-    external to the evolution loop).
+    Issue #419 — Cycle Time is defined as "Agent Failure to Harness Edit
+    Proposal" per PRD §5. The full evolution cycle is task_received →
+    critic_verdict (including the Critic review step). Previously this
+    measured task_received → proposal_generated (Evolver only), which
+    excluded the Critic and undercounted the full cycle.
 
     Issue #273 — previously looped every session id and called
     ``iter_events`` twice per session to find the first event of each
@@ -251,6 +260,50 @@ def _cycle_time(
     first-event-of-kind semantics.
 
     Issue #340 — ``since`` and ``until`` filter the query cursors.
+    """
+    start_events: dict[str, TraceEvent] = {}
+    for event in logger.query_events(
+        kind="task_received", harness_version=harness_version, since=since, until=until
+    ):
+        start_events.setdefault(event.session_id, event)
+    end_events: dict[str, TraceEvent] = {}
+    for event in logger.query_events(
+        kind="critic_verdict", harness_version=harness_version, since=since, until=until
+    ):
+        end_events.setdefault(event.session_id, event)
+
+    deltas: list[float] = []
+    for sid, start_event in start_events.items():
+        end_event = end_events.get(sid)
+        if end_event is None:
+            continue
+        try:
+            t0 = datetime.fromisoformat(start_event.timestamp)
+            t1 = datetime.fromisoformat(end_event.timestamp)
+        except ValueError:
+            continue
+        delta = (t1 - t0).total_seconds()
+        if delta > 0:
+            deltas.append(delta)
+    if not deltas:
+        return None
+    return sum(deltas) / len(deltas)
+
+
+def _evolver_time(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+) -> float | None:
+    """Mean wall-clock time from ``task_received`` to ``proposal_generated``.
+
+    Issue #419 — This auxiliary field tracks the Evolver-only step so operators
+    can see how much time the Critic adds to the full cycle. The delta between
+    ``cycle_time_seconds`` and ``evolver_time_seconds`` shows the Critic's
+    contribution to total cycle time.
+
+    Shares the same query-cursor pattern as :func:`_cycle_time` (issue #273).
     """
     start_events: dict[str, TraceEvent] = {}
     for event in logger.query_events(
@@ -449,6 +502,7 @@ def _render_markdown(summary: KpiSummary) -> str:
         "| KPI | Value |",
         "| --- | --- |",
         f"| Cycle Time (seconds) | {_format_value(summary.cycle_time_seconds)} |",
+        f"| Evolver Time (seconds) | {_format_value(summary.evolver_time_seconds)} |",
         f"| Regression Rate | {_format_value(summary.regression_rate)} |",
         f"| Improvement Rate | {_format_value(summary.improvement_rate)} |",
     ]
@@ -533,6 +587,10 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{_format_value(baseline.cycle_time_seconds)} | "
         f"{_format_value(candidate.cycle_time_seconds)} | "
         f"{_format_delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds, higher_is_better=False)} |",
+        "| Evolver Time (seconds) | "
+        f"{_format_value(baseline.evolver_time_seconds)} | "
+        f"{_format_value(candidate.evolver_time_seconds)} | "
+        f"{_format_delta(baseline.evolver_time_seconds, candidate.evolver_time_seconds, higher_is_better=False)} |",
         "| Regression Rate | "
         f"{_format_value(baseline.regression_rate)} | "
         f"{_format_value(candidate.regression_rate)} | "
@@ -584,7 +642,8 @@ def append_kpi_history(
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = summary.model_dump(
-        mode="json", exclude={"injection_blocks", "token_totals", "regressed_tasks"}
+        mode="json",
+        exclude={"injection_blocks", "token_totals", "regressed_tasks", "evolver_time_seconds"},
     )
     payload["timestamp"] = _now_iso()
     if harness_version is not None:
