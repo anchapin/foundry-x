@@ -1,5 +1,7 @@
 """Compute the three PRD success-metric KPIs from trace data.
 
+Closes #336.
+
 The PRD (``docs/PRD.md`` §5) defines:
 
 * **Cycle Time** — time from *Agent Failure* to *Harness Edit Proposal*.
