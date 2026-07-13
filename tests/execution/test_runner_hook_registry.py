@@ -120,6 +120,4 @@ class TestResolveHookRegistry:
 
 
 if __name__ == "__main__":
-<<<<<<< HEAD
-<<<<<<< HEAD
     pytest.main([__file__, "-v"])
