@@ -233,7 +233,8 @@ def test_adr_index_validation_precision() -> None:
     """
     numbers = sorted({num for num, _ in _adr_file_entries()})
     assert numbers, "no ADR files found"
-    assert max(numbers) == numbers[-1], "max should be last after sorting"
+    assert 1 in numbers, "ADR 0001 should exist"
+    assert 10 in numbers, "ADR 0010 should exist"
 
     # ADR-0011 referenced but missing should be detectable
     # This is the exact issue being fixed
