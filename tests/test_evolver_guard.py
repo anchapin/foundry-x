@@ -174,3 +174,105 @@ def test_propose_records_proposal(tmp_path):
         assert len(result) == 1
     events = list(logger.iter_events(session_id, kind=PROPOSED_EDIT_KIND))
     assert len(events) == 1
+
+
+class TestMutationClassDerivation:
+    def test_system_prompt_file_derives_system_prompt_mutation_class(self):
+        from foundry_x.evolution.evolver import _derive_mutation_class
+
+        result = _derive_mutation_class("harness/system_prompt.txt")
+        assert result == "system-prompt"
+
+    def test_hooks_file_derives_hook_mutation_class(self):
+        from foundry_x.evolution.evolver import _derive_mutation_class
+
+        result = _derive_mutation_class("harness/hooks/my_hook.py")
+        assert result == "hook"
+
+    def test_skills_file_derives_skill_mutation_class(self):
+        from foundry_x.evolution.evolver import _derive_mutation_class
+
+        result = _derive_mutation_class("harness/skills/my_skill.py")
+        assert result == "skill"
+
+    def test_propose_wires_mutation_class(self, tmp_path):
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        prompt_file = harness_dir / "system_prompt.txt"
+        prompt_file.write_text("You are FoundryAgent.\n", encoding="utf-8")
+        e = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+        failure = FailureReport(session_id="s", summary="x", proposed_class="wrong-tool")
+        result = e.propose(harness_dir, failure=failure)
+        assert len(result) == 1
+        assert result[0].mutation_class == "system-prompt"
+
+
+class TestProposedEditMutationFields:
+    def test_default_mutation_fields(self):
+        diff = _make_diff("be precise")
+        edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="tighten tool guidance",
+            unified_diff=diff,
+        )
+        assert edit.mutation_class == "system-prompt"
+        assert edit.risk_level == "low"
+        assert edit.is_corrective is False
+
+    def test_explicit_mutation_fields(self):
+        diff = _make_diff("be precise")
+        edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="tighten tool guidance",
+            unified_diff=diff,
+            mutation_class="hook",
+            risk_level="medium",
+            is_corrective=True,
+        )
+        assert edit.mutation_class == "hook"
+        assert edit.risk_level == "medium"
+        assert edit.is_corrective is True
+
+
+class TestHighRiskValidator:
+    def test_high_risk_with_short_rationale_rejected(self):
+        diff = _make_diff("be precise")
+        with pytest.raises(
+            Exception, match="high-risk edits require a rationale of at least 20 characters"
+        ):
+            ProposedEdit(
+                target_file="harness/system_prompt.txt",
+                rationale="short",
+                unified_diff=diff,
+                risk_level="high",
+            )
+
+    def test_high_risk_with_long_rationale_accepted(self):
+        diff = _make_diff("be precise")
+        edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="this is a very thorough rationale explaining the change",
+            unified_diff=diff,
+            risk_level="high",
+        )
+        assert edit.risk_level == "high"
+
+    def test_medium_risk_with_short_rationale_accepted(self):
+        diff = _make_diff("be precise")
+        edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="short",
+            unified_diff=diff,
+            risk_level="medium",
+        )
+        assert edit.risk_level == "medium"
+
+    def test_low_risk_with_short_rationale_accepted(self):
+        diff = _make_diff("be precise")
+        edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="short",
+            unified_diff=diff,
+            risk_level="low",
+        )
+        assert edit.risk_level == "low"
