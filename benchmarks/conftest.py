@@ -44,14 +44,20 @@ ADR-0004 / ADR-0005.
 
 from __future__ import annotations
 
+import os
 import shutil
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import httpx
 import pytest
 
 #: Root directory for static benchmark fixture data (``benchmarks/fixtures/``).
 FIXTURES_ROOT = Path(__file__).parent / "fixtures"
+
+#: Default timeout for llama-server /health polling.
+_LLAMACPP_HEALTH_TIMEOUT = 60
 
 
 def _seed_workspace(workspace: Path, seed_name: str) -> None:
@@ -95,3 +101,41 @@ def benchmark_workspace(request: pytest.FixtureRequest, tmp_path: Path) -> Itera
     yield workspace
     # ``tmp_path`` (and everything beneath it) is removed by pytest at the end
     # of the session, so explicit cleanup here is unnecessary.
+
+
+@pytest.fixture(scope="session")
+def llamacpp_server() -> Iterator[str]:
+    """Confirm llama-server is reachable and yield its base URL.
+
+    Session-scoped: the server is probed once and the result is shared across
+    all benchmark tasks in the session. Skips if ``LLAMACPP_HOST`` is unset.
+    Polls ``/health`` for up to 60 seconds before declaring the server
+    unreachable.
+
+    Benchmark tasks that require inference should depend on this fixture via
+    ``pytest.mark.benchmark`` so they skip gracefully when the server is
+    absent (issue #355).
+    """
+    host = os.environ.get("LLAMACPP_HOST")
+    if not host:
+        pytest.skip("LLAMACPP_HOST is not set; skipping inference-requiring benchmark")
+
+    base_url = host.rstrip("/")
+    health_url = f"{base_url}/health"
+
+    with httpx.Client(timeout=5.0) as client:
+        for attempt in range(_LLAMACPP_HEALTH_TIMEOUT):
+            try:
+                response = client.get(health_url)
+                if response.status_code == 200 and '"ok"' in response.text:
+                    break
+            except httpx.RequestError:
+                pass
+            time.sleep(1)
+        else:
+            pytest.skip(
+                f"llama-server not reachable at {base_url} after "
+                f"{_LLAMACPP_HEALTH_TIMEOUT}s; skipping inference-requiring benchmark"
+            )
+
+    yield base_url
