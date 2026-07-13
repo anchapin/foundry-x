@@ -270,7 +270,10 @@ class Evolver:
         failure: FailureReport,
         current_diff: str | None = None,
     ) -> list[ProposedEdit]:
-        self._check_rate_limit()
+        try:
+            self._check_rate_limit()
+        except EvolverGuardError:
+            return []
         if failure.proposed_class == "clean":
             return []
         template = _PROPOSED_CLASS_EDIT_TEMPLATES.get(failure.proposed_class)
@@ -298,6 +301,9 @@ class Evolver:
             rationale=rationale,
             unified_diff=unified_diff,
         )
-        self._validate_edit(edit)
+        try:
+            self._validate_edit(edit)
+        except EvolverGuardError:
+            return []
         self._record_proposals(edit=edit)
         return [edit]
