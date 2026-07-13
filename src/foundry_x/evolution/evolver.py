@@ -4,9 +4,9 @@ import difflib
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from foundry_x.evolution.digester import FailureReport
 
@@ -147,6 +147,17 @@ def _confine_to_harness_tree(raw: str) -> str:
     return canonical
 
 
+def _derive_mutation_class(target_file: str) -> Literal["system-prompt", "hook", "skill"]:
+    """Infer the mutation class from the target file path."""
+    parts = target_file.split("/")
+    if len(parts) >= 2 and parts[1] == _HARNESS_PROMPT_FILE:
+        return "system-prompt"
+    if len(parts) >= 2 and parts[1] in _HARNESS_SUBDIRS:
+        subdir = parts[1]
+        return "hook" if subdir == "hooks" else "skill"
+    return "system-prompt"
+
+
 class ProposedEdit(BaseModel):
     """A single targeted harness edit proposed by the Evolver (ADR-0006).
 
@@ -155,11 +166,18 @@ class ProposedEdit(BaseModel):
     Critic and wasting a gate run. ``target_file`` is further confined to
     the harness tree (ADR-0004) at construction time. ``unified_diff`` must
     be a valid git-apply unified diff with ``--- a/`` and ``+++ b/`` headers.
+
+    Mutation-classification fields (``mutation_class``, ``risk_level``,
+    ``is_corrective``) enable the Critic to apply differential rigor per
+    edit class, improving Improvement Rate and Regression Rate KPIs.
     """
 
     target_file: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
     unified_diff: str = Field(min_length=1)
+    mutation_class: Literal["system-prompt", "hook", "skill"] = "system-prompt"
+    risk_level: Literal["low", "medium", "high"] = "low"
+    is_corrective: bool = False
 
     @field_validator("target_file")
     @classmethod
@@ -188,6 +206,21 @@ class ProposedEdit(BaseModel):
         if not any(line.startswith("+++ b/") for line in lines):
             raise ValueError("unified_diff missing '+++ b/' header required by git apply")
         return value
+
+    @model_validator(mode="after")
+    def _high_risk_needs_long_rationale(self) -> "ProposedEdit":
+        """Reject high-risk edits that lack a substantive rationale.
+
+        High-risk edits without detailed justification may indicate reckless
+        changes. A rationale shorter than 20 characters is insufficient for
+        the Critic to assess a high-risk edit properly.
+        """
+        if self.risk_level == "high" and len(self.rationale) < 20:
+            raise ValueError(
+                "high-risk edits require a rationale of at least 20 characters; "
+                f"got {len(self.rationale)!r} ({self.rationale!r})"
+            )
+        return self
 
 
 class EvolverGuardError(ValueError):
@@ -297,6 +330,7 @@ class Evolver:
             target_file=confined_target,
             rationale=rationale,
             unified_diff=unified_diff,
+            mutation_class=_derive_mutation_class(confined_target),
         )
         self._validate_edit(edit)
         self._record_proposals(edit=edit)
