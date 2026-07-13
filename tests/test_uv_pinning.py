@@ -6,7 +6,7 @@ parses the Dockerfile directly, no Docker daemon required.
 Per ADR-0002 and `docs/SECURITY.md` threat #3, the Dockerfile MUST pin
 both the base image and the uv installer to digests (issue #124):
 
-- The `FROM python:3.11-slim` line MUST carry a `@sha256:<64hex>` digest
+ - The `FROM python:3.14-slim` line MUST carry a `@sha256:<64hex>` digest
   so a fresh Docker Hub build of the same tag cannot swap the base
   layer between rebuilds.
 - The uv installer MUST be fetched as a GitHub release tarball AND
@@ -42,14 +42,14 @@ def lines(dockerfile_text: str) -> list[str]:
 def test_base_image_is_digest_pinned(lines: list[str]) -> None:
     """The base image MUST be pinned to a digest (`@sha256:<64hex>`).
 
-    A tag-only `FROM python:3.11-slim` allows Docker Hub to swap the
+    A tag-only `FROM python:3.14-slim` allows Docker Hub to swap the
     layer contents between rebuilds (docs/SECURITY.md threat #3).
     Closes the gap that issue #124 calls out on line 1.
     """
     from_lines = [ln for ln in lines if re.match(r"^\s*FROM\s+\S", ln)]
     assert from_lines, "Dockerfile must start with a FROM instruction"
     first = from_lines[0]
-    assert "python:3.11" in first, f"FROM must pin a Python 3.11 image, got: {first!r}"
+    assert "python:3.14" in first, f"FROM must pin a Python 3.14 image, got: {first!r}"
     digest = re.search(r"@sha256:([a-f0-9]{64})\b", first)
     assert digest, (
         f"FROM must pin a digest (@sha256:<64hex>), got: {first!r}. "
