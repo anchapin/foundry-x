@@ -6,6 +6,35 @@ on:
     branches: [main]
 
 jobs:
+  conflict-markers:
+    name: detect conflict markers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv (hash-verified)
+        uses: ./.github/actions/install-uv
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Check for conflict markers
+        run: |
+          echo "Checking for merge conflict markers in changed files..."
+          markers=$(uv run rg --hidden --no-heading --line-number '<<<<<<< |=======|>>>>>>> ' HEAD ^develop 2>/dev/null | head -50)
+          if [ -n "$markers" ]; then
+            echo "ERROR: Merge conflict markers found:"
+            echo "$markers"
+            exit 1
+          fi
+          echo "No conflict markers found."
+
   ci:
     name: lint + test
     runs-on: ubuntu-latest
