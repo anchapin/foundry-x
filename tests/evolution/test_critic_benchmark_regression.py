@@ -82,6 +82,7 @@ def _baseline_critic(harness_dir: Path) -> Critic:
         harness_dir=harness_dir,
         pytest_args=["-q", "tests/test_benchmarks.py"],
         benchmark_tasks=[task_a, task_b],
+        use_sandbox=False,
     )
 
 
