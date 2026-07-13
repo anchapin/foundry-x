@@ -1122,6 +1122,17 @@ async def run_task(
     cap (matches the existing wall_clock + ``task_aborted`` pairing in
     SECURITY.md "Runaway detection").
 
+    Token-budget enforcement (issue #197): the loop accumulates
+    ``response.usage.total_tokens`` across steps. When the running total
+    exceeds ``limits.token_budget`` after a ``model_response`` is recorded,
+    the loop emits a ``task_aborted`` event with ``reason="token_budget"``
+    and terminates with ``outcome.status="failed"``,
+    ``outcome.reason="token_budget"``. The token-budget check lives in
+    ``run_task`` (not :func:`run_with_limits`) because ``run_task`` owns the
+    running counter; :func:`run_with_limits` continues to own the wall-clock
+    cap (matches the existing wall_clock + ``task_aborted`` pairing in
+    SECURITY.md "Runaway detection").
+
     On any model error the loop records a ``model_error`` event, sets
     ``outcome.status="failed"`` and ``outcome.reason="model_error"``, and
     re-raises so ``main()`` can append the ``task_failed`` terminal marker.
@@ -1156,6 +1167,17 @@ async def run_task(
     resolved_workspace_root = (
         workspace_root if workspace_root is not None else _resolve_workspace_root()
     )
+
+    async def _execute_skill(name: str, arguments: dict[str, Any]) -> Any:
+        if skill_executor is not None:
+            return await skill_executor(name, arguments)
+        if name == "bash":
+            return await _bash_skill_executor(name, arguments, workspace_dir=workspace_root)
+        if name in ("list_dir", "grep_search", "edit_file", "write_file"):
+            return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
+        return await _default_skill_executor(name, arguments)
+
+    max_steps = _resolve_max_steps()
 
     async def _execute_skill(name: str, arguments: dict[str, Any]) -> Any:
         if skill_executor is not None:
