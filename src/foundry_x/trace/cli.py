@@ -698,6 +698,48 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     seed_parser.set_defaults(func=_seed_sample_trace)
 
+    # Issue #275: delete-session / prune (retention policy)
+    delete_session_parser = sub.add_parser(
+        "delete-session",
+        help="Delete a session and all its events (idempotent).",
+    )
+    delete_session_parser.add_argument("session_id", help="Session to delete.")
+    delete_session_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    delete_session_parser.set_defaults(func=_delete_session)
+
+    prune_parser = sub.add_parser(
+        "prune",
+        help="Remove old sessions per retention policy (--keep-last or --older-than).",
+    )
+    prune_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    prune_group = prune_parser.add_mutually_exclusive_group(required=True)
+    prune_group.add_argument(
+        "--keep-last",
+        type=int,
+        metavar="N",
+        help="Keep only the N most recent sessions (by started_at).",
+    )
+    prune_group.add_argument(
+        "--older-than",
+        type=int,
+        metavar="DAYS",
+        help="Remove sessions older than DAYS days (by started_at).",
+    )
+    prune_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List sessions that would be removed without deleting them.",
+    )
+    prune_parser.set_defaults(func=_prune)
+
     return parser
 
 
