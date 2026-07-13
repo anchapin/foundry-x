@@ -23,7 +23,13 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-extras --dev
 
+      - name: uv.lock drift check
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          if ! git diff --quiet origin/${{ github.base_ref }} HEAD -- uv.lock; then
+            echo "ERROR: uv.lock changed in this PR — dependency changes must be intentional"
+            exit 1
+          fi
+
       - name: uv pip audit
-        # `uv pip audit` was removed in uv 0.9.x; use `uvx pip-audit`
-        # which runs the canonical PyPA tool via uv's ephemeral env.
         run: uvx pip-audit
