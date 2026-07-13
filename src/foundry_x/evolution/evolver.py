@@ -19,7 +19,7 @@ PROPOSED_EDIT_KIND: str = "proposed_edit"
 # "max N proposals per hour" guardrail.
 _RATE_WINDOW = timedelta(hours=1)
 
-# ADR-0004 + AGENTS.md §2: the only files the Evolver may propose edits to
+# ADR-0004 + AGENTS.md §2: the only files the Evolver (the meta-agent) may propose edits to
 # live under ``harness/``. The harness tree contains other files (e.g.
 # ``VERSION``) that are NOT editable by the evolution loop, so the allowed
 # set is enumerated explicitly rather than "everything under harness/".

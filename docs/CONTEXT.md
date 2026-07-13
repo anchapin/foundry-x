@@ -15,6 +15,9 @@
   loop, and the conventions that hold it together.
 - **FoundryAgent** — the runtime coding agent wrapped by the harness.
   Its persona and operating rules live in `harness/system_prompt.txt`.
+  This is a **harness-layer term**: the ``src/foundry_x/`` library does not
+  reference ``FoundryAgent``; the term belongs to the artifact under
+  evolution, not the foundry code that drives it.
 - **Harness** — the artifact being evolved. Consists of the system
   prompt, hooks, and skills. Version-controlled, evolved by the
   `Evolver`, gated by the `Critic`. Per PHILOSOPHY.md §6, the harness
@@ -36,8 +39,8 @@
 - **Digester** — parses a trace (or set of traces) and produces a
   failure report: what failed, where, and the candidate root cause.
   (`src/foundry_x/evolution/digester.py`)
-- **Evolver** — a meta-agent that takes a failure report and proposes
-  a `ProposedEdit` against the harness.
+- **Evolver** — a meta-agent (harness-layer role) that takes a failure report
+  and proposes a `ProposedEdit` against the harness.
   (`src/foundry_x/evolution/evolver.py`)
 - **Critic** — the gatekeeper. Runs the proposed edit through the
   pytest suite and benchmark suite; rejects regressions.
@@ -72,7 +75,9 @@ many times per day against a benchmark suite.
 - **meta-agent** — an agent that operates on another agent's artifacts
   rather than on the end task; in FoundryX the `Evolver` is the
   meta-agent that turns failure reports into `ProposedEdit`s against
-  the harness.
+  the harness.  This is a **harness-layer term**: the concept names a
+  role within the artifact under evolution, not a class or function
+  inside ``src/foundry_x/``.
 - **failure report** — the structured artifact produced by the
   `Digester` from a trace, naming what failed, where, and the candidate
   root cause; consumed by the `Evolver` as the basis for a
