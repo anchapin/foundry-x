@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import shlex
 import statistics
 import subprocess
 import sys
@@ -550,6 +551,82 @@ def _import_hook_types() -> tuple[type, type]:
     return ToolCall, ToolResult
 
 
+def _truncate_at_newline(data: bytes, max_bytes: int) -> tuple[bytes, bool]:
+    """Truncate bytes to max_bytes at the largest '\\n' boundary <= max_bytes.
+
+    Returns (truncated_data, was_truncated). If data fits in max_bytes,
+    returns (data, False).
+    """
+    if len(data) <= max_bytes:
+        return data, False
+    candidate = data[:max_bytes]
+    last_newline = candidate.rfind(b"\n")
+    if last_newline >= 0:
+        return candidate[: last_newline + 1], True
+    return candidate, True
+
+
+async def _bash_skill_executor(
+    name: str, arguments: dict[str, Any], *, workspace_dir: Path | None = None
+) -> dict[str, Any]:
+    """Subprocess-backed bash skill executor (issue #258).
+
+    Executes a single shell command via ``subprocess.run`` with ``shell=False``.
+    Per ``harness/skills/bash.json``:
+    - ``command`` is split with ``shlex.split`` and passed as argv (no shell)
+    - ``cwd`` defaults to ``workspace_dir`` if not provided
+    - ``timeout_seconds`` defaults to 30; on timeout exit_code=-1 and truncated=True
+    - ``max_output_bytes`` defaults to 32768; output is truncated at newline boundary
+    """
+    command: str = arguments.get("command", "")
+    cwd_arg: str | None = arguments.get("cwd")
+    timeout_seconds: int = arguments.get("timeout_seconds", 30)
+    max_output_bytes: int = arguments.get("max_output_bytes", 32768)
+
+    cwd: Path | None = None
+    if cwd_arg:
+        cwd = Path(cwd_arg)
+    elif workspace_dir:
+        cwd = workspace_dir
+
+    argv = shlex.split(command)
+
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            timeout=timeout_seconds,
+            shell=False,
+        )
+        stdout_raw = proc.stdout or b""
+        stderr_raw = proc.stderr or b""
+
+        stdout_truncated, stdout_was_truncated = _truncate_at_newline(stdout_raw, max_output_bytes)
+        stderr_truncated, stderr_was_truncated = _truncate_at_newline(stderr_raw, max_output_bytes)
+
+        return {
+            "stdout": stdout_truncated.decode("utf-8", errors="replace"),
+            "stderr": stderr_truncated.decode("utf-8", errors="replace"),
+            "exit_code": proc.returncode,
+            "truncated": stdout_was_truncated or stderr_was_truncated,
+        }
+    except subprocess.TimeoutExpired as exc:
+        stdout_raw = exc.stdout or b""
+        stderr_raw = exc.stderr or b""
+
+        stdout_truncated, _ = _truncate_at_newline(stdout_raw, max_output_bytes)
+        stderr_truncated, _ = _truncate_at_newline(stderr_raw, max_output_bytes)
+
+        return {
+            "stdout": stdout_truncated.decode("utf-8", errors="replace"),
+            "stderr": stderr_truncated.decode("utf-8", errors="replace"),
+            "exit_code": -1,
+            "truncated": True,
+        }
+
+
 async def _default_skill_executor(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Default skill executor that acknowledges the call (issue #89).
 
@@ -1031,8 +1108,8 @@ async def run_task(
     The tool surface is data-driven: a skill lands as soon as its JSON file
     does (issue #104, #105). Skill execution is delegated to ``skill_executor``
     (default: ``_default_skill_executor`` — a stub that acknowledges the call);
-    real ``subprocess.run``-backed executors are wired in a follow-up so the
-    Critic gate (ADR-0004) can evaluate them independently.
+    the ``bash`` skill is handled by ``_bash_skill_executor`` which uses
+    ``subprocess.run`` with ``shell=False`` (issue #258).
 
     Token-budget enforcement (issue #197): the loop accumulates
     ``response.usage.total_tokens`` across steps. When the running total
@@ -1079,16 +1156,17 @@ async def run_task(
     resolved_workspace_root = (
         workspace_root if workspace_root is not None else _resolve_workspace_root()
     )
-    max_steps = _resolve_max_steps()
 
-    if skill_executor is not None:
-        executor = skill_executor
-    else:
-
-        async def _file_op_executor(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _execute_skill(name: str, arguments: dict[str, Any]) -> Any:
+        if skill_executor is not None:
+            return await skill_executor(name, arguments)
+        if name == "bash":
+            return await _bash_skill_executor(name, arguments, workspace_dir=workspace_root)
+        if name in ("list_dir", "grep_search", "edit_file", "write_file"):
             return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
+        return await _default_skill_executor(name, arguments)
 
-        executor = _file_op_executor
+    max_steps = _resolve_max_steps()
 
     log.record(
         session_id,
@@ -1199,7 +1277,7 @@ async def run_task(
                 output: Any
                 error: str | None = None
                 try:
-                    output = await executor(call.name, dict(call.arguments))
+                    output = await _execute_skill(call.name, dict(call.arguments))
                 except Exception as exc:
                     output = None
                     error = f"{type(exc).__name__}: {exc}"
