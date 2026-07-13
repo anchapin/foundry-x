@@ -145,18 +145,24 @@ class TestBashSkillExecutor:
 
 
 class TestDefaultSkillExecutor:
-    """Tests for _default_skill_executor to ensure backward compatibility."""
+    """Tests for _default_skill_executor (issue #416).
+
+    The default executor now returns an explicit error envelope for any
+    unimplemented skill, replacing the fake ``{"status": "ok"}`` stub.
+    """
 
     @pytest.mark.asyncio
-    async def test_returns_acknowledgment_envelope(self) -> None:
+    async def test_returns_error_envelope_for_unimplemented_skill(self) -> None:
         result = await _default_skill_executor("bash", {"command": "echo hello"})
-        assert result["status"] == "ok"
+        assert result["error"] is not None
+        assert "not implemented" in result["error"]
         assert result["skill"] == "bash"
         assert "command" in result["echo"]
 
     @pytest.mark.asyncio
-    async def test_echoes_argument_keys(self) -> None:
-        result = await _default_skill_executor("read_file", {"path": "/tmp/x", "offset": 10})
-        assert result["status"] == "ok"
-        assert result["skill"] == "read_file"
-        assert sorted(result["echo"]) == ["offset", "path"]
+    async def test_echoes_argument_keys_for_unimplemented_skill(self) -> None:
+        result = await _default_skill_executor("nonexistent_skill", {"path": "/tmp/x"})
+        assert result["error"] is not None
+        assert "not implemented" in result["error"]
+        assert result["skill"] == "nonexistent_skill"
+        assert result["echo"] == ["path"]

@@ -13,6 +13,8 @@
     "example_skill.json",
     "grep_search.json",
     "list_dir.json",
+    "read_file.json",
+    "read_multiple_files.json",
     "write_file.json"
   ]
 }
