@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from foundry_x.evolution.digester import FailureReport
 from foundry_x.evolution.evolver import (
     Evolver,
     EvolverGuardError,
@@ -150,34 +151,36 @@ def test_diff_at_exact_line_cap_passes() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_propose_n_plus_first_call_raises_rate_limit_error() -> None:
+def test_propose_n_plus_first_call_raises_rate_limit_error(tmp_path) -> None:
     """The ``(max_proposals_per_hour + 1)``-th ``propose()`` within the
     rolling window raises ``EvolverGuardError``.
 
     Pin for issue #94 acceptance criterion 3. With
     ``max_proposals_per_hour=2``, two pre-existing timestamps fill the
     window; the next ``propose()`` must be rejected by the guard *before*
-    any body work runs (the body currently raises ``NotImplementedError``,
-    so the ``EvolverGuardError`` here proves the guard fired first).
+    any body work runs (the ``EvolverGuardError`` here proves the guard
+    fired first).
     """
     evolver = Evolver(max_proposals_per_hour=2, max_diff_lines=200)
     evolver._record_proposals(2)  # fill the window to the cap
+    failure = FailureReport(session_id="s", summary="x", proposed_class="clean")
     with pytest.raises(EvolverGuardError, match="rate limit exceeded"):
-        evolver.propose(Path("/nonexistent/harness"), failure=object())
+        evolver.propose(tmp_path / "harness", failure=failure)
 
 
-def test_propose_under_cap_reaches_body_not_guard() -> None:
+def test_propose_under_cap_reaches_body() -> None:
     """With headroom in the rate-limit window, ``propose()`` reaches its
     body rather than being blocked by the guard.
 
     Companion to the over-cap case: this test pins the *negative* of
-    criterion 3 — the guard does not over-fire. ``NotImplementedError``
-    (today's body) surfacing proves the guard ran AND passed AND yielded
-    control to the body.
+    criterion 3 — the guard does not over-fire. Returning an empty list
+    for ``proposed_class='clean'`` proves the guard ran AND passed AND
+    yielded control to the body.
     """
     evolver = Evolver(max_proposals_per_hour=3, max_diff_lines=200)
-    with pytest.raises(NotImplementedError):
-        evolver.propose(Path("/nonexistent/harness"), failure=object())
+    failure = FailureReport(session_id="s", summary="x", proposed_class="clean")
+    result = evolver.propose(Path("/nonexistent/harness"), failure=failure)
+    assert result == []
 
 
 # ---------------------------------------------------------------------------
