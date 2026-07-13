@@ -50,12 +50,13 @@ uv run ruff check .           # lint
 2. **Write code + tests together.** TDD is encouraged but not
    mandated; untested code will be asked to add tests before merge.
 
-3. **Run the local checks.**
-   ```bash
-   uv run pre-commit run --all-files   # ruff, secrets, hygiene
-   uv run ruff check .                 # lint only
-   uv run pytest                       # tests
-   ```
+   3. **Run the local checks.**
+      ```bash
+      uv run pre-commit run --all-files   # ruff, secrets, hygiene
+      uv run ruff check .                 # lint only
+      uv run pytest                       # tests
+      uv run pytest -m benchmark           # benchmark suite (benchmarks/)
+      ```
 
 4. **Commit** with [Conventional Commits](https://www.conventionalcommits.org/).
    Examples:
