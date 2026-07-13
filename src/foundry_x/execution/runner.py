@@ -1378,6 +1378,12 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         help="Root directory for file-operation skill executors. "
         "Defaults to the current working directory.",
     )
+    parser.add_argument(
+        "--model-id",
+        default=None,
+        help="Model identifier (e.g. Q5_K_M). Overrides FOUNDRY_MODEL_ID env var. "
+        "Stored in the trace session for quantization-level KPI attribution (issue #361).",
+    )
     args = parser.parse_args()
 
     harness_dir = Path(args.harness_dir).resolve()
@@ -1397,7 +1403,7 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
 
     logger = TraceLogger(args.trace_path, backend=resolve_trace_backend())
     harness_version = resolve_harness_version(harness_dir)
-    model_id = resolve_model_id()
+    model_id = args.model_id if args.model_id is not None else resolve_model_id()
     limits = run_limits_from_env()
 
     with logger.session(harness_version=harness_version, model_id=model_id) as session_id:
