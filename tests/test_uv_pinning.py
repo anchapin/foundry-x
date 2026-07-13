@@ -108,12 +108,12 @@ def test_arg_uv_version_is_declared(lines: list[str]) -> None:
     m = re.match(r"\s*ARG\s+UV_VERSION\s*=\s*([\w.\-]+)", arg)
     assert m, f"ARG UV_VERSION must have a concrete value, got: {arg!r}"
     version = m.group(1)
-    assert (
-        version.lower() != "latest"
-    ), f"UV_VERSION must be a pinned version, not 'latest' (got {version!r})"
-    assert re.match(
-        r"^\d+\.\d+\.\d+", version
-    ), f"UV_VERSION must look like semver `x.y.z` (got {version!r})"
+    assert version.lower() != "latest", (
+        f"UV_VERSION must be a pinned version, not 'latest' (got {version!r})"
+    )
+    assert re.match(r"^\d+\.\d+\.\d+", version), (
+        f"UV_VERSION must look like semver `x.y.z` (got {version!r})"
+    )
 
 
 def test_uv_version_sanity_check(lines: list[str]) -> None:
@@ -127,9 +127,9 @@ def test_uv_version_sanity_check(lines: list[str]) -> None:
         (i for i, ln in enumerate(lines) if "astral-sh/uv/releases/download" in ln),
         None,
     )
-    assert (
-        install_idx is not None
-    ), "Dockerfile must fetch uv from astral-sh/uv/releases/download (issue #124)."
+    assert install_idx is not None, (
+        "Dockerfile must fetch uv from astral-sh/uv/releases/download (issue #124)."
+    )
     post = lines[install_idx:]
     assert any("uv --version" in ln for ln in post), (
         "Dockerfile must run `uv --version` after installing uv so a "

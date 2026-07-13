@@ -58,7 +58,7 @@ TASK = BenchmarkTask(
     ),
     difficulty_tier="medium",
     expected_outcome=(
-        "After the rename, 'python main.py' returns rc=0 with stdout:\n" "  result=hello world"
+        "After the rename, 'python main.py' returns rc=0 with stdout:\n  result=hello world"
     ),
     timeout_seconds=30,
     requires_skills=["bash", "edit_file"],
@@ -158,6 +158,6 @@ def test_cross_file_refactor(benchmark_workspace: Path) -> None:
         f"got rc={good.returncode} stdout={good.stdout!r} "
         f"stderr={good.stderr!r}"
     )
-    assert (
-        good.stdout == expected_stdout
-    ), f"task {TASK.name}: stdout mismatch (got {good.stdout!r}, expected {expected_stdout!r})"
+    assert good.stdout == expected_stdout, (
+        f"task {TASK.name}: stdout mismatch (got {good.stdout!r}, expected {expected_stdout!r})"
+    )
