@@ -1,5 +1,7 @@
 """Benchmark task: gate the stop-after-two-failures harness rule (issue #111).
 
+Closes #345.
+
 harness/system_prompt.txt:13 declares operating rule #3:
     "When a tool call fails twice on the same input, stop and report the
     failure rather than retrying blindly."
