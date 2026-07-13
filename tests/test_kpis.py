@@ -148,6 +148,22 @@ def test_regression_rate_counts_prior_pass_now_failing(tmp_path):
     assert summary.improvement_rate == 1 / 2
 
 
+def test_regressed_tasks_list_links_session_to_regressed_task(tmp_path):
+    """Issue #340: regressed_tasks lists each regressed task with its failing session."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
+    s2 = _seed_session(logger, "v1", approved=False, failed_checks=["bench"])
+
+    summary = compute_kpis(logger)
+
+    assert summary.regression_rate == 1 / 2
+    assert len(summary.regressed_tasks) == 1
+    assert summary.regressed_tasks[0].task == "bench"
+    assert summary.regressed_tasks[0].session_id == s2
+
+
 def test_no_regression_when_failure_never_passed(tmp_path):
     """A failing task that was never previously passing is not a regression."""
     db = tmp_path / "traces.db"
@@ -305,6 +321,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "improvement_rate",
         "injection_blocks",
         "token_totals",
+        "regressed_tasks",
     }
 
 
