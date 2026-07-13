@@ -149,3 +149,64 @@ def test_main_leaves_model_id_null_when_unset(tmp_path, monkeypatch):
     sessions = TraceLogger(db).list_sessions()
     assert len(sessions) == 1
     assert sessions[0].model_id is None
+
+
+def test_main_accepts_model_id_cli_arg(tmp_path, monkeypatch):
+    """Issue #361: --model-id CLI arg is stamped into the trace session."""
+    db = tmp_path / "traces.db"
+    for key in ("FOUNDRY_MODEL_ID", "LLAMACPP_MODEL_PATH", "OPENCODE_SERVER_URL"):
+        monkeypatch.delenv(key, raising=False)
+    _stub_harness(tmp_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fx-runner",
+            "--task",
+            "noop",
+            "--trace-path",
+            str(db),
+            "--harness-dir",
+            str(tmp_path),
+            "--model-id",
+            "codellama-7b.Q5_K_M.gguf",
+        ],
+    )
+
+    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+        return None
+
+    main(run_task_fn=noop_run_task)
+
+    sessions = TraceLogger(db).list_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].model_id == "codellama-7b.Q5_K_M.gguf"
+
+
+def test_main_cli_model_id_overrides_env(tmp_path, monkeypatch):
+    """Issue #361: --model-id takes precedence over FOUNDRY_MODEL_ID env var."""
+    db = tmp_path / "traces.db"
+    monkeypatch.setenv("FOUNDRY_MODEL_ID", "env-model.gguf")
+    _stub_harness(tmp_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fx-runner",
+            "--task",
+            "noop",
+            "--trace-path",
+            str(db),
+            "--harness-dir",
+            str(tmp_path),
+            "--model-id",
+            "cli-model.gguf",
+        ],
+    )
+
+    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+        return None
+
+    main(run_task_fn=noop_run_task)
+
+    sessions = TraceLogger(db).list_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].model_id == "cli-model.gguf"

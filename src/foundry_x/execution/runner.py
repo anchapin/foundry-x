@@ -1366,6 +1366,12 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         help="Root directory for file-operation skill executors. "
         "Defaults to the current working directory.",
     )
+    parser.add_argument(
+        "--model-id",
+        default=None,
+        help="Model identifier stamped into the trace session (issue #361). "
+        "Overrides FOUNDRY_MODEL_ID and other auto-detection sources.",
+    )
     args = parser.parse_args()
 
     harness_dir = Path(args.harness_dir).resolve()
@@ -1385,10 +1391,18 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
 
     logger = TraceLogger(args.trace_path, backend=resolve_trace_backend())
     harness_version = resolve_harness_version(harness_dir)
-    model_id = resolve_model_id()
+    model_id: str | None = args.model_id if args.model_id else resolve_model_id()
     limits = run_limits_from_env()
+    # benchmarks.models is dev-only tooling; the import is deferred to main() so
+    # that merely importing runner (e.g. via fx-runner --help) does not require
+    # benchmarks on sys.path.
+    from benchmarks.models import ModelConfig
 
-    with logger.session(harness_version=harness_version, model_id=model_id) as session_id:
+    model_config: ModelConfig | None = None
+    if model_id is not None:
+        model_config = ModelConfig(model_id=model_id)
+
+    with logger.session(harness_version=harness_version, model_config=model_config) as session_id:
         logger.record(session_id, kind="task_received", payload={"prompt": args.task})
         start = time.monotonic()
         # ``run_task`` accepts the ``limits`` kwarg so it can enforce the

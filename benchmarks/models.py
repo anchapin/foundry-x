@@ -118,3 +118,25 @@ class BenchmarkTask(BaseModel):
         if value is not None and value <= 0:
             raise ValueError("timeout_seconds must be a positive integer")
         return value
+
+
+class ModelConfig(BaseModel):
+    """Model configuration for trace attribution (issue #361).
+
+    Records which model produced a given session so the Phase 3 improvement
+    rate KPI can attribute benchmark outcomes to specific quantizations.
+    """
+
+    model_id: str = Field(description="Model identifier (e.g. codellama-7b.Q5_K_M.gguf).")
+    quantization: str | None = Field(
+        default=None,
+        description="Quantization method (e.g. Q5_K_M, Q4_K_M, f16).",
+    )
+    context_window: int | None = Field(
+        default=None,
+        description="Context window size in tokens.",
+    )
+    hardware: str | None = Field(
+        default=None,
+        description="Hardware target (e.g. NVIDIA A100, RTX 3090, CPU).",
+    )

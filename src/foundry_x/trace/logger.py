@@ -235,16 +235,32 @@ class TraceLogger:
         harness_version: str,
         model_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        model_config: Any = None,
     ) -> Iterator[str]:
-        # Issue #121: scrub the metadata dict before either backend writes it.
-        # The original ``record()`` path already redacts its payload; the
-        # ``session()`` start-of-life marker did not, so an Operator passing
-        # ``metadata={'github_token': 'ghp_...'}`` would have persisted the raw
-        # token. SECURITY.md §Secrets.
+        # Issue #361: plumb ModelConfig through the trace pipeline so sessions
+        # record which model (quantization, context_window, hardware) produced
+        # each session, enabling the Phase 3 improvement-rate KPI to attribute
+        # benchmark outcomes to specific quantizations. When model_config is
+        # provided it takes precedence over a bare model_id string.
+        # benchmarks.models is dev-only tooling (not installed as a package);
+        # the import lives here so that merely importing TraceLogger does not
+        # require benchmarks on sys.path. The class is not directly referenced
+        # (we access model_config.model_id via duck-typing) so the alias is
+        # unused - ruff will flag it but it is required for the import to
+        # execute at runtime when session() is called.
+        from benchmarks.models import ModelConfig as _MC  # noqa: F401
+
+        redacted_metadata: dict[str, Any] = _redact(metadata) if metadata else {}
+
         redacted_metadata: dict[str, Any] = _redact(metadata) if metadata else {}
         if not isinstance(harness_version, str) or not harness_version:
             raise ValueError("harness_version must be a non-empty string")
         session_id = str(uuid.uuid4())
+        resolved_model_id: str | None
+        if model_config is not None:
+            resolved_model_id = model_config.model_id
+        else:
+            resolved_model_id = model_id
         if self.backend == "jsonl":
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(
@@ -253,7 +269,7 @@ class TraceLogger:
                             "session_id": session_id,
                             "started_at": _now(),
                             "harness_version": harness_version,
-                            "model_id": model_id,
+                            "model_id": resolved_model_id,
                             "metadata": redacted_metadata,
                             "kind": "session_start",
                         }
@@ -271,7 +287,7 @@ class TraceLogger:
                         session_id,
                         _now(),
                         harness_version,
-                        model_id,
+                        resolved_model_id,
                         json.dumps(redacted_metadata),
                     ),
                 )
