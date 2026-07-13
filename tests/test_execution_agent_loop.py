@@ -215,8 +215,10 @@ def test_agent_loop_records_full_event_sequence(tmp_path, monkeypatch):
     assert tool_result_event.payload["call_id"] == "call_bash_1"
     assert tool_result_event.payload["duration_ms"] >= 0
     assert tool_result_event.payload["error"] is None
-    assert tool_result_event.payload["output"]["status"] == "ok"
-    assert tool_result_event.payload["output"]["skill"] == "bash"
+    # Issue #258: bash skill now uses real subprocess-backed executor
+    assert "hello" in tool_result_event.payload["output"]["stdout"]
+    assert tool_result_event.payload["output"]["exit_code"] == 0
+    assert tool_result_event.payload["output"]["truncated"] is False
 
     outcome_event = events[outcome_idx]
     assert outcome_event.payload["status"] == "success"
