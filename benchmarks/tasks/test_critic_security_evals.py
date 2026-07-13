@@ -255,7 +255,7 @@ def test_critic_respects_custom_max_diff_lines(tmp_path) -> None:
     """Critic.evaluate() respects a custom max_diff_lines value.
 
     With ``max_diff_lines=5``, a 10-line diff must be rejected as
-    ``diff_too_large``; a 3-line diff must pass. This pins the
+    ``diff_size_cap``; a 3-line diff must pass. This pins the
     configuration contract.
     """
     harness_dir = tmp_path / "harness"
