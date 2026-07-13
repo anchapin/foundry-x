@@ -30,12 +30,11 @@ def session_id(trace_logger):
 class TestResolveHookRegistry:
     """Tests for :func:`_resolve_hook_registry`."""
 
-    def test_returns_none_when_harness_not_importable(
-        self, trace_logger, session_id, monkeypatch
-    ):
+    def test_returns_none_when_harness_not_importable(self, trace_logger, session_id, monkeypatch):
         """Missing harness (ImportError) is a legitimate degraded state —
         returns ``None`` without a trace event.
         """
+
         # Mock the import to raise ImportError
         def raise_import_error(*args, **kwargs):
             if args[0] == "harness.hooks":
@@ -51,9 +50,7 @@ class TestResolveHookRegistry:
         hook_errors = [e for e in events if e.kind == "hook_registry_error"]
         assert not hook_errors, "ImportError must not emit hook_registry_error"
 
-    def test_records_hook_registry_error_when_get_registry_raises(
-        self, trace_logger, session_id
-    ):
+    def test_records_hook_registry_error_when_get_registry_raises(self, trace_logger, session_id):
         """When ``get_registry()`` raises, a ``hook_registry_error`` event
         is recorded with ``error_type`` and ``message``.
         """
@@ -71,9 +68,7 @@ class TestResolveHookRegistry:
         assert payload["error_type"] == "RuntimeError"
         assert payload["message"] == "registry initialization failed"
 
-    def test_records_hook_registry_error_for_any_exception(
-        self, trace_logger, session_id
-    ):
+    def test_records_hook_registry_error_for_any_exception(self, trace_logger, session_id):
         """Any ``Exception`` subclass from ``get_registry()`` is captured."""
         exc = ValueError("config invalid")
 
@@ -107,9 +102,7 @@ class TestResolveHookRegistry:
         # The runner's run_task would proceed with registry=None and skip
         # hook fan-out. This test just confirms the function doesn't raise.
 
-    def test_existing_registry_none_path_still_works(
-        self, trace_logger, session_id, monkeypatch
-    ):
+    def test_existing_registry_none_path_still_works(self, trace_logger, session_id, monkeypatch):
         """When ``get_registry()`` returns a registry normally, it is
         returned (not None). This ensures the happy path is unchanged.
         """
@@ -128,7 +121,5 @@ class TestResolveHookRegistry:
 
 if __name__ == "__main__":
 <<<<<<< HEAD
+<<<<<<< HEAD
     pytest.main([__file__, "-v"])
-=======
-    pytest.main([__file__, "-v"])
->>>>>>> 66ceef6 (fix: resolve #260 — emit trace event when hook registry resolution fails)
