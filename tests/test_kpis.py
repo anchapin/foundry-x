@@ -45,12 +45,20 @@ def _seed_session(
     Issue #120 adds the optional ``injection_block_count`` parameter: when
     >0, that many ``injection_blocked`` events are planted so the per-
     session KPI counter has something to surface.
+
+    Issue #337: a ``proposal_generated`` event is always planted because
+    cycle time is now measured from ``task_received`` to ``proposal_generated``
+    (the meta-loop cycle), not to ``critic_verdict``.
     """
     with logger.session(harness_version=harness_version) as sid:
         logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+        time.sleep(0.01)
+        logger.record(
+            sid,
+            kind="proposal_generated",
+            payload={"target_file": "harness/system_prompt.txt", "rationale": "test"},
+        )
         if approved is not None:
-            # Small delay so cycle-time is measurably positive.
-            time.sleep(0.01)
             record_verdict(
                 logger,
                 sid,
@@ -665,3 +673,74 @@ def test_session_rejects_none_harness_version(tmp_path):
     with pytest.raises(ValueError, match="non-empty string"):
         with logger.session(harness_version=None):  # type: ignore[arg-type]
             pass
+
+
+# ---------------------------------------------------------------------------
+# Issue #337: cycle_time measures task_received → proposal_generated, not
+# task_received → critic_verdict. The meta-loop cycle is the Evolver step,
+# not the Critic review step.
+# ---------------------------------------------------------------------------
+
+
+def _seed_session_with_proposal(
+    logger: TraceLogger,
+    harness_version: str,
+) -> tuple[str, float]:
+    """Create a session with task_received + proposal_generated and return (sid, elapsed).
+
+    The elapsed return value is the actual wall-clock seconds between the two
+    events, computed with ``time.perf_counter`` so the test can assert the
+    measured KPI delta matches the planted elapsed time within a reasonable
+    tolerance (accounts for trace-event timestamp resolution).
+    """
+    t0 = time.perf_counter()
+    with logger.session(harness_version=harness_version) as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+        time.sleep(0.05)
+        logger.record(
+            sid,
+            kind="proposal_generated",
+            payload={"target_file": "harness/system_prompt.txt", "rationale": "test"},
+        )
+    elapsed = time.perf_counter() - t0
+    return sid, elapsed
+
+
+def test_cycle_time_uses_proposal_generated_event(tmp_path):
+    """Cycle time is measured from task_received to proposal_generated (issue #337)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    sid, planted_elapsed = _seed_session_with_proposal(logger, "v1")
+
+    summary = compute_kpis(logger)
+
+    assert summary.cycle_time_seconds is not None
+    assert summary.cycle_time_seconds > 0.0
+    assert abs(summary.cycle_time_seconds - planted_elapsed) < 0.02
+
+
+def test_cycle_time_proposal_generated_not_critic_verdict(tmp_path):
+    """Cycle time uses proposal_generated, not critic_verdict (issue #337).
+
+    A session with only critic_verdict (no proposal_generated) should have
+    no cycle_time measurement since the meta-loop was never closed.
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+        record_verdict(
+            logger,
+            sid,
+            CriticVerdict(
+                approved=True,
+                passed_checks=[],
+                failed_checks=[],
+            ),
+        )
+
+    summary = compute_kpis(logger)
+
+    assert summary.cycle_time_seconds is None
