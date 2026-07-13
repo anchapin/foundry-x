@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
+from foundry_x.evolution.digester import FailureReport
 from foundry_x.evolution.evolver import (
     PROPOSED_EDIT_KIND,
     Evolver,
@@ -95,14 +95,82 @@ def test_partial_window_keeps_recent_only():
         e._check_rate_limit()
 
 
-def test_propose_calls_guard_before_body():
+def test_propose_calls_guard_before_body(tmp_path):
     e = Evolver(max_proposals_per_hour=1, max_diff_lines=200)
     e._record_proposals(1)
+    failure = FailureReport(session_id="s", summary="x", proposed_class="clean")
     with pytest.raises(EvolverGuardError, match="rate limit"):
-        e.propose(Path("/nonexistent/harness"), failure=object())
+        e.propose(tmp_path / "harness", failure=failure)
 
 
-def test_propose_body_still_unimplemented_under_cap():
+def test_propose_clean_class_returns_empty_list(tmp_path):
     e = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
-    with pytest.raises(NotImplementedError):
-        e.propose(Path("/nonexistent/harness"), failure=object())
+    failure = FailureReport(session_id="s", summary="no failures", proposed_class="clean")
+    result = e.propose(tmp_path / "harness", failure=failure)
+    assert result == []
+
+
+@pytest.mark.parametrize(
+    "proposed_class",
+    [
+        "wrong-tool",
+        "bad-prompt",
+        "state-leak",
+        "tool-error",
+        "injection-attempt",
+    ],
+)
+def test_propose_class_returns_proposed_edit(tmp_path, proposed_class: str):
+    harness_dir = tmp_path / "harness"
+    harness_dir.mkdir()
+    prompt_file = harness_dir / "system_prompt.txt"
+    prompt_file.write_text("You are FoundryAgent.\n", encoding="utf-8")
+    e = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+    failure = FailureReport(session_id="s", summary="test failure", proposed_class=proposed_class)
+    result = e.propose(harness_dir, failure=failure)
+    assert len(result) == 1
+    edit = result[0]
+    assert isinstance(edit, ProposedEdit)
+    assert edit.target_file == "harness/system_prompt.txt"
+    assert edit.rationale is not None
+    assert "--- a/" in edit.unified_diff
+    assert "+++ b/" in edit.unified_diff
+
+
+def test_propose_unknown_class_returns_empty_list(tmp_path):
+    e = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+    failure = FailureReport(session_id="s", summary="x", proposed_class="nonexistent-class")
+    result = e.propose(tmp_path / "harness", failure=failure)
+    assert result == []
+
+
+def test_propose_edit_passes_validate_edit(tmp_path):
+    harness_dir = tmp_path / "harness"
+    harness_dir.mkdir()
+    prompt_file = harness_dir / "system_prompt.txt"
+    prompt_file.write_text("You are FoundryAgent.\n", encoding="utf-8")
+    e = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+    failure = FailureReport(session_id="s", summary="x", proposed_class="wrong-tool")
+    result = e.propose(harness_dir, failure=failure)
+    assert len(result) == 1
+    e._validate_edit(result[0])
+
+
+def test_propose_records_proposal(tmp_path):
+    logger = TraceLogger(tmp_path / "trace.db")
+    harness_dir = tmp_path / "harness"
+    harness_dir.mkdir()
+    prompt_file = harness_dir / "system_prompt.txt"
+    prompt_file.write_text("You are FoundryAgent.\n", encoding="utf-8")
+    with logger.session("test-session") as session_id:
+        e = Evolver(
+            max_proposals_per_hour=10,
+            max_diff_lines=200,
+            trace_logger=logger,
+            session_id=session_id,
+        )
+        failure = FailureReport(session_id="s", summary="x", proposed_class="wrong-tool")
+        result = e.propose(harness_dir, failure=failure)
+        assert len(result) == 1
+    events = list(logger.iter_events(session_id, kind=PROPOSED_EDIT_KIND))
+    assert len(events) == 1
