@@ -647,3 +647,21 @@ def test_main_json_includes_token_totals(tmp_path, capsys):
 
     payload = json.loads(captured.out)
     assert payload["token_totals"] == {s1: 10}
+
+
+def test_session_rejects_empty_harness_version(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    with pytest.raises(ValueError, match="non-empty string"):
+        with logger.session(harness_version=""):
+            pass
+
+
+def test_session_rejects_none_harness_version(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    with pytest.raises(ValueError, match="non-empty string"):
+        with logger.session(harness_version=None):  # type: ignore[arg-type]
+            pass

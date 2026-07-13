@@ -292,24 +292,20 @@ def build_model_adapter(env: dict[str, str] | None = None) -> OpenAICompatibleAd
 def resolve_harness_version(harness_dir: Path) -> str:
     """Return the version of the harness rooted at ``harness_dir``.
 
-    Resolution order (issue #11):
+    Resolution order (issue #365):
 
-    1. ``harness_dir / "VERSION"`` — a single-line text file owned by the
-       harness itself. The foundry reads a value the harness owns; it does
-       not hand-edit harness DNA (AGENTS.md §2, ADR-0004).
-    2. ``git describe --tags --always`` run in ``harness_dir``. Lets an
-       evolved checkout self-describe even before a ``VERSION`` bump.
-    3. The :data:`_FALLBACK_HARNESS_VERSION` literal.
+    1. ``harness_dir / "_version.txt"`` — a single-line text file created
+       on harness commit. The foundry reads a value the harness owns; it
+       does not hand-edit harness DNA (AGENTS.md §2, ADR-0004).
+    2. ``FOUNDRY_HARNESS_VERSION`` environment variable.
 
     Whitespace (including a trailing newline) is stripped from the file
-    contents and from the git output so the stamped value is canonical.
+    contents so the stamped value is canonical.
 
-    Failures (missing file, git not installed, git error, non-repo
-    directory) fall through silently to the next source rather than
-    aborting the run; a missing version stamp is preferable to a run that
-    cannot start.
+    Returns an empty string if neither source provides a version; the
+    caller is responsible for exiting with an error (issue #365).
     """
-    version_file = harness_dir / "VERSION"
+    version_file = harness_dir / "_version.txt"
     try:
         text = version_file.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError, UnicodeDecodeError):
@@ -317,19 +313,11 @@ def resolve_harness_version(harness_dir: Path) -> str:
     if text.strip():
         return text.strip()
 
-    try:
-        completed = subprocess.run(  # noqa: S603 — args are a literal list
-            ["git", "describe", "--tags", "--always"],
-            cwd=str(harness_dir),
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return _FALLBACK_HARNESS_VERSION
-    candidate = completed.stdout.strip()
-    return candidate or _FALLBACK_HARNESS_VERSION
+    env_version = os.environ.get("FOUNDRY_HARNESS_VERSION", "")
+    if env_version:
+        return env_version
+
+    return ""
 
 
 class RunLimits(BaseModel):
