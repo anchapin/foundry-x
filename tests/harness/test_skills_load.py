@@ -46,9 +46,9 @@ def test_skills_directory_exists() -> None:
 def test_skill_file_parses_as_json(skill_path: Path) -> None:
     raw = skill_path.read_text(encoding="utf-8")
     doc = json.loads(raw)
-    assert isinstance(
-        doc, dict
-    ), f"{skill_path.name}: top-level must be a JSON object, got {type(doc).__name__}"
+    assert isinstance(doc, dict), (
+        f"{skill_path.name}: top-level must be a JSON object, got {type(doc).__name__}"
+    )
 
 
 @pytest.mark.parametrize("skill_path", _skill_files(), ids=lambda p: p.name)
@@ -65,12 +65,12 @@ def test_skill_metadata_fields_are_well_typed(skill_path: Path) -> None:
     version = doc.get("version")
     description = doc.get("description")
     assert isinstance(name, str) and name, f"{skill_path.name}: name must be a non-empty string"
-    assert (
-        isinstance(version, str) and version
-    ), f"{skill_path.name}: version must be a non-empty semver string"
-    assert (
-        isinstance(description, str) and description
-    ), f"{skill_path.name}: description must be a non-empty string"
+    assert isinstance(version, str) and version, (
+        f"{skill_path.name}: version must be a non-empty semver string"
+    )
+    assert isinstance(description, str) and description, (
+        f"{skill_path.name}: description must be a non-empty string"
+    )
 
 
 @pytest.mark.parametrize("skill_path", _skill_files(), ids=lambda p: p.name)
@@ -78,12 +78,12 @@ def test_skill_schemas_are_json_schemas(skill_path: Path) -> None:
     doc = json.loads(skill_path.read_text(encoding="utf-8"))
     for key in ("input_schema", "output_schema"):
         schema = doc.get(key)
-        assert isinstance(
-            schema, dict
-        ), f"{skill_path.name}: {key} must be a JSON object, got {type(schema).__name__}"
-        assert (
-            schema.get("type") == "object"
-        ), f"{skill_path.name}: {key} must declare type=object at the top level"
+        assert isinstance(schema, dict), (
+            f"{skill_path.name}: {key} must be a JSON object, got {type(schema).__name__}"
+        )
+        assert schema.get("type") == "object", (
+            f"{skill_path.name}: {key} must declare type=object at the top level"
+        )
 
 
 def test_bash_skill_exists_and_has_documented_contract() -> None:
@@ -102,21 +102,21 @@ def test_bash_skill_exists_and_has_documented_contract() -> None:
     assert isinstance(doc["version"], str) and doc["version"]
 
     command_prop = doc["input_schema"]["properties"]["command"]
-    assert (
-        command_prop["type"] == "string"
-    ), "bash input_schema.command must be a string per the issue #104 acceptance"
-    assert (
-        "command" in doc["input_schema"]["required"]
-    ), "bash input_schema must require 'command' per the issue #104 acceptance"
+    assert command_prop["type"] == "string", (
+        "bash input_schema.command must be a string per the issue #104 acceptance"
+    )
+    assert "command" in doc["input_schema"]["required"], (
+        "bash input_schema must require 'command' per the issue #104 acceptance"
+    )
     cwd_prop = doc["input_schema"]["properties"].get("cwd")
-    assert (
-        cwd_prop is not None and cwd_prop["type"] == "string"
-    ), "bash input_schema.properties.cwd must be an optional string"
+    assert cwd_prop is not None and cwd_prop["type"] == "string", (
+        "bash input_schema.properties.cwd must be an optional string"
+    )
 
     for field in ("stdout", "stderr", "exit_code", "truncated"):
-        assert (
-            field in doc["output_schema"]["properties"]
-        ), f"bash output_schema must declare {field!r} per the issue #104 acceptance"
+        assert field in doc["output_schema"]["properties"], (
+            f"bash output_schema must declare {field!r} per the issue #104 acceptance"
+        )
     assert set(doc["output_schema"]["required"]) >= {
         "stdout",
         "stderr",
@@ -124,9 +124,9 @@ def test_bash_skill_exists_and_has_documented_contract() -> None:
         "truncated",
     }, "bash output_schema.required must list all four documented fields"
 
-    assert (
-        "subprocess" in doc["description"]
-    ), "bash description must defer to subprocess per docs/SECURITY.md \u00a71 threat #3"
+    assert "subprocess" in doc["description"], (
+        "bash description must defer to subprocess per docs/SECURITY.md \u00a71 threat #3"
+    )
 
 
 def _load_skill(name: str) -> dict:
@@ -159,40 +159,40 @@ def test_list_dir_skill_exists_and_has_documented_contract() -> None:
     assert isinstance(doc["version"], str) and doc["version"]
 
     properties = doc["input_schema"]["properties"]
-    assert (
-        "path" in properties
-    ), "list_dir input_schema must declare 'path' per issue #105 acceptance"
-    assert (
-        properties["path"]["type"] == "string"
-    ), "list_dir input_schema.path must be a string per issue #105 acceptance"
-    assert (
-        "path" in doc["input_schema"]["required"]
-    ), "list_dir input_schema.required must list 'path' per issue #105 acceptance"
+    assert "path" in properties, (
+        "list_dir input_schema must declare 'path' per issue #105 acceptance"
+    )
+    assert properties["path"]["type"] == "string", (
+        "list_dir input_schema.path must be a string per issue #105 acceptance"
+    )
+    assert "path" in doc["input_schema"]["required"], (
+        "list_dir input_schema.required must list 'path' per issue #105 acceptance"
+    )
 
     out_properties = doc["output_schema"]["properties"]
-    assert (
-        "entries" in out_properties
-    ), "list_dir output_schema must declare 'entries' per issue #105 acceptance"
+    assert "entries" in out_properties, (
+        "list_dir output_schema must declare 'entries' per issue #105 acceptance"
+    )
     entries_schema = out_properties["entries"]
-    assert (
-        entries_schema["type"] == "array"
-    ), "list_dir output_schema.entries must be an array per issue #105 acceptance"
+    assert entries_schema["type"] == "array", (
+        "list_dir output_schema.entries must be an array per issue #105 acceptance"
+    )
     entry_props = entries_schema["items"]["properties"]
     for field in ("name", "kind", "size"):
-        assert (
-            field in entry_props
-        ), f"list_dir output_schema.entries.items must declare {field!r} per issue #105 acceptance"
-    assert (
-        set(doc["output_schema"]["required"]) >= {"entries", "truncated"}
-    ), "list_dir output_schema.required must list 'entries' and 'truncated' per issue #105 acceptance"
+        assert field in entry_props, (
+            f"list_dir output_schema.entries.items must declare {field!r} per issue #105 acceptance"
+        )
+    assert set(doc["output_schema"]["required"]) >= {"entries", "truncated"}, (
+        "list_dir output_schema.required must list 'entries' and 'truncated' per issue #105 acceptance"
+    )
 
     assert "truncation_policy" in doc, (
         "list_dir must publish a truncation_policy so the Phase 3 historical-log "
         "pruner has a per-call bound to fall back to (SECURITY.md threat #5)"
     )
-    assert (
-        "scandir" in doc["description"] or "stdlib" in doc["description"]
-    ), "list_dir description must defer to Python stdlib (os.scandir) per docs/SECURITY.md \u00a71 threat #3"
+    assert "scandir" in doc["description"] or "stdlib" in doc["description"], (
+        "list_dir description must defer to Python stdlib (os.scandir) per docs/SECURITY.md \u00a71 threat #3"
+    )
 
 
 def test_grep_search_skill_exists_and_has_documented_contract() -> None:
@@ -209,16 +209,16 @@ def test_grep_search_skill_exists_and_has_documented_contract() -> None:
 
     properties = doc["input_schema"]["properties"]
     for field in ("pattern", "path"):
-        assert (
-            field in properties
-        ), f"grep_search input_schema must declare {field!r} per issue #105 acceptance"
-        assert (
-            properties[field]["type"] == "string"
-        ), f"grep_search input_schema.{field} must be a string per issue #105 acceptance"
+        assert field in properties, (
+            f"grep_search input_schema must declare {field!r} per issue #105 acceptance"
+        )
+        assert properties[field]["type"] == "string", (
+            f"grep_search input_schema.{field} must be a string per issue #105 acceptance"
+        )
     for field in ("pattern", "path"):
-        assert (
-            field in doc["input_schema"]["required"]
-        ), f"grep_search input_schema.required must list {field!r} per issue #105 acceptance"
+        assert field in doc["input_schema"]["required"], (
+            f"grep_search input_schema.required must list {field!r} per issue #105 acceptance"
+        )
 
     glob_prop = properties.get("glob")
     assert glob_prop is not None and glob_prop["type"] == "string", (
@@ -228,14 +228,14 @@ def test_grep_search_skill_exists_and_has_documented_contract() -> None:
 
     out_properties = doc["output_schema"]["properties"]
     matches_schema = out_properties["matches"]
-    assert (
-        matches_schema["type"] == "array"
-    ), "grep_search output_schema.matches must be an array per issue #105 acceptance"
+    assert matches_schema["type"] == "array", (
+        "grep_search output_schema.matches must be an array per issue #105 acceptance"
+    )
     match_props = matches_schema["items"]["properties"]
     for field in ("file", "line", "text"):
-        assert (
-            field in match_props
-        ), f"grep_search output_schema.matches.items must declare {field!r} per issue #105 acceptance"
+        assert field in match_props, (
+            f"grep_search output_schema.matches.items must declare {field!r} per issue #105 acceptance"
+        )
     assert set(doc["output_schema"]["required"]) >= {"matches", "truncated"}, (
         "grep_search output_schema.required must list 'matches' and 'truncated' "
         "per issue #105 acceptance"
@@ -245,6 +245,6 @@ def test_grep_search_skill_exists_and_has_documented_contract() -> None:
         "grep_search must publish a truncation_policy so the Phase 3 historical-log "
         "pruner has a per-call bound to fall back to (SECURITY.md threat #5)"
     )
-    assert (
-        "stdlib" in doc["description"]
-    ), "grep_search description must defer to Python stdlib per docs/SECURITY.md \u00a71 threat #3"
+    assert "stdlib" in doc["description"], (
+        "grep_search description must defer to Python stdlib per docs/SECURITY.md \u00a71 threat #3"
+    )

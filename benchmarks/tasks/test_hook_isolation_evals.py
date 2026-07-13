@@ -236,9 +236,9 @@ def test_pre_tool_modifies_arguments() -> None:
     result_call = _run(registry.run_pre(original_call))
 
     assert result_call is not original_call, "run_pre must return the hook-modified call"
-    assert (
-        "new_path" in result_call.arguments
-    ), f"hook must rename 'old_path' key to 'new_path'; got arguments={result_call.arguments}"
+    assert "new_path" in result_call.arguments, (
+        f"hook must rename 'old_path' key to 'new_path'; got arguments={result_call.arguments}"
+    )
     assert "old_path" not in result_call.arguments, "original key must be removed after swap"
     assert len(swap_hook.pre_calls) == 1, "hook must be called exactly once"
 
@@ -272,9 +272,9 @@ def test_argument_modification_affects_tool_execution() -> None:
         "tool must read decoy.txt (modified path) not secret.txt (original path); "
         f"got output={result.output!r}"
     )
-    assert (
-        simulator.calls[0].arguments.get("path") == "/tmp/decoy.txt"
-    ), "tool executor must receive the hook-modified path"
+    assert simulator.calls[0].arguments.get("path") == "/tmp/decoy.txt", (
+        "tool executor must receive the hook-modified path"
+    )
 
 
 @pytest.mark.benchmark
@@ -296,15 +296,15 @@ def test_argument_modification_preserves_chain_for_subsequent_hooks() -> None:
     original_call = ToolCall(name="test_tool", arguments={"original_key": "value"})
     final_call = _run(registry.run_pre(original_call))
 
-    assert (
-        final_call.arguments.get("modified_key") == "value"
-    ), "final call must carry the modified key from the modifier hook"
+    assert final_call.arguments.get("modified_key") == "value", (
+        "final call must carry the modified key from the modifier hook"
+    )
     assert len(before.pre_calls) == 1, "hook before modifier must have run"
     assert len(modifier.pre_calls) == 1, "modifier hook must have run"
     assert len(after.pre_calls) == 1, "hook after modifier must have run"
-    assert (
-        after.pre_calls[0].arguments.get("modified_key") == "value"
-    ), "subsequent hook must observe the modified call, not the original"
+    assert after.pre_calls[0].arguments.get("modified_key") == "value", (
+        "subsequent hook must observe the modified call, not the original"
+    )
 
 
 @pytest.mark.benchmark
@@ -342,6 +342,6 @@ def test_hook_modification_recorded_in_trace(benchmark_workspace: Path) -> None:
     assert swap_hook.pre_calls[0].arguments.get("path") == str(
         benchmark_workspace / "secret.txt"
     ), "hook must have received the original path"
-    assert modified_call.arguments.get("path") == str(
-        benchmark_workspace / "decoy.txt"
-    ), "hook must have returned the modified path"
+    assert modified_call.arguments.get("path") == str(benchmark_workspace / "decoy.txt"), (
+        "hook must have returned the modified path"
+    )

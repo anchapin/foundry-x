@@ -127,9 +127,9 @@ def test_critic_rejects_injection_like_text(tmp_path) -> None:
         "Critic.evaluate() must reject injection-like text in diff; "
         f"got approved={verdict.approved!r}"
     )
-    assert (
-        "content_rejected" in verdict.failed_checks
-    ), f"failed_checks must include 'content_rejected'; got {verdict.failed_checks!r}"
+    assert "content_rejected" in verdict.failed_checks, (
+        f"failed_checks must include 'content_rejected'; got {verdict.failed_checks!r}"
+    )
 
 
 @pytest.mark.benchmark
@@ -207,12 +207,12 @@ def test_critic_rejects_oversized_diff(tmp_path) -> None:
 
     verdict = Critic(harness_dir=harness_dir).evaluate(large_diff)
 
-    assert (
-        verdict.approved is False
-    ), f"Critic.evaluate() must reject oversized diff; got approved={verdict.approved!r}"
-    assert (
-        "diff_too_large" in verdict.failed_checks
-    ), f"failed_checks must include 'diff_too_large'; got {verdict.failed_checks!r}"
+    assert verdict.approved is False, (
+        f"Critic.evaluate() must reject oversized diff; got approved={verdict.approved!r}"
+    )
+    assert "diff_too_large" in verdict.failed_checks, (
+        f"failed_checks must include 'diff_too_large'; got {verdict.failed_checks!r}"
+    )
 
 
 @pytest.mark.benchmark
@@ -287,11 +287,7 @@ def test_critic_respects_custom_max_diff_lines(tmp_path) -> None:
     assert "diff_too_large" in verdict.failed_checks
 
     within_cap = (
-        "--- a/system_prompt.txt\n"
-        "+++ b/system_prompt.txt\n"
-        "@@ -1 +1 @@\n"
-        "-original\n"
-        "+newcontent\n"
+        "--- a/system_prompt.txt\n+++ b/system_prompt.txt\n@@ -1 +1 @@\n-original\n+newcontent\n"
     )
     verdict2 = Critic(
         harness_dir=harness_dir,
