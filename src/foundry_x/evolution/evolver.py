@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from foundry_x.trace.logger import TraceLogger
 
 PROPOSED_EDIT_KIND: str = "proposed_edit"
+PROPOSAL_GENERATED_KIND: str = "proposal_generated"
 
 # Sliding window for the rate limiter. One hour matches the SECURITY.md
 # "max N proposals per hour" guardrail.
@@ -286,6 +287,11 @@ class Evolver:
                 self._session_id,
                 PROPOSED_EDIT_KIND,
                 edit.model_dump(mode="json"),
+            )
+            self._trace_logger.record(
+                self._session_id,
+                PROPOSAL_GENERATED_KIND,
+                {"target_file": edit.target_file, "rationale": edit.rationale},
             )
 
     def _validate_edit(self, edit: ProposedEdit) -> None:

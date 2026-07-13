@@ -12,7 +12,9 @@ This module derives approximations of those metrics from the events already
 recorded by :class:`~foundry_x.trace.logger.TraceLogger`:
 
 * ``cycle_time_seconds`` — mean wall-clock time from the first
-  ``task_received`` event to the first ``critic_verdict`` event per session.
+  ``task_received`` event to the first ``proposal_generated`` event per session
+  (issue #337: the meta-loop cycle is task_received → proposal_generated,
+  not task_received → critic_verdict).
 * ``regression_rate`` — fraction of sessions with a ``critic_verdict`` in which
   a task previously seen in ``passed_checks`` later appears in ``failed_checks``
   (the persisted :class:`~foundry_x.observability.regression_report.VerdictRecord`
@@ -203,7 +205,13 @@ def _cycle_time(
     logger: TraceLogger,
     harness_version: str | None = None,
 ) -> float | None:
-    """Mean wall-clock time from ``task_received`` to ``critic_verdict``.
+    """Mean wall-clock time from ``task_received`` to ``proposal_generated``.
+
+    Issue #337 — Cycle Time is defined as "Agent Failure to Harness Edit
+    Proposal" per PRD §5. The meta-loop cycle is task_received →
+    proposal_generated (the Evolver step), not task_received →
+    critic_verdict (which includes the Critic review step that is
+    external to the evolution loop).
 
     Issue #273 — previously looped every session id and called
     ``iter_events`` twice per session to find the first event of each
@@ -216,7 +224,7 @@ def _cycle_time(
     for event in logger.query_events(kind="task_received", harness_version=harness_version):
         start_events.setdefault(event.session_id, event)
     end_events: dict[str, TraceEvent] = {}
-    for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
+    for event in logger.query_events(kind="proposal_generated", harness_version=harness_version):
         end_events.setdefault(event.session_id, event)
 
     deltas: list[float] = []
