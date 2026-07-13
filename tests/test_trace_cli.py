@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-
 from foundry_x.trace.cli import main
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
@@ -936,9 +935,9 @@ def test_seed_sample_trace_payloads_are_secret_free(tmp_path):
         # as ``[REDACTED:...]`` markers on the second pass.
         assert redacted_payload == _redact(redacted_payload)
         for value in _iter_payload_strings(redacted_payload):
-            assert (
-                "[REDACTED" not in value
-            ), f"seed planted a secret-shaped substring in {event.kind!r}: {value!r}"
+            assert "[REDACTED" not in value, (
+                f"seed planted a secret-shaped substring in {event.kind!r}: {value!r}"
+            )
 
 
 def _iter_payload_strings(payload):

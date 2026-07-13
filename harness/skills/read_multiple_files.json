@@ -1,0 +1,60 @@
+{
+  "name": "read_multiple_files",
+  "version": "0.1.0",
+  "description": "Read the contents of multiple files from the agent's workspace in a single call. Each file is read with the same bounds and path-escape prevention as ``read_file``. Returns a list of per-file results and an overall truncation flag.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "paths": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "List of absolute or harness-relative paths to files."
+      },
+      "max_bytes": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 32768,
+        "description": "Maximum number of UTF-8 bytes per file. Passed to each individual ``read_file`` call."
+      },
+      "max_lines": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Optional per-file line cap. Passed to each individual ``read_file`` call."
+      },
+      "offset": {
+        "type": "integer",
+        "minimum": 0,
+        "default": 0,
+        "description": "Byte offset at which to begin reading per file. Passed to each individual ``read_file`` call."
+      }
+    },
+    "required": ["paths"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "results": {
+        "type": "array",
+        "description": "Per-file results in the same order as ``paths``. Each entry has the same shape as ``read_file`` output: ``{content, sha256, truncated, bytes_returned, bytes_total, error}``."
+      },
+      "truncated": {
+        "type": "boolean",
+        "description": "true iff any individual file read was truncated."
+      },
+      "error": {
+        "type": ["string", "null"],
+        "description": "Non-null when the call itself failed (e.g. empty paths list). Individual file errors are embedded in each result entry, not here."
+      }
+    },
+    "required": ["results", "truncated", "error"]
+  },
+  "truncation_policy": {
+    "default_max_bytes": 32768,
+    "rationale": "Mirrors ``read_file``'s truncation policy per-file. The overall ``truncated`` flag is true if ANY file in the batch was truncated, letting the agent decide whether to re-read specific files.",
+    "truncation_strategy": "byte_cap_aligned_to_line_break",
+    "behavior_when_truncated": "Each file is truncated independently per the ``read_file`` policy. The top-level ``truncated`` is true if any file result has ``truncated=true``."
+  }
+}

@@ -158,8 +158,6 @@ def test_pre_tool_prunes_when_over_threshold(tmp_path) -> None:
     assert prune_event.payload == {
         "dropped": _PLANTS - DEFAULT_THRESHOLD,
         "threshold": DEFAULT_THRESHOLD,
-        "tokens_dropped": 0,
-        "tokens_remaining": 0,
     }
     assert captured == [
         {
@@ -168,8 +166,6 @@ def test_pre_tool_prunes_when_over_threshold(tmp_path) -> None:
             "payload": {
                 "dropped": _PLANTS - DEFAULT_THRESHOLD,
                 "threshold": DEFAULT_THRESHOLD,
-                "tokens_dropped": 0,
-                "tokens_remaining": 0,
             },
         }
     ]
@@ -238,14 +234,10 @@ def test_pre_tool_preserves_tool_result_and_user_prompt(tmp_path) -> None:
     assert prune_events[0].payload == {
         "dropped": 100,
         "threshold": DEFAULT_THRESHOLD,
-        "tokens_dropped": 0,
-        "tokens_remaining": 0,
     }
     assert captured[0]["payload"] == {
         "dropped": 100,
         "threshold": DEFAULT_THRESHOLD,
-        "tokens_dropped": 0,
-        "tokens_remaining": 0,
     }
 
 

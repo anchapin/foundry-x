@@ -1,7 +1,5 @@
 """Rate-limit hook and defaults mirror (SECURITY.md "Rate limits", issues #206, #332).
 
-Closes #332.
-
 ``docs/SECURITY.md:50-52`` states that the Evolver rate-limit defaults --
 "max N proposals per hour, max M lines of harness diff per proposal" --
 "live in ``harness/hooks/``." Before this module those defaults lived

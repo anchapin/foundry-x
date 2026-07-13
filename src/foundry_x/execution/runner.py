@@ -627,21 +627,155 @@ async def _bash_skill_executor(
         }
 
 
+async def _exec_read_file(arguments: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    """Execute the ``read_file`` skill (issue #416).
+
+    Reads a file with path-escape prevention (``_resolve_path``) and
+    returns bounded content with SHA-256, truncation flag, and byte counts
+    per the ``harness/skills/read_file.json`` contract.
+    """
+    path_str = arguments.get("path", "")
+    max_bytes = int(arguments.get("max_bytes", 32768))
+    max_lines = arguments.get("max_lines")
+    offset = int(arguments.get("offset", 0))
+
+    if not path_str:
+        return {
+            "content": "",
+            "sha256": "",
+            "truncated": False,
+            "bytes_returned": 0,
+            "bytes_total": 0,
+            "error": "path is required",
+        }
+
+    try:
+        resolved = _resolve_path(path_str, workspace_root)
+    except ValueError as exc:
+        return {
+            "content": "",
+            "sha256": "",
+            "truncated": False,
+            "bytes_returned": 0,
+            "bytes_total": 0,
+            "error": str(exc),
+        }
+
+    if not resolved.exists():
+        return {
+            "content": "",
+            "sha256": "",
+            "truncated": False,
+            "bytes_returned": 0,
+            "bytes_total": 0,
+            "error": f"file not found: {path_str}",
+        }
+
+    if not resolved.is_file():
+        return {
+            "content": "",
+            "sha256": "",
+            "truncated": False,
+            "bytes_returned": 0,
+            "bytes_total": 0,
+            "error": f"not a file: {path_str}",
+        }
+
+    try:
+        raw_bytes = resolved.read_bytes()
+    except OSError as exc:
+        return {
+            "content": "",
+            "sha256": "",
+            "truncated": False,
+            "bytes_returned": 0,
+            "bytes_total": 0,
+            "error": str(exc),
+        }
+
+    bytes_total = len(raw_bytes)
+
+    if offset >= bytes_total:
+        return {
+            "content": "",
+            "sha256": hashlib.sha256(b"").hexdigest(),
+            "truncated": False,
+            "bytes_returned": 0,
+            "bytes_total": bytes_total,
+            "error": None,
+        }
+
+    remaining = raw_bytes[offset:]
+    content_bytes = remaining[:max_bytes]
+
+    if max_lines is not None:
+        text_so_far = content_bytes.decode("utf-8", errors="replace")
+        lines = text_so_far.splitlines(keepends=True)
+        if len(lines) > max_lines:
+            truncated_at_line = "".join(lines[:max_lines])
+            content_bytes = truncated_at_line.encode("utf-8")
+            was_truncated = True
+        else:
+            was_truncated = False
+    else:
+        was_truncated = len(remaining) > max_bytes
+
+    if was_truncated:
+        content_bytes_truncated, _ = _truncate_at_newline(content_bytes, max_bytes)
+        content_bytes = content_bytes_truncated
+
+    content_str = content_bytes.decode("utf-8", errors="replace")
+    sha = hashlib.sha256(content_bytes).hexdigest()
+
+    return {
+        "content": content_str,
+        "sha256": sha,
+        "truncated": was_truncated,
+        "bytes_returned": len(content_bytes),
+        "bytes_total": bytes_total,
+        "error": None,
+    }
+
+
+async def _exec_read_multiple_files(
+    arguments: dict[str, Any], workspace_root: Path
+) -> dict[str, Any]:
+    """Execute the ``read_multiple_files`` skill (issue #416).
+
+    Reads multiple files in sequence, each with path-escape prevention.
+    Returns a list of per-file results plus an overall truncated flag.
+    """
+    paths: list[str] = arguments.get("paths", [])
+    max_bytes = int(arguments.get("max_bytes", 32768))
+    max_lines = arguments.get("max_lines")
+    offset = int(arguments.get("offset", 0))
+
+    if not paths:
+        return {"results": [], "truncated": False, "error": "paths is required"}
+
+    results: list[dict[str, Any]] = []
+    any_truncated = False
+
+    for path_str in paths:
+        result = await _exec_read_file(
+            {"path": path_str, "max_bytes": max_bytes, "max_lines": max_lines, "offset": offset},
+            workspace_root,
+        )
+        results.append(result)
+        if result.get("truncated"):
+            any_truncated = True
+
+    return {"results": results, "truncated": any_truncated, "error": None}
+
+
 async def _default_skill_executor(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Default skill executor that acknowledges the call (issue #89).
+    """Default skill executor for unimplemented skills (issue #416).
 
-    Issue #104 declares the bash skill's JSON contract; the actual
-    ``subprocess.run``-backed executor lands in a follow-up so the Critic
-    gate (ADR-0004) can evaluate it independently. Until then the runner
-    still needs *something* to close the loop and emit a ``tool_result``
-    event, so this stub returns a benign envelope the model can act on.
-
-    The shape is stable (``status`` + ``skill`` + ``echo`` of the argument
-    keys) so tests asserting the wiring can pattern-match without coupling
-    to the eventual real executor.
+    Returns an explicit error envelope so the agent can distinguish a missing
+    skill from a successful execution that returned no content.
     """
     return {
-        "status": "ok",
+        "error": f"skill {name!r} is not implemented",
         "skill": name,
         "echo": sorted(arguments.keys()),
     }
@@ -902,6 +1036,10 @@ async def _file_operation_skill_executor(
         return await _exec_edit_file(arguments, workspace_root)
     if name == "write_file":
         return await _exec_write_file(arguments, workspace_root)
+    if name == "read_file":
+        return await _exec_read_file(arguments, workspace_root)
+    if name == "read_multiple_files":
+        return await _exec_read_multiple_files(arguments, workspace_root)
     return await _default_skill_executor(name, arguments)
 
 
@@ -1122,17 +1260,6 @@ async def run_task(
     cap (matches the existing wall_clock + ``task_aborted`` pairing in
     SECURITY.md "Runaway detection").
 
-    Token-budget enforcement (issue #197): the loop accumulates
-    ``response.usage.total_tokens`` across steps. When the running total
-    exceeds ``limits.token_budget`` after a ``model_response`` is recorded,
-    the loop emits a ``task_aborted`` event with ``reason="token_budget"``
-    and terminates with ``outcome.status="failed"``,
-    ``outcome.reason="token_budget"``. The token-budget check lives in
-    ``run_task`` (not :func:`run_with_limits`) because ``run_task`` owns the
-    running counter; :func:`run_with_limits` continues to own the wall-clock
-    cap (matches the existing wall_clock + ``task_aborted`` pairing in
-    SECURITY.md "Runaway detection").
-
     On any model error the loop records a ``model_error`` event, sets
     ``outcome.status="failed"`` and ``outcome.reason="model_error"``, and
     re-raises so ``main()`` can append the ``task_failed`` terminal marker.
@@ -1175,16 +1302,7 @@ async def run_task(
             return await _bash_skill_executor(name, arguments, workspace_dir=workspace_root)
         if name in ("list_dir", "grep_search", "edit_file", "write_file"):
             return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
-        return await _default_skill_executor(name, arguments)
-
-    max_steps = _resolve_max_steps()
-
-    async def _execute_skill(name: str, arguments: dict[str, Any]) -> Any:
-        if skill_executor is not None:
-            return await skill_executor(name, arguments)
-        if name == "bash":
-            return await _bash_skill_executor(name, arguments, workspace_dir=workspace_root)
-        if name in ("list_dir", "grep_search", "edit_file", "write_file"):
+        if name in ("read_file", "read_multiple_files"):
             return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
         return await _default_skill_executor(name, arguments)
 
@@ -1295,6 +1413,17 @@ async def run_task(
                 if registry is not None:
                     call = await registry.run_pre(call)
 
+                log.record(
+                    session_id,
+                    kind="tool_call",
+                    payload={
+                        "step": step,
+                        "call_id": tool_call.id,
+                        "name": tool_call.function.name,
+                        "arguments": arguments,
+                        "duration_ms": 0,
+                    },
+                )
                 start = time.monotonic()
                 output: Any
                 error: str | None = None
@@ -1304,17 +1433,6 @@ async def run_task(
                     output = None
                     error = f"{type(exc).__name__}: {exc}"
                 duration_ms = int((time.monotonic() - start) * 1000)
-                log.record(
-                    session_id,
-                    kind="tool_call",
-                    payload={
-                        "step": step,
-                        "call_id": tool_call.id,
-                        "name": tool_call.function.name,
-                        "arguments": arguments,
-                        "duration_ms": duration_ms,
-                    },
-                )
                 result = hook_result_cls(name=call.name, output=output, error=error)
 
                 if registry is not None:
