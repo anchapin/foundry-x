@@ -242,6 +242,8 @@ class TraceLogger:
         # ``metadata={'github_token': 'ghp_...'}`` would have persisted the raw
         # token. SECURITY.md §Secrets.
         redacted_metadata: dict[str, Any] = _redact(metadata) if metadata else {}
+        if not isinstance(harness_version, str) or not harness_version:
+            raise ValueError("harness_version must be a non-empty string")
         session_id = str(uuid.uuid4())
         if self.backend == "jsonl":
             with self.path.open("a", encoding="utf-8") as fh:

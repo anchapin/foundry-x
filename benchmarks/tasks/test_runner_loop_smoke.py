@@ -149,6 +149,7 @@ def _stub_harness(harness_dir: Path) -> Path:
     """
     harness_dir.mkdir(parents=True, exist_ok=True)
     (harness_dir / "system_prompt.txt").write_text("stub harness for runner_loop_smoke\n")
+    (harness_dir / "_version.txt").write_text("0.1.0-test\n", encoding="utf-8")
     (harness_dir / "hooks").mkdir(exist_ok=True)
     (harness_dir / "skills").mkdir(exist_ok=True)
     return harness_dir
