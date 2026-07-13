@@ -106,12 +106,12 @@ def test_group_add_unlocks_render_nodes(override: dict) -> None:
     """
     svc = _service(override)
     group_add = svc.get("group_add", [])
-    assert (
-        "video" in group_add
-    ), f"group_add must include 'video' to access /dev/dri/renderD*; got {group_add!r}"
-    assert (
-        "render" in group_add
-    ), f"group_add must include 'render' to access /dev/dri/renderD*; got {group_add!r}"
+    assert "video" in group_add, (
+        f"group_add must include 'video' to access /dev/dri/renderD*; got {group_add!r}"
+    )
+    assert "render" in group_add, (
+        f"group_add must include 'render' to access /dev/dri/renderD*; got {group_add!r}"
+    )
 
 
 def test_hsa_override_gfx_version_for_rx_6600_xt(override: dict) -> None:
@@ -137,9 +137,9 @@ def test_rocm_path_points_at_host_install(override: dict) -> None:
     llama.cpp against this path on the host (infra/llama-cpp/rocm_setup.sh).
     """
     env = _service(override).get("environment", {})
-    assert (
-        env.get("ROCM_PATH") == "/opt/rocm"
-    ), f"ROCM_PATH must be /opt/rocm; got {env.get('ROCM_PATH')!r}"
+    assert env.get("ROCM_PATH") == "/opt/rocm", (
+        f"ROCM_PATH must be /opt/rocm; got {env.get('ROCM_PATH')!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

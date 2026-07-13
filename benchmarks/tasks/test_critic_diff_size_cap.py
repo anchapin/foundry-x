@@ -118,9 +118,9 @@ def test_critic_rejects_oversized_diff(benchmark_workspace: Path) -> None:
         f"for a {actual_lines}-line diff exceeding cap={cap}; "
         f"got approved={verdict.approved}"
     )
-    assert (
-        "diff_size_cap" in verdict.failed_checks
-    ), f"task {TASK.name}: expected 'diff_size_cap' in failed_checks, got {verdict.failed_checks}"
+    assert "diff_size_cap" in verdict.failed_checks, (
+        f"task {TASK.name}: expected 'diff_size_cap' in failed_checks, got {verdict.failed_checks}"
+    )
     assert "git apply" not in verdict.passed_checks, (
         f"task {TASK.name}: 'git apply' must not appear in passed_checks; "
         f"the cap check must run before apply (issue #333)"
@@ -149,9 +149,9 @@ def test_critic_accepts_rightsized_diff(benchmark_workspace: Path) -> None:
         )
     )
     actual_lines = len(rightsized_diff.splitlines())
-    assert (
-        actual_lines <= cap
-    ), f"test precondition: diff must be within cap ({actual_lines} vs {cap})"
+    assert actual_lines <= cap, (
+        f"test precondition: diff must be within cap ({actual_lines} vs {cap})"
+    )
 
     critic = Critic(harness, max_diff_lines=cap)
     verdict = critic.evaluate(rightsized_diff)

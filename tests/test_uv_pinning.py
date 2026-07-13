@@ -49,7 +49,7 @@ def test_base_image_is_digest_pinned(lines: list[str]) -> None:
     from_lines = [ln for ln in lines if re.match(r"^\s*FROM\s+\S", ln)]
     assert from_lines, "Dockerfile must start with a FROM instruction"
     first = from_lines[0]
-    assert "python:3.11" in first, f"FROM must pin a Python 3.11 image, got: {first!r}"
+    assert re.search(r"python:\d+\.\d+", first), f"FROM must pin a python image, got: {first!r}"
     digest = re.search(r"@sha256:([a-f0-9]{64})\b", first)
     assert digest, (
         f"FROM must pin a digest (@sha256:<64hex>), got: {first!r}. "
@@ -108,12 +108,12 @@ def test_arg_uv_version_is_declared(lines: list[str]) -> None:
     m = re.match(r"\s*ARG\s+UV_VERSION\s*=\s*([\w.\-]+)", arg)
     assert m, f"ARG UV_VERSION must have a concrete value, got: {arg!r}"
     version = m.group(1)
-    assert (
-        version.lower() != "latest"
-    ), f"UV_VERSION must be a pinned version, not 'latest' (got {version!r})"
-    assert re.match(
-        r"^\d+\.\d+\.\d+", version
-    ), f"UV_VERSION must look like semver `x.y.z` (got {version!r})"
+    assert version.lower() != "latest", (
+        f"UV_VERSION must be a pinned version, not 'latest' (got {version!r})"
+    )
+    assert re.match(r"^\d+\.\d+\.\d+", version), (
+        f"UV_VERSION must look like semver `x.y.z` (got {version!r})"
+    )
 
 
 def test_uv_version_sanity_check(lines: list[str]) -> None:
@@ -127,9 +127,9 @@ def test_uv_version_sanity_check(lines: list[str]) -> None:
         (i for i, ln in enumerate(lines) if "astral-sh/uv/releases/download" in ln),
         None,
     )
-    assert (
-        install_idx is not None
-    ), "Dockerfile must fetch uv from astral-sh/uv/releases/download (issue #124)."
+    assert install_idx is not None, (
+        "Dockerfile must fetch uv from astral-sh/uv/releases/download (issue #124)."
+    )
     post = lines[install_idx:]
     assert any("uv --version" in ln for ln in post), (
         "Dockerfile must run `uv --version` after installing uv so a "

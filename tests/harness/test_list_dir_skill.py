@@ -212,9 +212,9 @@ def test_registry_routes_list_dir_call_through_dispatch_hook() -> None:
     seed_result = ToolResult(name="list_dir", output={"entries": [], "truncated": False})
     out_result = _run(registry.run_post(call, seed_result))
 
-    assert (
-        out_result is not seed_result
-    ), "post_tool must replace the result with the walk output, not pass the seed through"
+    assert out_result is not seed_result, (
+        "post_tool must replace the result with the walk output, not pass the seed through"
+    )
     assert out_result.name == "list_dir"
     out_entries = out_result.output["entries"]
     assert "bash.json" in {entry["name"] for entry in out_entries}, (
@@ -256,9 +256,9 @@ def test_list_dir_walks_synthetic_fixture_and_finds_target(tmp_path: Path) -> No
     result = perform_list_dir(workspace)
 
     names = [entry["name"] for entry in result["entries"]]
-    assert (
-        "target.py" in names
-    ), "list_dir on the synthetic workspace must surface target.py (issue #105 acceptance)"
+    assert "target.py" in names, (
+        "list_dir on the synthetic workspace must surface target.py (issue #105 acceptance)"
+    )
     assert "helper.py" in names
     assert "README.md" in names
     assert result["truncated"] is False, (
@@ -268,9 +268,9 @@ def test_list_dir_walks_synthetic_fixture_and_finds_target(tmp_path: Path) -> No
 
     target_entry = next(entry for entry in result["entries"] if entry["name"] == "target.py")
     assert target_entry["kind"] == "file", target_entry
-    assert (
-        target_entry["size"] > 0
-    ), f"target.py was written with non-empty content; entry reports size={target_entry['size']}"
+    assert target_entry["size"] > 0, (
+        f"target.py was written with non-empty content; entry reports size={target_entry['size']}"
+    )
 
 
 def test_list_dir_glob_filter_only_returns_matching_entries(tmp_path: Path) -> None:
@@ -307,12 +307,12 @@ def test_list_dir_max_entries_caps_result_and_sets_truncated(tmp_path: Path) -> 
 
     result = perform_list_dir(workspace, max_entries=3)
 
-    assert (
-        result["truncated"] is True
-    ), "5 real entries against max_entries=3 must set truncated=True"
-    assert (
-        len(result["entries"]) == 3
-    ), f"exactly max_entries items should be returned; got {len(result['entries'])}"
+    assert result["truncated"] is True, (
+        "5 real entries against max_entries=3 must set truncated=True"
+    )
+    assert len(result["entries"]) == 3, (
+        f"exactly max_entries items should be returned; got {len(result['entries'])}"
+    )
     seen = {entry["name"] for entry in result["entries"]}
     assert len(seen) == 3, "entries must be unique after the cap"
 
@@ -330,9 +330,9 @@ def test_list_dir_excludes_hidden_entries_by_default(tmp_path: Path) -> None:
     (workspace / ".env").write_text("SECRET=top\n", encoding="utf-8")
 
     default_result = perform_list_dir(workspace)
-    assert {entry["name"] for entry in default_result["entries"]} == {
-        "visible.txt"
-    }, "default list_dir must exclude dotfiles"
+    assert {entry["name"] for entry in default_result["entries"]} == {"visible.txt"}, (
+        "default list_dir must exclude dotfiles"
+    )
 
     revealed = perform_list_dir(workspace, include_hidden=True)
     assert {entry["name"] for entry in revealed["entries"]} == {

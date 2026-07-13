@@ -25,6 +25,7 @@ _INJECTION_PATTERNS: tuple[tuple[str, str], ...] = (
     ("forget_previous", r"forget\s+(?:all\s+)?(?:previous|prior|above)\s+instructions"),
     ("new_instructions", r"(?:new|updated|real)\s+instructions\s*:"),
     ("role_tag_colon", r"(?:^|\n|\r)\s*(?:system|assistant|developer|user)\s*:\s*"),
+    ("role_tag_brackets", r"<{2}(?:system|assistant|developer|user)>{2}"),
     ("chatml_tag", r"<\|(?:im_start|im_end|system|assistant|user|begin_of_text|endoftext)\|>"),
     ("ignored_context", r"end\s+of\s+context\s+above"),
 )
