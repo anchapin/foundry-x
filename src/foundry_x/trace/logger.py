@@ -8,6 +8,8 @@ persist, including the ``metadata`` dict that an Operator passes to
 and the ``_redact`` / ``_redact_value`` helpers below for the
 implementation. Issue #121 extended the original layer (issue #3) to
 cover modern token formats and the previously-untouched metadata path.
+
+Closes #335.
 """
 
 from __future__ import annotations
