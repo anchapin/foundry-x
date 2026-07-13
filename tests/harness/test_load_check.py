@@ -79,9 +79,9 @@ def test_load_check_passes_against_real_harness_dir() -> None:
         text=True,
         timeout=30,
     )
-    assert (
-        proc.returncode == 0
-    ), f"load_check failed against real harness; stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert proc.returncode == 0, (
+        f"load_check failed against real harness; stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
     assert "load-check OK" in proc.stdout
 
 
@@ -130,12 +130,12 @@ def test_load_check_reports_broken_skill(tmp_path: Path) -> None:
         # script's own sys.path handling (parent of --harness-dir).
         env={**os.environ, "PYTHONPATH": ""},
     )
-    assert (
-        proc.returncode != 0
-    ), f"load_check should have failed; stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    assert (
-        "broken.json" in proc.stderr
-    ), f"stderr must name the broken file (issue #107); got {proc.stderr!r}"
+    assert proc.returncode != 0, (
+        f"load_check should have failed; stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "broken.json" in proc.stderr, (
+        f"stderr must name the broken file (issue #107); got {proc.stderr!r}"
+    )
 
 
 @pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
@@ -194,12 +194,12 @@ def test_load_check_reports_skill_name_filename_mismatch(tmp_path: Path) -> None
         f"load_check should have failed on name/filename mismatch; "
         f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     )
-    assert (
-        "mismatch.json" in proc.stderr
-    ), f"stderr must name the offending file (issue #278); got {proc.stderr!r}"
-    assert (
-        "'other'" in proc.stderr
-    ), f"stderr must name the internal name (issue #278); got {proc.stderr!r}"
+    assert "mismatch.json" in proc.stderr, (
+        f"stderr must name the offending file (issue #278); got {proc.stderr!r}"
+    )
+    assert "'other'" in proc.stderr, (
+        f"stderr must name the internal name (issue #278); got {proc.stderr!r}"
+    )
 
 
 @pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
@@ -270,9 +270,9 @@ def test_load_check_fails_when_manifest_references_missing_skill(tmp_path: Path)
         f"load_check should fail on manifest/disk drift; "
         f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     )
-    assert (
-        "ghost.json" in proc.stderr
-    ), f"stderr must name the missing skill (issue #277); got {proc.stderr!r}"
+    assert "ghost.json" in proc.stderr, (
+        f"stderr must name the missing skill (issue #277); got {proc.stderr!r}"
+    )
 
 
 @pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
@@ -303,6 +303,6 @@ def test_load_check_fails_when_manifest_references_missing_hook(tmp_path: Path) 
         f"load_check should fail on manifest/disk drift; "
         f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     )
-    assert (
-        "phantom" in proc.stderr
-    ), f"stderr must name the missing hook (issue #277); got {proc.stderr!r}"
+    assert "phantom" in proc.stderr, (
+        f"stderr must name the missing hook (issue #277); got {proc.stderr!r}"
+    )

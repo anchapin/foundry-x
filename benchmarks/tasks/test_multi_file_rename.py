@@ -167,9 +167,9 @@ def test_multi_file_rename(benchmark_workspace: Path) -> None:
         f"got rc={bad.returncode} stdout={bad.stdout!r} "
         f"stderr={bad.stderr!r}"
     )
-    assert (
-        "AttributeError" in bad.stderr
-    ), f"task {TASK.name}: expected AttributeError in stderr; got stderr={bad.stderr!r}"
+    assert "AttributeError" in bad.stderr, (
+        f"task {TASK.name}: expected AttributeError in stderr; got stderr={bad.stderr!r}"
+    )
 
     # --- Gold fix: edit BOTH the callee (def rename) and the caller -------
     # (import update) so the two files agree on the new name.
@@ -183,6 +183,6 @@ def test_multi_file_rename(benchmark_workspace: Path) -> None:
         f"got rc={good.returncode} stdout={good.stdout!r} "
         f"stderr={good.stderr!r}"
     )
-    assert (
-        good.stdout == expected_stdout
-    ), f"task {TASK.name}: stdout mismatch (got {good.stdout!r}, expected {expected_stdout!r})"
+    assert good.stdout == expected_stdout, (
+        f"task {TASK.name}: stdout mismatch (got {good.stdout!r}, expected {expected_stdout!r})"
+    )

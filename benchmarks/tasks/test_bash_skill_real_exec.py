@@ -163,9 +163,9 @@ def test_bash_real_exec(benchmark_workspace: Path) -> None:
     events = logger.load_session(logger.list_sessions()[0].session_id)
 
     tool_results = [e for e in events if e.kind == "tool_result"]
-    assert (
-        tool_results
-    ), f"expected at least one tool_result event; got kinds={[e.kind for e in events]}"
+    assert tool_results, (
+        f"expected at least one tool_result event; got kinds={[e.kind for e in events]}"
+    )
 
     bash_result = None
     for event in tool_results:
@@ -173,9 +173,9 @@ def test_bash_real_exec(benchmark_workspace: Path) -> None:
             bash_result = event.payload
             break
 
-    assert (
-        bash_result is not None
-    ), f"expected a tool_result for 'bash'; got ={[e.payload.get('name') for e in tool_results]}"
+    assert bash_result is not None, (
+        f"expected a tool_result for 'bash'; got ={[e.payload.get('name') for e in tool_results]}"
+    )
 
     output = bash_result.get("output")
     assert output is not None, f"tool_result output must not be None; got {bash_result!r}"
@@ -188,6 +188,6 @@ def test_bash_real_exec(benchmark_workspace: Path) -> None:
     error = output.get("error")
     assert error is None, f"expected no error field; got {error!r}"
 
-    assert (
-        bash_result.get("error") is None
-    ), f"expected tool_result.error=None; got {bash_result.get('error')!r}"
+    assert bash_result.get("error") is None, (
+        f"expected tool_result.error=None; got {bash_result.get('error')!r}"
+    )
