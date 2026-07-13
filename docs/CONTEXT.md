@@ -13,8 +13,11 @@
 
 - **FoundryX** — the framework as a whole: the runtime, the evolution
   loop, and the conventions that hold it together.
-- **FoundryAgent** — the runtime coding agent wrapped by the harness.
-  Its persona and operating rules live in `harness/system_prompt.txt`.
+- **FoundryAgent** — the runtime coding agent persona, defined in the
+  harness layer (`harness/system_prompt.txt`). This is a harness-layer
+  term: the `src/foundry_x/` package does not reference `FoundryAgent`
+  in its own code or type annotations; it is exclusively the identity
+  declared by the artifact under evolution.
 - **Harness** — the artifact being evolved. Consists of the system
   prompt, hooks, and skills. Version-controlled, evolved by the
   `Evolver`, gated by the `Critic`. Per PHILOSOPHY.md §6, the harness
@@ -69,10 +72,10 @@ many times per day against a benchmark suite.
 
 ## Concepts
 
-- **meta-agent** — an agent that operates on another agent's artifacts
-  rather than on the end task; in FoundryX the `Evolver` is the
-  meta-agent that turns failure reports into `ProposedEdit`s against
-  the harness.
+- **meta-agent** — a conceptual term (not a src/ term) for an agent
+  that operates on another agent's artifacts rather than on the end
+  task; in FoundryX the `Evolver` is the meta-agent that turns
+  failure reports into `ProposedEdit`s against the harness.
 - **failure report** — the structured artifact produced by the
   `Digester` from a trace, naming what failed, where, and the candidate
   root cause; consumed by the `Evolver` as the basis for a

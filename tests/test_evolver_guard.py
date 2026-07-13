@@ -276,3 +276,24 @@ class TestHighRiskValidator:
             risk_level="low",
         )
         assert edit.risk_level == "low"
+
+
+def test_evolver_uses_meta_agent_term_in_comment():
+    """Verify evolver.py comment uses 'meta-agent' (canonical term from CONTEXT.md §Concepts).
+
+    Issue #358: CONTEXT.md §Concepts defines 'meta-agent' as the canonical term
+    for the Evolver's role. The comment in evolver.py:22 should use this term
+    consistently to avoid breaking contributor onboarding (Observe step of the
+    workflow).
+    """
+    import re
+    from pathlib import Path
+
+    evolver_path = (
+        Path(__file__).resolve().parents[1] / "src" / "foundry_x" / "evolution" / "evolver.py"
+    )
+    source = evolver_path.read_text(encoding="utf-8")
+    assert re.search(r"meta-agent", source), (
+        "evolver.py must contain 'meta-agent' in a comment to align with "
+        "CONTEXT.md §Concepts terminology"
+    )
