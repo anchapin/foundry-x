@@ -43,6 +43,47 @@ from pydantic import BaseModel, Field, field_validator
 DifficultyTier = Literal["smoke", "easy", "medium"]
 
 
+class ModelRequirements(BaseModel):
+    """Model requirements for a benchmark task (issue #363, ADR-0014).
+
+    Records the minimal set of fields needed to identify and select a model
+    for a benchmark task. The Runner uses these fields to configure the
+    ModelAdapter when the field is non-null on a BenchmarkTask.
+
+    At least ``model_id`` is required; all other fields are optional.
+
+    The minimal MVP approach is config file + CLI flag (no registry service).
+    """
+
+    model_id: str = Field(
+        ...,
+        description="Model identifier (e.g. 'codellama-7b', 'qwen2.5-coder-7b').",
+    )
+    quantization: str | None = Field(
+        default=None,
+        description=(
+            "Quantization label (e.g. 'Q5_K_M', 'q8_0'). "
+            "``None`` means use the harness default quantization."
+        ),
+    )
+    path: str | None = Field(
+        default=None,
+        description=(
+            "Local GGUF file path. Mutually exclusive with ``endpoint``. "
+            "When set, the Runner uses this path to configure a local "
+            "llama.cpp server or similar binary backend."
+        ),
+    )
+    endpoint: str | None = Field(
+        default=None,
+        description=(
+            "OpenAI-compatible endpoint URL. Mutually exclusive with ``path``. "
+            "When set, the Runner sends chat completions to this endpoint "
+            "instead of the harness default."
+        ),
+    )
+
+
 class BenchmarkTask(BaseModel):
     """A single deterministic gatekeeping benchmark task."""
 
@@ -94,6 +135,18 @@ class BenchmarkTask(BaseModel):
             "means the task does not require any named skill (e.g. tasks that "
             "are satisfied by ``read_file``/``write_file`` alone). First non-empty "
             "entry as of issue #104 is ``bash``."
+        ),
+    )
+
+    # --- Model contract (issue #363, ADR-0014) ------------------------------
+    model_requirements: ModelRequirements | None = Field(
+        default=None,
+        description=(
+            "Model requirements for this task. When non-null, the Runner uses "
+            "these fields to configure the ModelAdapter for this benchmark. When "
+            "null, the harness default model configuration is used. Allows the "
+            "Critic to evaluate different model families (e.g. Q4 vs Q5) against "
+            "the same benchmark contract."
         ),
     )
 
