@@ -233,7 +233,6 @@ def test_adr_index_validation_precision() -> None:
     """
     # Current state validation
     numbers = sorted({num for num, _ in _adr_file_entries()})
-    max_expected = numbers[-1] if numbers else 0
 
     # The test should properly validate current index state
     assert 1 in numbers, "ADR 0001 should exist"
