@@ -3,6 +3,9 @@ from __future__ import annotations
 import difflib
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from foundry_x.evolution.critic import Critic
 from foundry_x.evolution.evolver import ProposedEdit
 from tests._harness_fixture import install_load_check_prerequisites
@@ -113,3 +116,77 @@ def test_clean_gate_passes():
     assert verdict.approved is True
     assert "pytest" in verdict.passed_checks
     assert verdict.failed_checks == []
+
+
+def test_proposed_edit_rejects_bare_hunk_diff():
+    """ProposedEdit rejects a unified diff missing git-apply headers (issue #257)."""
+    bare_hunk = "@@ -1 +1 @@\n-old line\n+new line\n"
+    with pytest.raises(ValidationError) as exc_info:
+        ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Test rationale",
+            unified_diff=bare_hunk,
+        )
+    assert "missing '--- a/' header" in str(exc_info.value)
+
+
+def test_proposed_edit_rejects_diff_missing_old_header():
+    """ProposedEdit rejects a unified diff missing the '--- a/' header."""
+    diff_missing_old = "+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old line\n+new line\n"
+    with pytest.raises(ValidationError) as exc_info:
+        ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Test rationale",
+            unified_diff=diff_missing_old,
+        )
+    assert "missing '--- a/' header" in str(exc_info.value)
+
+
+def test_proposed_edit_rejects_diff_missing_new_header():
+    """ProposedEdit rejects a unified diff missing the '+++ b/' header."""
+    diff_missing_new = "--- a/harness/system_prompt.txt\n@@ -1 +1 @@\n-old line\n+new line\n"
+    with pytest.raises(ValidationError) as exc_info:
+        ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Test rationale",
+            unified_diff=diff_missing_new,
+        )
+    assert "missing '+++ b/' header" in str(exc_info.value)
+
+
+def test_proposed_edit_accepts_well_formed_diff():
+    """ProposedEdit accepts a well-formed unified diff with git-apply headers."""
+    well_formed = (
+        "--- a/harness/system_prompt.txt\n"
+        "+++ b/harness/system_prompt.txt\n"
+        "@@ -1 +1 @@\n"
+        "-old line\n"
+        "+new line\n"
+    )
+    edit = ProposedEdit(
+        target_file="harness/system_prompt.txt",
+        rationale="Test rationale",
+        unified_diff=well_formed,
+    )
+    assert edit.unified_diff == well_formed
+
+
+def test_proposed_edit_accepts_multi_hunk_diff():
+    """ProposedEdit accepts a multi-hunk unified diff with headers."""
+    multi_hunk = (
+        "--- a/harness/system_prompt.txt\n"
+        "+++ b/harness/system_prompt.txt\n"
+        "@@ -1,3 +1,3 @@\n"
+        "-old line 1\n"
+        "+new line 1\n"
+        " unchanged\n"
+        "@@ -10,2 +10,2 @@\n"
+        "-old line 10\n"
+        "+new line 10\n"
+    )
+    edit = ProposedEdit(
+        target_file="harness/system_prompt.txt",
+        rationale="Test rationale",
+        unified_diff=multi_hunk,
+    )
+    assert edit.unified_diff == multi_hunk
