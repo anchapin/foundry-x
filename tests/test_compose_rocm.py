@@ -40,8 +40,8 @@ def base_text() -> str:
 
 def _service(compose: dict) -> dict:
     services = compose["services"]
-    assert "foundryx-runner" in services, "override must declare a 'foundryx-runner' service"
-    return services["foundryx-runner"]
+    assert "foundryx" in services, "override must declare a 'foundryx' service"
+    return services["foundryx"]
 
 
 def _device_names(svc: dict) -> list[str]:
@@ -72,11 +72,11 @@ def _device_names(svc: dict) -> list[str]:
 
 
 def test_override_uses_same_service_name_as_base(override: dict) -> None:
-    """The override must target the same service (`foundryx-runner`) so that
+    """The override must target the same service (`foundryx`) so that
     `docker compose -f base -f override` merges the ROCm bits into the
     base service rather than declaring a duplicate."""
-    assert "foundryx-runner" in override.get("services", {}), (
-        "override must declare the 'foundryx-runner' service so "
+    assert "foundryx" in override.get("services", {}), (
+        "override must declare the 'foundryx' service so "
         "`docker compose -f docker-compose.yml -f docker-compose.rocm.yml` "
         "merges the ROCm bits via Compose v2's merge-by-service"
     )
@@ -106,12 +106,12 @@ def test_group_add_unlocks_render_nodes(override: dict) -> None:
     """
     svc = _service(override)
     group_add = svc.get("group_add", [])
-    assert "video" in group_add, (
-        f"group_add must include 'video' to access /dev/dri/renderD*; got {group_add!r}"
-    )
-    assert "render" in group_add, (
-        f"group_add must include 'render' to access /dev/dri/renderD*; got {group_add!r}"
-    )
+    assert (
+        "video" in group_add
+    ), f"group_add must include 'video' to access /dev/dri/renderD*; got {group_add!r}"
+    assert (
+        "render" in group_add
+    ), f"group_add must include 'render' to access /dev/dri/renderD*; got {group_add!r}"
 
 
 def test_hsa_override_gfx_version_for_rx_6600_xt(override: dict) -> None:
@@ -137,9 +137,9 @@ def test_rocm_path_points_at_host_install(override: dict) -> None:
     llama.cpp against this path on the host (infra/llama-cpp/rocm_setup.sh).
     """
     env = _service(override).get("environment", {})
-    assert env.get("ROCM_PATH") == "/opt/rocm", (
-        f"ROCM_PATH must be /opt/rocm; got {env.get('ROCM_PATH')!r}"
-    )
+    assert (
+        env.get("ROCM_PATH") == "/opt/rocm"
+    ), f"ROCM_PATH must be /opt/rocm; got {env.get('ROCM_PATH')!r}"
 
 
 # ---------------------------------------------------------------------------

@@ -119,10 +119,7 @@ TASK = BenchmarkTask(
         "in CI (issue #175). Set FOUNDRY_RUN_LIVE_LLM=1 to enable."
     ),
 )
-def test_real_llm_smoke(
-    llamacpp_server: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_real_llm_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
     """Phase-3 plumbing canary for the live llama-server path (issue #175).
 
     Drives :func:`run_task` with the sort_a_list prompt and the
@@ -194,9 +191,9 @@ def test_real_llm_smoke(
     assert trace_path.exists(), f"trace database was not created at {trace_path}"
 
     sessions = logger.list_sessions()
-    assert len(sessions) == 1, (
-        f"expected exactly one TraceSession, got {len(sessions)}: {sessions!r}"
-    )
+    assert (
+        len(sessions) == 1
+    ), f"expected exactly one TraceSession, got {len(sessions)}: {sessions!r}"
     session = sessions[0]
     assert session.harness_version, (
         "TraceSession.harness_version is null/empty -- the trace is not "
@@ -221,9 +218,9 @@ def test_real_llm_smoke(
         )
 
     outcome_events = [event for event in events if event.kind == "outcome"]
-    assert len(outcome_events) == 1, (
-        f"expected exactly one outcome event, got {len(outcome_events)}"
-    )
+    assert (
+        len(outcome_events) == 1
+    ), f"expected exactly one outcome event, got {len(outcome_events)}"
     status = outcome_events[0].payload.get("status")
     assert status in {"success", "truncated", "failed"}, (
         f"unexpected outcome.status={status!r}; the Digester (ADR-0007) "

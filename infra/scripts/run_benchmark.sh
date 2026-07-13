@@ -16,7 +16,6 @@
 #   run_benchmark.sh --task "..." --keep-server           # server already up
 #   run_benchmark.sh --task "..." --dry-run               # print compose argv
 #   run_benchmark.sh --task "..." --compose-extra -f,infra/docker/docker-compose.rocm.yml
-#   run_benchmark.sh --smoke-test /srv/models/foo.Q5_K_M.gguf  # verify ROCm first
 #
 # Flags:
 #   --model <path>        GGUF model for auto-launched llama-server.
@@ -27,17 +26,6 @@
 #                         Example: --compose-extra -f,infra/docker/docker-compose.rocm.yml
 #   --keep-server         Do not tear down an auto-launched llama-server on exit.
 #   --dry-run             Print the resolved docker compose invocation and exit.
-#   --check-rocm          Run infra/llama-cpp/rocm_setup.sh --check-rocm before
-#                         launching or probing the server. Exits 0 only if all
-#                         ROCm preconditions hold; skips the benchmark if they
-#                         do not. Appropriate when using --compose-extra
-#                         -f,infra/docker/docker-compose.rocm.yml.
-#   --smoke-test <gguf>   Run infra/llama-cpp/rocm_setup.sh --smoke-test <gguf>
-#                         before launching or probing the server. The smoke test
-#                         launches a short-lived llama-server, verifies /health
-#                         AND /completion return non-empty content, then tears
-#                         the server down. Appropriate for CI and cold-start
-#                         validation (issue #355). Implies --check-rocm.
 #
 # Env vars (all optional):
 #   LLAMACPP_HOST          Host for /health probe (default http://127.0.0.1:8080)
@@ -53,7 +41,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 COMPOSE_FILE="$REPO_ROOT/infra/docker/docker-compose.yml"
 TRACES_DB="$REPO_ROOT/logs/traces.db"
-ROCM_SETUP_SCRIPT="$REPO_ROOT/infra/llama-cpp/rocm_setup.sh"
 
 LLAMACPP_HOST_URL="${LLAMACPP_HOST:-http://127.0.0.1:8080}"
 LLAMACPP_DIR="${LLAMACPP_DIR:-$HOME/llama.cpp}"
@@ -66,14 +53,11 @@ TASK=""
 COMPOSE_EXTRA=()
 KEEP_SERVER=0
 DRY_RUN=0
-CHECK_ROCM=0
-SMOKE_TEST_MODEL=""
 
 usage() {
     cat <<'USAGE'
 usage: run_benchmark.sh --task <prompt> [--model <gguf>]
                         [--compose-extra <args>] [--keep-server] [--dry-run]
-                        [--check-rocm] [--smoke-test <gguf>]
 
 Required:
   --task <prompt>            Task prompt for the sandboxed agent run.
@@ -84,11 +68,6 @@ Optional:
                              Example: -f,infra/docker/docker-compose.rocm.yml
   --keep-server              Do not tear down auto-launched llama-server on exit.
   --dry-run                  Print the resolved docker compose argv and exit.
-  --check-rocm               Run rocm_setup.sh --check-rocm before server launch.
-                             Exits 0 only if all ROCm preconditions hold.
-  --smoke-test <gguf>        Run rocm_setup.sh --smoke-test <gguf> before server
-                             launch. Verifies inference end-to-end (issue #355).
-                             Implies --check-rocm.
 
 Env: LLAMACPP_HOST, LLAMACPP_SERVER_BIN, LLAMACPP_DIR, LLAMACPP_NGL,
      LLAMACPP_HEALTH_TIMEOUT
@@ -115,12 +94,6 @@ while [[ $# -gt 0 ]]; do
             KEEP_SERVER=1; shift ;;
         --dry-run)
             DRY_RUN=1; shift ;;
-        --check-rocm)
-            CHECK_ROCM=1; shift ;;
-        --smoke-test)
-            [[ $# -ge 2 ]] || { echo "error: --smoke-test requires a path argument" >&2; exit 2; }
-            SMOKE_TEST_MODEL="$2"
-            CHECK_ROCM=1; shift 2 ;;
         -h|--help)
             usage; exit 0 ;;
         *)
@@ -141,7 +114,7 @@ compose_argv=(
     docker compose
     -f "$COMPOSE_FILE"
     "${COMPOSE_EXTRA[@]}"
-    run --rm foundryx-runner --task "$TASK"
+    run --rm foundryx --task "$TASK"
 )
 
 if [[ $DRY_RUN -eq 1 ]]; then
@@ -192,39 +165,6 @@ cleanup_server() {
     [[ -n "$SERVER_LOG" ]] && rm -f "$SERVER_LOG"
 }
 trap cleanup_server EXIT
-
-# ---------------------------------------------------------------------------
-# 0. ROCm pre-flight (issue #355)
-# ---------------------------------------------------------------------------
-if [[ -n "$SMOKE_TEST_MODEL" ]]; then
-    if [[ ! -x "$ROCM_SETUP_SCRIPT" ]]; then
-        echo "error: rocm_setup.sh not found at ${ROCM_SETUP_SCRIPT}" >&2
-        exit 1
-    fi
-    if [[ ! -r "$SMOKE_TEST_MODEL" ]]; then
-        echo "error: smoke-test model not found or not readable: ${SMOKE_TEST_MODEL}" >&2
-        exit 1
-    fi
-    echo "==> Running ROCm smoke test (issue #355)"
-    echo "    model: ${SMOKE_TEST_MODEL}"
-    echo "    script: ${ROCM_SETUP_SCRIPT}"
-    if ! "$ROCM_SETUP_SCRIPT" --smoke-test "$SMOKE_TEST_MODEL"; then
-        echo "error: ROCm smoke test failed; fix ROCm issues before re-running benchmark" >&2
-        exit 1
-    fi
-    echo "    smoke test PASSED"
-elif [[ $CHECK_ROCM -eq 1 ]]; then
-    if [[ -x "$ROCM_SETUP_SCRIPT" ]]; then
-        echo "==> Running ROCm pre-flight check (--check-rocm)"
-        if ! "$ROCM_SETUP_SCRIPT" --check-rocm; then
-            echo "error: ROCm preconditions not met; fix ROCm issues before re-running benchmark" >&2
-            exit 1
-        fi
-        echo "    ROCm preconditions OK"
-    else
-        echo "warning: --check-rocm set but rocm_setup.sh not found at ${ROCM_SETUP_SCRIPT}; skipping" >&2
-    fi
-fi
 
 # ---------------------------------------------------------------------------
 # 1. Ensure llama-server is running

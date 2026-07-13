@@ -210,9 +210,9 @@ def test_adr_index_drifts_with_new_adrs() -> None:
         missing_from_index = sorted(set(file_numbers) - set(index_numbers))
 
         # Verify the test properly detects this drift
-        assert mock_adr_number_in_files in missing_from_index, (
-            f"Index drift test failed: ADR {mock_adr_number:04d} in files but not in index"
-        )
+        assert (
+            mock_adr_number_in_files in missing_from_index
+        ), f"Index drift test failed: ADR {mock_adr_number:04d} in files but not in index"
 
         print(
             f"Index drift test verified: ADR {mock_adr_number:04d} detected as missing from index"
@@ -231,19 +231,17 @@ def test_adr_index_validation_precision() -> None:
     1. ADR numbers are validated against the correct range (0001-0010 currently)
     2. New ADRs can be added and validated
     """
-    # Current state validation
     numbers = sorted({num for num, _ in _adr_file_entries()})
-
-    # The test should properly validate current index state
+    assert numbers, "no ADR files found"
     assert 1 in numbers, "ADR 0001 should exist"
     assert 10 in numbers, "ADR 0010 should exist"
 
     # ADR-0011 referenced but missing should be detectable
     # This is the exact issue being fixed
     if 11 in _get_all_external_references():
-        assert 11 not in numbers, (
-            "ADR-0011 is referenced externally but not in ADR files (issue #291)"
-        )
+        assert (
+            11 not in numbers
+        ), "ADR-0011 is referenced externally but not in ADR files (issue #291)"
 
     # The validation should be able to detect if ADR-0011 file was added
     # but index not updated

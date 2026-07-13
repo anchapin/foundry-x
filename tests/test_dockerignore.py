@@ -101,9 +101,9 @@ def test_dockerignore_is_well_formed(patterns: list[str]) -> None:
 def test_dockerignore_has_a_lead_comment() -> None:
     """Operators should know why the file exists before they edit it."""
     head = DOCKERIGNORE.read_text().splitlines()[:3]
-    assert any(line.lstrip().startswith("#") for line in head), (
-        ".dockerignore should start with a comment explaining its purpose"
-    )
+    assert any(
+        line.lstrip().startswith("#") for line in head
+    ), ".dockerignore should start with a comment explaining its purpose"
 
 
 # ---------------------------------------------------------------------------

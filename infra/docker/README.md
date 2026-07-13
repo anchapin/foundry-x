@@ -84,32 +84,6 @@ the harness against the local ROCm-built llama-server
 (`infra/llama-cpp/`), issue #115 ships an *override* file that
 re-attaches the host AMD GPU without changing the CPU-only default:
 
-### Build
-
-The ROCm runtime is **not** installed by default (issue #352). To
-enable it, pass `--build-arg ENABLE_ROCM=1` at build time:
-
-```bash
-# ROCm-enabled image (one-time build)
-docker build \
-    --build-arg ENABLE_ROCM=1 \
-    -f infra/docker/Dockerfile \
-    -t foundryx:rocm \
-    .
-
-# CPU-only image (default, unchanged)
-docker build -f infra/docker/Dockerfile -t foundryx:latest .
-```
-
-`ENABLE_ROCM=1` installs `rocm-libs` and `hip-runtime-amd` from AMD's
-6.2.2 apt repository. The image size baseline in
-`tests/infra/image_size_baseline.json` applies to the CPU-only build;
-record a new baseline after building with ROCm enabled (rebuild locally,
-inspect `docker image inspect foundryx:rocm --format '{{.Size}}'`,
-update the baseline file).
-
-### Run
-
 ```bash
 docker compose \
     -f infra/docker/docker-compose.yml \

@@ -7,7 +7,7 @@ confirms the GPU passthrough override works end-to-end:
         -f infra/docker/docker-compose.yml \\
         -f infra/docker/docker-compose.rocm.yml \\
         run --rm \\
-        --entrypoint curl foundryx-runner http://llama-server:8080/health
+        --entrypoint curl foundryx http://llamacpp:8080/health
 
 Without an automated equivalent, the override can silently regress --
 a missing ``group_add`` entry, an ``HSA_OVERRIDE_GFX_VERSION`` typo, a
@@ -84,7 +84,7 @@ def test_health_endpoint_reachable() -> None:
     """Run the same curl smoke test as README.md:114-120.
 
     ``docker compose -f base -f rocm run --rm \\
-        --entrypoint curl foundryx-runner http://llama-server:8080/health``
+        --entrypoint curl foundryx http://llamacpp:8080/health``
 
     Expect a JSON body containing ``ok``.  On failure, dumps the merged
     compose config and the full curl response so the operator can
@@ -100,12 +100,12 @@ def test_health_endpoint_reachable() -> None:
         "--rm",
         "--entrypoint",
         "curl",
-        "foundryx-runner",
+        "foundryx",
         "--connect-timeout",
         "10",
         "--max-time",
         "30",
-        "http://llama-server:8080/health",
+        "http://llamacpp:8080/health",
     ]
     try:
         result = subprocess.run(
@@ -150,7 +150,7 @@ def test_hsa_override_gfx_version_honoured() -> None:
         "--rm",
         "--entrypoint",
         "sh",
-        "foundryx-runner",
+        "foundryx",
         "-c",
         'printf "%s" "$HSA_OVERRIDE_GFX_VERSION"',
     ]

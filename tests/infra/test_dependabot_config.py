@@ -34,9 +34,9 @@ EXPECTED_ECOSYSTEMS = ("github-actions", "docker", "uv")
 
 @pytest.fixture(scope="module")
 def config() -> dict:
-    assert DEPENDABOT_CONFIG.exists(), (
-        f"Dependabot config missing at {DEPENDABOT_CONFIG} (issue #283)."
-    )
+    assert (
+        DEPENDABOT_CONFIG.exists()
+    ), f"Dependabot config missing at {DEPENDABOT_CONFIG} (issue #283)."
     data = yaml.safe_load(DEPENDABOT_CONFIG.read_text())
     assert isinstance(data, dict), "dependabot.yml must parse to a mapping."
     return data
@@ -62,9 +62,9 @@ def test_config_uses_version_2(config: dict) -> None:
 def test_config_defines_exactly_the_three_expected_ecosystems(config: dict) -> None:
     """Acceptance criterion: github-actions, docker, and uv ecosystems."""
     ecosystems = {entry["package-ecosystem"] for entry in config["updates"]}
-    assert ecosystems == set(EXPECTED_ECOSYSTEMS), (
-        f"Expected {sorted(EXPECTED_ECOSYSTEMS)}; got {sorted(ecosystems)}."
-    )
+    assert ecosystems == set(
+        EXPECTED_ECOSYSTEMS
+    ), f"Expected {sorted(EXPECTED_ECOSYSTEMS)}; got {sorted(ecosystems)}."
 
 
 # ---------------------------------------------------------------------------
@@ -89,9 +89,9 @@ def test_ecosystem_targets_correct_directory(config: dict, ecosystem: str, direc
     live.
     """
     entry = _entry(config, ecosystem)
-    assert entry.get("directory") == directory, (
-        f"{ecosystem} must target {directory!r} (issue #283), got {entry.get('directory')!r}."
-    )
+    assert (
+        entry.get("directory") == directory
+    ), f"{ecosystem} must target {directory!r} (issue #283), got {entry.get('directory')!r}."
 
 
 @pytest.mark.parametrize("ecosystem", EXPECTED_ECOSYSTEMS)
@@ -121,9 +121,9 @@ def test_ecosystem_commit_message_is_chore_deps(config: dict, ecosystem: str) ->
     entry = _entry(config, ecosystem)
     cm = entry.get("commit-message", {})
     assert cm.get("prefix") == "chore", f"{ecosystem} commit prefix must be 'chore' (ADR-0008)."
-    assert cm.get("include") == "scope", (
-        f"{ecosystem} must include scope → 'chore(deps):' (ADR-0008)."
-    )
+    assert (
+        cm.get("include") == "scope"
+    ), f"{ecosystem} must include scope → 'chore(deps):' (ADR-0008)."
 
 
 # ---------------------------------------------------------------------------

@@ -98,7 +98,7 @@ def test_dry_run_prints_compose_invocation() -> None:
     assert "docker" in result.stdout
     assert "compose" in result.stdout
     assert "run" in result.stdout
-    assert "foundryx-runner" in result.stdout
+    assert "foundryx" in result.stdout
     assert "--task" in result.stdout
     # %q shell-quoting escapes spaces, so check for the first word.
     assert "Summarize" in result.stdout

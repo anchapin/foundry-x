@@ -72,9 +72,9 @@ def test_context_pruning_hook_loads_via_manifest():
     from harness.hooks.context_pruning import ContextPruningHook, register_into
 
     manifest = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
-    assert "context_pruning" in manifest["hooks"], (
-        "context_pruning entry missing from harness/manifest.json"
-    )
+    assert (
+        "context_pruning" in manifest["hooks"]
+    ), "context_pruning entry missing from harness/manifest.json"
 
     module_path = _REPO_ROOT / "harness" / "hooks" / "context_pruning.py"
     assert module_path.exists(), f"hook module missing at {module_path}"

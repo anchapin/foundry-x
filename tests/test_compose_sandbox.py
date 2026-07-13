@@ -27,17 +27,17 @@ def compose() -> dict:
 
 def _service(compose: dict) -> dict:
     services = compose["services"]
-    assert "foundryx-runner" in services, "expected a 'foundryx-runner' service"
-    return services["foundryx-runner"]
+    assert "foundryx" in services, "expected a 'foundryx' service"
+    return services["foundryx"]
 
 
 def test_src_and_harness_mounts_are_read_only(compose: dict) -> None:
     """Host source must be bind-mounted :ro (SECURITY.md threat #6)."""
     volumes = _service(compose)["volumes"]
     ro = {v.split(":")[1] for v in volumes if v.endswith(":ro")}
-    assert {"/app/src", "/app/harness"} <= ro, (
-        "src/ and harness/ must be read-only so a buggy hook cannot write outside the workspace"
-    )
+    assert (
+        {"/app/src", "/app/harness"} <= ro
+    ), "src/ and harness/ must be read-only so a buggy hook cannot write outside the workspace"
 
 
 def test_logs_mount_is_writable(compose: dict) -> None:
@@ -67,18 +67,18 @@ def test_memory_limit_is_set(compose: dict) -> None:
 def test_network_is_not_host_mode(compose: dict) -> None:
     """The container must NOT use broad host networking."""
     svc = _service(compose)
-    assert svc.get("network_mode") != "host", (
-        "network_mode: host grants broad host access; use a bridge network"
-    )
+    assert (
+        svc.get("network_mode") != "host"
+    ), "network_mode: host grants broad host access; use a bridge network"
     # A dedicated (non-default-alias) network should be declared.
     assert "networks" in svc, "service should attach to a dedicated network"
 
 
 def test_capabilities_dropped(compose: dict) -> None:
     """All Linux capabilities should be dropped (supplementary hardening)."""
-    assert "ALL" in _service(compose).get("cap_drop", []), (
-        "cap_drop: ALL removes ambient capabilities a buggy hook could abuse"
-    )
+    assert "ALL" in _service(compose).get(
+        "cap_drop", []
+    ), "cap_drop: ALL removes ambient capabilities a buggy hook could abuse"
 
 
 # ----------------------------------------------------------------------------
@@ -93,7 +93,7 @@ _TMPFS_SIZE_CAP_PATTERN = r"(?:^|[,\s])size=\d+[kmg]"
 
 
 def test_read_only_root_filesystem(compose: dict) -> None:
-    """Acceptance #1: read_only: true on the foundryx-runner service.
+    """Acceptance #1: read_only: true on the foundryx service.
 
     Closes the writable-surface gap that issue #6 left open: a buggy or
     malicious hook cannot persist to /root, /etc, or the overlay in
@@ -102,7 +102,7 @@ def test_read_only_root_filesystem(compose: dict) -> None:
     """
     svc = _service(compose)
     assert svc.get("read_only") is True, (
-        "foundryx-runner service must declare read_only: true (issue #123); "
+        "foundryx service must declare read_only: true (issue #123); "
         "without it the container's root FS is writable and a buggy hook "
         "can persist past the run"
     )
@@ -115,7 +115,7 @@ def test_tmpfs_caps_present(compose: dict) -> None:
     host RAM. Mode 1777 matches the FHS defaults for /tmp-style dirs.
     """
     svc = _service(compose)
-    assert "tmpfs" in svc, "foundryx-runner service must declare tmpfs: entries"
+    assert "tmpfs" in svc, "foundryx service must declare tmpfs: entries"
 
     raw = svc["tmpfs"]
     entries: list[tuple[str, str]] = []
@@ -137,15 +137,15 @@ def test_tmpfs_caps_present(compose: dict) -> None:
 
     for path, opts in entries:
         if path in _REQUIRED_TMPFS_PATHS:
-            assert re.search(_TMPFS_SIZE_CAP_PATTERN, opts), (
-                f"tmpfs {path!r} must declare a size cap (e.g. size=256m); got opts={opts!r}"
-            )
+            assert re.search(
+                _TMPFS_SIZE_CAP_PATTERN, opts
+            ), f"tmpfs {path!r} must declare a size cap (e.g. size=256m); got opts={opts!r}"
             # Mode 1777 is the FHS default for world-writable sticky dirs;
             # the test does not fail if mode is absent, only if it is wrong.
             mode_match = re.search(r"(?:^|[,\s])mode=([0-7]+)", opts)
-            assert mode_match is None or mode_match.group(1) == "1777", (
-                f"tmpfs {path!r} mode must be 1777 when declared; got {mode_match.group(1)!r}"
-            )
+            assert (
+                mode_match is None or mode_match.group(1) == "1777"
+            ), f"tmpfs {path!r} mode must be 1777 when declared; got {mode_match.group(1)!r}"
 
 
 def test_extra_hosts_is_llamacpp_gateway_only(compose: dict) -> None:
@@ -226,13 +226,13 @@ def _tmpfs_entry(compose: dict, mount_path: str) -> tuple[int, int] | None:
 
 
 def test_pids_limit_is_set(compose: dict) -> None:
-    """Issue #118: a top-level pids_limit on the foundryx-runner service bounds the
+    """Issue #118: a top-level pids_limit on the foundryx service bounds the
     total process count inside the container. Memory + CPU caps alone do not
     stop a fork-bomb (SECURITY.md threat #5)."""
     svc = _service(compose)
-    assert int(svc.get("pids_limit", 0)) >= 1, (
-        f"pids_limit must be a positive integer; got {svc.get('pids_limit')!r}"
-    )
+    assert (
+        int(svc.get("pids_limit", 0)) >= 1
+    ), f"pids_limit must be a positive integer; got {svc.get('pids_limit')!r}"
 
 
 def test_pids_limit_matches_deploy_resources_pids(compose: dict) -> None:
@@ -258,12 +258,12 @@ def test_ulimits_cap_process_and_fd_use(compose: dict) -> None:
     one process."""
     svc = _service(compose)
     ulimits = svc.get("ulimits") or {}
-    assert "nproc" in ulimits and int(ulimits["nproc"]) > 0, (
-        f"ulimits.nproc must be set; got {ulimits!r}"
-    )
-    assert "nofile" in ulimits and int(ulimits["nofile"]) > 0, (
-        f"ulimits.nofile must be set; got {ulimits!r}"
-    )
+    assert (
+        "nproc" in ulimits and int(ulimits["nproc"]) > 0
+    ), f"ulimits.nproc must be set; got {ulimits!r}"
+    assert (
+        "nofile" in ulimits and int(ulimits["nofile"]) > 0
+    ), f"ulimits.nofile must be set; got {ulimits!r}"
 
 
 def test_tmpfs_per_path_sizes(compose: dict) -> None:

@@ -40,9 +40,9 @@ def test_manifest_skills_match_on_disk_files() -> None:
     manifest = _load_manifest()
     manifest_skills = sorted(set(manifest["skills"]))
     on_disk = _on_disk_skill_basenames()
-    assert manifest_skills == on_disk, (
-        f"manifest.skills ({manifest_skills}) != on-disk skill files ({on_disk})"
-    )
+    assert (
+        manifest_skills == on_disk
+    ), f"manifest.skills ({manifest_skills}) != on-disk skill files ({on_disk})"
 
 
 def test_no_phantom_manifest_entries() -> None:
@@ -58,6 +58,6 @@ def test_no_orphan_skill_files() -> None:
     manifest = _load_manifest()
     manifest_set = set(manifest["skills"])
     for path in SKILLS_DIR.glob("*.json"):
-        assert path.name in manifest_set, (
-            f"{path.name} exists on disk but is missing from manifest.skills"
-        )
+        assert (
+            path.name in manifest_set
+        ), f"{path.name} exists on disk but is missing from manifest.skills"

@@ -55,16 +55,14 @@ _SIZE_CAP_PATTERN = re.compile(r"(?:^|[,\s])size=(\d+)([kmg])")
 
 
 def _service(compose: dict) -> dict:
-    """Return the ``foundryx-runner`` service entry from a parsed Compose file."""
+    """Return the ``foundryx`` service entry from a parsed Compose file."""
     services = compose["services"]
-    assert "foundryx-runner" in services, (
-        "expected a 'foundryx-runner' service in docker-compose.yml"
-    )
-    return services["foundryx-runner"]
+    assert "foundryx" in services, "expected a 'foundryx' service in docker-compose.yml"
+    return services["foundryx"]
 
 
 def _tmpfs_entries(svc: dict) -> dict[str, str]:
-    """Return ``{mount_path: opts}`` for the foundryx-runner service tmpfs block.
+    """Return ``{mount_path: opts}`` for the foundryx service tmpfs block.
 
     Compose accepts both the long syntax (a dict ``{"/path": "opts"}``)
     and the short syntax (a list of ``"/path:opts"`` strings). The
@@ -73,7 +71,7 @@ def _tmpfs_entries(svc: dict) -> dict[str, str]:
     someone re-shapes the file.
     """
     raw = svc.get("tmpfs")
-    assert raw is not None, "foundryx-runner service must declare tmpfs: entries (issue #123)"
+    assert raw is not None, "foundryx service must declare tmpfs: entries (issue #123)"
     if isinstance(raw, dict):
         return {path: (opts or "") for path, opts in raw.items()}
     entries: dict[str, str] = {}
@@ -109,20 +107,19 @@ TASK = BenchmarkTask(
         "security_opt=no-new-privileges."
     ),
     prompt=(
-        "Inspect infra/docker/docker-compose.yml: confirm the foundryx-runner "
+        "Inspect infra/docker/docker-compose.yml: confirm the foundryx "
         "service still declares read_only: true, tmpfs: entries for "
         "/tmp, /var/tmp, and /run each with an explicit size cap, "
-        "deploy.resources.limits with memory, cpus, and pids "
+        "extra_hosts containing exactly one entry whose key is "
+        "'llamacpp', deploy.resources.limits with memory, cpus, and pids "
         "set, pids_limit equal to deploy.resources.limits.pids, "
-        "cap_drop: ALL, and security_opt: no-new-privileges. "
-        "Confirm that OPENCODE_SERVER_URL is set to http://llama-server:8080 "
-        "and that a llama-server service exists in the compose file."
+        "cap_drop: ALL, and security_opt: no-new-privileges."
     ),
     difficulty_tier="medium",
     expected_outcome=(
         "Each hardening knob is present with the value issue #178 "
-        "specifies; OPENCODE_SERVER_URL points to the llama-server service; "
-        "every tmpfs entry carries an explicit size= cap "
+        "specifies; extra_hosts contains exactly one entry and its key "
+        "is 'llamacpp'; every tmpfs entry carries an explicit size= cap "
         "matching the per-path sizes from issue #118."
     ),
     tags=["security", "sandbox"],
@@ -149,7 +146,7 @@ def test_read_only_root_filesystem(compose: dict) -> None:
     """
     svc = _service(compose)
     assert svc.get("read_only") is True, (
-        "foundryx-runner service must declare read_only: true (issue #123); "
+        "foundryx service must declare read_only: true (issue #123); "
         "without it the container's root FS is writable and a buggy "
         "hook can persist past the run"
     )
@@ -183,12 +180,12 @@ def test_every_tmpfs_entry_carries_explicit_size_cap(compose: dict) -> None:
     time; either failure mode turns this benchmark red.
     """
     entries = _tmpfs_entries(_service(compose))
-    assert entries, "foundryx-runner service must declare at least one tmpfs: entry"
+    assert entries, "foundryx service must declare at least one tmpfs: entry"
     for path, opts in entries.items():
         match = _SIZE_CAP_PATTERN.search(opts)
-        assert match is not None, (
-            f"tmpfs {path!r} must declare an explicit size= cap (issue #123); got opts={opts!r}"
-        )
+        assert (
+            match is not None
+        ), f"tmpfs {path!r} must declare an explicit size= cap (issue #123); got opts={opts!r}"
 
 
 @pytest.mark.benchmark
@@ -220,23 +217,28 @@ def test_tmpfs_per_path_sizes_match_issue_118(compose: dict) -> None:
 
 
 @pytest.mark.benchmark
-def test_opencode_server_url_wired_to_llama_server(compose: dict) -> None:
-    """``OPENCODE_SERVER_URL`` is set to the internal llama-server service.
+def test_extra_hosts_is_exactly_one_llamacpp_entry(compose: dict) -> None:
+    """``extra_hosts`` contains exactly one entry, and its key is ``llamacpp``.
 
-    Issue #354 replaces the host-gateway extra_hosts approach with an
-    internal llama-server service. OPENCODE_SERVER_URL must point to
-    ``http://llama-server:8080`` so the runner can reach the inference
-    server without any host gateway alias.
+    Issue #123 narrows the egress surface from a generic
+    ``host.docker.internal:host-gateway`` alias (which exposes the whole
+    host loopback) to a specific ``llamacpp`` alias consumed only by
+    ``LLAMACPP_HOST``. Adding a second entry -- or widening it back to
+    ``host.docker.internal`` -- silently re-opens the threat; this
+    benchmark fails the moment either happens.
     """
-    services = compose.get("services", {})
-    assert "llama-server" in services, (
-        "compose file must declare a llama-server service (issue #354)"
+    names = _extra_hosts_names(_service(compose))
+    assert names, "foundryx service must declare at least one extra_hosts entry"
+    assert len(names) == 1, (
+        f"extra_hosts must contain EXACTLY one entry (the llamacpp "
+        f"gateway); got {len(names)}: {names!r}. Adding a second alias "
+        f"silently widens the egress surface."
     )
-    runner_env = _service(compose).get("environment", {})
-    assert runner_env.get("OPENCODE_SERVER_URL") == "http://llama-server:8080", (
-        "foundryx-runner OPENCODE_SERVER_URL must be http://llama-server:8080 "
-        "per issue #354; the runner reaches the inference server via Docker "
-        "internal DNS with no host gateway alias"
+    (only,) = names
+    assert only == "llamacpp", (
+        f"extra_hosts key must be 'llamacpp' per issue #123; got {only!r}. "
+        f"A generic alias like 'host.docker.internal' re-exposes the "
+        f"entire host loopback."
     )
 
 
@@ -254,9 +256,9 @@ def test_deploy_resources_limits_set(compose: dict) -> None:
     assert limits, "deploy.resources.limits must be declared (issue #118)"
     assert limits.get("memory"), "deploy.resources.limits.memory must be set"
     assert limits.get("cpus"), "deploy.resources.limits.cpus must be set"
-    assert int(limits.get("pids", 0)) >= 1, (
-        f"deploy.resources.limits.pids must be a positive integer; got {limits.get('pids')!r}"
-    )
+    assert (
+        int(limits.get("pids", 0)) >= 1
+    ), f"deploy.resources.limits.pids must be a positive integer; got {limits.get('pids')!r}"
 
 
 @pytest.mark.benchmark
@@ -271,9 +273,9 @@ def test_pids_limit_matches_deploy_resources_pids(compose: dict) -> None:
     svc = _service(compose)
     top_level = int(svc.get("pids_limit", 0))
     deploy_pids = int(svc.get("deploy", {}).get("resources", {}).get("limits", {}).get("pids", 0))
-    assert top_level == _EXPECTED_PIDS_LIMIT, (
-        f"pids_limit must be {_EXPECTED_PIDS_LIMIT} per issue #118; got {top_level}"
-    )
+    assert (
+        top_level == _EXPECTED_PIDS_LIMIT
+    ), f"pids_limit must be {_EXPECTED_PIDS_LIMIT} per issue #118; got {top_level}"
     assert deploy_pids == _EXPECTED_PIDS_LIMIT, (
         f"deploy.resources.limits.pids must be {_EXPECTED_PIDS_LIMIT} "
         f"per issue #118; got {deploy_pids}"
@@ -300,6 +302,6 @@ def test_capabilities_dropped_and_no_new_privileges(compose: dict) -> None:
 
     security_opt = svc.get("security_opt") or []
     normalised = {str(opt).lower() for opt in security_opt}
-    assert any(opt in {"no-new-privileges", "no-new-privileges:true"} for opt in normalised), (
-        f"security_opt must include 'no-new-privileges:true' (issue #124); got {security_opt!r}"
-    )
+    assert any(
+        opt in {"no-new-privileges", "no-new-privileges:true"} for opt in normalised
+    ), f"security_opt must include 'no-new-privileges:true' (issue #124); got {security_opt!r}"

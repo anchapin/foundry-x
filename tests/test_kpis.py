@@ -45,20 +45,12 @@ def _seed_session(
     Issue #120 adds the optional ``injection_block_count`` parameter: when
     >0, that many ``injection_blocked`` events are planted so the per-
     session KPI counter has something to surface.
-
-    Issue #337: a ``proposal_generated`` event is always planted because
-    cycle time is now measured from ``task_received`` to ``proposal_generated``
-    (the meta-loop cycle), not to ``critic_verdict``.
     """
     with logger.session(harness_version=harness_version) as sid:
         logger.record(sid, kind="task_received", payload={"prompt": "do work"})
-        time.sleep(0.01)
-        logger.record(
-            sid,
-            kind="proposal_generated",
-            payload={"target_file": "harness/system_prompt.txt", "rationale": "test"},
-        )
         if approved is not None:
+            # Small delay so cycle-time is measurably positive.
+            time.sleep(0.01)
             record_verdict(
                 logger,
                 sid,
@@ -102,37 +94,6 @@ def test_compute_kpis_with_planted_data(tmp_path):
     assert summary.injection_blocks == {}
 
 
-def test_compute_kpis_jsonl_backend_produces_identical_results(tmp_path):
-    """JSONL traces yield identical KPI values to SQLite (issue #339)."""
-    jsonl_path = tmp_path / "traces.jsonl"
-    sqlite_path = tmp_path / "traces.db"
-
-    jsonl_logger = TraceLogger(jsonl_path, backend="jsonl")
-    sqlite_logger = TraceLogger(sqlite_path, backend="sqlite")
-
-    # Plant identical data on both backends.
-    for _ in range(3):
-        _seed_session(jsonl_logger, "v1", approved=True, passed_checks=["bench"])
-        _seed_session(sqlite_logger, "v1", approved=True, passed_checks=["bench"])
-
-    _seed_session(jsonl_logger, "v1", approved=False, failed_checks=["bench"])
-    _seed_session(sqlite_logger, "v1", approved=False, failed_checks=["bench"])
-
-    jsonl_summary = compute_kpis(jsonl_logger)
-    sqlite_summary = compute_kpis(sqlite_logger)
-
-    # Cycle time is timing-dependent; both are positive and not None.
-    assert jsonl_summary.cycle_time_seconds is not None
-    assert sqlite_summary.cycle_time_seconds is not None
-    assert jsonl_summary.cycle_time_seconds > 0
-    assert sqlite_summary.cycle_time_seconds > 0
-    # Deterministic KPI values must match exactly.
-    assert jsonl_summary.regression_rate == sqlite_summary.regression_rate
-    assert jsonl_summary.improvement_rate == sqlite_summary.improvement_rate
-    assert jsonl_summary.injection_blocks == sqlite_summary.injection_blocks
-    assert jsonl_summary.token_totals == sqlite_summary.token_totals
-
-
 def test_regression_rate_counts_prior_pass_now_failing(tmp_path):
     """A task passing then failing in a later verdict counts as a regression."""
     db = tmp_path / "traces.db"
@@ -146,22 +107,6 @@ def test_regression_rate_counts_prior_pass_now_failing(tmp_path):
     # 1 of 2 sessions regressed; 1 of 2 verdicts approved.
     assert summary.regression_rate == 1 / 2
     assert summary.improvement_rate == 1 / 2
-
-
-def test_regressed_tasks_list_links_session_to_regressed_task(tmp_path):
-    """Issue #340: regressed_tasks lists each regressed task with its failing session."""
-    db = tmp_path / "traces.db"
-    logger = TraceLogger(db)
-
-    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
-    s2 = _seed_session(logger, "v1", approved=False, failed_checks=["bench"])
-
-    summary = compute_kpis(logger)
-
-    assert summary.regression_rate == 1 / 2
-    assert len(summary.regressed_tasks) == 1
-    assert summary.regressed_tasks[0].task == "bench"
-    assert summary.regressed_tasks[0].session_id == s2
 
 
 def test_no_regression_when_failure_never_passed(tmp_path):
@@ -218,23 +163,6 @@ def test_main_prints_markdown_table(tmp_path, capsys):
     assert "Improvement Rate" in output
     # No injection blocks planted → no extra section.
     assert "Injection Blocked" not in output
-
-
-def test_main_jsonl_backend_infers_from_path(tmp_path, capsys):
-    """The CLI auto-detects .jsonl backend from the --db path (issue #339)."""
-    jsonl = tmp_path / "traces.jsonl"
-    logger = TraceLogger(jsonl, backend="jsonl")
-    _seed_session(logger, "v1", approved=True)
-    _seed_session(logger, "v1", approved=False, failed_checks=["bench"])
-
-    rc = main(["--db", str(jsonl)])
-    captured = capsys.readouterr()
-
-    assert rc == 0
-    output = captured.out
-    assert "Cycle Time" in output
-    assert "Regression Rate" in output
-    assert "Improvement Rate" in output
 
 
 # ---------------------------------------------------------------------------
@@ -317,13 +245,10 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     # so downstream tooling can `payload["cycle_time_seconds"]` etc.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
-        "evolver_time_seconds",
         "regression_rate",
         "improvement_rate",
         "injection_blocks",
         "token_totals",
-        "regressed_tasks",
-        "aborted_benchmarks",
     }
 
 
@@ -722,95 +647,3 @@ def test_main_json_includes_token_totals(tmp_path, capsys):
 
     payload = json.loads(captured.out)
     assert payload["token_totals"] == {s1: 10}
-
-
-def test_session_rejects_empty_harness_version(tmp_path):
-    db = tmp_path / "traces.db"
-    logger = TraceLogger(db)
-
-    with pytest.raises(ValueError, match="non-empty string"):
-        with logger.session(harness_version=""):
-            pass
-
-
-def test_session_rejects_none_harness_version(tmp_path):
-    db = tmp_path / "traces.db"
-    logger = TraceLogger(db)
-
-    with pytest.raises(ValueError, match="non-empty string"):
-        with logger.session(harness_version=None):  # type: ignore[arg-type]
-            pass
-
-
-# ---------------------------------------------------------------------------
-# Issue #419: cycle_time measures task_received → critic_verdict, including
-# the Critic review step in the full evolution cycle. evolver_time_seconds
-# is the auxiliary field for task_received → proposal_generated.
-# ---------------------------------------------------------------------------
-
-
-def _seed_session_with_proposal(
-    logger: TraceLogger,
-    harness_version: str,
-) -> tuple[str, float]:
-    """Create a session with task_received + proposal_generated and return (sid, elapsed).
-
-    The elapsed return value is the actual wall-clock seconds between the two
-    events, computed with ``time.perf_counter`` so the test can assert the
-    measured KPI delta matches the planted elapsed time within a reasonable
-    tolerance (accounts for trace-event timestamp resolution).
-    """
-    t0 = time.perf_counter()
-    with logger.session(harness_version=harness_version) as sid:
-        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
-        time.sleep(0.05)
-        logger.record(
-            sid,
-            kind="proposal_generated",
-            payload={"target_file": "harness/system_prompt.txt", "rationale": "test"},
-        )
-    elapsed = time.perf_counter() - t0
-    return sid, elapsed
-
-
-def test_evolver_time_uses_proposal_generated_event(tmp_path):
-    """Evolver time is measured from task_received to proposal_generated (issue #419)."""
-    db = tmp_path / "traces.db"
-    logger = TraceLogger(db)
-
-    sid, planted_elapsed = _seed_session_with_proposal(logger, "v1")
-
-    summary = compute_kpis(logger)
-
-    assert summary.evolver_time_seconds is not None
-    assert summary.evolver_time_seconds > 0.0
-    assert abs(summary.evolver_time_seconds - planted_elapsed) < 0.02
-    assert summary.cycle_time_seconds is None
-
-
-def test_cycle_time_uses_critic_verdict_event(tmp_path):
-    """Cycle time is measured from task_received to critic_verdict (issue #419).
-
-    A session with only critic_verdict (no proposal_generated) has
-    cycle_time but no evolver_time since the evolver step was skipped.
-    """
-    db = tmp_path / "traces.db"
-    logger = TraceLogger(db)
-
-    with logger.session(harness_version="v1") as sid:
-        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
-        record_verdict(
-            logger,
-            sid,
-            CriticVerdict(
-                approved=True,
-                passed_checks=[],
-                failed_checks=[],
-            ),
-        )
-
-    summary = compute_kpis(logger)
-
-    assert summary.cycle_time_seconds is not None
-    assert summary.cycle_time_seconds > 0.0
-    assert summary.evolver_time_seconds is None

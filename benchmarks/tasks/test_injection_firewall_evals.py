@@ -115,24 +115,24 @@ def test_each_marker_category_truncates_and_flags() -> None:
     hook = InjectionFirewallHook()
     for marker_name, payload in sample_payloads.items():
         result = _post(hook, payload)
-        assert "injection_firewall" in result.output, (
-            f"{marker_name}: output must carry the suppression marker; got {result.output!r}"
-        )
+        assert (
+            "injection_firewall" in result.output
+        ), f"{marker_name}: output must carry the suppression marker; got {result.output!r}"
         # The re-injectable field must not contain the adversarial span.
-        assert "ignore previous instructions" not in result.output.lower(), (
-            f"{marker_name}: suppression must scrub the adversarial span from output"
-        )
+        assert (
+            "ignore previous instructions" not in result.output.lower()
+        ), f"{marker_name}: suppression must scrub the adversarial span from output"
         # The human-review channel carries the marker name (and only the marker name).
         assert result.error is not None, f"{marker_name}: error must be set on block"
-        assert result.error.startswith("injection_detected:"), (
-            f"{marker_name}: error must carry the injection_detected prefix; got {result.error!r}"
-        )
-        assert marker_name in result.error, (
-            f"{marker_name}: marker name must appear in error; got {result.error!r}"
-        )
-        assert "preview=" in result.error, (
-            f"{marker_name}: error must carry a bounded preview for triage"
-        )
+        assert result.error.startswith(
+            "injection_detected:"
+        ), f"{marker_name}: error must carry the injection_detected prefix; got {result.error!r}"
+        assert (
+            marker_name in result.error
+        ), f"{marker_name}: marker name must appear in error; got {result.error!r}"
+        assert (
+            "preview=" in result.error
+        ), f"{marker_name}: error must carry a bounded preview for triage"
 
 
 @pytest.mark.benchmark

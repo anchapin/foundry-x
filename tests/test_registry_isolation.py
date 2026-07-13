@@ -274,9 +274,9 @@ def test_firewall_register_into_isolates_from_default() -> None:
         assert isinstance(returned, InjectionFirewallHook)
         assert len(fresh._hooks) == 1
         assert fresh._hooks[0] is returned
-        assert len(saved._hooks) == pre_default_len, (
-            "register_into must not mutate the host default registry"
-        )
+        assert (
+            len(saved._hooks) == pre_default_len
+        ), "register_into must not mutate the host default registry"
     finally:
         set_default_registry(saved)
 

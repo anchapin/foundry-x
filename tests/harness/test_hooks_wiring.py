@@ -134,9 +134,9 @@ def _apply_and_import(tmp_path: Path) -> set[str]:
         timeout=30,
         env={"PYTHONPATH": str(tmp_path), "PATH": ""},
     )
-    assert proc.returncode == 0, (
-        f"Patched harness.hooks failed to import: stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    )
+    assert (
+        proc.returncode == 0
+    ), f"Patched harness.hooks failed to import: stdout={proc.stdout!r} stderr={proc.stderr!r}"
     return set(json.loads(proc.stdout.strip()))
 
 
@@ -153,9 +153,9 @@ def test_diff_exposes_context_pruning_exports(tmp_path: Path) -> None:
     every symbol ``context_pruning.py`` exports (issue #203 acceptance)."""
     all_names = _apply_and_import(tmp_path)
     missing = _EXPECTED_CONTEXT_PRUNING_EXPORTS - all_names
-    assert not missing, (
-        f"context_pruning exports missing from patched harness.hooks.__all__: {missing}"
-    )
+    assert (
+        not missing
+    ), f"context_pruning exports missing from patched harness.hooks.__all__: {missing}"
 
 
 def test_diff_exposes_context_pruning_module(tmp_path: Path) -> None:

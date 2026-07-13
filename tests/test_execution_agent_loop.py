@@ -198,9 +198,9 @@ def test_agent_loop_records_full_event_sequence(tmp_path, monkeypatch):
     tool_call_idx = kinds.index("tool_call")
     tool_result_idx = kinds.index("tool_result")
     outcome_idx = kinds.index("outcome")
-    assert user_prompt_idx < tool_call_idx < tool_result_idx < outcome_idx, (
-        f"events out of order: {kinds!r}"
-    )
+    assert (
+        user_prompt_idx < tool_call_idx < tool_result_idx < outcome_idx
+    ), f"events out of order: {kinds!r}"
 
     tool_call_event = events[tool_call_idx]
     assert tool_call_event.payload["name"] == "bash"
@@ -251,9 +251,9 @@ def test_agent_loop_records_full_event_sequence(tmp_path, monkeypatch):
     for ci in chunk_idxs:
         req_idx = max((i for i in req_idxs if i < ci), default=-1)
         resp_idx = min((i for i in resp_idxs if i > ci), default=len(kinds))
-        assert req_idx >= 0 and ci < resp_idx, (
-            f"chunk event {ci} not bracketed by request {req_idx} and response {resp_idx}"
-        )
+        assert (
+            req_idx >= 0 and ci < resp_idx
+        ), f"chunk event {ci} not bracketed by request {req_idx} and response {resp_idx}"
     # Each step's chunks share its model_request/model_response bracket.
     assert len(chunk_idxs) >= len(req_idxs), (
         f"expected at least one chunk per step; got {len(chunk_idxs)} chunks "
@@ -436,9 +436,9 @@ def test_agent_loop_records_parse_error_for_malformed_arguments(tmp_path, monkey
     assert "tool_argument_parse_error" in kinds, f"missing parse-error event: {kinds!r}"
     err_idx = kinds.index("tool_argument_parse_error")
     tool_call_idx = kinds.index("tool_call")
-    assert err_idx < tool_call_idx, (
-        f"parse-error must precede tool_call: err={err_idx}, call={tool_call_idx}"
-    )
+    assert (
+        err_idx < tool_call_idx
+    ), f"parse-error must precede tool_call: err={err_idx}, call={tool_call_idx}"
 
     parse_error_event = events[err_idx]
     assert parse_error_event.payload["call_id"] == "call_bad_args"
@@ -539,9 +539,9 @@ def test_agent_loop_emits_no_parse_error_for_valid_arguments(tmp_path, monkeypat
 
     events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
     kinds = [event.kind for event in events]
-    assert "tool_argument_parse_error" not in kinds, (
-        f"no parse-error event should fire for valid args: {kinds!r}"
-    )
+    assert (
+        "tool_argument_parse_error" not in kinds
+    ), f"no parse-error event should fire for valid args: {kinds!r}"
     tool_call_event = next(event for event in events if event.kind == "tool_call")
     assert tool_call_event.payload["arguments"] == {"command": "echo hello"}
 
@@ -603,9 +603,9 @@ def test_agent_loop_emits_hook_registry_error_when_get_registry_raises(tmp_path,
 
     events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
     kinds = [event.kind for event in events]
-    assert "hook_registry_error" in kinds, (
-        f"expected a hook_registry_error event when get_registry() raises; kinds={kinds!r}"
-    )
+    assert (
+        "hook_registry_error" in kinds
+    ), f"expected a hook_registry_error event when get_registry() raises; kinds={kinds!r}"
 
     err_event = next(event for event in events if event.kind == "hook_registry_error")
     assert err_event.payload["error_type"] == "RuntimeError"

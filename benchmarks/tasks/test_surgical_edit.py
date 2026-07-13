@@ -148,9 +148,9 @@ def test_surgical_edit(benchmark_workspace: Path) -> None:
         f"got rc={bad.returncode} stdout={bad.stdout!r} "
         f"stderr={bad.stderr!r}"
     )
-    assert "IndexError" in bad.stderr, (
-        f"task {TASK.name}: expected IndexError in stderr; got stderr={bad.stderr!r}"
-    )
+    assert (
+        "IndexError" in bad.stderr
+    ), f"task {TASK.name}: expected IndexError in stderr; got stderr={bad.stderr!r}"
 
     # --- Capture pre-edit function hashes. ----------------------------
     before = _function_hashes(seeded_source)
@@ -173,9 +173,9 @@ def test_surgical_edit(benchmark_workspace: Path) -> None:
         f"got rc={good.returncode} stdout={good.stdout!r} "
         f"stderr={good.stderr!r}"
     )
-    assert good.stdout == expected_stdout, (
-        f"task {TASK.name}: stdout mismatch (got {good.stdout!r}, expected {expected_stdout!r})"
-    )
+    assert (
+        good.stdout == expected_stdout
+    ), f"task {TASK.name}: stdout mismatch (got {good.stdout!r}, expected {expected_stdout!r})"
 
     # --- Precision: untouched functions are byte-identical. -----------
     after = _function_hashes(patched_source)

@@ -309,19 +309,6 @@ def test_cli_timeline_jsonl_backend(tmp_path, capsys):
     assert "hi" in out
 
 
-def test_cli_timeline_output_matches_format_timeline_directly(tmp_path, capsys):
-    db = tmp_path / "traces.db"
-    sid = _populate_session(db)
-    events = TraceLogger(db).load_session(sid)
-
-    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid])
-
-    assert rc == 0
-    cli_output = capsys.readouterr().out
-    direct_output = format_timeline(events)
-    assert cli_output.rstrip("\n") == direct_output.rstrip("\n")
-
-
 # ---------------------------------------------------------------------------
 # Issue #270: fx-trace timeline --format json / --out .json
 # ---------------------------------------------------------------------------

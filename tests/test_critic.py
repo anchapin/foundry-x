@@ -72,7 +72,7 @@ def harness_dir(tmp_path: Path) -> Path:
 
 
 def test_noop_diff_on_clean_harness_approves(harness_dir: Path) -> None:
-    critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"], use_sandbox=False)
+    critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"])
     verdict = critic.evaluate("")
     assert verdict.approved is True
     assert "pytest" in verdict.passed_checks
@@ -85,7 +85,7 @@ def test_diff_that_breaks_test_is_rejected(harness_dir: Path) -> None:
         _SANITY_TEST,
         _SANITY_TEST.replace("assert True", "assert False"),
     )
-    critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"], use_sandbox=False)
+    critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"])
     verdict = critic.evaluate(breaking)
     assert verdict.approved is False
     assert "pytest" in verdict.failed_checks
@@ -98,7 +98,7 @@ def test_live_harness_is_byte_identical_after_evaluate(harness_dir: Path) -> Non
         _SANITY_TEST,
         _SANITY_TEST.replace("assert True", "assert False"),
     )
-    critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"], use_sandbox=False)
+    critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"])
     before = _hash_dir(harness_dir)
     critic.evaluate(breaking)
     assert _hash_dir(harness_dir) == before
@@ -110,7 +110,7 @@ def test_patch_that_does_not_apply_is_rejected(harness_dir: Path) -> None:
         "this content does not exist\n",
         "replacement\n",
     )
-    critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"], use_sandbox=False)
+    critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"])
     verdict = critic.evaluate(bad_diff)
     assert verdict.approved is False
     assert "git apply" in verdict.failed_checks
@@ -131,7 +131,6 @@ def test_clean_diff_that_passes_is_approved(harness_dir: Path) -> None:
         harness_dir,
         pytest_args=["-q", "tests/test_sanity.py"],
         benchmark_tasks=[],
-        use_sandbox=False,
     )
     verdict = critic.evaluate(clean_diff)
     assert verdict.approved is True
@@ -146,7 +145,7 @@ def test_load_check_failure_rejected_pre_pytest(harness_dir: Path) -> None:
     appears in neither passed nor failed checks."""
     # Inject a broken skill so harness/scripts/load_check.py exits 1.
     (harness_dir / "skills" / "broken.json").write_text("{ not valid json")
-    critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"], use_sandbox=False)
+    critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"])
     verdict = critic.evaluate("")
     assert verdict.approved is False
     assert verdict.failed_checks == ["load_check"]
@@ -244,7 +243,6 @@ def test_passed_checks_list_benchmark_tags(harness_dir: Path) -> None:
                 tags=["security", "math"],
             ),
         ],
-        use_sandbox=False,
     )
     verdict = critic.evaluate("")
     assert verdict.approved is True

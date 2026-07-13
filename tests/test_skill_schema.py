@@ -79,9 +79,7 @@ def test_read_file_skill_present() -> None:
 def test_at_least_one_write_capable_skill() -> None:
     """The tool surface must allow the agent to produce code (issue #19)."""
     write_capable = SKILL_NAMES & {"write_file", "edit_file"}
-    assert write_capable, (
-        f"no write-capable skill found; expected one of write_file/edit_file, got {sorted(SKILL_NAMES)}"
-    )
+    assert write_capable, f"no write-capable skill found; expected one of write_file/edit_file, got {sorted(SKILL_NAMES)}"
 
 
 # ---------------------------------------------------------------------------
@@ -138,9 +136,9 @@ def test_read_file_truncation_policy_threshold_is_nonzero() -> None:
     assert isinstance(threshold, int), "default_max_bytes must be an integer"
     assert threshold > 0, f"default_max_bytes must be > 0, got {threshold}"
     # 32 KiB (32768) is the documented safe bound for 4K-32K context windows.
-    assert threshold >= 4096, (
-        f"default_max_bytes={threshold} is below the minimum safety bound of 4096 bytes"
-    )
+    assert (
+        threshold >= 4096
+    ), f"default_max_bytes={threshold} is below the minimum safety bound of 4096 bytes"
 
 
 def test_read_file_input_default_matches_truncation_policy() -> None:
@@ -246,9 +244,9 @@ def test_read_file_contract_truncates_large_synthetic_file(tmp_path: Path) -> No
         f"file of {len(payload)} bytes should exceed default_max_bytes="
         f"{default_max_bytes} but truncated=False"
     )
-    assert result["bytes_returned"] <= default_max_bytes, (
-        f"bytes_returned={result['bytes_returned']} exceeded default_max_bytes={default_max_bytes}"
-    )
+    assert (
+        result["bytes_returned"] <= default_max_bytes
+    ), f"bytes_returned={result['bytes_returned']} exceeded default_max_bytes={default_max_bytes}"
     assert result["bytes_total"] == len(payload)
     assert isinstance(result["content"], str) and result["content"]
     assert len(result["sha256"]) == 64  # hex SHA-256

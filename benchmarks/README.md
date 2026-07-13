@@ -41,24 +41,16 @@ benchmarks/
 
 ## Listing tasks
 
-To enumerate every benchmark task without running any code:
+To list all available benchmark tasks without running them, use pytest's
+collection-only mode:
 
 ```bash
 uv run pytest --co -q -m benchmark
 ```
 
-The `-q` (quiet) flag suppresses the full path, showing only
-`benchmarks/tasks/test_<name>.py::test_<task>` lines. The marker
-selection means only tasks in `benchmarks/tasks/` are listed — not the
-hygiene or smoke tests in `tests/benchmarks/` or `benchmarks/`.
-
-Current tasks include: `cross_file_refactor`, `fix_import_error`,
-`fix_syntax_error`, `grep_search_fix`, `hook_isolation_evals`,
-`injection_firewall_evals`, `list_dir_navigation`,
-`list_files_before_edit`, `multi_file_rename`, `nth_fibonacci`,
-`reject_prompt_injection`, `reverse_string`, `sandbox_compose_evals`,
-`smoke`, `sort_a_list`, `stop_after_two_failures`,
-`surface_ambiguity`, `surgical_edit`, `two_sum`, and `write_unit_test`.
+This outputs the names of all tasks currently registered in
+`benchmarks/tasks/`, useful for discovering available tasks and
+verifying a new task was added correctly.
 
 ## Mark a test with `@pytest.mark.benchmark`
 

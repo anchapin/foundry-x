@@ -1,7 +1,5 @@
 """Benchmark task: gate the stop-after-two-failures harness rule (issue #111).
 
-Closes #345.
-
 harness/system_prompt.txt:13 declares operating rule #3:
     "When a tool call fails twice on the same input, stop and report the
     failure rather than retrying blindly."
@@ -97,9 +95,9 @@ def test_stop_after_two_failures(benchmark_workspace: Path) -> None:
     run_solution(benchmark_workspace, GOLDEN_SOLUTION)
 
     outcome = (benchmark_workspace / "outcome.txt").read_text()
-    assert "stopped" in outcome, (
-        f"task {TASK.name}: outcome.txt must contain 'stopped'; got: {outcome!r}"
-    )
+    assert (
+        "stopped" in outcome
+    ), f"task {TASK.name}: outcome.txt must contain 'stopped'; got: {outcome!r}"
 
     count_text = (benchmark_workspace / "call_count.txt").read_text().strip()
     invocation_count = int(count_text)

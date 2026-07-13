@@ -1,7 +1,5 @@
 """Compute the three PRD success-metric KPIs from trace data.
 
-Closes #336.
-
 The PRD (``docs/PRD.md`` §5) defines:
 
 * **Cycle Time** — time from *Agent Failure* to *Harness Edit Proposal*.
@@ -14,12 +12,7 @@ This module derives approximations of those metrics from the events already
 recorded by :class:`~foundry_x.trace.logger.TraceLogger`:
 
 * ``cycle_time_seconds`` — mean wall-clock time from the first
-  ``task_received`` event to the first ``critic_verdict`` event per session
-  (issue #419: the full evolution cycle includes the Critic review step).
-* ``evolver_time_seconds`` — mean wall-clock time from the first
-  ``task_received`` event to the first ``proposal_generated`` event per session.
-  This auxiliary field tracks the Evolver-only step so operators can see how
-  much time the Critic adds to the full cycle (issue #419).
+  ``task_received`` event to the first ``critic_verdict`` event per session.
 * ``regression_rate`` — fraction of sessions with a ``critic_verdict`` in which
   a task previously seen in ``passed_checks`` later appears in ``failed_checks``
   (the persisted :class:`~foundry_x.observability.regression_report.VerdictRecord`
@@ -60,18 +53,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from foundry_x.evolution.digester import INJECTION_BLOCKED_KIND
 from foundry_x.observability.regression_report import VerdictRecord
 from foundry_x.trace.logger import TraceEvent, TraceLogger
-
-
-class RegressedTask(BaseModel):
-    """One regressed task linked to the session that regressed it (issue #340)."""
-
-    task: str
-    session_id: str
 
 
 class KpiSummary(BaseModel):
@@ -90,21 +76,13 @@ class KpiSummary(BaseModel):
     with no token data (e.g. an endpoint that never reports usage) keeps
     the summary compact. Like ``injection_blocks`` this is an auxiliary
     operator signal, not one of the three PRD success-metric KPIs.
-
-    Issue #340 adds ``regressed_tasks``: a list of :class:`RegressedTask`
-    linking each regressed task to the session that regressed it, so
-    operators can ask "show me KPIs for sessions that regressed" by
-    cross-referencing against the regression report.
     """
 
     cycle_time_seconds: float | None = None
-    evolver_time_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
-    aborted_benchmarks: int = 0
     injection_blocks: dict[str, int] = {}
     token_totals: dict[str, int] = {}
-    regressed_tasks: list[RegressedTask] = Field(default_factory=list)
 
 
 class KpiComparison(BaseModel):
@@ -150,8 +128,6 @@ class KpiHistoryEntry(BaseModel):
 def compute_kpis(
     logger: TraceLogger,
     harness_version: str | None = None,
-    since: str | None = None,
-    until: str | None = None,
 ) -> KpiSummary:
     """Compute KPIs from the trace store backing *logger*.
 
@@ -162,12 +138,6 @@ def compute_kpis(
     harness_version:
         When provided, only sessions created with this harness version are
         considered.
-    since:
-        When provided, only events at or after this ISO-8601 timestamp are
-        considered (issue #340 — mirrors ``fx-trace regression-report --since``).
-    until:
-        When provided, only events before this ISO-8601 timestamp are
-        considered (issue #340 — mirrors ``fx-trace regression-report --until``).
 
     Issue #273 — the per-session helpers below each call
     :meth:`TraceLogger.query_events` exactly once per event kind. The
@@ -177,26 +147,17 @@ def compute_kpis(
     down to the store so a multi-session fixture does not need to be
     materialized in Python.
     """
-    cycle_time = _cycle_time(logger, harness_version=harness_version, since=since, until=until)
-    evolver_time = _evolver_time(logger, harness_version=harness_version, since=since, until=until)
-    regression_rate, improvement_rate, regressed_tasks = _verdict_rates(
-        logger, harness_version=harness_version, since=since, until=until
-    )
-    injection_blocks = _injection_blocks(
-        logger, harness_version=harness_version, since=since, until=until
-    )
-    token_totals = _token_totals(logger, harness_version=harness_version, since=since, until=until)
-    aborted_benchmarks = _aborted_benchmarks(logger, harness_version=harness_version)
+    cycle_time = _cycle_time(logger, harness_version=harness_version)
+    regression_rate, improvement_rate = _verdict_rates(logger, harness_version=harness_version)
+    injection_blocks = _injection_blocks(logger, harness_version=harness_version)
+    token_totals = _token_totals(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
-        evolver_time_seconds=evolver_time,
         regression_rate=regression_rate,
         improvement_rate=improvement_rate,
-        aborted_benchmarks=aborted_benchmarks,
         injection_blocks=injection_blocks,
         token_totals=token_totals,
-        regressed_tasks=regressed_tasks,
     )
 
 
@@ -204,8 +165,6 @@ def compare_kpis(
     logger: TraceLogger,
     baseline_version: str,
     candidate_version: str,
-    since: str | None = None,
-    until: str | None = None,
 ) -> KpiComparison:
     """Compute a baseline-vs-candidate comparison (issue #100).
 
@@ -215,8 +174,8 @@ def compare_kpis(
     is "good") is applied at render time, not here, so the structured
     ``deltas`` stay sign-agnostic for JSON consumers.
     """
-    baseline = compute_kpis(logger, harness_version=baseline_version, since=since, until=until)
-    candidate = compute_kpis(logger, harness_version=candidate_version, since=since, until=until)
+    baseline = compute_kpis(logger, harness_version=baseline_version)
+    candidate = compute_kpis(logger, harness_version=candidate_version)
     return KpiComparison(
         baseline=baseline,
         candidate=candidate,
@@ -235,9 +194,6 @@ def _compute_deltas(
 
     return {
         "cycle_time_seconds": _delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds),
-        "evolver_time_seconds": _delta(
-            baseline.evolver_time_seconds, candidate.evolver_time_seconds
-        ),
         "regression_rate": _delta(baseline.regression_rate, candidate.regression_rate),
         "improvement_rate": _delta(baseline.improvement_rate, candidate.improvement_rate),
     }
@@ -246,16 +202,8 @@ def _compute_deltas(
 def _cycle_time(
     logger: TraceLogger,
     harness_version: str | None = None,
-    since: str | None = None,
-    until: str | None = None,
 ) -> float | None:
     """Mean wall-clock time from ``task_received`` to ``critic_verdict``.
-
-    Issue #419 — Cycle Time is defined as "Agent Failure to Harness Edit
-    Proposal" per PRD §5. The full evolution cycle is task_received →
-    critic_verdict (including the Critic review step). Previously this
-    measured task_received → proposal_generated (Evolver only), which
-    excluded the Critic and undercounted the full cycle.
 
     Issue #273 — previously looped every session id and called
     ``iter_events`` twice per session to find the first event of each
@@ -263,62 +211,12 @@ def _cycle_time(
     qualifying event in timestamp order; ``setdefault`` keeps the first
     (earliest) event per session, which is exactly the prior
     first-event-of-kind semantics.
-
-    Issue #340 — ``since`` and ``until`` filter the query cursors.
     """
     start_events: dict[str, TraceEvent] = {}
-    for event in logger.query_events(
-        kind="task_received", harness_version=harness_version, since=since, until=until
-    ):
+    for event in logger.query_events(kind="task_received", harness_version=harness_version):
         start_events.setdefault(event.session_id, event)
     end_events: dict[str, TraceEvent] = {}
-    for event in logger.query_events(
-        kind="critic_verdict", harness_version=harness_version, since=since, until=until
-    ):
-        end_events.setdefault(event.session_id, event)
-
-    deltas: list[float] = []
-    for sid, start_event in start_events.items():
-        end_event = end_events.get(sid)
-        if end_event is None:
-            continue
-        try:
-            t0 = datetime.fromisoformat(start_event.timestamp)
-            t1 = datetime.fromisoformat(end_event.timestamp)
-        except ValueError:
-            continue
-        delta = (t1 - t0).total_seconds()
-        if delta > 0:
-            deltas.append(delta)
-    if not deltas:
-        return None
-    return sum(deltas) / len(deltas)
-
-
-def _evolver_time(
-    logger: TraceLogger,
-    harness_version: str | None = None,
-    since: str | None = None,
-    until: str | None = None,
-) -> float | None:
-    """Mean wall-clock time from ``task_received`` to ``proposal_generated``.
-
-    Issue #419 — This auxiliary field tracks the Evolver-only step so operators
-    can see how much time the Critic adds to the full cycle. The delta between
-    ``cycle_time_seconds`` and ``evolver_time_seconds`` shows the Critic's
-    contribution to total cycle time.
-
-    Shares the same query-cursor pattern as :func:`_cycle_time` (issue #273).
-    """
-    start_events: dict[str, TraceEvent] = {}
-    for event in logger.query_events(
-        kind="task_received", harness_version=harness_version, since=since, until=until
-    ):
-        start_events.setdefault(event.session_id, event)
-    end_events: dict[str, TraceEvent] = {}
-    for event in logger.query_events(
-        kind="proposal_generated", harness_version=harness_version, since=since, until=until
-    ):
+    for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
         end_events.setdefault(event.session_id, event)
 
     deltas: list[float] = []
@@ -342,9 +240,7 @@ def _evolver_time(
 def _verdict_rates(
     logger: TraceLogger,
     harness_version: str | None = None,
-    since: str | None = None,
-    until: str | None = None,
-) -> tuple[float, float, list[RegressedTask]]:
+) -> tuple[float, float]:
     """Derive regression and improvement rates from persisted Critic verdicts.
 
     Verdicts are persisted as the :class:`VerdictRecord` shape
@@ -361,9 +257,6 @@ def _verdict_rates(
     * *regression_rate* = sessions with >=1 regressed task / sessions with a
       verdict, where a task regresses when it appears in ``failed_checks`` after
       having appeared in ``passed_checks`` in an earlier verdict.
-
-    Issue #340 — ``since`` and ``until`` filter the query cursor, and the
-    list of :class:`RegressedTask` objects is returned alongside the rates.
     """
 
     total_verdicts = 0
@@ -371,11 +264,8 @@ def _verdict_rates(
     prior_passed: dict[str, str] = {}
     sessions_with_verdicts: set[str] = set()
     regression_sessions: set[str] = set()
-    regressed_tasks: list[RegressedTask] = []
 
-    for event in logger.query_events(
-        kind="critic_verdict", harness_version=harness_version, since=since, until=until
-    ):
+    for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
         total_verdicts += 1
         sessions_with_verdicts.add(event.session_id)
         record = VerdictRecord(**event.payload)
@@ -384,7 +274,6 @@ def _verdict_rates(
         for task in record.failed_checks:
             if task in prior_passed:
                 regression_sessions.add(event.session_id)
-                regressed_tasks.append(RegressedTask(task=task, session_id=event.session_id))
         for task in record.passed_checks:
             prior_passed[task] = event.session_id
 
@@ -392,14 +281,12 @@ def _verdict_rates(
     regression_rate = (
         len(regression_sessions) / len(sessions_with_verdicts) if sessions_with_verdicts else 0.0
     )
-    return regression_rate, improvement_rate, regressed_tasks
+    return regression_rate, improvement_rate
 
 
 def _injection_blocks(
     logger: TraceLogger,
     harness_version: str | None = None,
-    since: str | None = None,
-    until: str | None = None,
 ) -> dict[str, int]:
     """Per-session count of ``injection_blocked`` events (issue #120).
 
@@ -411,15 +298,11 @@ def _injection_blocks(
     Issue #273 — one :meth:`TraceLogger.query_events` cursor replaces
     the previous per-session ``iter_events`` loop; the kind filter is
     pushed down so only ``injection_blocked`` rows cross the boundary.
-
-    Issue #340 — ``since`` and ``until`` filter the query cursor.
     """
     blocks: dict[str, int] = {}
     for event in logger.query_events(
         kind=INJECTION_BLOCKED_KIND,
         harness_version=harness_version,
-        since=since,
-        until=until,
     ):
         blocks[event.session_id] = blocks.get(event.session_id, 0) + 1
     return blocks
@@ -428,8 +311,6 @@ def _injection_blocks(
 def _token_totals(
     logger: TraceLogger,
     harness_version: str | None = None,
-    since: str | None = None,
-    until: str | None = None,
 ) -> dict[str, int]:
     """Per-session cumulative token totals (issue #271).
 
@@ -450,15 +331,11 @@ def _token_totals(
     :meth:`TraceLogger.query_events` cursor (issue #273) with the kind and
     ``harness_version`` filters pushed down, so a multi-session store is a
     single ordered scan rather than S round-trips.
-
-    Issue #340 — ``since`` and ``until`` filter the query cursor.
     """
     totals: dict[str, int] = {}
     for event in logger.query_events(
         kind="model_response",
         harness_version=harness_version,
-        since=since,
-        until=until,
     ):
         usage = event.payload.get("usage")
         if not isinstance(usage, dict):
@@ -469,29 +346,6 @@ def _token_totals(
             continue
         totals[event.session_id] = totals.get(event.session_id, 0) + step_total
     return totals
-
-
-def _aborted_benchmarks(
-    logger: TraceLogger,
-    harness_version: str | None = None,
-) -> int:
-    """Count benchmark runs aborted due to token budget (issue #417).
-
-    Counts ``task_aborted`` events whose ``reason`` is ``"token_budget"``.
-    These are sessions where the Runner aborted the loop because the running
-    token total exceeded the configured ``token_budget`` in ``RunLimits``.
-    The count is used in the KPI summary to distinguish completed vs.
-    aborted benchmark runs.
-    """
-    count = 0
-    for event in logger.query_events(
-        kind="task_aborted",
-        harness_version=harness_version,
-    ):
-        reason = event.payload.get("reason")
-        if reason == "token_budget":
-            count += 1
-    return count
 
 
 def _format_value(value: float | None) -> str:
@@ -530,20 +384,9 @@ def _render_markdown(summary: KpiSummary) -> str:
         "| KPI | Value |",
         "| --- | --- |",
         f"| Cycle Time (seconds) | {_format_value(summary.cycle_time_seconds)} |",
-        f"| Evolver Time (seconds) | {_format_value(summary.evolver_time_seconds)} |",
         f"| Regression Rate | {_format_value(summary.regression_rate)} |",
         f"| Improvement Rate | {_format_value(summary.improvement_rate)} |",
-        f"| Aborted (token budget) | {summary.aborted_benchmarks} |",
     ]
-    # Issue #340: surface regressed tasks only when at least one task regressed.
-    if summary.regressed_tasks:
-        lines.append("")
-        lines.append(f"Regressed Tasks: {len(summary.regressed_tasks)} regressed task(s) detected.")
-        lines.append("")
-        lines.append("| Task | Session |")
-        lines.append("| --- | --- |")
-        for rt in summary.regressed_tasks:
-            lines.append(f"| {rt.task} | {rt.session_id} |")
     # Issue #120: surface per-session ``injection_blocked`` counts only when
     # at least one session has ≥1 block; a clean trace store stays compact.
     if summary.injection_blocks:
@@ -574,12 +417,6 @@ def _render_markdown(summary: KpiSummary) -> str:
         for sid, count in sorted(summary.token_totals.items()):
             lines.append(f"| {sid} | {count} |")
     return "\n".join(lines)
-
-
-def _infer_backend(path: str | Path) -> str:
-    """Return ``"jsonl"`` for ``.jsonl`` paths, ``"sqlite"`` otherwise."""
-    suffix = Path(path).suffix.lower()
-    return "jsonl" if suffix == ".jsonl" else "sqlite"
 
 
 def _resolve_format(args_format: str | None, out: str | None) -> str:
@@ -616,10 +453,6 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{_format_value(baseline.cycle_time_seconds)} | "
         f"{_format_value(candidate.cycle_time_seconds)} | "
         f"{_format_delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds, higher_is_better=False)} |",
-        "| Evolver Time (seconds) | "
-        f"{_format_value(baseline.evolver_time_seconds)} | "
-        f"{_format_value(candidate.evolver_time_seconds)} | "
-        f"{_format_delta(baseline.evolver_time_seconds, candidate.evolver_time_seconds, higher_is_better=False)} |",
         "| Regression Rate | "
         f"{_format_value(baseline.regression_rate)} | "
         f"{_format_value(candidate.regression_rate)} | "
@@ -628,7 +461,6 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{_format_value(baseline.improvement_rate)} | "
         f"{_format_value(candidate.improvement_rate)} | "
         f"{_format_delta(baseline.improvement_rate, candidate.improvement_rate, higher_is_better=True)} |",
-        f"| Aborted (token budget) | {baseline.aborted_benchmarks} | {candidate.aborted_benchmarks} | (count) |",
     ]
     return "\n".join(lines)
 
@@ -671,10 +503,7 @@ def append_kpi_history(
     previous line.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = summary.model_dump(
-        mode="json",
-        exclude={"injection_blocks", "token_totals", "regressed_tasks", "evolver_time_seconds"},
-    )
+    payload = summary.model_dump(mode="json", exclude={"injection_blocks", "token_totals"})
     payload["timestamp"] = _now_iso()
     if harness_version is not None:
         payload["harness_version"] = harness_version
@@ -803,22 +632,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             " render a placeholder table."
         ),
     )
-    parser.add_argument(
-        "--since",
-        default=None,
-        help=(
-            "ISO-8601 timestamp. Only events at or after this timestamp are"
-            " considered (issue #340 — mirrors fx-trace regression-report --since)."
-        ),
-    )
-    parser.add_argument(
-        "--until",
-        default=None,
-        help=(
-            "ISO-8601 timestamp. Only events before this timestamp are"
-            " considered (issue #340 — mirrors fx-trace regression-report --until)."
-        ),
-    )
     args = parser.parse_args(argv)
 
     baseline_version = args.baseline_harness_version
@@ -841,21 +654,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     fmt = _resolve_format(args.format, args.out)
-    backend = _infer_backend(args.db)
-    logger = TraceLogger(args.db, backend=backend)
+    logger = TraceLogger(args.db)
 
     if baseline_version is not None and candidate_version is not None:
-        comparison = compare_kpis(
-            logger, baseline_version, candidate_version, since=args.since, until=args.until
-        )
+        comparison = compare_kpis(logger, baseline_version, candidate_version)
         if fmt == "json":
             output = _render_comparison_json(comparison)
         else:
             output = _render_comparison_markdown(comparison.baseline, comparison.candidate)
     else:
-        summary = compute_kpis(
-            logger, harness_version=args.harness_version, since=args.since, until=args.until
-        )
+        summary = compute_kpis(logger, harness_version=args.harness_version)
         # Issue #183: append-only history log. Comparison runs are
         # intentionally not logged (the history is per single-summary
         # run; a comparison is a one-off baseline-vs-candidate diff).

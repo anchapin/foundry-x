@@ -29,9 +29,6 @@ belongs here, not in `src/`.
 ## Author
 <you, with date>
 
-## Status
-Proposed | Approved | Rejected
-
 ## Problem
 What is missing or broken today?
 
@@ -50,29 +47,18 @@ What would have to be true for this to be a good idea?
 
 When an idea is approved:
 
-1. Update the `Status` field in the idea file to `Approved`.
-2. Add or update an ADR in `../adr/` capturing the decision.
-3. Either move the idea file into `../adr/` (rename and merge) if
+1. Add or update an ADR in `../adr/` capturing the decision.
+2. Either move the idea file into `../adr/` (rename and merge) if
    the ADR supersedes it, or delete it if the ADR fully captures
    the intent.
-4. Implement in a follow-up PR.
+3. Implement in a follow-up PR.
 
 When an idea is rejected:
 
-1. Update the `Status` field in the idea file to `Rejected`.
+1. Update its status to `Rejected` with a one-line reason.
 2. Leave the file in place so future contributors see it was
    considered.
 
-The ideas index in this README is updated automatically by
-`scripts/update_ideas_index.py` (run as a pre-commit hook).
-
 ## Ideas index
 
-<!-- Do not edit this table by hand. It is updated by
-     `scripts/update_ideas_index.py`, which runs automatically as a
-     pre-commit hook and can be run manually with:
-       python scripts/update_ideas_index.py -->
-
-| Number | Title | Status |
-| ------ | ----- | ------ |
-<!-- entries inserted by scripts/update_ideas_index.py -->
+_None yet._

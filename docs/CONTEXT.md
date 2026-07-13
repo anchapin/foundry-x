@@ -13,11 +13,10 @@
 
 - **FoundryX** — the framework as a whole: the runtime, the evolution
   loop, and the conventions that hold it together.
-- **FoundryAgent** — the runtime coding agent persona, defined in the
-  harness layer (`harness/system_prompt.txt`). This is a harness-layer
-  term: the `src/foundry_x/` package does not reference `FoundryAgent`
-  in its own code or type annotations; it is exclusively the identity
-  declared by the artifact under evolution.
+- **FoundryAgent** — the runtime coding agent persona as defined in the
+  harness. Its persona and operating rules live in `harness/system_prompt.txt`.
+  This is a *harness-layer term*: the src/foundry_x/ layer refers to "the
+  agent" or "the runtime agent" without using this specific persona name.
 - **Harness** — the artifact being evolved. Consists of the system
   prompt, hooks, and skills. Version-controlled, evolved by the
   `Evolver`, gated by the `Critic`. Per PHILOSOPHY.md §6, the harness
@@ -39,8 +38,8 @@
 - **Digester** — parses a trace (or set of traces) and produces a
   failure report: what failed, where, and the candidate root cause.
   (`src/foundry_x/evolution/digester.py`)
-- **Evolver** — a meta-agent that takes a failure report and proposes
-  a `ProposedEdit` against the harness.
+- **Evolver** — a meta-agent (harness-layer role) that takes a failure report
+  and proposes a `ProposedEdit` against the harness.
   (`src/foundry_x/evolution/evolver.py`)
 - **Critic** — the gatekeeper. Runs the proposed edit through the
   pytest suite and benchmark suite; rejects regressions.
@@ -72,10 +71,11 @@ many times per day against a benchmark suite.
 
 ## Concepts
 
-- **meta-agent** — a conceptual term (not a src/ term) for an agent
-  that operates on another agent's artifacts rather than on the end
-  task; in FoundryX the `Evolver` is the meta-agent that turns
-  failure reports into `ProposedEdit`s against the harness.
+- **meta-agent** — an agent that operates on another agent's artifacts
+  rather than on the end task; in FoundryX the `Evolver` is the
+  meta-agent that turns failure reports into `ProposedEdit`s against
+  the harness.  This is a *conceptual term* used in documentation; the
+  src/foundry_x/ code uses "Evolver" as the proper class name.
 - **failure report** — the structured artifact produced by the
   `Digester` from a trace, naming what failed, where, and the candidate
   root cause; consumed by the `Evolver` as the basis for a

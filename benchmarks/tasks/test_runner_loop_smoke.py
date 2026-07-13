@@ -149,7 +149,6 @@ def _stub_harness(harness_dir: Path) -> Path:
     """
     harness_dir.mkdir(parents=True, exist_ok=True)
     (harness_dir / "system_prompt.txt").write_text("stub harness for runner_loop_smoke\n")
-    (harness_dir / "_version.txt").write_text("0.1.0-test\n", encoding="utf-8")
     (harness_dir / "hooks").mkdir(exist_ok=True)
     (harness_dir / "skills").mkdir(exist_ok=True)
     return harness_dir
@@ -243,21 +242,21 @@ def test_runner_loop_smoke(benchmark_workspace: Path) -> None:
             assert required in kinds, f"event kind {required!r} missing from trace; got {kinds!r}"
 
         # user_prompt precedes outcome (the loop enters, then terminates).
-        assert kinds.index("user_prompt") < kinds.index("outcome"), (
-            f"user_prompt must precede outcome; got {kinds!r}"
-        )
+        assert kinds.index("user_prompt") < kinds.index(
+            "outcome"
+        ), f"user_prompt must precede outcome; got {kinds!r}"
 
         # tool_call precedes its corresponding tool_result (the loop records
         # the call before the executor returns).
-        assert kinds.index("tool_call") < kinds.index("tool_result"), (
-            f"tool_call must precede tool_result; got {kinds!r}"
-        )
+        assert kinds.index("tool_call") < kinds.index(
+            "tool_result"
+        ), f"tool_call must precede tool_result; got {kinds!r}"
 
         # --- Terminal outcome ----------------------------------------------
         outcome_event = next(event for event in events if event.kind == "outcome")
-        assert outcome_event.payload["reason"] == "final_answer", (
-            f"expected outcome.reason='final_answer'; got {outcome_event.payload!r}"
-        )
+        assert (
+            outcome_event.payload["reason"] == "final_answer"
+        ), f"expected outcome.reason='final_answer'; got {outcome_event.payload!r}"
         assert outcome_event.payload["status"] == "success"
         assert outcome_event.payload["steps"] >= 1
 
@@ -266,9 +265,9 @@ def test_runner_loop_smoke(benchmark_workspace: Path) -> None:
         # (issue #21) -- a hook that raises on clean output would silently
         # corrupt the model channel. Surfacing the count here makes that
         # class of regression observable at PR review (ADR-0004).
-        assert hook_failures == [], (
-            f"expected zero HookRegistry.on_error calls on the happy path; got {hook_failures!r}"
-        )
+        assert (
+            hook_failures == []
+        ), f"expected zero HookRegistry.on_error calls on the happy path; got {hook_failures!r}"
 
         # --- Adapter exhaustion guard --------------------------------------
         # Regression vs. SECURITY.md "Runaway detection": the loop must exit

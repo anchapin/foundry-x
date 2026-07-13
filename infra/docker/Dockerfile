@@ -27,25 +27,15 @@
 #     tests/infra/test_docker_build.py::test_runtime_image_size_within_baseline
 #     and tests/infra/image_size_baseline.json.
 #
-# ROCm GPU support (issue #352):
-#   ENABLE_ROCM=1 installs AMD ROCm runtime (rocm-libs + hip-runtime-amd)
-#   so llama-server built against gfx1032 on the host can execute
-#   inference inside the container. Build with:
-#     docker build --build-arg ENABLE_ROCM=1 -f infra/docker/Dockerfile .
-#   Then run with the device passthrough via docker-compose.rocm.yml
-#   (infra/docker/README.md "ROCm GPU sandbox (RX 6600 XT)").
-#
 # Requires BuildKit (Docker 23+ default; `docker compose build` uses
 # BuildKit by default). On legacy builders, the `--mount=type=cache`
 # syntax will fail loudly — which is the desired behavior, since the
 # cache mount is part of the acceptance criteria.
 
-ARG ENABLE_ROCM=0
-
 # ---- Stage 1: builder -------------------------------------------------------
 # Carries the toolchain required to install uv and resolve the lockfile.
 # This stage is NOT the published image.
-FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1 AS builder
+FROM python:3.11-slim@sha256:a7bce671c71744cd4dcef2bc9cd9c5eff3d7cfa6b55eca30759765047184bcdb AS builder
 # was: python:3.11-slim (2026-07-10) — 3.11.15-slim-trixie per issue #124
 #      Resolved from registry-1.docker.io/v2/library/python/manifests/3.11-slim
 
@@ -101,41 +91,16 @@ COPY tests ./tests
 # No compiler, no VCS, no HTTP client — only ca-certificates (needed for
 # outbound TLS to llama-server). The .venv created in the builder is
 # copied wholesale; uv itself is NOT installed here.
-FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1 AS runtime
+FROM python:3.11-slim@sha256:a7bce671c71744cd4dcef2bc9cd9c5eff3d7cfa6b55eca30759765047184bcdb AS runtime
 # was: python:3.11-slim (2026-07-10)
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/src
 
-# Install runtime deps. curl is needed for rocm_setup.sh --smoke-test (health
-# polling), and the rocm libs let the host-built HIP binary execute inside
-# the container (issue #352).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
-        curl \
     && rm -rf /var/lib/apt/lists/*
-
-# ROCm GPU support (issue #352): ENABLE_ROCM=1 installs the AMD ROCm
-# runtime so the container can run llama-server built with HIP on the host.
-# The rocm-libs meta-package pulls in hipblas, rocrand, hipsolver, and
-# rocblas — everything llama-server needs to drive the RX 6600 XT via
-# /dev/kfd + /dev/dri (device passthrough via docker-compose.rocm.yml).
-# HSA_OVERRIDE_GFX_VERSION=10.3.0 is set at runtime via the compose
-# override; ROCM_PATH here lets in-container tooling find the install.
-RUN if [ "$ENABLE_ROCM" = "1" ]; then \
-        apt-get update && apt-get install -y --no-install-recommends \
-            wget \
-        && wget -q -O /etc/apt/trusted.gpg.d/rocm.gpg \
-            https://repo.radeon.com/rocm/rocm.gpg.key \
-        && echo "deb [arch=amd64] https://repo.radeon.com/rocm/apt/6.2.2 ubuntu main" \
-            > /etc/apt/sources.list.d/rocm.list \
-        && apt-get update \
-        && apt-get install -y --no-install-recommends \
-            rocm-libs \
-            hip-runtime-amd \
-        && rm -rf /var/lib/apt/lists/* \
-        ; fi
 
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv

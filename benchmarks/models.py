@@ -21,6 +21,9 @@ Field groups:
   flag a benchmark whose required skill is missing from the harness as
   "not yet evaluable" instead of a spurious fail (issue #104, ADR-0004).
 - **Grouping:** ``tags`` -- free-form labels for selection / reporting.
+- **Model contract:** ``model_requirements`` -- model identity fields that
+  let the Runner override its environment-derived defaults for a specific
+  task (issue #363, ADR-0014).
 
 All fields beyond ``name`` and ``description`` are optional with sane
 defaults, so the minimal task shape authored under issue #30 keeps working
@@ -32,6 +35,7 @@ seeding of the ``bash`` skill.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -44,43 +48,24 @@ DifficultyTier = Literal["smoke", "easy", "medium"]
 
 
 class ModelRequirements(BaseModel):
-    """Model requirements for a benchmark task (issue #363, ADR-0014).
+    """Model identity fields for model-swapping milestone (issue #363, ADR-0014).
 
-    Records the minimal set of fields needed to identify and select a model
-    for a benchmark task. The Runner uses these fields to configure the
-    ModelAdapter when the field is non-null on a BenchmarkTask.
-
-    At least ``model_id`` is required; all other fields are optional.
-
-    The minimal MVP approach is config file + CLI flag (no registry service).
+    Three orthogonal fields identify every model variant currently supported
+    (local llama.cpp GGUF, OpenAI-compatible remote) without breaking the
+    schema for future variants (custom GPTQ, vision models).
     """
 
-    model_id: str = Field(
-        ...,
-        description="Model identifier (e.g. 'codellama-7b', 'qwen2.5-coder-7b').",
+    model_id: str | None = Field(
+        default=None,
+        description="Stable machine-readable identifier sent in the API request body.",
     )
     quantization: str | None = Field(
         default=None,
-        description=(
-            "Quantization label (e.g. 'Q5_K_M', 'q8_0'). "
-            "``None`` means use the harness default quantization."
-        ),
+        description="Quantization label from the filename, e.g. Q5_K_M.",
     )
-    path: str | None = Field(
+    path_or_endpoint: Path | str | None = Field(
         default=None,
-        description=(
-            "Local GGUF file path. Mutually exclusive with ``endpoint``. "
-            "When set, the Runner uses this path to configure a local "
-            "llama.cpp server or similar binary backend."
-        ),
-    )
-    endpoint: str | None = Field(
-        default=None,
-        description=(
-            "OpenAI-compatible endpoint URL. Mutually exclusive with ``path``. "
-            "When set, the Runner sends chat completions to this endpoint "
-            "instead of the harness default."
-        ),
+        description="Local GGUF path or remote URL.",
     )
 
 
@@ -120,19 +105,9 @@ class BenchmarkTask(BaseModel):
         description="Tier used to weight the task in the improvement-rate KPI (PRD S5).",
     )
     timeout_seconds: int | None = Field(
-        default=300,
+        default=None,
         description=(
-            "Optional wall-clock cap (seconds) for the Runner. Default is 300s (5 minutes) "
-            "so benchmarks do not run open-ended (issue #417)."
-        ),
-    )
-    token_budget: int | None = Field(
-        default=50000,
-        description=(
-            "Optional total-token cap for the Runner. When set, the session is "
-            "aborted with ``task_aborted(reason='token_budget')`` if the running "
-            "token total exceeds this value. Default is 50000 tokens so benchmarks "
-            "do not run open-ended (issue #417)."
+            "Optional wall-clock cap (seconds) for the Runner. ``None`` means no limit is enforced."
         ),
     )
     requires_skills: list[str] = Field(
@@ -148,22 +123,21 @@ class BenchmarkTask(BaseModel):
         ),
     )
 
-    # --- Model contract (issue #363, ADR-0014) ------------------------------
-    model_requirements: ModelRequirements | None = Field(
-        default=None,
-        description=(
-            "Model requirements for this task. When non-null, the Runner uses "
-            "these fields to configure the ModelAdapter for this benchmark. When "
-            "null, the harness default model configuration is used. Allows the "
-            "Critic to evaluate different model families (e.g. Q4 vs Q5) against "
-            "the same benchmark contract."
-        ),
-    )
-
     # --- Grouping ---------------------------------------------------------
     tags: list[str] = Field(
         default_factory=list,
         description="Free-form grouping labels for selection / reporting.",
+    )
+
+    # --- Model contract ---------------------------------------------------
+    model_requirements: ModelRequirements | None = Field(
+        default=None,
+        description=(
+            "Model identity fields for this task. When set, the Runner uses "
+            "these values instead of the environment-derived defaults for this "
+            "task only. Added under issue #363 / ADR-0014 for the model-swapping "
+            "milestone."
+        ),
     )
 
     @field_validator("name")
@@ -181,33 +155,3 @@ class BenchmarkTask(BaseModel):
         if value is not None and value <= 0:
             raise ValueError("timeout_seconds must be a positive integer")
         return value
-
-    @field_validator("token_budget")
-    @classmethod
-    def _token_budget_positive(cls, value: int | None) -> int | None:
-        """A non-positive cap is nonsensical; surface it at validation time."""
-        if value is not None and value <= 0:
-            raise ValueError("token_budget must be a positive integer")
-        return value
-
-
-class ModelConfig(BaseModel):
-    """Model configuration for trace attribution (issue #361).
-
-    Records which model produced a given session so the Phase 3 improvement
-    rate KPI can attribute benchmark outcomes to specific quantizations.
-    """
-
-    model_id: str = Field(description="Model identifier (e.g. codellama-7b.Q5_K_M.gguf).")
-    quantization: str | None = Field(
-        default=None,
-        description="Quantization method (e.g. Q5_K_M, Q4_K_M, f16).",
-    )
-    context_window: int | None = Field(
-        default=None,
-        description="Context window size in tokens.",
-    )
-    hardware: str | None = Field(
-        default=None,
-        description="Hardware target (e.g. NVIDIA A100, RTX 3090, CPU).",
-    )

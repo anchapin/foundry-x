@@ -19,13 +19,12 @@ def test_minimal_construction_backwards_compatible() -> None:
     task = BenchmarkTask(name="sort_a_list", description="Sort integers ascending.")
     assert task.name == "sort_a_list"
     assert task.description == "Sort integers ascending."
-    # New fields all take documented defaults (issue #417: defaults prevent open-ended runs).
+    # New fields all take documented defaults.
     assert task.prompt == ""
     assert task.setup_commands == []
     assert task.expected_outcome == ""
     assert task.difficulty_tier == "easy"
-    assert task.timeout_seconds == 300
-    assert task.token_budget == 50000
+    assert task.timeout_seconds is None
     assert task.tags == []
 
 
@@ -74,12 +73,6 @@ def test_timeout_seconds_must_be_positive(bad_timeout: int) -> None:
         BenchmarkTask(name="t", description="d", timeout_seconds=bad_timeout)
 
 
-@pytest.mark.parametrize("bad_budget", [0, -1, -5000])
-def test_token_budget_must_be_positive(bad_budget: int) -> None:
-    with pytest.raises(ValidationError, match="token_budget must be a positive integer"):
-        BenchmarkTask(name="t", description="d", token_budget=bad_budget)
-
-
 def test_round_trip_serialization() -> None:
     """model_dump_json -> model_validate_json yields an equal task (ADR-0006)."""
     original = BenchmarkTask(
@@ -103,5 +96,4 @@ def test_round_trip_preserves_defaults_for_minimal_task() -> None:
     restored = BenchmarkTask.model_validate_json(original.model_dump_json())
     assert restored == original
     assert restored.setup_commands == []
-    assert restored.timeout_seconds == 300
-    assert restored.token_budget == 50000
+    assert restored.timeout_seconds is None

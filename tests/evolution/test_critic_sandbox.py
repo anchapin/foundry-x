@@ -61,7 +61,6 @@ def test_patch_is_visible_to_pytest():
     verdict = Critic(
         harness_dir=harness_dir,
         pytest_args=["-q", "tests/test_gate.py"],
-        use_sandbox=False,
     ).evaluate(_diff("system_prompt.txt", "original\n", "patched\n"))
 
     assert verdict.approved is True
@@ -84,7 +83,6 @@ def test_marker_stays_safe():
     verdict = Critic(
         harness_dir=harness_dir,
         pytest_args=["-q", "tests/test_gate.py"],
-        use_sandbox=False,
     ).evaluate(_diff("marker.txt", "safe\n", "broken\n"))
 
     assert verdict.approved is False
@@ -113,7 +111,6 @@ def test_clean_gate_passes():
     verdict = Critic(
         harness_dir=harness_dir,
         pytest_args=["-q", "tests/test_gate.py"],
-        use_sandbox=False,
     ).evaluate(edit.unified_diff)
 
     assert verdict.approved is True

@@ -12,7 +12,7 @@
 #   docker compose \
 #       -f infra/docker/docker-compose.yml \
 #       -f infra/docker/docker-compose.rocm.yml \
-#       run --rm foundryx-runner --task "your ROCm benchmark task prompt"
+#       run --rm foundryx --task "your ROCm benchmark task prompt"
 #
 # This file declares ONLY the fields ROCm needs. Compose v2 merges
 # services by name, so every other field (read-only mounts, tmpfs
@@ -58,7 +58,7 @@
 # Issue #115 keeps CI and the standard benchmark path on CPU.
 
 services:
-  foundryx-runner:
+  foundryx:
     environment:
       # Declared alongside the base file's environment block; Compose
       # v2 merges environment dicts by key, so the existing

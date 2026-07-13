@@ -52,9 +52,9 @@ def test_load_all_tasks_returns_only_benchmark_task_instances() -> None:
     tasks = load_all_tasks()
     assert tasks, "registry must contain at least one task"
     for task in tasks:
-        assert isinstance(task, BenchmarkTask), (
-            f"registry entry {task!r} is not a BenchmarkTask instance"
-        )
+        assert isinstance(
+            task, BenchmarkTask
+        ), f"registry entry {task!r} is not a BenchmarkTask instance"
         assert task.name, "every registry entry must declare a non-empty name"
 
 

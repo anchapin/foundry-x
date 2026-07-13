@@ -292,20 +292,24 @@ def build_model_adapter(env: dict[str, str] | None = None) -> OpenAICompatibleAd
 def resolve_harness_version(harness_dir: Path) -> str:
     """Return the version of the harness rooted at ``harness_dir``.
 
-    Resolution order (issue #365):
+    Resolution order (issue #11):
 
-    1. ``harness_dir / "_version.txt"`` — a single-line text file created
-       on harness commit. The foundry reads a value the harness owns; it
-       does not hand-edit harness DNA (AGENTS.md §2, ADR-0004).
-    2. ``FOUNDRY_HARNESS_VERSION`` environment variable.
+    1. ``harness_dir / "VERSION"`` — a single-line text file owned by the
+       harness itself. The foundry reads a value the harness owns; it does
+       not hand-edit harness DNA (AGENTS.md §2, ADR-0004).
+    2. ``git describe --tags --always`` run in ``harness_dir``. Lets an
+       evolved checkout self-describe even before a ``VERSION`` bump.
+    3. The :data:`_FALLBACK_HARNESS_VERSION` literal.
 
     Whitespace (including a trailing newline) is stripped from the file
-    contents so the stamped value is canonical.
+    contents and from the git output so the stamped value is canonical.
 
-    Returns an empty string if neither source provides a version; the
-    caller is responsible for exiting with an error (issue #365).
+    Failures (missing file, git not installed, git error, non-repo
+    directory) fall through silently to the next source rather than
+    aborting the run; a missing version stamp is preferable to a run that
+    cannot start.
     """
-    version_file = harness_dir / "_version.txt"
+    version_file = harness_dir / "VERSION"
     try:
         text = version_file.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError, UnicodeDecodeError):
@@ -313,11 +317,19 @@ def resolve_harness_version(harness_dir: Path) -> str:
     if text.strip():
         return text.strip()
 
-    env_version = os.environ.get("FOUNDRY_HARNESS_VERSION", "")
-    if env_version:
-        return env_version
-
-    return ""
+    try:
+        completed = subprocess.run(  # noqa: S603 — args are a literal list
+            ["git", "describe", "--tags", "--always"],
+            cwd=str(harness_dir),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _FALLBACK_HARNESS_VERSION
+    candidate = completed.stdout.strip()
+    return candidate or _FALLBACK_HARNESS_VERSION
 
 
 class RunLimits(BaseModel):
@@ -1369,8 +1381,8 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
     parser.add_argument(
         "--model-id",
         default=None,
-        help="Model identifier stamped into the trace session (issue #361). "
-        "Overrides FOUNDRY_MODEL_ID and other auto-detection sources.",
+        help="Model identifier (e.g. Q5_K_M). Overrides FOUNDRY_MODEL_ID env var. "
+        "Stored in the trace session for quantization-level KPI attribution (issue #361).",
     )
     args = parser.parse_args()
 
@@ -1391,18 +1403,10 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
 
     logger = TraceLogger(args.trace_path, backend=resolve_trace_backend())
     harness_version = resolve_harness_version(harness_dir)
-    model_id: str | None = args.model_id if args.model_id else resolve_model_id()
+    model_id = args.model_id if args.model_id is not None else resolve_model_id()
     limits = run_limits_from_env()
-    # benchmarks.models is dev-only tooling; the import is deferred to main() so
-    # that merely importing runner (e.g. via fx-runner --help) does not require
-    # benchmarks on sys.path.
-    from benchmarks.models import ModelConfig
 
-    model_config: ModelConfig | None = None
-    if model_id is not None:
-        model_config = ModelConfig(model_id=model_id)
-
-    with logger.session(harness_version=harness_version, model_config=model_config) as session_id:
+    with logger.session(harness_version=harness_version, model_id=model_id) as session_id:
         logger.record(session_id, kind="task_received", payload={"prompt": args.task})
         start = time.monotonic()
         # ``run_task`` accepts the ``limits`` kwarg so it can enforce the

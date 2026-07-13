@@ -192,6 +192,6 @@ def test_grep_search_fix(benchmark_workspace: Path) -> None:
         f"task {TASK.name}: corrected workspace must exit 0; "
         f"got rc={good.returncode} stdout={good.stdout!r} stderr={good.stderr!r}"
     )
-    assert "1 passed" in good.stdout, (
-        f"task {TASK.name}: expected '1 passed' in pytest summary; got stdout={good.stdout!r}"
-    )
+    assert (
+        "1 passed" in good.stdout
+    ), f"task {TASK.name}: expected '1 passed' in pytest summary; got stdout={good.stdout!r}"

@@ -190,9 +190,9 @@ def test_list_dir_navigation(benchmark_workspace: Path) -> None:
         f"task {TASK.name}: seeded workspace must fail before the fix; "
         f"got rc={bad.returncode} stdout={bad.stdout!r} stderr={bad.stderr!r}"
     )
-    assert "NameError" in bad.stderr, (
-        f"task {TASK.name}: expected NameError in stderr; got stderr={bad.stderr!r}"
-    )
+    assert (
+        "NameError" in bad.stderr
+    ), f"task {TASK.name}: expected NameError in stderr; got stderr={bad.stderr!r}"
 
     # --- Golden fix: navigate the tree and correct the broken file. -----
     run_solution(benchmark_workspace, GOLDEN_SOLUTION)
@@ -203,6 +203,6 @@ def test_list_dir_navigation(benchmark_workspace: Path) -> None:
         f"task {TASK.name}: corrected workspace must exit 0; "
         f"got rc={good.returncode} stdout={good.stdout!r} stderr={good.stderr!r}"
     )
-    assert good.stdout == expected_stdout, (
-        f"task {TASK.name}: stdout mismatch (got {good.stdout!r}, expected {expected_stdout!r})"
-    )
+    assert (
+        good.stdout == expected_stdout
+    ), f"task {TASK.name}: stdout mismatch (got {good.stdout!r}, expected {expected_stdout!r})"

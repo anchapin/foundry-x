@@ -1,7 +1,5 @@
 """Benchmark task: gate the list-files-before-edit harness rule (issue #205).
 
-Closes #344.
-
 harness/system_prompt.txt:11 declares operating rule #1:
     "Before any non-trivial edit, list the files you will change and
     why."
@@ -100,9 +98,9 @@ def test_list_files_before_edit(benchmark_workspace: Path) -> None:
 
     # 1. files.txt must exist and name target.py.
     files_listing = (benchmark_workspace / "files.txt").read_text()
-    assert "target.py" in files_listing, (
-        f"task {TASK.name}: files.txt must list target.py; got: {files_listing!r}"
-    )
+    assert (
+        "target.py" in files_listing
+    ), f"task {TASK.name}: files.txt must list target.py; got: {files_listing!r}"
 
     # 2. The listing must precede (or be contemporaneous with) the edit.
     files_mtime = os.path.getmtime(benchmark_workspace / "files.txt")

@@ -99,9 +99,9 @@ def _load_baseline() -> dict[str, Any]:
     early (AGENTS.md §2 — never silently swallow) rather than producing
     a misleading pass.
     """
-    assert IMAGE_SIZE_BASELINE.exists(), (
-        f"baseline file missing: {IMAGE_SIZE_BASELINE.relative_to(ROOT)} (required by issue #286)"
-    )
+    assert (
+        IMAGE_SIZE_BASELINE.exists()
+    ), f"baseline file missing: {IMAGE_SIZE_BASELINE.relative_to(ROOT)} (required by issue #286)"
     try:
         data = json.loads(IMAGE_SIZE_BASELINE.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -114,9 +114,9 @@ def _load_baseline() -> dict[str, Any]:
             f"{IMAGE_SIZE_BASELINE.relative_to(ROOT)} missing required key "
             f"'{key}' (issue #286 contract)"
         )
-    assert isinstance(data["baseline_bytes"], int) and data["baseline_bytes"] > 0, (
-        "baseline_bytes must be a positive integer"
-    )
+    assert (
+        isinstance(data["baseline_bytes"], int) and data["baseline_bytes"] > 0
+    ), "baseline_bytes must be a positive integer"
     assert (
         isinstance(data["margin_percent"], (int, float)) and 0 <= data["margin_percent"] <= 100
     ), "margin_percent must be a number in [0, 100]"

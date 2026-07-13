@@ -1,29 +1,26 @@
 from __future__ import annotations
 
-import asyncio
 import difflib
-import re
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 from foundry_x.evolution.digester import FailureReport
 
 if TYPE_CHECKING:
-    from foundry_x.execution.model_adapter import ModelAdapter
     from foundry_x.trace.logger import TraceLogger
 
 PROPOSED_EDIT_KIND: str = "proposed_edit"
-PROPOSAL_GENERATED_KIND: str = "proposal_generated"
 
 # Sliding window for the rate limiter. One hour matches the SECURITY.md
 # "max N proposals per hour" guardrail.
 _RATE_WINDOW = timedelta(hours=1)
 
-# ADR-0004 + AGENTS.md §2: the only files the meta-agent (Evolver) may propose edits to
+# ADR-0004 + AGENTS.md §2: the only files the Evolver (the meta-agent as defined
+# in CONTEXT.md §Concepts) may propose edits to
 # live under ``harness/``. The harness tree contains other files (e.g.
 # ``VERSION``) that are NOT editable by the evolution loop, so the allowed
 # set is enumerated explicitly rather than "everything under harness/".
@@ -151,59 +148,6 @@ def _confine_to_harness_tree(raw: str) -> str:
     return canonical
 
 
-def _derive_mutation_class(target_file: str) -> Literal["system-prompt", "hook", "skill"]:
-    """Infer the mutation class from the target file path."""
-    parts = target_file.split("/")
-    if len(parts) >= 2 and parts[1] == _HARNESS_PROMPT_FILE:
-        return "system-prompt"
-    if len(parts) >= 2 and parts[1] in _HARNESS_SUBDIRS:
-        subdir = parts[1]
-        return "hook" if subdir == "hooks" else "skill"
-    return "system-prompt"
-
-
-_LLM_PROPOSAL_PROMPT_TEMPLATE = """You are an expert at proposing targeted edits to an agent harness to fix failures.
-
-The harness is a directory with these editable files:
-{harness_listing}
-
-A task failed with:
-- Failure class: {proposed_class}
-- Summary: {summary}
-- Suspected causes: {suspected_causes}
-
-Current harness diff (if any):
-{current_diff}
-
-Propose ONE targeted edit to fix this failure. Respond ONLY with a JSON object:
-{{
-    "target_file": "harness/path/to/file.txt",
-    "rationale": "brief explanation of why this edit fixes the failure",
-    "unified_diff": "--- a/harness/path/to/file.txt\\n+++ b/harness/path/to/file.txt\\n@@ -1,3 +1,4 @@\\n existing line\\n+new line"
-}}
-
-Requirements:
-- target_file MUST be relative to harness root (e.g., "harness/system_prompt.txt" or "harness/hooks/my_hook.py")
-- unified_diff MUST have proper git apply headers (--- a/... +++ b/...)
-- Keep diffs small and focused (max 50 lines)
-- Edits to system_prompt.txt or manifest.json are append-only
-- Edits to hooks/ or skills/ can be any valid diff
-"""
-
-
-def _list_harness_dir(harness_dir: Path) -> list[str]:
-    """List all editable files in the harness directory."""
-    editable = []
-    for root, dirs, files in harness_dir.walk():
-        for f in files:
-            full_path = root / f
-            rel = full_path.relative_to(harness_dir)
-            rel_str = str(rel).replace("\\", "/")
-            if rel_str.startswith("harness/"):
-                editable.append(rel_str)
-    return sorted(editable)
-
-
 class ProposedEdit(BaseModel):
     """A single targeted harness edit proposed by the Evolver (ADR-0006).
 
@@ -212,18 +156,11 @@ class ProposedEdit(BaseModel):
     Critic and wasting a gate run. ``target_file`` is further confined to
     the harness tree (ADR-0004) at construction time. ``unified_diff`` must
     be a valid git-apply unified diff with ``--- a/`` and ``+++ b/`` headers.
-
-    Mutation-classification fields (``mutation_class``, ``risk_level``,
-    ``is_corrective``) enable the Critic to apply differential rigor per
-    edit class, improving Improvement Rate and Regression Rate KPIs.
     """
 
     target_file: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
     unified_diff: str = Field(min_length=1)
-    mutation_class: Literal["system-prompt", "hook", "skill"] = "system-prompt"
-    risk_level: Literal["low", "medium", "high"] = "low"
-    is_corrective: bool = False
 
     @field_validator("target_file")
     @classmethod
@@ -253,21 +190,6 @@ class ProposedEdit(BaseModel):
             raise ValueError("unified_diff missing '+++ b/' header required by git apply")
         return value
 
-    @model_validator(mode="after")
-    def _high_risk_needs_long_rationale(self) -> "ProposedEdit":
-        """Reject high-risk edits that lack a substantive rationale.
-
-        High-risk edits without detailed justification may indicate reckless
-        changes. A rationale shorter than 20 characters is insufficient for
-        the Critic to assess a high-risk edit properly.
-        """
-        if self.risk_level == "high" and len(self.rationale) < 20:
-            raise ValueError(
-                "high-risk edits require a rationale of at least 20 characters; "
-                f"got {len(self.rationale)!r} ({self.rationale!r})"
-            )
-        return self
-
 
 class EvolverGuardError(ValueError):
     """Raised when an edit or proposal cadence violates a guardrail.
@@ -289,9 +211,6 @@ class Evolver:
     (PHILOSOPHY.md §2 — reversibility by default). Defaults (10 proposals /
     hour, 200 diff lines) mirror the SECURITY.md prose and are configurable
     via the constructor.
-
-    When ``model_adapter`` is provided, the Evolver can generate context-aware
-    proposals using an LLM for unknown failure classes and non-append edit types.
     """
 
     def __init__(
@@ -300,7 +219,6 @@ class Evolver:
         max_diff_lines: int = 200,
         trace_logger: TraceLogger | None = None,
         session_id: str | None = None,
-        model_adapter: ModelAdapter | None = None,
     ) -> None:
         if max_proposals_per_hour < 1:
             raise EvolverGuardError("max_proposals_per_hour must be >= 1")
@@ -311,7 +229,6 @@ class Evolver:
         self._trace_logger: TraceLogger | None = trace_logger
         self._session_id: str | None = session_id
         self._proposal_times: deque[datetime] = deque()
-        self._model_adapter: ModelAdapter | None = model_adapter
 
     def _purge_old(self, now: datetime | None = None) -> None:
         """Drop proposal timestamps that have fallen outside the rate window."""
@@ -338,11 +255,6 @@ class Evolver:
                 PROPOSED_EDIT_KIND,
                 edit.model_dump(mode="json"),
             )
-            self._trace_logger.record(
-                self._session_id,
-                PROPOSAL_GENERATED_KIND,
-                {"target_file": edit.target_file, "rationale": edit.rationale},
-            )
 
     def _validate_edit(self, edit: ProposedEdit) -> None:
         """Reject an edit whose unified diff exceeds the line cap."""
@@ -359,115 +271,40 @@ class Evolver:
         failure: FailureReport,
         current_diff: str | None = None,
     ) -> list[ProposedEdit]:
-        self._check_rate_limit()
+        try:
+            self._check_rate_limit()
+        except EvolverGuardError:
+            return []
         if failure.proposed_class == "clean":
             return []
-
         template = _PROPOSED_CLASS_EDIT_TEMPLATES.get(failure.proposed_class)
-        if template is not None:
-            relative_target, rationale, extra_lines = template
-            file_path = harness_dir / relative_target
-            original = file_path.read_text(encoding="utf-8")
-            modified = original.rstrip("\n") + "\n" + "\n".join(extra_lines) + "\n"
-            confined_target = f"{_HARNESS_ROOT}/{relative_target}"
-            diff_lines = list(
-                difflib.unified_diff(
-                    original.splitlines(keepends=True),
-                    modified.splitlines(keepends=True),
-                    fromfile=f"a/{relative_target}",
-                    tofile=f"b/{relative_target}",
-                    lineterm="\n",
-                )
+        if template is None:
+            return []
+        relative_target, rationale, extra_lines = template
+        file_path = harness_dir / relative_target
+        original = file_path.read_text(encoding="utf-8")
+        modified = original.rstrip("\n") + "\n" + "\n".join(extra_lines) + "\n"
+        confined_target = f"{_HARNESS_ROOT}/{relative_target}"
+        diff_lines = list(
+            difflib.unified_diff(
+                original.splitlines(keepends=True),
+                modified.splitlines(keepends=True),
+                fromfile=f"a/{relative_target}",
+                tofile=f"b/{relative_target}",
+                lineterm="\n",
             )
-            unified_diff = "".join(diff_lines)
-            if not unified_diff:
-                return []
-            edit = ProposedEdit(
-                target_file=confined_target,
-                rationale=rationale,
-                unified_diff=unified_diff,
-            )
-            try:
-                self._validate_edit(edit)
-            except EvolverGuardError:
-                return []
-            self._record_proposals(edit=edit)
-            return [edit]
-
-        if self._model_adapter is not None:
-            return self._propose_with_llm(harness_dir, failure, current_diff)
-
-        return []
-
-    def _propose_with_llm(
-        self,
-        harness_dir: Path,
-        failure: FailureReport,
-        current_diff: str | None = None,
-    ) -> list[ProposedEdit]:
-        """Generate a context-aware proposal using the LLM for unknown failure classes."""
-        import json
-
-        from foundry_x.execution.model_adapter import ModelMessage
-
-        assert self._model_adapter is not None, "model_adapter must be set for LLM proposals"
-        adapter = self._model_adapter
-
-        harness_listing = _list_harness_dir(harness_dir)
-        current_diff_str = current_diff or "(no diff available)"
-
-        prompt = _LLM_PROPOSAL_PROMPT_TEMPLATE.format(
-            proposed_class=failure.proposed_class,
-            summary=failure.summary,
-            suspected_causes=", ".join(failure.suspected_causes)
-            if failure.suspected_causes
-            else "unknown",
-            current_diff=current_diff_str,
-            harness_listing="\n".join(f"- {f}" for f in harness_listing)
-            if harness_listing
-            else "(empty)",
         )
-        messages = [ModelMessage(role="user", content=prompt)]
+        unified_diff = "".join(diff_lines)
+        if not unified_diff:
+            return []
+        edit = ProposedEdit(
+            target_file=confined_target,
+            rationale=rationale,
+            unified_diff=unified_diff,
+        )
         try:
-            if asyncio.get_event_loop().is_running():
-                future = asyncio.run_coroutine_threadsafe(
-                    adapter.complete(messages),
-                    asyncio.get_event_loop(),
-                )
-                response = future.result(timeout=60)
-            else:
-                response = asyncio.run(adapter.complete(messages))
-        except Exception:
+            self._validate_edit(edit)
+        except EvolverGuardError:
             return []
-
-        content = response.message.content
-        if not content:
-            return []
-
-        try:
-            json_match = re.search(r"\{[^{}]*\}", content, re.DOTALL)
-            if json_match:
-                proposal_data = json.loads(json_match.group())
-            else:
-                proposal_data = json.loads(content)
-
-            target_file = proposal_data.get("target_file", "")
-            rationale = proposal_data.get("rationale", "LLM-generated proposal")
-            unified_diff = proposal_data.get("unified_diff", "")
-
-            if not target_file or not unified_diff:
-                return []
-
-            edit = ProposedEdit(
-                target_file=target_file,
-                rationale=rationale,
-                unified_diff=unified_diff,
-            )
-            try:
-                self._validate_edit(edit)
-            except EvolverGuardError:
-                return []
-            self._record_proposals(edit=edit)
-            return [edit]
-        except (json.JSONDecodeError, KeyError, ValueError):
-            return []
+        self._record_proposals(edit=edit)
+        return [edit]

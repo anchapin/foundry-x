@@ -141,9 +141,9 @@ def test_fix_import_error(benchmark_workspace: Path, case_id: str) -> None:
         f"the fix; got rc={bad.returncode} stdout={bad.stdout!r} "
         f"stderr={bad.stderr!r}"
     )
-    assert "NameError" in bad.stderr, (
-        f"task {TASK.name}/{case_id}: expected NameError in stderr; got stderr={bad.stderr!r}"
-    )
+    assert (
+        "NameError" in bad.stderr
+    ), f"task {TASK.name}/{case_id}: expected NameError in stderr; got stderr={bad.stderr!r}"
 
     # Apply the golden fix: overwrite module.py in the workspace with the
     # corrected version (missing import added at the top).
