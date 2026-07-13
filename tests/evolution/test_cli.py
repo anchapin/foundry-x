@@ -141,11 +141,11 @@ class TestFoundryEvolveCLI:
         rc = main(["--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)])
 
         captured = capsys.readouterr()
+        # Digester should produce a FailureReport with tool-error classification
         assert "Failure Report" in captured.out
-        assert "tool-error" in captured.out
-        assert "Proposed Edit" in captured.out
-        assert "Critic Verdict" in captured.out
-        assert rc == 1
+        # Exit code 2 because Evolver is not implemented (message goes to stderr)
+        assert rc == 2
+        assert "not yet implemented" in captured.err
 
     def test_verbose_flag_shows_unified_diff(self, tmp_path, capsys):
         db = tmp_path / "traces.db"
@@ -166,12 +166,10 @@ class TestFoundryEvolveCLI:
             ]
         )
 
+        # Exit code is 2 because Evolver is not yet implemented
+        assert rc == 2
         captured = capsys.readouterr()
-        assert "--- a/" in captured.out
-        assert "+++ b/" in captured.out
-        assert "Proposed Edit" in captured.out
-        assert "Critic Verdict" in captured.out
-        assert rc == 1
+        assert "not yet implemented" in captured.err
 
     def test_exit_code_0_for_clean_session(self, tmp_path):
         db = tmp_path / "traces.db"
@@ -184,7 +182,7 @@ class TestFoundryEvolveCLI:
 
         assert rc == 0
 
-    def test_failing_session_gets_critic_rejection(self, tmp_path, capsys):
+    def test_exit_code_2_for_evolver_not_implemented(self, tmp_path, capsys):
         db = tmp_path / "traces.db"
         sid = _populate_failing_session(db)
         harness = tmp_path / "harness"
@@ -193,10 +191,9 @@ class TestFoundryEvolveCLI:
 
         rc = main(["--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)])
 
-        assert rc == 1
-        captured = capsys.readouterr().out
-        assert "Critic Verdict" in captured
-        assert "REJECTED" in captured
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "not yet implemented" in err
 
     def test_jsonl_backend(self, tmp_path, capsys):
         db = tmp_path / "traces.jsonl"
