@@ -21,6 +21,9 @@ Field groups:
   flag a benchmark whose required skill is missing from the harness as
   "not yet evaluable" instead of a spurious fail (issue #104, ADR-0004).
 - **Grouping:** ``tags`` -- free-form labels for selection / reporting.
+- **Model contract:** ``model_requirements`` -- model identity fields that
+  let the Runner override its environment-derived defaults for a specific
+  task (issue #363, ADR-0014).
 
 All fields beyond ``name`` and ``description`` are optional with sane
 defaults, so the minimal task shape authored under issue #30 keeps working
@@ -32,6 +35,7 @@ seeding of the ``bash`` skill.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -41,6 +45,28 @@ from pydantic import BaseModel, Field, field_validator
 #: multi-step capability. Adding a higher tier (e.g. ``hard``) requires an
 #: ADR because it changes the improvement-rate KPI weighting.
 DifficultyTier = Literal["smoke", "easy", "medium"]
+
+
+class ModelRequirements(BaseModel):
+    """Model identity fields for model-swapping milestone (issue #363, ADR-0014).
+
+    Three orthogonal fields identify every model variant currently supported
+    (local llama.cpp GGUF, OpenAI-compatible remote) without breaking the
+    schema for future variants (custom GPTQ, vision models).
+    """
+
+    model_id: str | None = Field(
+        default=None,
+        description="Stable machine-readable identifier sent in the API request body.",
+    )
+    quantization: str | None = Field(
+        default=None,
+        description="Quantization label from the filename, e.g. Q5_K_M.",
+    )
+    path_or_endpoint: Path | str | None = Field(
+        default=None,
+        description="Local GGUF path or remote URL.",
+    )
 
 
 class BenchmarkTask(BaseModel):
@@ -101,6 +127,17 @@ class BenchmarkTask(BaseModel):
     tags: list[str] = Field(
         default_factory=list,
         description="Free-form grouping labels for selection / reporting.",
+    )
+
+    # --- Model contract ---------------------------------------------------
+    model_requirements: ModelRequirements | None = Field(
+        default=None,
+        description=(
+            "Model identity fields for this task. When set, the Runner uses "
+            "these values instead of the environment-derived defaults for this "
+            "task only. Added under issue #363 / ADR-0014 for the model-swapping "
+            "milestone."
+        ),
     )
 
     @field_validator("name")
