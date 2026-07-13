@@ -17,8 +17,8 @@
 #   * logs/ is the only read-write host mount, so the TraceLogger
 #     (ADR-0003) persists traces to a host-visible SQLite DB.
 #   * A dedicated bridge network grants no broad host network access; the
-#     container reaches the host llama-server (infra/llama-cpp) solely via
-#     the narrowly-scoped `llamacpp` alias (see THREAT MODEL: egress below).
+#     container reaches the llama-server service exclusively via the Docker
+#     internal network (see THREAT MODEL: egress below).
 #   * A read-only root filesystem with bounded tmpfs caps closes the
 #     writable-surface gap left by issue #6 (see THREAT MODEL: root FS below).
 #   * A memory + CPU cap contains runaway evolution runs (threat #5).
@@ -58,24 +58,27 @@
 # other host service (Docker API, SSH, an admin dashboard) could reach it
 # on any port — not just llama.cpp's 8080.
 #
-# We narrow the egress surface by:
+# Issue #354 replaces the host-gateway approach with an internal
+# llama-server service running in the same compose project. The
+# foundryx-runner reaches it via Docker's internal DNS at
+# `llama-server:8080` — there is no host gateway alias at all, and no
+# `extra_hosts` entry. This closes the egress gap completely: the runner
+# container has no DNS name for the host, only for the llama-server
+# service it actually needs.
 #
-#   * Replacing `host.docker.internal` with an intentionally specific
-#     alias, `llamacpp`, so the only DNS name pointing at the host is the
-#     one used by LLAMACPP_HOST. There is no longer a generic "host"
-#     alias the sandbox can use to enumerate services.
-#   * Pointing LLAMACPP_HOST at the alias plus port 8080 (the only
-#     llama.cpp port we expect to need), so even at the application layer
-#     the sandbox has no documented route to any other host service.
+# The llama-server service uses the official llama.cpp image
+# (ghcr.io/ggerganov/llama.cpp:server). The model file is bind-mounted
+# from the host so the image itself does not need to be rebuilt when the
+# model changes. Operators set LLAMACPP_MODEL_PATH (the host path) and
+# LLAMACPP_NGPULAYERS (GPU offload layers) in .env; the compose file
+# translates those into the volume mount and -ng argument.
 #
-# This is a defence-in-depth narrowing, not a true L4 egress filter (which
-# would require iptables / network policy and is tracked separately). The
-# tests in tests/test_compose_sandbox.py assert that no extra_hosts entry
-# other than the LLAMACPP gateway exists, so this narrowing cannot
-# regress silently.
+# scale: 0 on foundryx-runner means `docker compose up --scale
+# foundryx-runner=0` tears down the entire project cleanly, since
+# llama-server has no replicas and is the only dependent service.
 
 services:
-  foundryx:
+  foundryx-runner:
     # Build context is the repo root so the Dockerfile can COPY pyproject,
     # src, harness, and tests. The Compose file itself lives under infra/docker/.
     build:
@@ -84,7 +87,7 @@ services:
     image: foundryx:latest
     init: true
 
-    # Pull runtime configuration from .env (LLAMACPP_HOST, FOUNDRY_*).
+    # Pull runtime configuration from .env (LLAMACPP_MODEL_PATH, FOUNDRY_*).
     # `required: false` so `compose config` / CI validation does not hard-fail
     # when .env is absent on a fresh clone; a real run copies .env.example first.
     env_file:
@@ -92,11 +95,12 @@ services:
         required: false
 
     environment:
-      # Inside the default bridge network 127.0.0.1 is the container, not the
-      # host. The `llamacpp` alias added in extra_hosts is the only DNS name
-      # that resolves to the host loopback; LLAMACPP_HOST intentionally uses
-      # that alias plus port 8080 (see THREAT MODEL: egress in the header).
-      LLAMACPP_HOST: http://llamacpp:8080
+      # OPENCODE_SERVER_URL is wired to the llama-server service name so the
+      # runner can reach it without any host gateway alias. LLAMACPP_HOST is
+      # still accepted as a fallback for backwards compatibility with local-first
+      # deployments that run llama-server on the host.
+      OPENCODE_SERVER_URL: http://llama-server:8080
+      LLAMACPP_HOST: http://llama-server:8080
       # TraceLogger writes to a path inside the writable logs mount so events
       # are visible on the host (acceptance criterion).
       FOUNDRY_TRACE_PATH: /app/logs/traces.db
@@ -130,18 +134,10 @@ services:
       - /run:size=64m,mode=1777
 
     # Isolated bridge network: the container has no broad host network access.
-    # It reaches the host llama-server exclusively via the narrowly-scoped
-    # `llamacpp` alias (THREAT MODEL: egress in the header).
+    # It reaches the llama-server exclusively via the Docker internal DNS
+    # (THREAT MODEL: egress in the header).
     networks:
       - sandbox
-
-    extra_hosts:
-      # Linux: make the host reachable as `llamacpp` so the container can
-      # talk to llama-server (infra/llama-cpp/README.md) on port 8080.
-      # The alias is intentionally narrow: it is only consumed by
-      # LLAMACPP_HOST, so the sandbox has no generic "host" name it could
-      # use to reach unrelated host services. See THREAT MODEL: egress.
-      - "llamacpp:host-gateway"
 
     # Resource caps (SECURITY.md threat #5: resource exhaustion). Honoured by
     # `docker compose` (Compose v2) for container creation. The `pids`
@@ -173,6 +169,56 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+
+    # scale: 0 means no instances start by default. Operators explicitly run
+    # `docker compose up --scale foundryx-runner=N` to start N replicas.
+    # Scaling to 0 tears everything down cleanly since llama-server is the
+    # only other service and has no replicas.
+    scale: 0
+
+  llama-server:
+    # Official llama.cpp server image. The model file is bind-mounted from
+    # the host so the image does not need to be rebuilt when the model
+    # changes. Operators set LLAMACPP_MODEL_PATH in .env to point at the
+    # host model file; the mount destination inside the container is always
+    # /models (the path the llama.cpp server expects by convention).
+    image: ghcr.io/ggerganov/llama.cpp:server
+    init: true
+
+    env_file:
+      - path: ../../.env
+        required: false
+
+    environment:
+      # NGPULAYERS defaults to 0 (CPU-only) so the compose file works on
+      # non-GPU hosts without any configuration. Set LLAMACPP_NGPULAYERS
+      # in .env to enable GPU offload on ROCm-capable hardware.
+      NGPULAYERS: "${LLAMACPP_NGPULAYERS:-0}"
+
+    volumes:
+      # Read-only bind mount of the repo (issue #354 acceptance criterion).
+      # The server does not execute any of this code but having it mounted
+      # shared with foundryx-runner keeps the volume configuration identical
+      # and makes the setup self-documenting.
+      - ../../:/repo:ro
+      # Host model directory mounted at /models inside the container.
+      # LLAMACPP_MODEL_PATH in .env points at the host model file;
+      # the mount destination is the path the llama.cpp server expects.
+      - ${LLAMACPP_MODEL_PATH:-/srv/models}:/models:ro
+
+    # Expose the server port on the sandbox network only (not published to
+    # the host). The foundryx-runner reaches it via Docker DNS at
+    # llama-server:8080. Port 8080 is the llama.cpp default.
+    ports: []
+
+    networks:
+      - sandbox
+
+    # No resource caps on llama-server — it is the inference workload and
+    # its resource use is bounded by the model size and context window,
+    # not by a fixed cap. Operators who want resource constraints should
+    # use the ROCm override (docker-compose.rocm.yml) and control GPU
+    # memory via --n-gpu-layers or the model's VRAM requirements.
 
 networks:
   sandbox:

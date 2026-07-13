@@ -40,8 +40,8 @@ def base_text() -> str:
 
 def _service(compose: dict) -> dict:
     services = compose["services"]
-    assert "foundryx" in services, "override must declare a 'foundryx' service"
-    return services["foundryx"]
+    assert "foundryx-runner" in services, "override must declare a 'foundryx-runner' service"
+    return services["foundryx-runner"]
 
 
 def _device_names(svc: dict) -> list[str]:
@@ -72,11 +72,11 @@ def _device_names(svc: dict) -> list[str]:
 
 
 def test_override_uses_same_service_name_as_base(override: dict) -> None:
-    """The override must target the same service (`foundryx`) so that
+    """The override must target the same service (`foundryx-runner`) so that
     `docker compose -f base -f override` merges the ROCm bits into the
     base service rather than declaring a duplicate."""
-    assert "foundryx" in override.get("services", {}), (
-        "override must declare the 'foundryx' service so "
+    assert "foundryx-runner" in override.get("services", {}), (
+        "override must declare the 'foundryx-runner' service so "
         "`docker compose -f docker-compose.yml -f docker-compose.rocm.yml` "
         "merges the ROCm bits via Compose v2's merge-by-service"
     )

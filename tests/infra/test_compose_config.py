@@ -16,7 +16,7 @@ repo never invoked. This module runs it against:
 
 The merged validation is the one that matters in practice: the override
 is an additive fragment designed to be merged with the base, and on its
-own it is not a valid Compose project (the ``foundryx`` service has no
+own it is not a valid Compose project (the ``foundryx-runner`` service has no
 ``image``/``build`` until merged). Validating each file in isolation is
 therefore necessary but not sufficient — the merged config is what
 ``docker compose up`` actually consumes.

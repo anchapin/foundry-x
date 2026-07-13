@@ -55,14 +55,16 @@ _SIZE_CAP_PATTERN = re.compile(r"(?:^|[,\s])size=(\d+)([kmg])")
 
 
 def _service(compose: dict) -> dict:
-    """Return the ``foundryx`` service entry from a parsed Compose file."""
+    """Return the ``foundryx-runner`` service entry from a parsed Compose file."""
     services = compose["services"]
-    assert "foundryx" in services, "expected a 'foundryx' service in docker-compose.yml"
-    return services["foundryx"]
+    assert (
+        "foundryx-runner" in services
+    ), "expected a 'foundryx-runner' service in docker-compose.yml"
+    return services["foundryx-runner"]
 
 
 def _tmpfs_entries(svc: dict) -> dict[str, str]:
-    """Return ``{mount_path: opts}`` for the foundryx service tmpfs block.
+    """Return ``{mount_path: opts}`` for the foundryx-runner service tmpfs block.
 
     Compose accepts both the long syntax (a dict ``{"/path": "opts"}``)
     and the short syntax (a list of ``"/path:opts"`` strings). The
@@ -71,7 +73,7 @@ def _tmpfs_entries(svc: dict) -> dict[str, str]:
     someone re-shapes the file.
     """
     raw = svc.get("tmpfs")
-    assert raw is not None, "foundryx service must declare tmpfs: entries (issue #123)"
+    assert raw is not None, "foundryx-runner service must declare tmpfs: entries (issue #123)"
     if isinstance(raw, dict):
         return {path: (opts or "") for path, opts in raw.items()}
     entries: dict[str, str] = {}
@@ -107,19 +109,20 @@ TASK = BenchmarkTask(
         "security_opt=no-new-privileges."
     ),
     prompt=(
-        "Inspect infra/docker/docker-compose.yml: confirm the foundryx "
+        "Inspect infra/docker/docker-compose.yml: confirm the foundryx-runner "
         "service still declares read_only: true, tmpfs: entries for "
         "/tmp, /var/tmp, and /run each with an explicit size cap, "
-        "extra_hosts containing exactly one entry whose key is "
-        "'llamacpp', deploy.resources.limits with memory, cpus, and pids "
+        "deploy.resources.limits with memory, cpus, and pids "
         "set, pids_limit equal to deploy.resources.limits.pids, "
-        "cap_drop: ALL, and security_opt: no-new-privileges."
+        "cap_drop: ALL, and security_opt: no-new-privileges. "
+        "Confirm that OPENCODE_SERVER_URL is set to http://llama-server:8080 "
+        "and that a llama-server service exists in the compose file."
     ),
     difficulty_tier="medium",
     expected_outcome=(
         "Each hardening knob is present with the value issue #178 "
-        "specifies; extra_hosts contains exactly one entry and its key "
-        "is 'llamacpp'; every tmpfs entry carries an explicit size= cap "
+        "specifies; OPENCODE_SERVER_URL points to the llama-server service; "
+        "every tmpfs entry carries an explicit size= cap "
         "matching the per-path sizes from issue #118."
     ),
     tags=["security", "sandbox"],
@@ -146,7 +149,7 @@ def test_read_only_root_filesystem(compose: dict) -> None:
     """
     svc = _service(compose)
     assert svc.get("read_only") is True, (
-        "foundryx service must declare read_only: true (issue #123); "
+        "foundryx-runner service must declare read_only: true (issue #123); "
         "without it the container's root FS is writable and a buggy "
         "hook can persist past the run"
     )
@@ -180,7 +183,7 @@ def test_every_tmpfs_entry_carries_explicit_size_cap(compose: dict) -> None:
     time; either failure mode turns this benchmark red.
     """
     entries = _tmpfs_entries(_service(compose))
-    assert entries, "foundryx service must declare at least one tmpfs: entry"
+    assert entries, "foundryx-runner service must declare at least one tmpfs: entry"
     for path, opts in entries.items():
         match = _SIZE_CAP_PATTERN.search(opts)
         assert (
@@ -217,28 +220,23 @@ def test_tmpfs_per_path_sizes_match_issue_118(compose: dict) -> None:
 
 
 @pytest.mark.benchmark
-def test_extra_hosts_is_exactly_one_llamacpp_entry(compose: dict) -> None:
-    """``extra_hosts`` contains exactly one entry, and its key is ``llamacpp``.
+def test_opencode_server_url_wired_to_llama_server(compose: dict) -> None:
+    """``OPENCODE_SERVER_URL`` is set to the internal llama-server service.
 
-    Issue #123 narrows the egress surface from a generic
-    ``host.docker.internal:host-gateway`` alias (which exposes the whole
-    host loopback) to a specific ``llamacpp`` alias consumed only by
-    ``LLAMACPP_HOST``. Adding a second entry -- or widening it back to
-    ``host.docker.internal`` -- silently re-opens the threat; this
-    benchmark fails the moment either happens.
+    Issue #354 replaces the host-gateway extra_hosts approach with an
+    internal llama-server service. OPENCODE_SERVER_URL must point to
+    ``http://llama-server:8080`` so the runner can reach the inference
+    server without any host gateway alias.
     """
-    names = _extra_hosts_names(_service(compose))
-    assert names, "foundryx service must declare at least one extra_hosts entry"
-    assert len(names) == 1, (
-        f"extra_hosts must contain EXACTLY one entry (the llamacpp "
-        f"gateway); got {len(names)}: {names!r}. Adding a second alias "
-        f"silently widens the egress surface."
-    )
-    (only,) = names
-    assert only == "llamacpp", (
-        f"extra_hosts key must be 'llamacpp' per issue #123; got {only!r}. "
-        f"A generic alias like 'host.docker.internal' re-exposes the "
-        f"entire host loopback."
+    services = compose.get("services", {})
+    assert (
+        "llama-server" in services
+    ), "compose file must declare a llama-server service (issue #354)"
+    runner_env = _service(compose).get("environment", {})
+    assert runner_env.get("OPENCODE_SERVER_URL") == "http://llama-server:8080", (
+        "foundryx-runner OPENCODE_SERVER_URL must be http://llama-server:8080 "
+        "per issue #354; the runner reaches the inference server via Docker "
+        "internal DNS with no host gateway alias"
     )
 
 
