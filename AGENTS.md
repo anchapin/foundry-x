@@ -55,6 +55,9 @@ and ask the human.
   human approvals are still required for harness hand-edits.
 - **Never pretend a benchmark passed.** If a test fails, the change is
   not done. Re-read the failure, do not paper over it.
+- **Never merge directly to `main`.** All changes go through PRs targeting
+  `develop`. The `main` branch is protected and requires PR reviews,
+  status checks (CI + benchmark gate), and linear history.
 
 ## 3. The FoundryX way
 
@@ -96,6 +99,9 @@ mirrors the way our product works:
 
 ## 5. Commit and PR etiquette
 
+- **Branch from `develop` and target `develop`.** The `main` branch is
+  protected — all work branches off `develop` and PRs target `develop`.
+  Use `git checkout -b fix/issue-NNN-description develop` to create branches.
 - One logical change per commit. If a refactor is needed to make the
   feature possible, that is two commits in two PRs.
 - Commit subject: 50 chars, imperative, no trailing period.
