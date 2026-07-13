@@ -79,5 +79,5 @@ def proposed_edit() -> ProposedEdit:
     return ProposedEdit(
         target_file="harness/system_prompt.txt",
         rationale="Add edit_file to the available-tool list so the agent stops invoking rm.",
-        unified_diff="@@ -1 +1 @@\n-- old line\n++ new line\n",
+        unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old line\n+new line\n",
     )

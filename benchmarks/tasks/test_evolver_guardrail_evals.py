@@ -73,7 +73,7 @@ def test_proposed_edit_rejects_etc_passwd() -> None:
         ProposedEdit(
             target_file="etc/passwd",
             rationale="tighten tool guidance",
-            unified_diff="+a\n",
+            unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+a\n",
         )
 
 
@@ -83,7 +83,7 @@ def test_proposed_edit_rejects_traversal_escape() -> None:
         ProposedEdit(
             target_file="../etc/passwd",
             rationale="tighten tool guidance",
-            unified_diff="+a\n",
+            unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+a\n",
         )
 
 
@@ -93,7 +93,7 @@ def test_proposed_edit_rejects_absolute_path() -> None:
         ProposedEdit(
             target_file="/absolute/path/harness/hooks/a.py",
             rationale="tighten tool guidance",
-            unified_diff="+a\n",
+            unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+a\n",
         )
 
 
@@ -104,7 +104,7 @@ def test_proposed_edit_rejects_harness_readme() -> None:
         ProposedEdit(
             target_file="harness/README.md",
             rationale="tighten tool guidance",
-            unified_diff="+a\n",
+            unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+a\n",
         )
 
 
@@ -115,7 +115,7 @@ def test_proposed_edit_rejects_harness_version() -> None:
         ProposedEdit(
             target_file="harness/VERSION",
             rationale="tighten tool guidance",
-            unified_diff="+a\n",
+            unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+a\n",
         )
 
 
@@ -126,7 +126,7 @@ def test_proposed_edit_rejects_prompt_as_directory() -> None:
         ProposedEdit(
             target_file="harness/system_prompt.txt/hooks/inner.py",
             rationale="tighten tool guidance",
-            unified_diff="+a\n",
+            unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+a\n",
         )
 
 
@@ -137,7 +137,7 @@ def test_proposed_edit_rejects_hooks_directory_itself() -> None:
         ProposedEdit(
             target_file="harness/hooks",
             rationale="tighten tool guidance",
-            unified_diff="+a\n",
+            unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+a\n",
         )
 
 
@@ -148,7 +148,7 @@ def test_proposed_edit_rejects_skills_directory_itself() -> None:
         ProposedEdit(
             target_file="harness/skills",
             rationale="tighten tool guidance",
-            unified_diff="+a\n",
+            unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+a\n",
         )
 
 
@@ -159,7 +159,7 @@ def test_proposed_edit_rejects_src_path() -> None:
         ProposedEdit(
             target_file="src/foundry_x/execution/runner.py",
             rationale="tighten tool guidance",
-            unified_diff="+a\n",
+            unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+a\n",
         )
 
 
@@ -170,7 +170,7 @@ def test_proposed_edit_rejects_backslash_component() -> None:
         ProposedEdit(
             target_file="harness\\hooks\\a.py",
             rationale="tighten tool guidance",
-            unified_diff="+a\n",
+            unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+a\n",
         )
 
 
@@ -182,7 +182,7 @@ def test_proposed_edit_accepts_system_prompt_txt() -> None:
     edit = ProposedEdit(
         target_file="harness/system_prompt.txt",
         rationale="x",
-        unified_diff="+one\n",
+        unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+one\n",
     )
     assert edit.target_file == "harness/system_prompt.txt"
 
@@ -192,7 +192,7 @@ def test_proposed_edit_accepts_hooks_file() -> None:
     edit = ProposedEdit(
         target_file="harness/hooks/a.py",
         rationale="x",
-        unified_diff="+one\n",
+        unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+one\n",
     )
     assert edit.target_file == "harness/hooks/a.py"
 
@@ -202,7 +202,7 @@ def test_proposed_edit_accepts_hooks_nested_file() -> None:
     edit = ProposedEdit(
         target_file="harness/hooks/sub/b.py",
         rationale="x",
-        unified_diff="+one\n",
+        unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+one\n",
     )
     assert edit.target_file == "harness/hooks/sub/b.py"
 
@@ -212,7 +212,7 @@ def test_proposed_edit_accepts_skills_file() -> None:
     edit = ProposedEdit(
         target_file="harness/skills/x.md",
         rationale="x",
-        unified_diff="+one\n",
+        unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+one\n",
     )
     assert edit.target_file == "harness/skills/x.md"
 
@@ -222,7 +222,7 @@ def test_proposed_edit_accepts_skills_nested_file() -> None:
     edit = ProposedEdit(
         target_file="harness/skills/nested/y.md",
         rationale="x",
-        unified_diff="+one\n",
+        unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+one\n",
     )
     assert edit.target_file == "harness/skills/nested/y.md"
 
@@ -240,7 +240,7 @@ def test_proposed_edit_canonicalises_dotdot_dot_paths() -> None:
     edit = ProposedEdit(
         target_file="harness/./hooks/../hooks/a.py",
         rationale="x",
-        unified_diff="+one\n",
+        unified_diff="--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+one\n",
     )
     assert edit.target_file == "harness/hooks/a.py"
 
@@ -281,7 +281,9 @@ def test_evolver_old_proposals_purge_outside_window() -> None:
 def test_evolver_rejects_oversized_diff() -> None:
     """A unified diff exceeding ``max_diff_lines`` raises ``EvolverGuardError``."""
     evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=5)
-    big_diff = "\n".join(f"+line {i}" for i in range(10))
+    header = "--- a/x\n+++ b/x\n"
+    hunk = "@@ -0,0 +1 @@\n"
+    big_diff = header + hunk + "".join(f"+line {i}\n" for i in range(10))
     with pytest.raises(EvolverGuardError, match="diff too large"):
         evolver._validate_edit(
             ProposedEdit(
