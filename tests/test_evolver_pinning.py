@@ -33,11 +33,14 @@ from foundry_x.evolution.evolver import (
     ProposedEdit,
 )
 
-# A minimal non-blank unified diff; these tests pin guardrails, not the
-# diff parser. ``+one\n`` is the smallest legal body the pydantic model
-# accepts and keeps the assertions independent of any future diff parser
-# changes.
-_TINY_DIFF = "+one\n"
+
+def _make_diff(*lines: str) -> str:
+    header = "--- a/x\n+++ b/x\n"
+    hunk = "@@ -0,0 +1 @@\n"
+    return header + hunk + "".join(f"+{line}\n" for line in lines)
+
+
+_TINY_DIFF = _make_diff("one")
 
 
 # ---------------------------------------------------------------------------
@@ -110,11 +113,11 @@ def test_diff_exceeding_line_cap_raises_evolver_guard_error() -> None:
     """A diff whose line count exceeds ``max_diff_lines`` is rejected.
 
     Pin for issue #94 acceptance criterion 2. With ``max_diff_lines=5``,
-    a 6-line diff must surface ``EvolverGuardError``; a 5-line diff at
-    the cap is the boundary and must still pass.
+    a properly-formatted diff with 6 content lines (total > 5) must surface
+    ``EvolverGuardError``; a diff at the cap (total == 5) still passes.
     """
     evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=5)
-    oversized = "\n".join(f"+line {i}" for i in range(6))
+    oversized = _make_diff(*[f"line {i}" for i in range(6)])
     edit = ProposedEdit(
         target_file="harness/hooks/a.py",
         rationale="x",
@@ -127,12 +130,13 @@ def test_diff_exceeding_line_cap_raises_evolver_guard_error() -> None:
 def test_diff_at_exact_line_cap_passes() -> None:
     """A diff whose line count equals ``max_diff_lines`` is accepted.
 
-    Boundary case: ``>=`` semantics on the cap. Without this test a
-    regression that flips the comparison to ``>=`` would silently
-    shrink the allowed diff size by one line on every evolution run.
+    Boundary case: ``>`` semantics on the cap (total > max_diff_lines is
+    rejected; total == max_diff_lines is accepted).  Without this test a
+    regression that flips the comparison to ``>=`` would silently shrink
+    the allowed diff size by one line on every evolution run.
     """
     evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=5)
-    at_cap = "\n".join(f"+l{i}" for i in range(5))
+    at_cap = _make_diff("l0", "l1")
     edit = ProposedEdit(
         target_file="harness/hooks/a.py",
         rationale="x",

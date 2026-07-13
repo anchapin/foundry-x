@@ -108,7 +108,8 @@ class ProposedEdit(BaseModel):
     The three string fields are required and non-blank so a malformed edit
     surfaces a ``ValidationError`` at the boundary instead of reaching the
     Critic and wasting a gate run. ``target_file`` is further confined to
-    the harness tree (ADR-0004) at construction time.
+    the harness tree (ADR-0004) at construction time. ``unified_diff`` must
+    be a valid git-apply unified diff with ``--- a/`` and ``+++ b/`` headers.
     """
 
     target_file: str = Field(min_length=1)
@@ -125,6 +126,23 @@ class ProposedEdit(BaseModel):
         Critic. Returns the canonical normalized path.
         """
         return _confine_to_harness_tree(value)
+
+    @field_validator("unified_diff")
+    @classmethod
+    def _unified_diff_has_git_apply_headers(cls, value: str) -> str:
+        """Validate that the unified diff has git-apply compatible headers.
+
+        ``git apply`` requires a unified diff with ``--- a/<path>`` and
+        ``+++ b/<path>`` header lines. A bare hunk (starting with ``@@``)
+        will be rejected by git apply with an opaque error. We validate at
+        the model boundary per ADR-0006 so malformed edits fail fast.
+        """
+        lines = value.splitlines()
+        if not any(line.startswith("--- a/") for line in lines):
+            raise ValueError("unified_diff missing '--- a/' header required by git apply")
+        if not any(line.startswith("+++ b/") for line in lines):
+            raise ValueError("unified_diff missing '+++ b/' header required by git apply")
+        return value
 
 
 class EvolverGuardError(ValueError):
