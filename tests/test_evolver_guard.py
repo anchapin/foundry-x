@@ -14,6 +14,12 @@ from foundry_x.evolution.evolver import (
 from foundry_x.trace.logger import TraceLogger
 
 
+def _make_diff(*lines: str) -> str:
+    header = "--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n"
+    hunk = "@@ -0,0 +1 @@\n"
+    return header + hunk + "".join(f"+{line}\n" for line in lines)
+
+
 def _edit(diff: str) -> ProposedEdit:
     return ProposedEdit(
         target_file="harness/system_prompt.txt",
@@ -24,7 +30,7 @@ def _edit(diff: str) -> ProposedEdit:
 
 def test_record_proposal_emits_trace_event(tmp_path):
     logger = TraceLogger(tmp_path / "trace.db")
-    edit = _edit("+be precise")
+    edit = _edit(_make_diff("be precise"))
     with logger.session("harness-v1") as session_id:
         evolver = Evolver(trace_logger=logger, session_id=session_id)
         evolver._record_proposals(edit=edit)
@@ -49,14 +55,14 @@ def test_invalid_limits_rejected():
 
 def test_oversized_diff_rejected():
     e = Evolver(max_proposals_per_hour=10, max_diff_lines=5)
-    big_diff = "\n".join(f"+line {i}" for i in range(10))
+    big_diff = _make_diff(*[f"line {i}" for i in range(10)])
     with pytest.raises(EvolverGuardError, match="diff too large"):
         e._validate_edit(_edit(big_diff))
 
 
 def test_diff_at_exact_cap_passes():
     e = Evolver(max_proposals_per_hour=10, max_diff_lines=5)
-    e._validate_edit(_edit("\n".join(f"+l{i}" for i in range(5))))
+    e._validate_edit(_edit(_make_diff("l0", "l1")))
 
 
 def test_rate_limit_triggers_after_cap():
