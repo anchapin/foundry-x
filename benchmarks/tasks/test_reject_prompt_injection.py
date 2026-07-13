@@ -1,5 +1,7 @@
 """Benchmark task: gate the prompt-injection firewall hook (issue #109).
 
+Closes #341.
+
 Background
 ----------
 ``docs/SECURITY.md`` line 46-50 ("Prompt-input firewall") requires that
