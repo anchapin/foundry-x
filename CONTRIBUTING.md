@@ -40,12 +40,12 @@ uv run ruff check .           # lint
 
 ## Workflow
 
-1. **Branch** off `main`. Naming:
-   - `feat/short-name`
-   - `fix/short-name`
-   - `chore/short-name`
-   - `docs/short-name`
-   - `adr/NNNN-title`
+1. **Branch** off `develop`. Naming:
+    - `feat/short-name`
+    - `fix/short-name`
+    - `chore/short-name`
+    - `docs/short-name`
+    - `adr/NNNN-title`
 
 2. **Write code + tests together.** TDD is encouraged but not
    mandated; untested code will be asked to add tests before merge.
@@ -63,7 +63,7 @@ uv run ruff check .           # lint
    - `fix(evolver): prevent duplicate ProposedEdit on retry`
    - `docs(adr): record uv adoption`
 
-5. **Push and open a PR** against `main`. Fill out the PR template:
+5. **Push and open a PR** against `develop`. Fill out the PR template:
    motivation, evidence, risk, ADRs touched.
 
 6. **CI must be green** before review.

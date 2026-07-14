@@ -85,8 +85,12 @@ mirrors the way our product works:
   include ruff, ruff-format, gitleaks (secret scan), and standard
   hygiene checks. See `.pre-commit-config.yaml`.
 - **Lint:** `uv run ruff check .` — must pass before commit (and is
-  also enforced by pre-commit).
+  also enforced by pre-commit). Run before test to catch issues early.
 - **Test:** `uv run pytest` — must pass before commit.
+  - Single test: `uv run pytest tests/path/to_test.py::test_name`
+  - Single benchmark: `uv run pytest benchmarks/tasks/test_name.py -m benchmark`
+  - Benchmarks live alongside unit tests in `benchmarks/tasks/` and are
+    marked `@pytest.mark.benchmark` (ADR-0004, ADR-0005).
 - **Type discipline:** Python 3.11+ syntax. `pydantic` for all
   structured data at module boundaries (ADR-0006). No `Any` without
   a comment explaining why.
