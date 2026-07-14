@@ -78,6 +78,7 @@ _PROPOSED_CLASS_EDIT_TEMPLATES: dict[str, tuple[str, str, list[str]]] = {
 
 from pydantic import BaseModel, Field
 
+
 def _normalize_relative_parts(parts: tuple[str, ...]) -> tuple[str, ...] | None:
     """Collapse ``.``/``..`` in a relative path without touching the FS.
 

@@ -258,12 +258,12 @@ def test_load_check_reports_skill_name_filename_mismatch(tmp_path: Path) -> None
         f"load_check should have failed on name/filename mismatch; "
         f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     )
-    assert (
-        "mismatch.json" in proc.stderr
-    ), f"stderr must name the offending file (issue #278); got {proc.stderr!r}"
-    assert (
-        "'other'" in proc.stderr
-    ), f"stderr must name the internal name (issue #278); got {proc.stderr!r}"
+    assert "mismatch.json" in proc.stderr, (
+        f"stderr must name the offending file (issue #278); got {proc.stderr!r}"
+    )
+    assert "'other'" in proc.stderr, (
+        f"stderr must name the internal name (issue #278); got {proc.stderr!r}"
+    )
 
 
 @pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
