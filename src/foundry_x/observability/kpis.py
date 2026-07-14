@@ -76,6 +76,11 @@ class KpiSummary(BaseModel):
     with no token data (e.g. an endpoint that never reports usage) keeps
     the summary compact. Like ``injection_blocks`` this is an auxiliary
     operator signal, not one of the three PRD success-metric KPIs.
+
+    Issue #466 adds ``token_budget_abort_count``: the number of sessions
+    that recorded at least one ``task_aborted(reason="token_budget")``
+    event. Surfaced as an auxiliary operator signal alongside
+    ``injection_blocks`` and ``token_totals``.
     """
 
     cycle_time_seconds: float | None = None
@@ -83,6 +88,7 @@ class KpiSummary(BaseModel):
     improvement_rate: float = 0.0
     injection_blocks: dict[str, int] = {}
     token_totals: dict[str, int] = {}
+    token_budget_abort_count: int = 0
 
 
 class KpiComparison(BaseModel):
@@ -126,6 +132,10 @@ class KpiHistoryEntry(BaseModel):
     injection_blocks: dict[str, int] = {}
 
 
+TASK_ABORTED_KIND = "task_aborted"
+TOKEN_BUDGET_REASON = "token_budget"
+
+
 def compute_kpis(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -152,6 +162,7 @@ def compute_kpis(
     regression_rate, improvement_rate = _verdict_rates(logger, harness_version=harness_version)
     injection_blocks = _injection_blocks(logger, harness_version=harness_version)
     token_totals = _token_totals(logger, harness_version=harness_version)
+    token_budget_abort_count = _token_budget_aborts(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -159,6 +170,7 @@ def compute_kpis(
         improvement_rate=improvement_rate,
         injection_blocks=injection_blocks,
         token_totals=token_totals,
+        token_budget_abort_count=token_budget_abort_count,
     )
 
 
@@ -349,6 +361,31 @@ def _token_totals(
     return totals
 
 
+def _token_budget_aborts(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> int:
+    """Count sessions that hit ``task_aborted(reason="token_budget")`` (issue #466).
+
+    Unlike ``_injection_blocks`` which returns a per-session map, this
+    function returns a single integer: the number of sessions that
+    recorded at least one ``task_aborted`` event with
+    ``reason="token_budget"``. Sessions are counted once regardless of
+    how many times the abort fires within them.
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with
+    the kind and ``harness_version`` filters pushed down.
+    """
+    sessions_with_abort: set[str] = set()
+    for event in logger.query_events(
+        kind=TASK_ABORTED_KIND,
+        harness_version=harness_version,
+    ):
+        if event.payload.get("reason") == TOKEN_BUDGET_REASON:
+            sessions_with_abort.add(event.session_id)
+    return len(sessions_with_abort)
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -417,6 +454,13 @@ def _render_markdown(summary: KpiSummary) -> str:
         lines.append("| --- | --- |")
         for sid, count in sorted(summary.token_totals.items()):
             lines.append(f"| {sid} | {count} |")
+    # Issue #466: surface token budget abort count when at least one session hit it.
+    if summary.token_budget_abort_count > 0:
+        lines.append("")
+        lines.append(
+            f"Token Budget Aborts: {summary.token_budget_abort_count} session(s) "
+            "hit the token budget limit."
+        )
     return "\n".join(lines)
 
 

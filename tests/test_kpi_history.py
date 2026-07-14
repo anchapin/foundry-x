@@ -296,9 +296,11 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "cycle_time_seconds",
         "regression_rate",
         "improvement_rate",
+        "token_budget_abort_count",
         "timestamp",
     }
     assert "injection_blocks" not in payload
+    assert "token_totals" not in payload
 
 
 def test_main_log_to_persists_harness_version_when_filtered(tmp_path):
