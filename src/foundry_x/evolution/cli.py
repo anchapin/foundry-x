@@ -104,7 +104,9 @@ def _render_quantization_result(result: QuantizationResult) -> str:
 def _render_quantization_verdict(verdict: QuantizationVerdict) -> str:
     """Render a QuantizationVerdict as a comparison table."""
     lines = ["Quantization Sweep Results", "=" * 70]
-    header = f"  {'Quantization':<15} | {'Pass Rate':>9} | {'Avg Cycle':>10} | {'Tokens':>10} | Model ID"
+    header = (
+        f"  {'Quantization':<15} | {'Pass Rate':>9} | {'Avg Cycle':>10} | {'Tokens':>10} | Model ID"
+    )
     lines.append(header)
     lines.append("-" * 70)
     for result in verdict.quantizations:
@@ -219,8 +221,7 @@ def _build_sweep_parser() -> argparse.ArgumentParser:
         "--quantizations",
         required=True,
         help=(
-            "Comma-separated list of quantization labels to sweep "
-            "(e.g. Q4_K_S,Q5_K_M,Q6_K,Q8_0)."
+            "Comma-separated list of quantization labels to sweep (e.g. Q4_K_S,Q5_K_M,Q6_K,Q8_0)."
         ),
     )
     parser.add_argument(
@@ -305,8 +306,7 @@ def _build_sweep_subparser(parser: argparse.ArgumentParser) -> None:
         "--quantizations",
         required=True,
         help=(
-            "Comma-separated list of quantization labels to sweep "
-            "(e.g. Q4_K_S,Q5_K_M,Q6_K,Q8_0)."
+            "Comma-separated list of quantization labels to sweep (e.g. Q4_K_S,Q5_K_M,Q6_K,Q8_0)."
         ),
     )
     parser.add_argument(
@@ -327,9 +327,7 @@ def _build_sweep_subparser(parser: argparse.ArgumentParser) -> None:
         "--regression-threshold",
         type=float,
         default=2.0,
-        help=(
-            "Regression threshold in percentage points (default: 2.0)."
-        ),
+        help=("Regression threshold in percentage points (default: 2.0)."),
     )
 
 
