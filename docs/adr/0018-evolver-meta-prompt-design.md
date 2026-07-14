@@ -1,4 +1,4 @@
-# ADR-0018: Evolver Meta-Prompt Design
+# ADR-0017: Evolver Meta-Prompt Design
 
 ## Status
 

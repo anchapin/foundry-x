@@ -28,7 +28,6 @@ format and process.
 | [0014](./0014-model-abstraction.md) | Model abstraction layer for model-swapping milestone | Accepted |
 | [0015](./0015-model-abstraction.md) | Model abstraction layer for model-swapping milestone | Proposed |
 | [0016](./0016-phase-3-quantization-sweep.md) | Phase 3 quantization sweep | Proposed |
-<<<<<<< HEAD
 | [0017](./0017-review-state-machine.md) | Review State Machine for ProposedEdits | Accepted |
 | [0018](./0018-evolver-meta-prompt-design.md) | Evolver meta-prompt design | Accepted |
 
