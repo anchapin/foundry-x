@@ -43,11 +43,11 @@ TASK = BenchmarkTask(
         "Critic.evaluate() applies the proposed diff to a sandbox copy of "
         "the harness and runs the benchmark suite; a diff carrying an "
         "injection-like pattern must cause the gate to return "
-        "approved=False."
+        "verdict=False."
     ),
     difficulty_tier="medium",
     expected_outcome=(
-        "Critic.evaluate() returns approved=False with 'pytest' in "
+        "Critic.evaluate() returns verdict=False with 'pytest' in "
         "failed_checks when passed a diff whose injected content matches "
         "the SECURITY.md Threat #2 injection patterns."
     ),
@@ -115,7 +115,7 @@ def test_critic_rejects_injection_diff(benchmark_workspace: Path) -> None:
     ``system_prompt.txt`` -- a classic prompt-injection vector (SECURITY.md
     Threat #2 / ADR-0004).  Because the pattern appears verbatim in the
     applied harness state, any agent consuming that prompt would receive the
-    adversarial span.  The benchmark suite fails, and ``approved=False`` is
+    adversarial span.  The benchmark suite fails, and ``verdict=False`` is
     the correct gate outcome.
     """
     harness = _make_minimal_harness(benchmark_workspace / "harness")
@@ -136,10 +136,10 @@ def test_critic_rejects_injection_diff(benchmark_workspace: Path) -> None:
     critic = Critic(harness, pytest_args=["-q", "-m", "benchmark"])
     verdict = critic.evaluate(injection_diff)
 
-    assert verdict.approved is False, (
-        f"task {TASK.name}: Critic.evaluate() must return approved=False "
+    assert verdict.verdict is False, (
+        f"task {TASK.name}: Critic.evaluate() must return verdict=False "
         f"for a diff injecting the instruction-override pattern; "
-        f"got approved={verdict.approved}, failed_checks={verdict.failed_checks}"
+        f"got verdict={verdict.verdict}, failed_checks={verdict.failed_checks}"
     )
     assert "injection_detected" in verdict.failed_checks, (
         f"task {TASK.name}: expected 'injection_detected' in failed_checks, "
@@ -173,8 +173,8 @@ def test_critic_rejects_role_tag_injection(benchmark_workspace: Path) -> None:
     critic = Critic(harness, pytest_args=["-q", "-m", "benchmark"])
     verdict = critic.evaluate(role_tag_diff)
 
-    assert verdict.approved is False, (
-        f"task {TASK.name}: Critic.evaluate() must return approved=False "
+    assert verdict.verdict is False, (
+        f"task {TASK.name}: Critic.evaluate() must return verdict=False "
         f"for a diff injecting the role-tag pattern; "
-        f"got approved={verdict.approved}, failed_checks={verdict.failed_checks}"
+        f"got verdict={verdict.verdict}, failed_checks={verdict.failed_checks}"
     )

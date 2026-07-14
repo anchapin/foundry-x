@@ -76,6 +76,7 @@ _PROPOSED_CLASS_EDIT_TEMPLATES: dict[str, tuple[str, str, list[str]]] = {
     ),
 }
 
+from pydantic import BaseModel, Field
 
 def _normalize_relative_parts(parts: tuple[str, ...]) -> tuple[str, ...] | None:
     """Collapse ``.``/``..`` in a relative path without touching the FS.
@@ -189,6 +190,18 @@ class ProposedEdit(BaseModel):
         if not any(line.startswith("+++ b/") for line in lines):
             raise ValueError("unified_diff missing '+++ b/' header required by git apply")
         return value
+
+
+class EvolverGuardError(ValueError):
+    """Raised when an edit or proposal cadence violates a guardrail.
+
+    Implements the SECURITY.md "Rate limits" guardrail: max N proposals per
+    hour, max M lines of harness diff per proposal. Violations are raised,
+    never swallowed, per AGENTS.md §4 ("no swallowed exceptions"). Surfacing
+    the failure is the "surface it or re-raise" option in that rule; a
+    TraceLogger event will be attached once the propose() body lands and a
+    session context is available.
+    """
 
 
 class EvolverGuardError(ValueError):

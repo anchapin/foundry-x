@@ -63,7 +63,7 @@ def test_patch_is_visible_to_pytest():
         pytest_args=["-q", "tests/test_gate.py"],
     ).evaluate(_diff("system_prompt.txt", "original\n", "patched\n"))
 
-    assert verdict.approved is True
+    assert verdict.verdict is True
     assert "pytest" in verdict.passed_checks
     assert _snapshot(harness_dir) == before
 
@@ -85,7 +85,7 @@ def test_marker_stays_safe():
         pytest_args=["-q", "tests/test_gate.py"],
     ).evaluate(_diff("marker.txt", "safe\n", "broken\n"))
 
-    assert verdict.approved is False
+    assert verdict.verdict is False
     assert "git apply" in verdict.passed_checks
     assert "pytest" in verdict.failed_checks
 
@@ -113,7 +113,7 @@ def test_clean_gate_passes():
         pytest_args=["-q", "tests/test_gate.py"],
     ).evaluate(edit.unified_diff)
 
-    assert verdict.approved is True
+    assert verdict.verdict is True
     assert "pytest" in verdict.passed_checks
     assert verdict.failed_checks == []
 

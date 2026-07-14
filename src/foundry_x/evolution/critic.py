@@ -52,10 +52,16 @@ def _scan_diff_for_injection(diff: str) -> list[str]:
     return triggered
 
 
+#: Default location of the regression baseline JSON written by the Critic
+#: (ADR-0004 step 3, issue #186). Relative to the process working directory
+#: so an invocation from the repo root lands at ``logs/critic_baseline.json``.
+DEFAULT_BASELINE_PATH: Path = Path("logs") / "critic_baseline.json"
+
+
 class CriticVerdict(BaseModel):
     """Result of a Critic gate run against a proposed harness edit (ADR-0006)."""
 
-    approved: bool
+    verdict: bool
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
     notes: str = ""
@@ -139,6 +145,15 @@ class Critic:
            a confusing downstream pytest error.
         6. Run pytest with ``self.pytest_args`` in the sandbox.
 
+        Every subprocess inside this method is bounded by
+        ``self.gate_timeout_s`` (issue #188). On
+        :class:`subprocess.TimeoutExpired` the verdict is
+        ``approved=False`` with ``failed_checks`` carrying the offending check
+        name suffixed ``":timeout"`` (e.g. ``"pytest:timeout"``), and
+        ``notes`` holds the trailing window of any partial output the
+        process managed to write before being killed — or a wall-clock-cap
+        message when no partial output was captured.
+
         The verdict's ``approved`` flag is ``True`` only when every check that
         runs succeeds. All filesystem mutations are confined to the temp copy.
         """
@@ -154,7 +169,7 @@ class Critic:
                 line_count = len(proposed_diff.splitlines())
                 if line_count > self.max_diff_lines:
                     return CriticVerdict(
-                        approved=False,
+                        verdict=False,
                         passed_checks=[],
                         failed_checks=["diff_size_cap"],
                         notes=f"diff too large: {line_count} lines (cap={self.max_diff_lines})",
@@ -165,7 +180,7 @@ class Critic:
                 injection_markers = _scan_diff_for_injection(proposed_diff)
                 if injection_markers:
                     return CriticVerdict(
-                        approved=False,
+                        verdict=False,
                         passed_checks=[],
                         failed_checks=["injection_detected"],
                         notes=f"injection pattern(s) in diff: {', '.join(injection_markers)}",
@@ -179,7 +194,7 @@ class Critic:
                 )
                 if apply_result.returncode != 0:
                     return CriticVerdict(
-                        approved=False,
+                        verdict=False,
                         passed_checks=[],
                         failed_checks=["git apply"],
                         notes=_tail(apply_result.stderr or apply_result.stdout),
@@ -203,7 +218,7 @@ class Critic:
             )
             if load_result.returncode != 0:
                 return CriticVerdict(
-                    approved=False,
+                    verdict=False,
                     passed_checks=passed_checks,
                     failed_checks=[*failed_checks, "load_check"],
                     notes=_tail(load_result.stderr or load_result.stdout),
@@ -227,7 +242,7 @@ class Critic:
 
             combined = (pytest_result.stdout or "") + (pytest_result.stderr or "")
             return CriticVerdict(
-                approved=not failed_checks,
+                verdict=not failed_checks,
                 passed_checks=passed_checks,
                 failed_checks=failed_checks,
                 notes=_tail(combined),

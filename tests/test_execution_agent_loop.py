@@ -198,9 +198,9 @@ def test_agent_loop_records_full_event_sequence(tmp_path, monkeypatch):
     tool_call_idx = kinds.index("tool_call")
     tool_result_idx = kinds.index("tool_result")
     outcome_idx = kinds.index("outcome")
-    assert user_prompt_idx < tool_call_idx < tool_result_idx < outcome_idx, (
-        f"events out of order: {kinds!r}"
-    )
+    assert (
+        user_prompt_idx < tool_call_idx < tool_result_idx < outcome_idx
+    ), f"events out of order: {kinds!r}"
 
     tool_call_event = events[tool_call_idx]
     assert tool_call_event.payload["name"] == "bash"

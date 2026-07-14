@@ -197,6 +197,38 @@ def resolve_trace_backend(env: dict[str, str] | None = None) -> str:
         )
     return backend
 
+# Trace-backend selection (issue #13). ``.env.example`` documents
+# ``FOUNDRY_TRACE_BACKEND`` as the way to switch the trace store between the
+# default SQLite database and the JSONL export format (ADR-0003). Keeping the
+# supported set in one place lets the runner validate the value up front
+# rather than silently falling through to a no-op backend, honoring
+# AGENTS.md §2 ("Never silently swallow an exception").
+_TRACE_BACKEND_ENV = "FOUNDRY_TRACE_BACKEND"
+_SUPPORTED_TRACE_BACKENDS: frozenset[str] = frozenset({"sqlite", "jsonl"})
+_DEFAULT_TRACE_BACKEND: str = "sqlite"
+
+
+def resolve_trace_backend(env: dict[str, str] | None = None) -> str:
+    """Resolve the trace backend from ``FOUNDRY_TRACE_BACKEND`` (issue #13).
+
+    The value is lower-cased and whitespace-stripped before comparison so a
+    value such as ``"JSONL"`` or ``" sqlite "`` from a hand-edited ``.env``
+    is accepted. An empty/absent value yields the :data:`_DEFAULT_TRACE_BACKEND`
+    (``sqlite``), matching ``.env.example``. An unrecognized value raises
+    :class:`ValueError` naming the valid options — failing fast at startup is
+    preferable to a silent fall-through that writes nothing and leaves the
+    engineer debugging why no trace appeared (AGENTS.md §2).
+    """
+    source = env if env is not None else os.environ
+    raw = source.get(_TRACE_BACKEND_ENV, "").strip().lower()
+    backend = raw or _DEFAULT_TRACE_BACKEND
+    if backend not in _SUPPORTED_TRACE_BACKENDS:
+        valid = ", ".join(sorted(_SUPPORTED_TRACE_BACKENDS))
+        raise ValueError(
+            f"Unsupported FOUNDRY_TRACE_BACKEND={backend!r}; valid options are: {valid}"
+        )
+    return backend
+
 
 def resolve_model_id(env: dict[str, str] | None = None) -> str | None:
     """Resolve the model identity to stamp into the trace session (issue #12).
@@ -1260,6 +1292,17 @@ async def run_task(
     cap (matches the existing wall_clock + ``task_aborted`` pairing in
     SECURITY.md "Runaway detection").
 
+    Token-budget enforcement (issue #197): the loop accumulates
+    ``response.usage.total_tokens`` across steps. When the running total
+    exceeds ``limits.token_budget`` after a ``model_response`` is recorded,
+    the loop emits a ``task_aborted`` event with ``reason="token_budget"``
+    and terminates with ``outcome.status="failed"``,
+    ``outcome.reason="token_budget"``. The token-budget check lives in
+    ``run_task`` (not :func:`run_with_limits`) because ``run_task`` owns the
+    running counter; :func:`run_with_limits` continues to own the wall-clock
+    cap (matches the existing wall_clock + ``task_aborted`` pairing in
+    SECURITY.md "Runaway detection").
+
     On any model error the loop records a ``model_error`` event, sets
     ``outcome.status="failed"`` and ``outcome.reason="model_error"``, and
     re-raises so ``main()`` can append the ``task_failed`` terminal marker.
@@ -1303,6 +1346,17 @@ async def run_task(
         if name in ("list_dir", "grep_search", "edit_file", "write_file"):
             return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
         if name in ("read_file", "read_multiple_files"):
+            return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
+        return await _default_skill_executor(name, arguments)
+
+    max_steps = _resolve_max_steps()
+
+    async def _execute_skill(name: str, arguments: dict[str, Any]) -> Any:
+        if skill_executor is not None:
+            return await skill_executor(name, arguments)
+        if name == "bash":
+            return await _bash_skill_executor(name, arguments, workspace_dir=workspace_root)
+        if name in ("list_dir", "grep_search", "edit_file", "write_file"):
             return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
         return await _default_skill_executor(name, arguments)
 
@@ -1433,6 +1487,17 @@ async def run_task(
                     output = None
                     error = f"{type(exc).__name__}: {exc}"
                 duration_ms = int((time.monotonic() - start) * 1000)
+                log.record(
+                    session_id,
+                    kind="tool_call",
+                    payload={
+                        "step": step,
+                        "call_id": tool_call.id,
+                        "name": tool_call.function.name,
+                        "arguments": arguments,
+                        "duration_ms": duration_ms,
+                    },
+                )
                 result = hook_result_cls(name=call.name, output=output, error=error)
 
                 if registry is not None:

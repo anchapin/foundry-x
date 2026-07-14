@@ -67,7 +67,7 @@ def _render_proposed_edit(edit: ProposedEdit, verbose: bool = False) -> str:
 
 def _render_critic_verdict(verdict: CriticVerdict) -> str:
     """Render a CriticVerdict as a compact plain-text summary."""
-    status = "APPROVED" if verdict.approved else "REJECTED"
+    status = "APPROVED" if verdict.verdict else "REJECTED"
     lines = [f"Critic Verdict: {status}"]
     if verdict.passed_checks:
         lines.append("  Passed checks:")
@@ -136,7 +136,7 @@ def _run_loop(
     print(_render_critic_verdict(verdict))
     print()
 
-    exit_code = 0 if verdict.approved else 1
+    exit_code = 0 if verdict.verdict else 1
     return report, edit, verdict, exit_code
 
 

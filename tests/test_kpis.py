@@ -31,14 +31,14 @@ from foundry_x.trace.logger import TraceLogger
 def _seed_session(
     logger: TraceLogger,
     harness_version: str,
-    approved: bool | None = None,
+    verdict: bool | None = None,
     passed_checks: list[str] | None = None,
     failed_checks: list[str] | None = None,
     injection_block_count: int = 0,
 ) -> str:
     """Create a session with task_received + optional persisted critic_verdict.
 
-    When ``approved`` is not ``None`` a real CriticVerdict is persisted via
+    When ``verdict`` is not ``None`` a real CriticVerdict is persisted via
     ``record_verdict`` (issue #98), so the trace store holds the same
     ``VerdictRecord`` payload the production path writes.
 
@@ -48,14 +48,14 @@ def _seed_session(
     """
     with logger.session(harness_version=harness_version) as sid:
         logger.record(sid, kind="task_received", payload={"prompt": "do work"})
-        if approved is not None:
+        if verdict is not None:
             # Small delay so cycle-time is measurably positive.
             time.sleep(0.01)
             record_verdict(
                 logger,
                 sid,
                 CriticVerdict(
-                    approved=approved,
+                    verdict=verdict,
                     passed_checks=passed_checks or [],
                     failed_checks=failed_checks or [],
                 ),
@@ -79,9 +79,9 @@ def test_compute_kpis_with_planted_data(tmp_path):
 
     # 2 approved, 1 rejected → improvement 2/3. The rejected session fails
     # "bench", which the two prior sessions passed → 1 regressed session of 3.
-    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
-    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
-    _seed_session(logger, "v1", approved=False, failed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=False, failed_checks=["bench"])
 
     summary = compute_kpis(logger)
 
@@ -99,8 +99,8 @@ def test_regression_rate_counts_prior_pass_now_failing(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
 
-    _seed_session(logger, "v1", approved=True, passed_checks=["smoke"])
-    _seed_session(logger, "v1", approved=False, failed_checks=["smoke"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["smoke"])
+    _seed_session(logger, "v1", verdict=False, failed_checks=["smoke"])
 
     summary = compute_kpis(logger)
 
@@ -114,8 +114,8 @@ def test_no_regression_when_failure_never_passed(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
 
-    _seed_session(logger, "v1", approved=True, passed_checks=["smoke"])
-    _seed_session(logger, "v1", approved=False, failed_checks=["brand_new"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["smoke"])
+    _seed_session(logger, "v1", verdict=False, failed_checks=["brand_new"])
 
     summary = compute_kpis(logger)
 
@@ -137,8 +137,8 @@ def test_compute_kpis_empty_db(tmp_path):
 def test_compute_kpis_harness_version_filter(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
-    _seed_session(logger, "v2", approved=False)
+    _seed_session(logger, "v1", verdict=True)
+    _seed_session(logger, "v2", verdict=False)
 
     summary = compute_kpis(logger, harness_version="v1")
     assert summary.improvement_rate == 1.0
@@ -150,8 +150,8 @@ def test_compute_kpis_harness_version_filter(tmp_path):
 def test_main_prints_markdown_table(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
-    _seed_session(logger, "v1", approved=False)
+    _seed_session(logger, "v1", verdict=True)
+    _seed_session(logger, "v1", verdict=False)
 
     rc = main(["--db", str(db)])
     captured = capsys.readouterr()
@@ -176,10 +176,10 @@ def test_injection_blocks_counted_per_session(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
 
-    s1 = _seed_session(logger, "v1", approved=True, injection_block_count=2)
-    s2 = _seed_session(logger, "v1", approved=True, injection_block_count=1)
+    s1 = _seed_session(logger, "v1", verdict=True, injection_block_count=2)
+    s2 = _seed_session(logger, "v1", verdict=True, injection_block_count=1)
     # Clean session contributes nothing to the map.
-    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", verdict=True)
 
     summary = compute_kpis(logger)
 
@@ -190,7 +190,7 @@ def test_injection_blocks_counted_per_session(tmp_path):
 def test_injection_blocks_empty_when_no_events(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", verdict=True)
 
     summary = compute_kpis(logger)
     assert summary.injection_blocks == {}
@@ -199,7 +199,7 @@ def test_injection_blocks_empty_when_no_events(tmp_path):
 def test_main_renders_injection_block_section_when_present(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    s1 = _seed_session(logger, "v1", approved=True, injection_block_count=3)
+    s1 = _seed_session(logger, "v1", verdict=True, injection_block_count=3)
 
     rc = main(["--db", str(db)])
     captured = capsys.readouterr()
@@ -215,7 +215,7 @@ def test_main_renders_injection_block_section_when_present(tmp_path, capsys):
 def test_main_omits_injection_block_section_when_clean(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", verdict=True)
 
     rc = main(["--db", str(db)])
     captured = capsys.readouterr()
@@ -234,7 +234,7 @@ def test_main_omits_injection_block_section_when_clean(tmp_path, capsys):
 def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", verdict=True)
 
     rc = main(["--db", str(db), "--format", "json"])
     captured = capsys.readouterr()
@@ -255,8 +255,8 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
 def test_main_json_round_trips_through_kpi_summary(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
-    _seed_session(logger, "v1", approved=False, failed_checks=["task"])
+    _seed_session(logger, "v1", verdict=True)
+    _seed_session(logger, "v1", verdict=False, failed_checks=["task"])
 
     rc = main(["--db", str(db), "--format", "json"])
     captured = capsys.readouterr()
@@ -270,7 +270,7 @@ def test_main_format_auto_detects_json_from_out_extension(tmp_path):
     db = tmp_path / "traces.db"
     out = tmp_path / "kpis.json"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", verdict=True)
 
     rc = main(["--db", str(db), "--out", str(out)])
     assert rc == 0
@@ -285,7 +285,7 @@ def test_main_explicit_markdown_format_overrides_json_extension(tmp_path):
     db = tmp_path / "traces.db"
     out = tmp_path / "anything.json"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", verdict=True)
 
     rc = main(["--db", str(db), "--format", "markdown", "--out", str(out)])
     assert rc == 0
@@ -300,8 +300,8 @@ def test_main_explicit_markdown_format_overrides_json_extension(tmp_path):
 def test_main_json_includes_injection_blocks_when_present(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    s1 = _seed_session(logger, "v1", approved=True, injection_block_count=2)
-    s2 = _seed_session(logger, "v1", approved=True, injection_block_count=1)
+    s1 = _seed_session(logger, "v1", verdict=True, injection_block_count=2)
+    s2 = _seed_session(logger, "v1", verdict=True, injection_block_count=1)
 
     rc = main(["--db", str(db), "--format", "json"])
     captured = capsys.readouterr()
@@ -343,11 +343,11 @@ def test_compare_kpis_returns_candidate_minus_baseline_deltas(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     # Baseline v1: both approved, both pass "bench".
-    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
-    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
     # Candidate v2: one passes "bench", one regresses it.
-    _seed_session(logger, "v2", approved=True, passed_checks=["bench"])
-    _seed_session(logger, "v2", approved=False, failed_checks=["bench"])
+    _seed_session(logger, "v2", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v2", verdict=False, failed_checks=["bench"])
 
     comparison = compare_kpis(logger, "v1", "v2")
 
@@ -366,11 +366,11 @@ def test_main_comparison_prints_baseline_candidate_delta_columns(tmp_path, capsy
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     # Baseline v1: both approved, both pass "bench".
-    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
-    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
     # Candidate v2: one passes "bench", one regresses it.
-    _seed_session(logger, "v2", approved=True, passed_checks=["bench"])
-    _seed_session(logger, "v2", approved=False, failed_checks=["bench"])
+    _seed_session(logger, "v2", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v2", verdict=False, failed_checks=["bench"])
 
     rc = main(
         [
@@ -410,9 +410,9 @@ def test_main_comparison_marks_improvement_increase_as_positive(tmp_path, capsys
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     # Baseline: rejected (improvement 0.0).
-    _seed_session(logger, "v1", approved=False, failed_checks=["x"])
+    _seed_session(logger, "v1", verdict=False, failed_checks=["x"])
     # Candidate: approved (improvement 1.0) → improvement increases.
-    _seed_session(logger, "v2", approved=True, passed_checks=["x"])
+    _seed_session(logger, "v2", verdict=True, passed_checks=["x"])
 
     rc = main(
         [
@@ -435,8 +435,8 @@ def test_main_comparison_marks_improvement_increase_as_positive(tmp_path, capsys
 def test_main_comparison_json_structure(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True, passed_checks=["bench"])
-    _seed_session(logger, "v2", approved=False, failed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v2", verdict=False, failed_checks=["bench"])
 
     rc = main(
         [
@@ -463,7 +463,7 @@ def test_main_comparison_json_structure(tmp_path, capsys):
 def test_main_comparison_requires_both_versions(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", verdict=True)
 
     with pytest.raises(SystemExit) as exc:
         main(["--db", str(db), "--baseline-harness-version", "v1"])
@@ -579,7 +579,7 @@ def test_token_totals_omits_session_with_no_usage(tmp_path):
 def test_token_totals_empty_when_no_model_response_events(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", verdict=True)
 
     summary = compute_kpis(logger)
 
@@ -625,7 +625,7 @@ def test_main_markdown_renders_token_usage_section(tmp_path, capsys):
 def test_main_markdown_omits_token_usage_when_clean(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", verdict=True)
 
     rc = main(["--db", str(db)])
     captured = capsys.readouterr()

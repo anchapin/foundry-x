@@ -173,7 +173,7 @@ class TestEvolutionResultModel:
             summary="test failure",
             proposed_class="tool-error",
         )
-        verdict = CriticVerdict(approved=True, passed_checks=["pytest"], failed_checks=[])
+        verdict = CriticVerdict(verdict=True, passed_checks=["pytest"], failed_checks=[])
         result = EvolutionResult(
             session_id="sess-test",
             failure_report=report,
@@ -181,4 +181,4 @@ class TestEvolutionResultModel:
             verdict=verdict,
         )
         assert result.verdict is not None
-        assert result.verdict.approved is True
+        assert result.verdict.verdict is True

@@ -13,7 +13,7 @@ VERDICT_KIND = "critic_verdict"
 class VerdictRecord(BaseModel):
     """Structured payload persisted for every Critic verdict (ADR-0006 boundary model)."""
 
-    approved: bool = False
+    verdict: bool = False
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
     notes: str = ""
@@ -73,7 +73,7 @@ class RegressionAnalysis(BaseModel):
 def record_verdict(logger: TraceLogger, session_id: str, verdict: CriticVerdict) -> None:
     """Persist a CriticVerdict as a ``critic_verdict`` trace event."""
     record = VerdictRecord(
-        approved=verdict.approved,
+        verdict=verdict.verdict,
         passed_checks=list(verdict.passed_checks),
         failed_checks=list(verdict.failed_checks),
         notes=verdict.notes,
@@ -187,7 +187,7 @@ def analyze_regressions(
     """
     events = _load_verdict_events(logger, since)
     total = len(events)
-    approvals = sum(1 for _sid, _ts, v in events if v.approved)
+    approvals = sum(1 for _sid, _ts, v in events if v.verdict)
     rejections = total - approvals
     versions = _session_versions(logger)
     regressions, new_passes = _compute(events, versions)
@@ -203,6 +203,19 @@ def analyze_regressions(
         regressions=[RegressionRow(**asdict(r)) for r in regressions],
         new_passes=[NewPassRow(**asdict(p)) for p in new_passes],
     )
+
+
+def _session_versions(logger: TraceLogger) -> dict[str, str]:
+    """Build a ``session_id -> harness_version`` map for every known session.
+
+    The map is consumed by :func:`_compute` so each regression / new-pass row
+    can surface the manifest version of its *current-state* session (issue
+    #103: regression_report gains a column showing the manifest version of
+    each verdict's source session). Sessions whose row is missing are
+    rendered as an empty string rather than ``None`` so the Markdown table
+    stays a 4-column shape.
+    """
+    return {s.session_id: s.harness_version for s in logger.list_sessions()}
 
 
 def _session_versions(logger: TraceLogger) -> dict[str, str]:
