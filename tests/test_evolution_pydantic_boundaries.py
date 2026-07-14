@@ -76,7 +76,7 @@ _SAMPLE_PROPOSED_EDIT = ProposedEdit(
 )
 
 _SAMPLE_CRITIC_VERDICT = CriticVerdict(
-    approved=True,
+    verdict=True,
     passed_checks=["git apply", "pytest"],
     failed_checks=[],
     notes="all checks passed (truncated tail)",

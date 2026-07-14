@@ -42,7 +42,7 @@ GITIGNORE = REPO_ROOT / ".gitignore"
 def _seed_session(
     logger: TraceLogger,
     harness_version: str,
-    approved: bool = True,
+    verdict: bool = True,
     passed_checks: list[str] | None = None,
     failed_checks: list[str] | None = None,
     injection_block_count: int = 0,
@@ -62,7 +62,7 @@ def _seed_session(
             logger,
             sid,
             CriticVerdict(
-                approved=approved,
+                verdict=verdict,
                 passed_checks=passed_checks or [],
                 failed_checks=failed_checks or [],
             ),
@@ -280,7 +280,7 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     db = tmp_path / "traces.db"
     log = tmp_path / "kpi-history.jsonl"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", verdict=True)
 
     rc = main(["--db", str(db), "--log-to", str(log)])
 
@@ -305,7 +305,7 @@ def test_main_log_to_persists_harness_version_when_filtered(tmp_path):
     db = tmp_path / "traces.db"
     log = tmp_path / "kpi-history.jsonl"
     logger = TraceLogger(db)
-    _seed_session(logger, "v2", approved=True)
+    _seed_session(logger, "v2", verdict=True)
 
     rc = main(["--db", str(db), "--harness-version", "v2", "--log-to", str(log)])
 
@@ -318,7 +318,7 @@ def test_main_log_to_creates_parent_directory(tmp_path):
     db = tmp_path / "traces.db"
     log = tmp_path / "nested" / "kpi-history.jsonl"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", verdict=True)
 
     rc = main(["--db", str(db), "--log-to", str(log)])
 
@@ -331,9 +331,9 @@ def test_main_log_to_increments_across_runs(tmp_path):
     db = tmp_path / "traces.db"
     log = tmp_path / "kpi-history.jsonl"
     logger = TraceLogger(db)
-    _seed_session(logger, "v1", approved=True)
+    _seed_session(logger, "v1", verdict=True)
     main(["--db", str(db), "--log-to", str(log)])
-    _seed_session(logger, "v1", approved=False, failed_checks=["x"])
+    _seed_session(logger, "v1", verdict=False, failed_checks=["x"])
     main(["--db", str(db), "--log-to", str(log)])
 
     entries = read_kpi_history(log)

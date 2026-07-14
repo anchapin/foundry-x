@@ -74,7 +74,7 @@ def harness_dir(tmp_path: Path) -> Path:
 def test_noop_diff_on_clean_harness_approves(harness_dir: Path) -> None:
     critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"])
     verdict = critic.evaluate("")
-    assert verdict.approved is True
+    assert verdict.verdict is True
     assert "pytest" in verdict.passed_checks
     assert verdict.failed_checks == []
 
@@ -87,7 +87,7 @@ def test_diff_that_breaks_test_is_rejected(harness_dir: Path) -> None:
     )
     critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"])
     verdict = critic.evaluate(breaking)
-    assert verdict.approved is False
+    assert verdict.verdict is False
     assert "pytest" in verdict.failed_checks
     assert verdict.notes
 
@@ -112,7 +112,7 @@ def test_patch_that_does_not_apply_is_rejected(harness_dir: Path) -> None:
     )
     critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"])
     verdict = critic.evaluate(bad_diff)
-    assert verdict.approved is False
+    assert verdict.verdict is False
     assert "git apply" in verdict.failed_checks
     assert "pytest" not in verdict.passed_checks
 
@@ -133,7 +133,7 @@ def test_clean_diff_that_passes_is_approved(harness_dir: Path) -> None:
         benchmark_tasks=[],
     )
     verdict = critic.evaluate(clean_diff)
-    assert verdict.approved is True
+    assert verdict.verdict is True
     # Issue #187: passed_checks order is git apply -> load_check -> pytest.
     assert verdict.passed_checks == ["git apply", "load_check", "pytest"]
     assert (harness_dir / "system_prompt.txt").read_text() == _SYSTEM_PROMPT
@@ -147,7 +147,7 @@ def test_load_check_failure_rejected_pre_pytest(harness_dir: Path) -> None:
     (harness_dir / "skills" / "broken.json").write_text("{ not valid json")
     critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"])
     verdict = critic.evaluate("")
-    assert verdict.approved is False
+    assert verdict.verdict is False
     assert verdict.failed_checks == ["load_check"]
     assert "pytest" not in verdict.passed_checks
     assert "pytest" not in verdict.failed_checks
@@ -155,7 +155,7 @@ def test_load_check_failure_rejected_pre_pytest(harness_dir: Path) -> None:
 
 
 def test_verdict_round_trips_through_pydantic() -> None:
-    v = CriticVerdict(approved=True, passed_checks=["pytest"], notes="ok")
+    v = CriticVerdict(verdict=True, passed_checks=["pytest"], notes="ok")
     assert CriticVerdict.model_validate(v.model_dump()) == v
 
 
@@ -245,7 +245,7 @@ def test_passed_checks_list_benchmark_tags(harness_dir: Path) -> None:
         ],
     )
     verdict = critic.evaluate("")
-    assert verdict.approved is True
+    assert verdict.verdict is True
     assert "pytest" in verdict.passed_checks
     assert "benchmark:security" in verdict.passed_checks
     assert "benchmark:smoke" in verdict.passed_checks

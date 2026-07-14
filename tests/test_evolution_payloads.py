@@ -54,7 +54,7 @@ def test_proposed_edit_valid_payload_constructs():
 
 
 def test_critic_verdict_defaults_preserved():
-    verdict = CriticVerdict(approved=True)
+    verdict = CriticVerdict(verdict=True)
     assert verdict.passed_checks == []
     assert verdict.failed_checks == []
     assert verdict.notes == ""
@@ -67,4 +67,4 @@ def test_critic_verdict_missing_approved_raises():
 
 def test_critic_verdict_non_bool_approved_raises():
     with pytest.raises(ValidationError):
-        CriticVerdict(approved=["not", "a", "bool"])  # type: ignore[arg-type]
+        CriticVerdict(verdict=["not", "a", "bool"])  # type: ignore[arg-type]

@@ -8,7 +8,7 @@ this cap at the gate so that even a diff that bypasses ``Evolver._validate_edit`
 (issue #333) is caught before the sandbox copy is mutated.
 
 A diff exceeding ``max_diff_lines`` (default 200, mirroring the Evolver
-default) must cause ``CriticVerdict.approved=False`` with
+default) must cause ``CriticVerdict.verdict=False`` with
 ``failed_checks=["diff_size_cap"]`` before git apply is attempted.
 """
 
@@ -38,7 +38,7 @@ TASK = BenchmarkTask(
     ),
     difficulty_tier="easy",
     expected_outcome=(
-        "Critic.evaluate() returns approved=False with 'diff_size_cap' in "
+        "Critic.evaluate() returns verdict=False with 'diff_size_cap' in "
         "failed_checks and notes mentioning the line count when the diff "
         "exceeds max_diff_lines."
     ),
@@ -90,7 +90,7 @@ def test_critic_rejects_oversized_diff(benchmark_workspace: Path) -> None:
     """A diff exceeding max_diff_lines is rejected before git apply is attempted.
 
     The diff has 250 lines against a cap of 200 (default).  The gate must
-    return ``approved=False`` with ``'diff_size_cap'`` in failed_checks
+    return ``verdict=False`` with ``'diff_size_cap'`` in failed_checks
     immediately, without running git apply or pytest.
     """
     harness = _make_minimal_harness(benchmark_workspace / "harness")
@@ -113,10 +113,10 @@ def test_critic_rejects_oversized_diff(benchmark_workspace: Path) -> None:
     critic = Critic(harness, max_diff_lines=cap)
     verdict = critic.evaluate(oversized_diff)
 
-    assert verdict.approved is False, (
-        f"task {TASK.name}: Critic.evaluate() must return approved=False "
+    assert verdict.verdict is False, (
+        f"task {TASK.name}: Critic.evaluate() must return verdict=False "
         f"for a {actual_lines}-line diff exceeding cap={cap}; "
-        f"got approved={verdict.approved}"
+        f"got verdict={verdict.verdict}"
     )
     assert "diff_size_cap" in verdict.failed_checks, (
         f"task {TASK.name}: expected 'diff_size_cap' in failed_checks, got {verdict.failed_checks}"
@@ -156,10 +156,10 @@ def test_critic_accepts_rightsized_diff(benchmark_workspace: Path) -> None:
     critic = Critic(harness, max_diff_lines=cap)
     verdict = critic.evaluate(rightsized_diff)
 
-    assert verdict.approved is True, (
-        f"task {TASK.name}: Critic.evaluate() must return approved=True "
+    assert verdict.verdict is True, (
+        f"task {TASK.name}: Critic.evaluate() must return verdict=True "
         f"for a {actual_lines}-line diff within cap={cap}; "
-        f"got approved={verdict.approved}, failed_checks={verdict.failed_checks}"
+        f"got verdict={verdict.verdict}, failed_checks={verdict.failed_checks}"
     )
 
 

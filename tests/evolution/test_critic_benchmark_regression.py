@@ -89,7 +89,7 @@ def test_critic_rejects_when_baseline_task_regresses_post_edit(tmp_path: Path) -
     harness_dir = _write_harness(tmp_path, _BASELINE_SOURCE)
 
     baseline = _baseline_critic(harness_dir).evaluate("")
-    assert baseline.approved is True
+    assert baseline.verdict is True
     assert baseline.failed_checks == []
 
     regress_diff = _diff(
@@ -100,7 +100,7 @@ def test_critic_rejects_when_baseline_task_regresses_post_edit(tmp_path: Path) -
 
     verdict = _baseline_critic(harness_dir).evaluate(regress_diff)
 
-    assert verdict.approved is False
+    assert verdict.verdict is False
     assert "pytest" in verdict.failed_checks
 
 
@@ -111,7 +111,7 @@ def test_critic_approves_when_all_baseline_tasks_still_pass(tmp_path: Path) -> N
 
     verdict = _baseline_critic(harness_dir).evaluate(benign_diff)
 
-    assert verdict.approved is True
+    assert verdict.verdict is True
     assert "pytest" in verdict.passed_checks
     assert verdict.failed_checks == []
 
@@ -127,7 +127,7 @@ def test_critic_surfaces_regressed_task_name_in_verdict(tmp_path: Path) -> None:
 
     verdict = _baseline_critic(harness_dir).evaluate(regress_diff)
 
-    assert verdict.approved is False
+    assert verdict.verdict is False
     evidence = " ".join(verdict.failed_checks) + " " + verdict.notes
     assert "task_A" in evidence
     assert "task_B" not in evidence

@@ -51,6 +51,7 @@ def _scan_diff_for_injection(diff: str) -> list[str]:
             triggered.append(name)
     return triggered
 
+
 #: Default location of the regression baseline JSON written by the Critic
 #: (ADR-0004 step 3, issue #186). Relative to the process working directory
 #: so an invocation from the repo root lands at ``logs/critic_baseline.json``.
@@ -168,7 +169,7 @@ class Critic:
                 line_count = len(proposed_diff.splitlines())
                 if line_count > self.max_diff_lines:
                     return CriticVerdict(
-                        approved=False,
+                        verdict=False,
                         passed_checks=[],
                         failed_checks=["diff_size_cap"],
                         notes=f"diff too large: {line_count} lines (cap={self.max_diff_lines})",
@@ -179,7 +180,7 @@ class Critic:
                 injection_markers = _scan_diff_for_injection(proposed_diff)
                 if injection_markers:
                     return CriticVerdict(
-                        approved=False,
+                        verdict=False,
                         passed_checks=[],
                         failed_checks=["injection_detected"],
                         notes=f"injection pattern(s) in diff: {', '.join(injection_markers)}",
@@ -193,7 +194,7 @@ class Critic:
                 )
                 if apply_result.returncode != 0:
                     return CriticVerdict(
-                        approved=False,
+                        verdict=False,
                         passed_checks=[],
                         failed_checks=["git apply"],
                         notes=_tail(apply_result.stderr or apply_result.stdout),
@@ -217,7 +218,7 @@ class Critic:
             )
             if load_result.returncode != 0:
                 return CriticVerdict(
-                    approved=False,
+                    verdict=False,
                     passed_checks=passed_checks,
                     failed_checks=[*failed_checks, "load_check"],
                     notes=_tail(load_result.stderr or load_result.stdout),
@@ -241,7 +242,7 @@ class Critic:
 
             combined = (pytest_result.stdout or "") + (pytest_result.stderr or "")
             return CriticVerdict(
-                approved=not failed_checks,
+                verdict=not failed_checks,
                 passed_checks=passed_checks,
                 failed_checks=failed_checks,
                 notes=_tail(combined),

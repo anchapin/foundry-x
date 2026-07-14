@@ -83,7 +83,7 @@ TASK = BenchmarkTask(
     ),
     difficulty_tier="medium",
     expected_outcome=(
-        "Critic.evaluate() returns approved=False with failed_checks "
+        "Critic.evaluate() returns verdict=False with failed_checks "
         "containing 'injection_detected' for injection-like diffs and "
         "'diff_size_cap' for oversized diffs."
     ),
@@ -123,9 +123,9 @@ def test_critic_rejects_injection_like_text(tmp_path) -> None:
 
     verdict = Critic(harness_dir=harness_dir).evaluate(injection_diff)
 
-    assert verdict.approved is False, (
+    assert verdict.verdict is False, (
         "Critic.evaluate() must reject injection-like text in diff; "
-        f"got approved={verdict.approved!r}"
+        f"got verdict={verdict.verdict!r}"
     )
     assert "injection_detected" in verdict.failed_checks, (
         f"failed_checks must include 'injection_detected'; got {verdict.failed_checks!r}"
@@ -154,7 +154,7 @@ def test_critic_rejects_role_tag_injection(tmp_path) -> None:
 
     verdict = Critic(harness_dir=harness_dir).evaluate(role_tag_diff)
 
-    assert verdict.approved is False
+    assert verdict.verdict is False
     assert "injection_detected" in verdict.failed_checks
 
 
@@ -179,7 +179,7 @@ def test_critic_rejects_ignored_context_injection(tmp_path) -> None:
 
     verdict = Critic(harness_dir=harness_dir).evaluate(context_diff)
 
-    assert verdict.approved is False
+    assert verdict.verdict is False
     assert "injection_detected" in verdict.failed_checks
 
 
@@ -208,8 +208,8 @@ def test_critic_rejects_oversized_diff(tmp_path) -> None:
 
     verdict = Critic(harness_dir=harness_dir).evaluate(large_diff)
 
-    assert verdict.approved is False, (
-        f"Critic.evaluate() must reject oversized diff; got approved={verdict.approved!r}"
+    assert verdict.verdict is False, (
+        f"Critic.evaluate() must reject oversized diff; got verdict={verdict.verdict!r}"
     )
     assert "diff_size_cap" in verdict.failed_checks, (
         f"failed_checks must include 'diff_size_cap'; got {verdict.failed_checks!r}"
@@ -244,8 +244,8 @@ def test_critic_accepts_sized_diff(tmp_path) -> None:
         small_diff
     )
 
-    assert verdict.approved is True, (
-        f"Critic.evaluate() must accept diff within size cap; got approved={verdict.approved!r}, "
+    assert verdict.verdict is True, (
+        f"Critic.evaluate() must accept diff within size cap; got verdict={verdict.verdict!r}, "
         f"failed_checks={verdict.failed_checks!r}"
     )
 
@@ -284,7 +284,7 @@ def test_critic_respects_custom_max_diff_lines(tmp_path) -> None:
     )
 
     verdict = Critic(harness_dir=harness_dir, max_diff_lines=5).evaluate(oversized)
-    assert verdict.approved is False
+    assert verdict.verdict is False
     assert "diff_size_cap" in verdict.failed_checks
 
     within_cap = (
@@ -295,4 +295,4 @@ def test_critic_respects_custom_max_diff_lines(tmp_path) -> None:
         max_diff_lines=5,
         pytest_args=["-q", "tests/test_bench.py"],
     ).evaluate(within_cap)
-    assert verdict2.approved is True
+    assert verdict2.verdict is True
