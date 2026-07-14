@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 import random
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Literal, Protocol, Self, TypeAlias, runtime_checkable
 
 import httpx
@@ -246,7 +246,7 @@ class ModelAdapter(Protocol):
     ) -> ModelResponse:
         """Return one full response for the provided chat messages."""
 
-    async def stream(
+    def stream(
         self,
         messages: Sequence[MessageInput],
         tools: Sequence[ToolInput] | None = None,
@@ -263,7 +263,7 @@ class ModelAdapter(Protocol):
         """Compatibility alias for callers that use chat terminology."""
 
 
-class OpenAICompatibleAdapter:
+class OpenAICompatibleAdapter(ModelAdapter):
     """ModelAdapter backed by an OpenAI-compatible chat-completions API."""
 
     def __init__(
@@ -467,7 +467,7 @@ def _default_chat_completions_path(base_url: str) -> str:
     return "/v1/chat/completions"
 
 
-def resolve_adapter_max_retries(env: dict[str, str] | None = None) -> int:
+def resolve_adapter_max_retries(env: Mapping[str, str] | None = None) -> int:
     """Resolve the adapter retry cap from ``FOUNDRY_ADAPTER_MAX_RETRIES``.
 
     An empty / absent value yields :data:`_DEFAULT_ADAPTER_MAX_RETRIES`
