@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
     from foundry_x.trace.logger import TraceLogger
 
 PROPOSED_EDIT_KIND: str = "proposed_edit"
+REVIEW_STATE_TRANSITION_KIND: str = "review_state_transition"
 
 # Sliding window for the rate limiter. One hour matches the SECURITY.md
 # "max N proposals per hour" guardrail.
@@ -33,6 +35,97 @@ _HARNESS_LEAF_FILES = frozenset({_HARNESS_PROMPT_FILE, _HARNESS_MANIFEST})
 # ``hooks`` and ``skills`` are subtrees the Evolver may edit arbitrarily
 # deep beneath.
 _HARNESS_SUBDIRS = frozenset({"hooks", "skills"})
+
+
+class ReviewState(str, Enum):
+    """Review state for a ProposedEdit (issue #497).
+
+    States:
+        PROPOSED: Initial state when Evolver creates the edit.
+        PENDING_REVIEW: Edit is awaiting human review.
+        APPROVED: Edit has been approved and can be applied to harness.
+        REJECTED: Edit has been rejected and must not be applied.
+    """
+
+    PROPOSED = "PROPOSED"
+    PENDING_REVIEW = "PENDING_REVIEW"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+# Valid state transitions per the review state machine (issue #497).
+# PROPOSED -> PENDING_REVIEW: Evolver submits for review
+# PENDING_REVIEW -> APPROVED: Human approves the edit
+# PENDING_REVIEW -> REJECTED: Human rejects the edit
+# REJECTED and APPROVED are terminal states (no further transitions allowed).
+_VALID_TRANSITIONS: dict[ReviewState, frozenset[ReviewState]] = {
+    ReviewState.PROPOSED: frozenset({ReviewState.PENDING_REVIEW}),
+    ReviewState.PENDING_REVIEW: frozenset({ReviewState.APPROVED, ReviewState.REJECTED}),
+    ReviewState.APPROVED: frozenset(),
+    ReviewState.REJECTED: frozenset(),
+}
+
+
+class InvalidStateTransition(ValueError):
+    """Raised when a review state transition is not allowed.
+
+    Per issue #497 the state machine enforces valid transitions:
+    - PROPOSED -> PENDING_REVIEW
+    - PENDING_REVIEW -> APPROVED | REJECTED
+    - APPROVED and REJECTED are terminal (no outbound transitions)
+    """
+
+
+class ReviewStateMachine:
+    """Manages review state transitions for ProposedEdit objects (issue #497).
+
+    Enforces valid state transitions and logs each transition to the trace store.
+    Only edits in APPROVED state may be applied to the harness.
+    """
+
+    def __init__(
+        self,
+        trace_logger: TraceLogger | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        self._trace_logger = trace_logger
+        self._session_id = session_id
+
+    def can_apply(self, state: ReviewState) -> bool:
+        """Return True if the given state allows the edit to be applied to harness."""
+        return state == ReviewState.APPROVED
+
+    def validate_transition(self, current: ReviewState, next_state: ReviewState) -> None:
+        """Raise InvalidStateTransition if the transition is not allowed."""
+        valid_next = _VALID_TRANSITIONS.get(current, frozenset())
+        if next_state not in valid_next:
+            raise InvalidStateTransition(
+                f"invalid transition from {current.value} to {next_state.value}; "
+                f"allowed next states from {current.value}: {[s.value for s in valid_next]}"
+            )
+
+    def transition(
+        self,
+        edit_id: str,
+        current: ReviewState,
+        next_state: ReviewState,
+    ) -> None:
+        """Perform a state transition after validating it is allowed.
+
+        Logs the transition to the trace store if a logger is configured.
+        """
+        self.validate_transition(current, next_state)
+        if self._trace_logger is not None and self._session_id is not None:
+            self._trace_logger.record(
+                self._session_id,
+                REVIEW_STATE_TRANSITION_KIND,
+                {
+                    "edit_id": edit_id,
+                    "from_state": current.value,
+                    "to_state": next_state.value,
+                },
+            )
+
 
 # Template edits per failure class. Each entry is a
 # (relative_target, rationale, extra_lines) tuple: relative_target is the
@@ -156,11 +249,13 @@ class ProposedEdit(BaseModel):
     Critic and wasting a gate run. ``target_file`` is further confined to
     the harness tree (ADR-0004) at construction time. ``unified_diff`` must
     be a valid git-apply unified diff with ``--- a/`` and ``+++ b/`` headers.
+    ``review_state`` tracks the review workflow state (issue #497).
     """
 
     target_file: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
     unified_diff: str = Field(min_length=1)
+    review_state: ReviewState = Field(default=ReviewState.PROPOSED)
 
     @field_validator("target_file")
     @classmethod
