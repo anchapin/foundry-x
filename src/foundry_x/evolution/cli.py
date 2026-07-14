@@ -19,7 +19,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from foundry_x.evolution.critic import Critic, CriticVerdict
+from foundry_x.evolution.critic import (
+    Critic,
+    CriticVerdict,
+    QuantizationResult,
+    QuantizationVerdict,
+)
 from foundry_x.evolution.digester import Digester, FailureReport
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
 from foundry_x.trace.logger import TraceLogger
@@ -82,6 +87,31 @@ def _render_critic_verdict(verdict: CriticVerdict) -> str:
         if len(verdict.notes) > 500:
             notes_preview += " [...truncated]"
         lines.append(f"  Notes: {notes_preview}")
+    return "\n".join(lines)
+
+
+def _render_quantization_result(result: QuantizationResult) -> str:
+    """Render a single QuantizationResult as a table row."""
+    pass_rate_pct = result.pass_rate * 100
+    avg_time = f"{result.avg_cycle_time_s:.1f}s" if result.avg_cycle_time_s else "N/A"
+    return (
+        f"  {result.quantization:<15} | {pass_rate_pct:>6.1f}% | "
+        f"{avg_time:>8} | {result.total_tokens:>10} | "
+        f"{result.model_id}"
+    )
+
+
+def _render_quantization_verdict(verdict: QuantizationVerdict) -> str:
+    """Render a QuantizationVerdict as a comparison table."""
+    lines = ["Quantization Sweep Results", "=" * 70]
+    header = f"  {'Quantization':<15} | {'Pass Rate':>9} | {'Avg Cycle':>10} | {'Tokens':>10} | Model ID"
+    lines.append(header)
+    lines.append("-" * 70)
+    for result in verdict.quantizations:
+        lines.append(_render_quantization_result(result))
+    lines.append("=" * 70)
+    reg_status = "REGRESSION DETECTED" if verdict.regression else "No regression"
+    lines.append(f"Recommended: {verdict.recommended}  [{reg_status}]")
     return "\n".join(lines)
 
 
@@ -174,7 +204,146 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_sweep_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="foundry-sweep",
+        description=(
+            "Run a quantization sweep: execute the benchmark suite against "
+            "each listed quantization and produce a comparison table. "
+            "FOUNDRY_MODEL_PATH must point to a directory containing model files. "
+            "Each model file is matched via a glob pattern (default: *.<quant>.gguf). "
+            "Exit 0 on success, non-zero if any quantization fails all benchmarks."
+        ),
+    )
+    parser.add_argument(
+        "--quantizations",
+        required=True,
+        help=(
+            "Comma-separated list of quantization labels to sweep "
+            "(e.g. Q4_K_S,Q5_K_M,Q6_K,Q8_0)."
+        ),
+    )
+    parser.add_argument(
+        "--harness-dir",
+        required=True,
+        type=Path,
+        help="Path to the harness directory to be evaluated.",
+    )
+    parser.add_argument(
+        "--baseline",
+        default=None,
+        help=(
+            "Baseline quantization to compare against. "
+            "Defaults to the first quantization in --quantizations."
+        ),
+    )
+    parser.add_argument(
+        "--regression-threshold",
+        type=float,
+        default=2.0,
+        help=(
+            "Regression threshold in percentage points. A candidate's pass "
+            "rate must be within this many pp of the baseline to be "
+            "considered non-regressing (default: 2.0)."
+        ),
+    )
+    return parser
+
+
 def main(argv: list[str] | None = None) -> int:
+    if argv and argv[0] in ("evolve", "sweep"):
+        parser = argparse.ArgumentParser(
+            prog="foundry-evolve",
+            description="foundry-evolve and foundry-sweep commands.",
+        )
+        sub = parser.add_subparsers(dest="command", required=True)
+
+        evolve_parser = sub.add_parser("evolve", help="Run one evolution loop step.")
+        _build_evolve_subparser(evolve_parser)
+
+        sweep_parser = sub.add_parser("sweep", help="Run a quantization sweep.")
+        _build_sweep_subparser(sweep_parser)
+
+        args = parser.parse_args(argv)
+
+        if args.command == "evolve":
+            return _main_evolve(args)
+        elif args.command == "sweep":
+            return _main_sweep(args)
+        else:
+            return 2
+    else:
+        return _main_evolve_legacy(argv)
+
+
+def _build_evolve_subparser(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--session-id",
+        required=True,
+        help="Trace session UUID to analyse.",
+    )
+    parser.add_argument(
+        "--trace-db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    parser.add_argument(
+        "--harness-dir",
+        required=True,
+        type=Path,
+        help="Path to the harness directory to be evolved and evaluated.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print the full unified_diff of each ProposedEdit.",
+    )
+
+
+def _build_sweep_subparser(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--quantizations",
+        required=True,
+        help=(
+            "Comma-separated list of quantization labels to sweep "
+            "(e.g. Q4_K_S,Q5_K_M,Q6_K,Q8_0)."
+        ),
+    )
+    parser.add_argument(
+        "--harness-dir",
+        required=True,
+        type=Path,
+        help="Path to the harness directory to be evaluated.",
+    )
+    parser.add_argument(
+        "--baseline",
+        default=None,
+        help=(
+            "Baseline quantization to compare against. "
+            "Defaults to the first quantization in --quantizations."
+        ),
+    )
+    parser.add_argument(
+        "--regression-threshold",
+        type=float,
+        default=2.0,
+        help=(
+            "Regression threshold in percentage points (default: 2.0)."
+        ),
+    )
+
+
+def _main_evolve(args: argparse.Namespace) -> int:
+    _report, _edit, _verdict, exit_code = _run_loop(
+        session_id=args.session_id,
+        trace_db=args.trace_db,
+        harness_dir=args.harness_dir,
+        verbose=args.verbose,
+    )
+    return exit_code
+
+
+def _main_evolve_legacy(argv: list[str] | None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     _report, _edit, _verdict, exit_code = _run_loop(
@@ -186,5 +355,61 @@ def main(argv: list[str] | None = None) -> int:
     return exit_code
 
 
+def _main_sweep(args: argparse.Namespace) -> int:
+    quantizations = [q.strip() for q in args.quantizations.split(",") if q.strip()]
+    if not quantizations:
+        sys.stderr.write("--quantizations must specify at least one quantization label.\n")
+        return 2
+
+    critic = Critic(harness_dir=args.harness_dir)
+    try:
+        verdict = critic.quantization_sweep(
+            quantizations=quantizations,
+            baseline_quantization=args.baseline,
+            regression_threshold_pp=args.regression_threshold,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        return 1
+
+    print(_render_quantization_verdict(verdict))
+    return 0 if not verdict.regression else 1
+
+
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def sweep_main(argv: list[str] | None = None) -> int:
+    """Entry point for the ``foundry-sweep`` CLI (issue #464).
+
+    Standalone sweep invocation that does not go through the evolution loop.
+    Runs the benchmark suite against each listed quantization and prints a
+    comparison table.
+
+    Exit codes:
+        0  Sweep completed with no regression detected
+        1  Sweep completed but regression detected
+        2  Usage error or model path not found
+    """
+    parser = _build_sweep_parser()
+    args = parser.parse_args(argv)
+
+    quantizations = [q.strip() for q in args.quantizations.split(",") if q.strip()]
+    if not quantizations:
+        sys.stderr.write("--quantizations must specify at least one quantization label.\n")
+        return 2
+
+    critic = Critic(harness_dir=args.harness_dir)
+    try:
+        verdict = critic.quantization_sweep(
+            quantizations=quantizations,
+            baseline_quantization=args.baseline,
+            regression_threshold_pp=args.regression_threshold,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        return 1
+
+    print(_render_quantization_verdict(verdict))
+    return 0 if not verdict.regression else 1

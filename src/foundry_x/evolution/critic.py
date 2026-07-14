@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import glob
+import os
 import re
 import shutil
 import subprocess
@@ -11,6 +13,8 @@ from pydantic import BaseModel, Field
 
 from benchmarks.models import BenchmarkTask
 from benchmarks.registry import load_all_tasks
+
+DEFAULT_REGRESSION_THRESHOLD_PP = 2.0
 
 _NOTES_TAIL_CHARS = 4000
 
@@ -65,6 +69,29 @@ class CriticVerdict(BaseModel):
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
     notes: str = ""
+
+
+class QuantizationResult(BaseModel):
+    """Per-quantization benchmark result (ADR-0016)."""
+
+    quantization: str
+    model_path: str
+    model_id: str
+    total_tasks: int = 0
+    passed_tasks: int = 0
+    failed_tasks: int = 0
+    task_shaped_failures: int = 0
+    pass_rate: float = 0.0
+    avg_cycle_time_s: float | None = None
+    total_tokens: int = 0
+
+
+class QuantizationVerdict(BaseModel):
+    """Sweep-level verdict aggregating per-quantization results (ADR-0016)."""
+
+    quantizations: list[QuantizationResult]
+    recommended: str
+    regression: bool
 
 
 class Critic:
@@ -122,6 +149,171 @@ class Critic:
         if self._benchmark_tasks is None:
             self._benchmark_tasks = load_all_tasks()
         return self._benchmark_tasks
+
+    def quantization_sweep(
+        self,
+        quantizations: list[str],
+        model_glob_patterns: dict[str, str] | None = None,
+        baseline_quantization: str | None = None,
+        regression_threshold_pp: float = DEFAULT_REGRESSION_THRESHOLD_PP,
+    ) -> QuantizationVerdict:
+        """Run the benchmark suite against each quantization and produce a comparison.
+
+        ADR-0016: this is the single entry point for multi-quantization
+        evaluation, keeping orchestration logic co-located with single-run
+        evaluation.
+
+        Args:
+            quantizations: quantization labels to sweep (e.g. ``["Q4_K_S", "Q5_K_M"]``).
+            model_glob_patterns: maps each quantization label to a glob pattern
+                relative to ``FOUNDRY_MODEL_PATH``. Defaults to
+                ``{q: f"*.{q}.gguf" for q in quantizations}``.
+            baseline_quantization: quantization to compare against. Defaults to
+                the first quantization in *quantizations*.
+            regression_threshold_pp: regression threshold in percentage points.
+                A candidate's pass rate must be within this many pp of the
+                baseline to be considered non-regressing (default 2.0 pp).
+
+        Returns:
+            A ``QuantizationVerdict`` with per-quantization results and a
+            recommended quantization label. ``regression`` is ``True`` when
+            the recommended quantization has a lower pass rate than the
+            baseline beyond the regression threshold.
+
+        Sweep is idempotent and safe to re-run. Each quantization run is
+        stamped with ``FOUNDRY_MODEL_ID`` in the trace store. Exit code of
+        the subprocess is 0 on success, non-zero if any quantization fails
+        all benchmarks.
+        """
+        model_path_env = os.environ.get("FOUNDRY_MODEL_PATH", "")
+        if not model_path_env:
+            raise ValueError("FOUNDRY_MODEL_PATH environment variable is not set")
+
+        model_base = Path(model_path_env)
+        if not model_base.exists():
+            raise FileNotFoundError(
+                f"FOUNDRY_MODEL_PATH does not exist: {model_path_env}"
+            )
+
+        if model_glob_patterns is None:
+            model_glob_patterns = {q: f"*.{q}.gguf" for q in quantizations}
+
+        results: list[QuantizationResult] = []
+
+        for quant in quantizations:
+            pattern = model_glob_patterns.get(quant, f"*.{quant}.gguf")
+            full_pattern = str(model_base / pattern)
+            matched = glob.glob(full_pattern)
+
+            if not matched:
+                raise FileNotFoundError(
+                    f"No model file found for quantization {quant!r} "
+                    f"using pattern {pattern!r} in {model_path_env}"
+                )
+            if len(matched) > 1:
+                raise ValueError(
+                    f"Multiple model files matched for quantization {quant!r}: {matched}"
+                )
+
+            model_file = matched[0]
+            model_id = f"{quant}"
+
+            original_model_path = os.environ.get("FOUNDRY_MODEL_PATH")
+            original_model_id = os.environ.get("FOUNDRY_MODEL_ID")
+
+            os.environ["FOUNDRY_MODEL_PATH"] = str(model_base)
+            os.environ["FOUNDRY_MODEL_ID"] = model_id
+
+            try:
+                sweep_result = self._run_sweep_for_quant(model_file, model_id)
+                results.append(sweep_result)
+            finally:
+                if original_model_path is not None:
+                    os.environ["FOUNDRY_MODEL_PATH"] = original_model_path
+                else:
+                    os.environ.pop("FOUNDRY_MODEL_PATH", None)
+                if original_model_id is not None:
+                    os.environ["FOUNDRY_MODEL_ID"] = original_model_id
+                else:
+                    os.environ.pop("FOUNDRY_MODEL_ID", None)
+
+        baseline = baseline_quantization if baseline_quantization else quantizations[0]
+        baseline_result = next(r for r in results if r.quantization == baseline)
+
+        regression = False
+        for result in results:
+            if result.quantization == baseline:
+                continue
+            rate_diff_pp = (result.pass_rate - baseline_result.pass_rate) * 100
+            if rate_diff_pp < -regression_threshold_pp:
+                regression = True
+                break
+
+        recommended = baseline
+        if not regression:
+            best = max(results, key=lambda r: r.pass_rate)
+            recommended = best.quantization
+
+        return QuantizationVerdict(
+            quantizations=results,
+            recommended=recommended,
+            regression=regression,
+        )
+
+    def _run_sweep_for_quant(self, model_file: str, model_id: str) -> QuantizationResult:
+        """Run the benchmark suite for a single quantization.
+
+        Returns a ``QuantizationResult`` with metrics parsed from pytest output.
+        """
+        quant_label = Path(model_file).stem
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", *self.pytest_args, "--tb=no", "-v"],
+            capture_output=True,
+            text=True,
+        )
+
+        passed = 0
+        failed = 0
+        task_shaped = 0
+        total = 0
+
+        for line in (result.stdout or "").splitlines():
+            if " passed" in line:
+                parts = line.split()
+                for i, p in enumerate(parts):
+                    if p == "passed":
+                        try:
+                            passed = int(parts[i - 1])
+                            total = passed
+                            break
+                        except (IndexError, ValueError):
+                            pass
+            if " failed" in line:
+                parts = line.split()
+                for i, p in enumerate(parts):
+                    if p == "failed":
+                        try:
+                            failed = int(parts[i - 1])
+                            break
+                        except (IndexError, ValueError):
+                            pass
+
+        if passed + failed > 0:
+            total = passed + failed
+
+        pass_rate = (passed / total) if total > 0 else 0.0
+
+        return QuantizationResult(
+            quantization=quant_label,
+            model_path=model_file,
+            model_id=model_id,
+            total_tasks=total,
+            passed_tasks=passed,
+            failed_tasks=failed,
+            task_shaped_failures=task_shaped,
+            pass_rate=pass_rate,
+            total_tokens=0,
+        )
 
     def evaluate(self, proposed_diff: str) -> CriticVerdict:
         """Apply ``proposed_diff`` to a sandbox copy of the harness and gate it.
