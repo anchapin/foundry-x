@@ -1,4 +1,4 @@
-# ADR-0016: Review State Machine for ProposedEdits
+# ADR-0017: Review State Machine for ProposedEdits
 
 ## Status
 
