@@ -583,13 +583,22 @@ class Evolver:
         try:
             match = self._EDIT_JSON_RE.search(content)
             if match:
-                data = json.loads(match.group())
-                edits = data.get("proposed_edits", [])
+                try:
+                    data = json.loads(match.group())
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    try:
+                        data = json.loads(content)
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        return []
             else:
                 data = json.loads(content)
-                edits = data.get("proposed_edits", []) if isinstance(data, dict) else data
         except (json.JSONDecodeError, KeyError, TypeError):
             return []
+
+        if data is None:
+            return []
+
+        edits = data.get("proposed_edits", []) if isinstance(data, dict) else data
 
         if not isinstance(edits, list):
             return []

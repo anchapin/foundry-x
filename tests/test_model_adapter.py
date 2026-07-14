@@ -127,8 +127,8 @@ async def test_run_task_calls_injected_adapter_and_records_trace(tmp_path):
     assert "time_to_first_token_ms" in response_event.payload
     assert "chunk_count" in response_event.payload
     assert response_event.payload["chunk_count"] >= 1
-    # Issue #197: model_response carries usage and tokens_used.
-    assert "usage" in response_event.payload
+    # Issue #197: model_response carries token_usage and tokens_used.
+    assert "token_usage" in response_event.payload
     assert "tokens_used" in response_event.payload
     assert response_event.payload["tokens_used"] == 0
     chunk_event = next(event for event in events if event.kind == "model_response_chunk")

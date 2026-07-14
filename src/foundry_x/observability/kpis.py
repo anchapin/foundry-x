@@ -350,7 +350,7 @@ def _token_totals(
         kind="model_response",
         harness_version=harness_version,
     ):
-        usage = event.payload.get("usage")
+        usage = event.payload.get("token_usage")
         if not isinstance(usage, dict):
             continue
         step_total = usage.get("total_tokens", 0)
