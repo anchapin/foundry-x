@@ -1,9 +1,9 @@
 {
-  "approved": true,
   "failed_checks": [],
   "notes": "all checks passed (truncated tail)",
   "passed_checks": [
     "git apply",
     "pytest"
-  ]
+  ],
+  "verdict": true
 }
