@@ -630,49 +630,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     redact_key_parser.set_defaults(func=_redact_key)
 
-    # Issue #275: delete-session / prune — retention management.
-    delete_session_parser = sub.add_parser(
-        "delete-session",
-        help="Remove a session and all its events (idempotent).",
-    )
-    delete_session_parser.add_argument("session_id", help="Session to delete.")
-    delete_session_parser.add_argument(
-        "--db",
-        default="logs/traces.db",
-        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
-    )
-    delete_session_parser.set_defaults(func=_delete_session)
-
-    prune_parser = sub.add_parser(
-        "prune",
-        help="Remove old sessions based on retention policy.",
-    )
-    prune_parser.add_argument(
-        "--keep-last",
-        type=int,
-        default=None,
-        help="Keep only the N most recent sessions.",
-    )
-    prune_parser.add_argument(
-        "--older-than",
-        type=int,
-        default=None,
-        metavar="DAYS",
-        help="Remove sessions older than DAYS.",
-    )
-    prune_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=False,
-        help="Report what would be deleted without removing anything.",
-    )
-    prune_parser.add_argument(
-        "--db",
-        default="logs/traces.db",
-        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
-    )
-    prune_parser.set_defaults(func=_prune)
-
     # Issue #195: offline smoke subcommand. Plants a deterministic session
     # so the Digester, KPI, and regression-report CLIs have realistic input
     # without standing up llama-server. ``--harness-version`` lets the
