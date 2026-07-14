@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from foundry_x.evolution.digester import Digester
+from foundry_x.evolution.evolver import PROPOSED_EDIT_KIND
 from foundry_x.observability.render import render_failure_report
 from foundry_x.observability.timeline import format_timeline
 from foundry_x.trace.logger import TraceEvent, TraceLogger, TraceSession
@@ -473,6 +474,156 @@ def _seed_sample_trace(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- Issue #499: proposed-edits / show-edit / edit-history -------------------
+
+
+def _render_proposed_edit_summary(event: TraceEvent) -> str:
+    """Render a ProposedEdit trace event as a one-line summary."""
+    payload = event.payload
+    target = payload.get("target_file", "unknown")
+    rationale = payload.get("rationale", "")[:60]
+    if len(payload.get("rationale", "")) > 60:
+        rationale += "..."
+    return f"{event.event_id}  {event.session_id}  {event.timestamp}  {target}  {rationale}"
+
+
+def _render_proposed_edit_full(event: TraceEvent, verbose: bool = False) -> str:
+    """Render a ProposedEdit trace event with full details."""
+    payload = event.payload
+    lines = [
+        f"Event ID: {event.event_id}",
+        f"Session: {event.session_id}",
+        f"Timestamp: {event.timestamp}",
+        f"Target: {payload.get('target_file', 'unknown')}",
+        f"Rationale: {payload.get('rationale', 'unknown')}",
+    ]
+    if verbose:
+        lines.append(f"Unified diff:\n{payload.get('unified_diff', '')}")
+    else:
+        diff = payload.get("unified_diff", "")
+        diff_lines = diff.splitlines()
+        lines.append(f"Unified diff: {len(diff_lines)} line(s) (use --verbose to print full diff)")
+    return "\n".join(lines)
+
+
+def _proposed_edits(args: argparse.Namespace) -> int:
+    """Implement ``proposed-edits`` (issue #499).
+
+    Lists all ProposedEdit events across all sessions, ordered by timestamp.
+    Each row shows: event_id, session_id, timestamp, target_file, rationale (truncated).
+    """
+    logger = _logger_for(args.db)
+    events = list(logger.query_events(kind=PROPOSED_EDIT_KIND))
+
+    if args.json:
+        output = [
+            {
+                "event_id": e.event_id,
+                "session_id": e.session_id,
+                "timestamp": e.timestamp,
+                "target_file": e.payload.get("target_file"),
+                "rationale": e.payload.get("rationale"),
+                "unified_diff": e.payload.get("unified_diff"),
+            }
+            for e in events
+        ]
+        sys.stdout.write(json.dumps(output, indent=2) + "\n")
+        return 0
+
+    if not events:
+        sys.stdout.write("No ProposedEdit events found.\n")
+        return 0
+
+    sys.stdout.write("event_id  session_id  timestamp  target_file  rationale\n")
+    for event in events:
+        sys.stdout.write(_render_proposed_edit_summary(event) + "\n")
+    return 0
+
+
+def _show_edit(args: argparse.Namespace) -> int:
+    """Implement ``show-edit`` (issue #499).
+
+    Shows full details and rationale of a specific ProposedEdit by event_id.
+    """
+    logger = _logger_for(args.db)
+    event_id = args.event_id
+
+    for event in logger.query_events(kind=PROPOSED_EDIT_KIND):
+        if event.event_id == event_id:
+            if args.json:
+                output = {
+                    "event_id": event.event_id,
+                    "session_id": event.session_id,
+                    "timestamp": event.timestamp,
+                    "target_file": event.payload.get("target_file"),
+                    "rationale": event.payload.get("rationale"),
+                    "unified_diff": event.payload.get("unified_diff"),
+                }
+                sys.stdout.write(json.dumps(output, indent=2) + "\n")
+            else:
+                sys.stdout.write(_render_proposed_edit_full(event, verbose=True) + "\n")
+            return 0
+
+    sys.stderr.write(f"No ProposedEdit found with event_id={event_id}.\n")
+    return 1
+
+
+def _edit_history(args: argparse.Namespace) -> int:
+    """Implement ``edit-history`` (issue #499).
+
+    Shows edit status history by pairing ProposedEdit events with their
+    corresponding CriticVerdict events within the same session.
+    """
+    logger = _logger_for(args.db)
+    proposed_edit_events = list(logger.query_events(kind=PROPOSED_EDIT_KIND))
+    verdict_events = {e.session_id: e for e in logger.query_events(kind="critic_verdict")}
+
+    if args.json:
+        history: list[dict[str, object]] = []
+        for edit_event in proposed_edit_events:
+            verdict_event = verdict_events.get(edit_event.session_id)
+            entry: dict[str, object] = {
+                "event_id": edit_event.event_id,
+                "session_id": edit_event.session_id,
+                "timestamp": edit_event.timestamp,
+                "target_file": edit_event.payload.get("target_file", ""),
+                "rationale": edit_event.payload.get("rationale", ""),
+                "verdict": None,
+                "passed_checks": [],
+                "failed_checks": [],
+            }
+            if verdict_event:
+                entry["verdict"] = verdict_event.payload.get("verdict")
+                entry["passed_checks"] = verdict_event.payload.get("passed_checks", [])
+                entry["failed_checks"] = verdict_event.payload.get("failed_checks", [])
+            history.append(entry)
+        sys.stdout.write(json.dumps(history, indent=2) + "\n")
+        return 0
+
+    if not proposed_edit_events:
+        sys.stdout.write("No edit history found.\n")
+        return 0
+
+    sys.stdout.write("event_id  session_id  timestamp  target_file  verdict  passed  failed\n")
+    for edit_event in proposed_edit_events:
+        verdict_event = verdict_events.get(edit_event.session_id)
+        target = edit_event.payload.get("target_file", "unknown")
+        if verdict_event:
+            v_payload = verdict_event.payload
+            verdict_str = "APPROVED" if v_payload.get("verdict") else "REJECTED"
+            passed_str = str(len(v_payload.get("passed_checks", [])))
+            failed_str = str(len(v_payload.get("failed_checks", [])))
+        else:
+            verdict_str = "PENDING"
+            passed_str = "-"
+            failed_str = "-"
+        sys.stdout.write(
+            f"{edit_event.event_id}  {edit_event.session_id}  "
+            f"{edit_event.timestamp}  {target}  {verdict_str}  {passed_str}  {failed_str}\n"
+        )
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="foundry-trace",
@@ -695,6 +846,56 @@ def _build_parser() -> argparse.ArgumentParser:
         help="List sessions that would be removed without deleting them.",
     )
     prune_parser.set_defaults(func=_prune)
+
+    # Issue #499: proposed-edits / show-edit / edit-history
+    proposed_edits_parser = sub.add_parser(
+        "proposed-edits",
+        help="List all ProposedEdit events across all sessions.",
+    )
+    proposed_edits_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    proposed_edits_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable JSON instead of human-readable text.",
+    )
+    proposed_edits_parser.set_defaults(func=_proposed_edits)
+
+    show_edit_parser = sub.add_parser(
+        "show-edit",
+        help="Show details and rationale of a specific ProposedEdit.",
+    )
+    show_edit_parser.add_argument("event_id", help="Event ID of the ProposedEdit to display.")
+    show_edit_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    show_edit_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable JSON instead of human-readable text.",
+    )
+    show_edit_parser.set_defaults(func=_show_edit)
+
+    edit_history_parser = sub.add_parser(
+        "edit-history",
+        help="Show edit status history (ProposedEdit + CriticVerdict pairs).",
+    )
+    edit_history_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    edit_history_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable JSON instead of human-readable text.",
+    )
+    edit_history_parser.set_defaults(func=_edit_history)
 
     return parser
 

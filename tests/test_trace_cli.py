@@ -996,3 +996,200 @@ def test_seed_sample_trace_is_visible_to_existing_subcommands(tmp_path, capsys):
     timeline = capsys.readouterr().out
     for required_kind in _REQUIRED_SEED_KINDS:
         assert required_kind in timeline
+
+
+# --- Issue #499: proposed-edits / show-edit / edit-history -------------------
+
+
+def _populate_with_proposed_edit(tmp_path, backend: str) -> tuple[str, str]:
+    """Seed a session with a ProposedEdit event and return (db_path, event_id)."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="0.1.0") as sid:
+        edit_event = logger.record(
+            sid,
+            "proposed_edit",
+            {
+                "target_file": "harness/system_prompt.txt",
+                "rationale": "address bad-prompt failure: add disambiguation guidance",
+                "unified_diff": "--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1,2 @@\n old line\n+new line\n",
+            },
+        )
+    return str(path), edit_event.event_id
+
+
+@_BACKENDS
+def test_proposed_edits_lists_events(tmp_path, backend, capsys):
+    db, event_id = _populate_with_proposed_edit(tmp_path, backend)
+
+    rc = main(["proposed-edits", "--db", db])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert event_id in out
+    assert "harness/system_prompt.txt" in out
+    assert "address bad-prompt" in out
+
+
+@_BACKENDS
+def test_proposed_edits_json_output(tmp_path, backend, capsys):
+    db, event_id = _populate_with_proposed_edit(tmp_path, backend)
+
+    rc = main(["proposed-edits", "--db", db, "--json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert len(data) == 1
+    assert data[0]["event_id"] == event_id
+    assert data[0]["target_file"] == "harness/system_prompt.txt"
+
+
+@_BACKENDS
+def test_proposed_edits_empty_store(tmp_path, backend, capsys):
+    db = tmp_path / f"traces{_suffix(backend)}"
+    TraceLogger(db, backend=backend)
+
+    rc = main(["proposed-edits", "--db", str(db)])
+
+    assert rc == 0
+    assert "No ProposedEdit events found" in capsys.readouterr().out
+
+
+@_BACKENDS
+def test_show_edit_existing_event(tmp_path, backend, capsys):
+    db, event_id = _populate_with_proposed_edit(tmp_path, backend)
+
+    rc = main(["show-edit", event_id, "--db", db])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert event_id in out
+    assert "harness/system_prompt.txt" in out
+    assert "address bad-prompt" in out
+    assert "Unified diff" in out
+
+
+@_BACKENDS
+def test_show_edit_json_output(tmp_path, backend, capsys):
+    db, event_id = _populate_with_proposed_edit(tmp_path, backend)
+
+    rc = main(["show-edit", event_id, "--db", db, "--json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["event_id"] == event_id
+    assert data["target_file"] == "harness/system_prompt.txt"
+
+
+@_BACKENDS
+def test_show_edit_unknown_event_returns_nonzero(tmp_path, backend, capsys):
+    db, _ = _populate_with_proposed_edit(tmp_path, backend)
+
+    rc = main(["show-edit", "does-not-exist", "--db", db])
+
+    assert rc == 1
+    assert "No ProposedEdit found" in capsys.readouterr().err
+
+
+@_BACKENDS
+def test_edit_history_with_verdict(tmp_path, backend, capsys):
+    """Edit history pairs ProposedEdit with CriticVerdict from same session."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="0.1.0") as sid:
+        edit_event = logger.record(
+            sid,
+            "proposed_edit",
+            {
+                "target_file": "harness/system_prompt.txt",
+                "rationale": "test rationale",
+                "unified_diff": "--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n old\n+new\n",
+            },
+        )
+        logger.record(
+            sid,
+            "critic_verdict",
+            {
+                "verdict": True,
+                "passed_checks": ["benchmark-1", "benchmark-2"],
+                "failed_checks": [],
+                "notes": "all good",
+            },
+        )
+
+    rc = main(["edit-history", "--db", str(path)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert edit_event.event_id in out
+    assert "APPROVED" in out
+    assert "2" in out  # passed checks count
+    assert "0" in out  # failed checks count
+
+
+@_BACKENDS
+def test_edit_history_pending_verdict(tmp_path, backend, capsys):
+    """ProposedEdit without CriticVerdict shows PENDING status."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="0.1.0") as sid:
+        edit_event = logger.record(
+            sid,
+            "proposed_edit",
+            {
+                "target_file": "harness/hooks/test.py",
+                "rationale": "test",
+                "unified_diff": "--- a/harness/hooks/test.py\n+++ b/harness/hooks/test.py\n@@ -1 +1 @@\n old\n+new\n",
+            },
+        )
+        # No critic_verdict event in this session
+
+    rc = main(["edit-history", "--db", str(path)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert edit_event.event_id in out
+    assert "PENDING" in out
+
+
+@_BACKENDS
+def test_edit_history_json_output(tmp_path, backend, capsys):
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(
+            sid,
+            "proposed_edit",
+            {
+                "target_file": "harness/skills/test.py",
+                "rationale": "test",
+                "unified_diff": "--- a/harness/skills/test.py\n+++ b/harness/skills/test.py\n@@ -1 +1 @@\n old\n+new\n",
+            },
+        )
+        logger.record(
+            sid,
+            "critic_verdict",
+            {"verdict": False, "passed_checks": [], "failed_checks": ["test-failed"], "notes": ""},
+        )
+
+    rc = main(["edit-history", "--db", str(path), "--json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert len(data) == 1
+    assert data[0]["verdict"] is False
+    assert data[0]["failed_checks"] == ["test-failed"]
+
+
+@_BACKENDS
+def test_edit_history_empty_store(tmp_path, backend, capsys):
+    db = tmp_path / f"traces{_suffix(backend)}"
+    TraceLogger(db, backend=backend)
+
+    rc = main(["edit-history", "--db", str(db)])
+
+    assert rc == 0
+    assert "No edit history found" in capsys.readouterr().out
