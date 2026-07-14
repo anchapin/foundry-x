@@ -178,11 +178,10 @@ def test_render_session_summary_includes_recorded_outcome_fields(tmp_path):
     new_line = next(ln for ln in rendered.splitlines() if "sess-0004-new" in ln)
     assert "failed" in new_line
     assert "model_error" in new_line
-    # ``steps`` lives in the right-most column with width 5; the integer
-    # is right-justified, so we check the row contains "    4" (3 spaces
-    # + "4") rather than checking for the bare number which would also
-    # match against the ISO-8601 second field.
-    assert new_line.rstrip().endswith("4")
+    # ``steps`` is no longer the right-most column (token_budget_hit is);
+    # we check that "4" appears in the correct position by looking for it
+    # in the context of the steps column.
+    assert "    4  false" in new_line
 
 
 def test_render_session_summary_respects_limit(tmp_path):
@@ -224,10 +223,11 @@ def test_render_session_summary_long_outcome_is_truncated(tmp_path):
     )
     rendered = render_session_summary(rows)
     long_line = next(ln for ln in rendered.splitlines() if "sess-0099-long" in ln)
-    # Each fixed-width cell is separated by two spaces. The rightmost
-    # ``steps`` column ("    1") stays at the end regardless of
-    # truncation of the reason cell.
-    assert long_line.rstrip().endswith("    1")
+    # Each fixed-width cell is separated by two spaces. The right-most
+    # ``token_budget_hit`` column ("_" for this row) stays at the end
+    # regardless of truncation of the reason cell; the ``steps`` column
+    # ("    1") is now second-to-last.
+    assert "    1      _" in long_line
 
 
 # --- CLI integration ---
@@ -309,3 +309,96 @@ def test_cli_session_summary_does_not_import_digester_or_critic():
             branch = branch[:idx]
     assert "Digester" not in branch
     assert "Critic" not in branch
+
+
+# ---------------------------------------------------------------------------
+# Issue #466: token_budget_hit column in session-summary.
+# ---------------------------------------------------------------------------
+
+
+def _plant_session_with_token_budget_abort(db_path, sid, harness_version, started_at, ended_at):
+    """Plant a session with both an outcome and a token_budget task_aborted event."""
+    import json
+    import sqlite3
+    import uuid
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO sessions "
+            "(session_id, started_at, harness_version, model_id, metadata, ended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (sid, started_at, harness_version, None, "{}", ended_at),
+        )
+        conn.execute(
+            "INSERT INTO events (event_id, session_id, timestamp, kind, payload) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                sid,
+                started_at,
+                "outcome",
+                json.dumps({"status": "failed", "reason": "token_budget", "steps": 3}),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO events (event_id, session_id, timestamp, kind, payload) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                sid,
+                started_at,
+                "task_aborted",
+                json.dumps({"reason": "token_budget", "tokens_used": 8000, "token_budget": 5000}),
+            ),
+        )
+
+
+def test_build_session_summary_token_budget_hit_true_when_aborted(tmp_path):
+    """``token_budget_hit`` is True when session has a token_budget task_aborted."""
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    _plant_session_with_token_budget_abort(
+        db,
+        "sess-0005-abort",
+        "0.2.0",
+        "2026-07-10T14:00:00+00:00",
+        "2026-07-10T14:00:30+00:00",
+    )
+
+    rows = build_session_summary(TraceLogger(db))
+
+    abort_row = next(row for row in rows if row.session_id == "sess-0005-abort")
+    assert abort_row.token_budget_hit is True
+
+
+def test_build_session_summary_token_budget_hit_false_when_no_abort(tmp_path):
+    """``token_budget_hit`` is False when session has outcome but no token budget abort."""
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rows = build_session_summary(TraceLogger(db))
+
+    success_row = next(row for row in rows if row.session_id == "sess-0001-old")
+    assert success_row.token_budget_hit is False
+
+
+def test_render_session_summary_shows_token_budget_hit_column(tmp_path):
+    """Rendered output includes token_budget_hit values."""
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    _plant_session_with_token_budget_abort(
+        db,
+        "sess-0005-abort",
+        "0.2.0",
+        "2026-07-10T14:00:00+00:00",
+        "2026-07-10T14:00:30+00:00",
+    )
+
+    rows = build_session_summary(TraceLogger(db))
+    rendered = render_session_summary(rows)
+
+    lines = rendered.splitlines()
+    header = lines[0]
+    assert "budget_hit" in header
+    abort_line = next(ln for ln in lines if "sess-0005-abort" in ln)
+    assert "true" in abort_line

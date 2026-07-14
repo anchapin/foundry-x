@@ -249,6 +249,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "improvement_rate",
         "injection_blocks",
         "token_totals",
+        "token_budget_abort_count",
     }
 
 
@@ -647,3 +648,114 @@ def test_main_json_includes_token_totals(tmp_path, capsys):
 
     payload = json.loads(captured.out)
     assert payload["token_totals"] == {s1: 10}
+
+
+# ---------------------------------------------------------------------------
+# Issue #466: token budget aborts. ``compute_kpis`` counts sessions that
+# recorded at least one ``task_aborted(reason="token_budget")`` event and
+# surfaces the count in the KPI summary. The markdown renderer shows the
+# count only when >0 (clean store stays compact).
+# ---------------------------------------------------------------------------
+
+
+def _seed_task_aborted_token_budget(
+    logger: TraceLogger,
+    harness_version: str,
+    reason: str,
+) -> str:
+    """Plant a session with a ``task_aborted`` event."""
+    with logger.session(harness_version=harness_version) as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+        logger.record(
+            sid,
+            kind="task_aborted",
+            payload={"reason": reason, "tokens_used": 1000, "token_budget": 500},
+        )
+    return sid
+
+
+def test_token_budget_abort_count_counts_sessions_with_abort(tmp_path):
+    """``token_budget_abort_count`` is the number of sessions that hit the token budget."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _seed_task_aborted_token_budget(logger, "v1", "token_budget")
+    _seed_task_aborted_token_budget(logger, "v1", "token_budget")
+    _seed_task_aborted_token_budget(logger, "v1", "wall_clock")
+
+    summary = compute_kpis(logger)
+
+    assert summary.token_budget_abort_count == 2
+
+
+def test_token_budget_abort_count_zero_when_no_aborts(tmp_path):
+    """``token_budget_abort_count`` is 0 when no session hit the token budget."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _seed_task_aborted_token_budget(logger, "v1", "wall_clock")
+
+    summary = compute_kpis(logger)
+
+    assert summary.token_budget_abort_count == 0
+
+
+def test_token_budget_abort_count_respects_harness_version_filter(tmp_path):
+    """``token_budget_abort_count`` is filtered by harness version."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _seed_task_aborted_token_budget(logger, "v1", "token_budget")
+    _seed_task_aborted_token_budget(logger, "v2", "token_budget")
+
+    v1_summary = compute_kpis(logger, harness_version="v1")
+    v2_summary = compute_kpis(logger, harness_version="v2")
+
+    assert v1_summary.token_budget_abort_count == 1
+    assert v2_summary.token_budget_abort_count == 1
+
+
+def test_main_markdown_shows_token_budget_abort_when_present(tmp_path, capsys):
+    """Markdown output includes token budget abort count when >0."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _seed_task_aborted_token_budget(logger, "v1", "token_budget")
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    output = captured.out
+    assert "Token Budget Aborts" in output
+    assert "1 session(s) hit the token budget limit" in output
+
+
+def test_main_markdown_omits_token_budget_abort_when_zero(tmp_path, capsys):
+    """Markdown output omits token budget abort section when count is 0."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _seed_task_aborted_token_budget(logger, "v1", "wall_clock")
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    assert "Token Budget Aborts" not in captured.out
+
+
+def test_main_json_includes_token_budget_abort_count(tmp_path, capsys):
+    """JSON output includes token_budget_abort_count."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _seed_task_aborted_token_budget(logger, "v1", "token_budget")
+    _seed_task_aborted_token_budget(logger, "v1", "token_budget")
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert payload["token_budget_abort_count"] == 2
