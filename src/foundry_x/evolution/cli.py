@@ -27,7 +27,10 @@ from foundry_x.evolution.critic import (
 )
 from foundry_x.evolution.digester import Digester, FailureReport
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
+from foundry_x.evolution.store import ProposedEditStore, TrackedProposedEdit, ProposedEditStatus
 from foundry_x.trace.logger import TraceLogger
+
+import subprocess
 
 
 def _infer_backend(trace_db: str) -> str:
@@ -62,6 +65,26 @@ def _render_proposed_edit(edit: ProposedEdit, verbose: bool = False) -> str:
         f"  Target: {edit.target_file}",
         f"  Rationale: {edit.rationale}",
     ]
+    if verbose:
+        lines.append(f"  Unified diff:\n{edit.unified_diff}")
+    else:
+        diff_lines = edit.unified_diff.splitlines()
+        lines.append(f"  Unified diff: {len(diff_lines)} line(s) (use --verbose to print)")
+    return "\n".join(lines)
+
+
+def _render_tracked_edit(edit: TrackedProposedEdit, verbose: bool = False) -> str:
+    """Render a TrackedProposedEdit as a compact summary."""
+    lines = [
+        f"ID: {edit.id}",
+        f"  Status: {edit.status.value.upper()}",
+        f"  Target: {edit.target_file}",
+        f"  Rationale: {edit.rationale}",
+    ]
+    if edit.review_reason:
+        lines.append(f"  Review reason: {edit.review_reason}")
+    if edit.reviewed_at:
+        lines.append(f"  Reviewed at: {edit.reviewed_at}")
     if verbose:
         lines.append(f"  Unified diff:\n{edit.unified_diff}")
     else:
@@ -172,6 +195,89 @@ def _run_loop(
     return report, edit, verdict, exit_code
 
 
+def _list_pending(args: argparse.Namespace) -> int:
+    """Implement ``foundry-evolve list-pending`` (issue #498)."""
+    store = ProposedEditStore(args.store)
+    pending = store.list_pending()
+    if not pending:
+        sys.stdout.write("No pending ProposedEdits.\n")
+        store.close()
+        return 0
+    sys.stdout.write(f"{len(pending)} pending ProposedEdit(s):\n\n")
+    for edit in pending:
+        sys.stdout.write(_render_tracked_edit(edit, verbose=args.verbose) + "\n\n")
+    store.close()
+    return 0
+
+
+def _approve(args: argparse.Namespace) -> int:
+    """Implement ``foundry-evolve approve <edit_id>`` (issue #498)."""
+    store = ProposedEditStore(args.store)
+    edit = store.approve(args.edit_id, reason=args.reason or "")
+    store.close()
+    if edit is None:
+        return 1
+    sys.stdout.write(f"Approved edit {args.edit_id}.\n")
+    sys.stdout.write(_render_tracked_edit(edit, verbose=True) + "\n")
+    return 0
+
+
+def _reject(args: argparse.Namespace) -> int:
+    """Implement ``foundry-evolve reject <edit_id>`` (issue #498)."""
+    store = ProposedEditStore(args.store)
+    edit = store.reject(args.edit_id, reason=args.reason or "")
+    store.close()
+    if edit is None:
+        return 1
+    sys.stdout.write(f"Rejected edit {args.edit_id}.\n")
+    sys.stdout.write(_render_tracked_edit(edit, verbose=True) + "\n")
+    return 0
+
+
+def _apply(args: argparse.Namespace) -> int:
+    """Implement ``foundry-evolve apply <edit_id>`` (issue #498).
+
+    Transitions the edit to APPLIED and applies the unified_diff to the harness
+    directory via git apply. Runs git apply from the parent of harness_dir so
+    that diff paths (e.g. ``harness/system_prompt.txt``) resolve correctly.
+    """
+    store = ProposedEditStore(args.store)
+    edit = store.get(args.edit_id)
+    if edit is None:
+        sys.stderr.write(f"apply: edit {args.edit_id} not found.\n")
+        store.close()
+        return 2
+    if edit.status != ProposedEditStatus.APPROVED:
+        sys.stderr.write(
+            f"apply: edit {args.edit_id} is {edit.status.value}; must be approved first.\n"
+        )
+        store.close()
+        return 1
+    harness_dir = Path(args.harness_dir)
+    if not harness_dir.exists():
+        sys.stderr.write(f"apply: harness directory {args.harness_dir} does not exist.\n")
+        store.close()
+        return 2
+    git_apply_dir = harness_dir.parent
+    result = subprocess.run(
+        ["git", "apply", "--whitespace=nowarn"],
+        input=edit.unified_diff,
+        cwd=git_apply_dir,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(f"apply: git apply failed:\n{result.stderr}\n")
+        store.close()
+        return 1
+    applied = store.mark_applied(args.edit_id)
+    store.close()
+    sys.stdout.write(f"Applied edit {args.edit_id} to harness.\n")
+    if applied:
+        sys.stdout.write(_render_tracked_edit(applied, verbose=False) + "\n")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="foundry-evolve",
@@ -252,7 +358,7 @@ def _build_sweep_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    if argv and argv[0] in ("evolve", "sweep"):
+    if argv and argv[0] in ("evolve", "sweep", "list-pending", "approve", "reject", "apply"):
         parser = argparse.ArgumentParser(
             prog="foundry-evolve",
             description="foundry-evolve and foundry-sweep commands.",
@@ -265,12 +371,90 @@ def main(argv: list[str] | None = None) -> int:
         sweep_parser = sub.add_parser("sweep", help="Run a quantization sweep.")
         _build_sweep_subparser(sweep_parser)
 
+        list_parser = sub.add_parser(
+            "list-pending",
+            help="List all pending ProposedEdits awaiting review (issue #498).",
+        )
+        list_parser.add_argument(
+            "--store",
+            default="logs/proposed_edits.db",
+            help="Path to the ProposedEdit SQLite store (default: logs/proposed_edits.db).",
+        )
+        list_parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="Print the full unified_diff for each edit.",
+        )
+        list_parser.set_defaults(func=_list_pending)
+
+        approve_parser = sub.add_parser(
+            "approve",
+            help="Approve a pending ProposedEdit (issue #498).",
+        )
+        approve_parser.add_argument(
+            "edit_id",
+            help="UUID of the ProposedEdit to approve.",
+        )
+        approve_parser.add_argument(
+            "--store",
+            default="logs/proposed_edits.db",
+            help="Path to the ProposedEdit SQLite store (default: logs/proposed_edits.db).",
+        )
+        approve_parser.add_argument(
+            "--reason",
+            default="",
+            help="Optional reason for the approval.",
+        )
+        approve_parser.set_defaults(func=_approve)
+
+        reject_parser = sub.add_parser(
+            "reject",
+            help="Reject a pending ProposedEdit (issue #498).",
+        )
+        reject_parser.add_argument(
+            "edit_id",
+            help="UUID of the ProposedEdit to reject.",
+        )
+        reject_parser.add_argument(
+            "--store",
+            default="logs/proposed_edits.db",
+            help="Path to the ProposedEdit SQLite store (default: logs/proposed_edits.db).",
+        )
+        reject_parser.add_argument(
+            "--reason",
+            default="",
+            help="Reason for the rejection.",
+        )
+        reject_parser.set_defaults(func=_reject)
+
+        apply_parser = sub.add_parser(
+            "apply",
+            help="Apply an approved ProposedEdit to the harness (issue #498).",
+        )
+        apply_parser.add_argument(
+            "edit_id",
+            help="UUID of the ProposedEdit to apply.",
+        )
+        apply_parser.add_argument(
+            "--store",
+            default="logs/proposed_edits.db",
+            help="Path to the ProposedEdit SQLite store (default: logs/proposed_edits.db).",
+        )
+        apply_parser.add_argument(
+            "--harness-dir",
+            default="harness",
+            help="Path to the harness directory (default: harness).",
+        )
+        apply_parser.set_defaults(func=_apply)
+
         args = parser.parse_args(argv)
 
         if args.command == "evolve":
             return _main_evolve(args)
         elif args.command == "sweep":
             return _main_sweep(args)
+        elif args.command in ("list-pending", "approve", "reject", "apply"):
+            return args.func(args)
         else:
             return 2
     else:
@@ -375,7 +559,7 @@ def _main_sweep(args: argparse.Namespace) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
 
 
 def sweep_main(argv: list[str] | None = None) -> int:
