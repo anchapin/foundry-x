@@ -1399,7 +1399,7 @@ async def run_task(
                     "tool_calls": [call.model_dump(mode="json") for call in response.tool_calls],
                     "time_to_first_token_ms": ttft_ms,
                     "chunk_count": chunk_count,
-                    "usage": response.usage.model_dump(mode="json")
+                    "token_usage": response.usage.model_dump(mode="json")
                     if response.usage is not None
                     else None,
                     "tokens_used": tokens_used,

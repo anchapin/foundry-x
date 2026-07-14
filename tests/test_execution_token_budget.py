@@ -215,14 +215,14 @@ async def test_run_task_records_usage_and_running_total_on_model_response(tmp_pa
     assert len(model_responses) == 2
 
     first, second = model_responses
-    assert first.payload["usage"] == {
+    assert first.payload["token_usage"] == {
         "prompt_tokens": 10,
         "completion_tokens": 20,
         "total_tokens": 30,
     }
     assert first.payload["tokens_used"] == 30
 
-    assert second.payload["usage"] == {
+    assert second.payload["token_usage"] == {
         "prompt_tokens": 40,
         "completion_tokens": 60,
         "total_tokens": 100,

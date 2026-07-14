@@ -505,7 +505,7 @@ def _seed_model_response_usage(
                 payload={
                     "step": step,
                     "finish_reason": "stop",
-                    "usage": usage,
+                    "token_usage": usage,
                     "tokens_used": running,
                 },
             )

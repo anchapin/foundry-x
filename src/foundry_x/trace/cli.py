@@ -436,7 +436,7 @@ def _seed_sample_trace(args: argparse.Namespace) -> int:
                 ],
                 # Issue #271: token-usage accounting so the KPI summary and
                 # timeline renderers have a token surface to exercise.
-                "usage": _SEED_USAGE,
+                "token_usage": _SEED_USAGE,
                 "tokens_used": _SEED_USAGE["total_tokens"],
             },
         )
