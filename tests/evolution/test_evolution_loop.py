@@ -9,7 +9,7 @@ import pytest
 
 from foundry_x.evolution.critic import CriticVerdict
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
-from foundry_x.evolution.loop import EvolutionResult, run_evolution_step
+from foundry_x.evolution.loop import EvolutionResult, run_evolution_step, run_evolution_step_async
 from foundry_x.trace.logger import TraceEvent
 from tests._harness_fixture import install_load_check_prerequisites
 
@@ -182,3 +182,69 @@ class TestEvolutionResultModel:
         )
         assert result.verdict is not None
         assert result.verdict.verdict is True
+
+
+class TestRunEvolutionStepAsync:
+    @pytest.mark.asyncio
+    async def test_clean_report_short_circuits(self, tmp_path: Path):
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("outcome", 1.0, {"status": "success"}, event_id="e2"),
+        ]
+
+        result = await run_evolution_step_async("sess-clean", events, harness_dir)
+
+        assert result.failure_report.proposed_class == "clean"
+        assert result.proposed_edits == []
+        assert result.verdict is None
+
+    @pytest.mark.asyncio
+    async def test_empty_edits_short_circuits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        async def mock_propose_async(self, harness_dir, failure, current_diff=None):
+            return []
+
+        monkeypatch.setattr(Evolver, "propose_async", mock_propose_async)
+
+        result = await run_evolution_step_async("sess-no-edits", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert result.proposed_edits == []
+        assert result.verdict is None
+
+    @pytest.mark.asyncio
+    async def test_full_pipeline_runs_critic(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix the failure",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+
+        async def mock_propose_async(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit]
+
+        monkeypatch.setattr(Evolver, "propose_async", mock_propose_async)
+
+        result = await run_evolution_step_async("sess-full-pipeline", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert result.proposed_edits == [proposed_edit]
+        assert result.verdict is not None
+        assert isinstance(result.verdict, CriticVerdict)

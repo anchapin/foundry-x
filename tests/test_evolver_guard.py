@@ -174,3 +174,37 @@ def test_propose_records_proposal(tmp_path):
         assert len(result) == 1
     events = list(logger.iter_events(session_id, kind=PROPOSED_EDIT_KIND))
     assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_propose_async_returns_same_result_as_sync(tmp_path):
+    harness_dir = tmp_path / "harness"
+    harness_dir.mkdir()
+    prompt_file = harness_dir / "system_prompt.txt"
+    prompt_file.write_text("You are FoundryAgent.\n", encoding="utf-8")
+    e = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+    failure = FailureReport(session_id="s", summary="test failure", proposed_class="wrong-tool")
+    sync_result = e.propose(harness_dir, failure=failure)
+    async_result = await e.propose_async(harness_dir, failure=failure)
+    assert sync_result == async_result
+    assert len(async_result) == 1
+    edit = async_result[0]
+    assert isinstance(edit, ProposedEdit)
+    assert edit.target_file == "harness/system_prompt.txt"
+
+
+@pytest.mark.asyncio
+async def test_propose_async_rate_limit_enforced(tmp_path):
+    e = Evolver(max_proposals_per_hour=1, max_diff_lines=200)
+    e._record_proposals(1)
+    failure = FailureReport(session_id="s", summary="x", proposed_class="clean")
+    result = await e.propose_async(tmp_path / "harness", failure=failure)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_propose_async_clean_class_returns_empty(tmp_path):
+    e = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+    failure = FailureReport(session_id="s", summary="no failures", proposed_class="clean")
+    result = await e.propose_async(tmp_path / "harness", failure=failure)
+    assert result == []

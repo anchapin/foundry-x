@@ -127,3 +127,61 @@ def run_evolution_step(
         proposed_edits=proposed_edits,
         verdict=verdict,
     )
+
+
+async def run_evolution_step_async(
+    session_id: str,
+    events: list[TraceEvent],
+    harness_dir: Path,
+    *,
+    critic: Critic | None = None,
+    evolver: Evolver | None = None,
+) -> EvolutionResult:
+    """Async variant of :func:`run_evolution_step`.
+
+    Awaits ``evolver.propose_async()`` instead of calling ``evolver.propose()``.
+    The Critic is still invoked synchronously because the subprocess call is
+    inherently blocking (ADR-0010).
+    """
+    failure_report = Digester().digest(session_id, events)
+
+    if failure_report.proposed_class == "clean":
+        return EvolutionResult(
+            session_id=session_id,
+            failure_report=failure_report,
+            proposed_edits=[],
+            verdict=None,
+        )
+
+    if evolver is None:
+        evolver = Evolver()
+
+    try:
+        proposed_edits = await evolver.propose_async(
+            harness_dir=harness_dir,
+            failure=failure_report,
+            current_diff=None,
+        )
+    except NotImplementedError:
+        proposed_edits = []
+
+    if not proposed_edits:
+        return EvolutionResult(
+            session_id=session_id,
+            failure_report=failure_report,
+            proposed_edits=[],
+            verdict=None,
+        )
+
+    if critic is None:
+        critic = Critic(harness_dir=harness_dir)
+
+    proposed_diff = _edits_to_diff(proposed_edits)
+    verdict = critic.evaluate(proposed_diff)
+
+    return EvolutionResult(
+        session_id=session_id,
+        failure_report=failure_report,
+        proposed_edits=proposed_edits,
+        verdict=verdict,
+    )

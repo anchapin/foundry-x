@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import difflib
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -308,3 +309,21 @@ class Evolver:
             return []
         self._record_proposals(edit=edit)
         return [edit]
+
+    async def propose_async(
+        self,
+        harness_dir: Path,
+        failure: FailureReport,
+        current_diff: str | None = None,
+    ) -> list[ProposedEdit]:
+        """Async variant of :meth:`propose`.
+
+        Runs the synchronous :meth:`propose` logic in a thread pool so the
+        calling event loop is not blocked by file I/O.
+        """
+        return await asyncio.to_thread(
+            self.propose,
+            harness_dir=harness_dir,
+            failure=failure,
+            current_diff=current_diff,
+        )
