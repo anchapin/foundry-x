@@ -12,7 +12,7 @@
 The orchestrator MUST prepend the following briefing to each sub-agent's
 prompt, alongside this file and the slot key. The briefing is regenerated
 per batch; its job is to keep sub-agents from re-proposing work that has
-already shipped. Snapshot it from `git log --oneline -50 main` and
+already shipped. Snapshot it from `git log --oneline -50 develop` and
 `gh issue list --state all --limit 200 --json number,title,labels` before
 each batch.
 
@@ -20,8 +20,8 @@ each batch.
 FOUNDRYX STATE BRIEFING — <UTC timestamp>
 
 Repo:   github.com/anchapin/foundry-x
-Branch: <current branch, default main>
-Latest: <output of git log --oneline -1 main>
+Branch: <current branch, default develop>
+Latest: <output of git log --oneline -1 develop>
 Open issues:   <count>
 Closed issues: <count>
 
@@ -328,7 +328,7 @@ If the orchestrator runs fewer than all nine slots, prefer in this order:
    contradict one, either drop the proposal or label it `needs-adr`
    and frame the issue as "supersede ADR-NNNN with...".
 4. **Skim `docs/ideas/`** for prior art in this slot.
-5. **Diff against `git log --oneline -50 main`** to confirm the slot
+5. **Diff against `git log --oneline -50 develop`** to confirm the slot
    is not already mid-implementation of what you want to propose.
 6. **Cross-check open issues** by title and topic. The orchestrator
    will pass you a recent-issues list. Treat that as authoritative.

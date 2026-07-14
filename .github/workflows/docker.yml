@@ -24,7 +24,7 @@ on:
       - ".github/workflows/docker.yml"
       - ".github/actions/install-uv/**"
   push:
-    branches: [main]
+    branches: [develop]
 
 jobs:
   image-size:
