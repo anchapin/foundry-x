@@ -73,6 +73,9 @@ _FOUNDRY_MODEL_API_KEY_ENV = "FOUNDRY_MODEL_API_KEY"
 _OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
 _FALLBACK_REQUEST_MODEL = "foundry-local"
 
+# Env-var for quantization label (issue #494).
+_QUANTIZATION_ENV = "FOUNDRY_QUANTIZATION"
+
 # Trace-backend selection (issue #13). ``.env.example`` documents
 # ``FOUNDRY_TRACE_BACKEND`` as the way to switch the trace store between the
 # default SQLite database and the JSONL export format (ADR-0003). Keeping the
@@ -294,6 +297,70 @@ def build_model_adapter(env: Mapping[str, str] | None = None) -> OpenAICompatibl
     return OpenAICompatibleAdapter(
         base_url=base_url,
         model=_resolve_model_request_name(source),
+        api_key=api_key or None,
+        timeout=_resolve_request_timeout(source),
+        max_retries=resolve_adapter_max_retries(source),
+    )
+
+
+def build_model_adapter_with_overrides(
+    model_id: str | None,
+    quantization: str | None,
+    path_or_endpoint: str | None,
+    env: Mapping[str, str] | None = None,
+) -> OpenAICompatibleAdapter:
+    """Build a model adapter with explicit overrides (issue #494).
+
+    When *path_or_endpoint* is a URL it is used as the OpenAI-compatible
+    endpoint directly. When it is a local GGUF path, ``llama-server`` is
+    assumed to be running at ``LLAMACPP_HOST`` (default ``127.0.0.1:8080``)
+    and the path is passed via ``FOUNDRY_MODEL_PATH``.
+
+    *quantization* is stored in ``FOUNDRY_QUANTIZATION`` for traceability but
+    does not affect adapter construction (quantization is a path-level
+    concern for llama.cpp, not an API-level parameter).
+
+    When all overrides are ``None`` this function is equivalent to
+    :func:`build_model_adapter` called with the same *env*.
+    """
+    source = env if env is not None else os.environ
+
+    if path_or_endpoint is not None:
+        path_str = str(path_or_endpoint).strip()
+        if path_str.startswith(("http://", "https://")):
+            base_url = path_str.rstrip("/")
+        else:
+            base_url = source.get(_LLAMACPP_HOST_ENV, "").strip() or "http://127.0.0.1:8080"
+    else:
+        base_url = (
+            source.get(_OPENCODE_SERVER_URL_ENV, "").strip()
+            or source.get(_LLAMACPP_HOST_ENV, "").strip()
+        )
+
+    if not base_url:
+        raise ValueError(
+            "Set OPENCODE_SERVER_URL or LLAMACPP_HOST to an OpenAI-compatible endpoint"
+        )
+
+    resolved_model_id: str
+    if model_id is not None and model_id.strip():
+        resolved_model_id = model_id.strip()
+    else:
+        resolved_model_id = _resolve_model_request_name(source)
+
+    if quantization is not None and quantization.strip():
+        quant_env: dict[str, str] = dict(source)
+        quant_env[_QUANTIZATION_ENV] = quantization.strip()
+        source = quant_env
+
+    api_key = (
+        source.get(_FOUNDRY_MODEL_API_KEY_ENV, "").strip()
+        or source.get(_OPENAI_API_KEY_ENV, "").strip()
+    )
+
+    return OpenAICompatibleAdapter(
+        base_url=base_url,
+        model=resolved_model_id,
         api_key=api_key or None,
         timeout=_resolve_request_timeout(source),
         max_retries=resolve_adapter_max_retries(source),
@@ -1606,6 +1673,20 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         help="Model identifier (e.g. Q5_K_M). Overrides FOUNDRY_MODEL_ID env var. "
         "Stored in the trace session for quantization-level KPI attribution (issue #361).",
     )
+    parser.add_argument(
+        "--quantization",
+        default=None,
+        help="Quantization label (e.g. Q5_K_M). Stored in FOUNDRY_QUANTIZATION "
+        "for traceability in trace sessions (issue #494).",
+    )
+    parser.add_argument(
+        "--path-or-endpoint",
+        default=None,
+        help="Local GGUF path or OpenAI-compatible endpoint URL. "
+        "When a URL, used directly as the endpoint. When a local path, "
+        "LLAMACPP_HOST is used (default http://127.0.0.1:8080). "
+        "Issue #494.",
+    )
     args = parser.parse_args()
 
     harness_dir = Path(args.harness_dir).resolve()
@@ -1625,17 +1706,27 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
 
     logger = TraceLogger(args.trace_path, backend=resolve_trace_backend())
     harness_version = resolve_harness_version(harness_dir)
-    model_id = args.model_id if args.model_id is not None else resolve_model_id()
+    model_id_override = args.model_id if args.model_id is not None else None
+    quantization_override = args.quantization if args.quantization is not None else None
+    path_or_endpoint_override = args.path_or_endpoint if args.path_or_endpoint is not None else None
+    model_id = model_id_override if model_id_override is not None else resolve_model_id()
     limits = run_limits_from_env()
+
+    model_adapter: ModelAdapter | None = None
+    if (
+        model_id_override is not None
+        or quantization_override is not None
+        or path_or_endpoint_override is not None
+    ):
+        model_adapter = build_model_adapter_with_overrides(
+            model_id=model_id_override,
+            quantization=quantization_override,
+            path_or_endpoint=path_or_endpoint_override,
+        )
 
     with logger.session(harness_version=harness_version, model_id=model_id) as session_id:
         logger.record(session_id, kind="task_received", payload={"prompt": args.task})
         start = time.monotonic()
-        # ``run_task`` accepts the ``limits`` kwarg so it can enforce the
-        # ``FOUNDRY_TOKEN_BUDGET`` cap (issue #197); injected ``run_task_fn``
-        # stubs in the test suite keep the older four-positional-arg
-        # signature for clarity, so the kwarg is only passed when we are
-        # calling the module-level :func:`run_task`.
         if run_task_fn is not None:
             task_coro = task(args.task, harness_dir, logger, session_id)
         else:
@@ -1644,6 +1735,7 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
                 harness_dir,
                 logger,
                 session_id,
+                model_adapter=model_adapter,
                 limits=limits,
                 workspace_root=workspace_root,
             )
