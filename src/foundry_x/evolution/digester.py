@@ -61,6 +61,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
     {
         "tool_error",
         "task_failed",
+        "task_aborted",
         "run_failed",
         "agent_error",
         "error",
