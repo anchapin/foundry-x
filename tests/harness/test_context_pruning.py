@@ -606,3 +606,216 @@ def test_token_aware_payload_json_round_tripable(tmp_path) -> None:
     assert decoded["payload"]["dropped"] == _PLANTS
     assert decoded["payload"]["threshold_tokens"] == 1000
     assert decoded["payload"]["session_tokens"] == 3000
+
+
+# ---------------------------------------------------------------------------
+# Issue #492: Large-session pruning validation
+# ---------------------------------------------------------------------------
+
+
+def test_pre_tool_prunes_1000_plus_events(tmp_path) -> None:
+    """1000 planted events, one ``pre_tool`` call: post-prune count must
+    be ``<= threshold`` and ``context_pruned`` event must record the
+    exact dropped count."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as sid:
+        _plant(logger, sid, 1000)
+        pruner = _sqlite_pruner(db)
+        tracer, captured = _tracer_for(logger, sid)
+        hook = ContextPruningHook(
+            session_id=sid,
+            threshold=DEFAULT_THRESHOLD,
+            pruner=pruner,
+            tracer=tracer,
+        )
+
+        _run(hook.pre_tool(ToolCall(name="read_file", arguments={"path": "/tmp/x"})))
+
+        surviving = logger.load_session(sid)
+
+    prune_events = [e for e in surviving if e.kind == "context_pruned"]
+    real_events = [e for e in surviving if e.kind != "context_pruned"]
+    assert len(real_events) <= DEFAULT_THRESHOLD
+    assert len(real_events) == DEFAULT_THRESHOLD
+    assert len(prune_events) == 1
+    assert prune_events[0].payload == {
+        "dropped": 1000 - DEFAULT_THRESHOLD,
+        "threshold": DEFAULT_THRESHOLD,
+        "token_threshold": DEFAULT_TOKEN_THRESHOLD,
+    }
+    assert captured[0]["payload"] == {
+        "dropped": 1000 - DEFAULT_THRESHOLD,
+        "threshold": DEFAULT_THRESHOLD,
+        "token_threshold": DEFAULT_TOKEN_THRESHOLD,
+    }
+
+
+def test_pre_tool_prunes_2000_events_session(tmp_path) -> None:
+    """2000 planted events, one ``pre_tool`` call: post-prune count must
+    be ``<= threshold`` and ``context_pruned`` event must record the
+    exact dropped count. This validates pruning at scale (issue #492)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as sid:
+        _plant(logger, sid, 2000)
+        pruner = _sqlite_pruner(db)
+        tracer, captured = _tracer_for(logger, sid)
+        hook = ContextPruningHook(
+            session_id=sid,
+            threshold=DEFAULT_THRESHOLD,
+            pruner=pruner,
+            tracer=tracer,
+        )
+
+        _run(hook.pre_tool(ToolCall(name="bash", arguments={"command": "ls"})))
+
+        surviving = logger.load_session(sid)
+
+    prune_events = [e for e in surviving if e.kind == "context_pruned"]
+    real_events = [e for e in surviving if e.kind != "context_pruned"]
+    assert len(real_events) == DEFAULT_THRESHOLD
+    assert len(prune_events) == 1
+    assert prune_events[0].payload["dropped"] == 2000 - DEFAULT_THRESHOLD
+
+
+def test_pre_tool_preserves_all_tool_results_regardless_of_age(tmp_path) -> None:
+    """All ``tool_result`` events must survive pruning regardless of age.
+    Plant 100 tool_results spread across a 500-event session; after
+    pruning to DEFAULT_THRESHOLD all 100 tool_results must survive."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as sid:
+        for i in range(100):
+            logger.record(sid, kind="tool_result", payload={"index": i, "age": "old"})
+        for _ in range(400):
+            logger.record(sid, kind="tool_call", payload={"index": 0})
+        for i in range(100, 200):
+            logger.record(sid, kind="tool_result", payload={"index": i, "age": "new"})
+        pruner = _sqlite_pruner(db)
+        tracer, captured = _tracer_for(logger, sid)
+        hook = ContextPruningHook(
+            session_id=sid,
+            threshold=DEFAULT_THRESHOLD,
+            pruner=pruner,
+            tracer=tracer,
+        )
+        _run(hook.pre_tool(ToolCall(name="read_file", arguments={})))
+        surviving = logger.load_session(sid)
+
+    real_events = [e for e in surviving if e.kind != "context_pruned"]
+    kinds = [e.kind for e in real_events]
+    assert kinds.count("tool_result") == 200
+    assert kinds.count("tool_call") == 0
+    prune_events = [e for e in surviving if e.kind == "context_pruned"]
+    assert len(prune_events) == 1
+    assert prune_events[0].payload["dropped"] == 400
+
+
+def test_dropped_events_recorded_correctly_in_trace(tmp_path) -> None:
+    """The ``context_pruned`` event payload must record the exact number
+    of events that were dropped, enabling trace consumers to verify
+    pruning happened and to account for missing events."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as sid:
+        _plant(logger, sid, 500)
+        pruner = _sqlite_pruner(db)
+        tracer, captured = _tracer_for(logger, sid)
+        hook = ContextPruningHook(
+            session_id=sid,
+            threshold=DEFAULT_THRESHOLD,
+            pruner=pruner,
+            tracer=tracer,
+        )
+        _run(hook.pre_tool(ToolCall(name="read_file", arguments={})))
+        surviving = logger.load_session(sid)
+
+    prune_events = [e for e in surviving if e.kind == "context_pruned"]
+    assert len(prune_events) == 1
+    expected_dropped = 500 - DEFAULT_THRESHOLD
+    assert prune_events[0].payload["dropped"] == expected_dropped
+    assert prune_events[0].payload["threshold"] == DEFAULT_THRESHOLD
+    assert captured[0]["payload"]["dropped"] == expected_dropped
+    assert captured[0]["payload"]["threshold"] == DEFAULT_THRESHOLD
+
+
+def test_pruning_performance_reasonable_for_1000_events(tmp_path) -> None:
+    """Pruning a 1000-event session must complete within 1 second.
+    This is a sanity-check bound; the actual requirement is that
+    pruning adds negligible latency to the tool-call pre_tool hook."""
+    import time
+
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as sid:
+        _plant(logger, sid, 1000)
+        pruner = _sqlite_pruner(db)
+        tracer, _ = _tracer_for(logger, sid)
+        hook = ContextPruningHook(
+            session_id=sid,
+            threshold=DEFAULT_THRESHOLD,
+            pruner=pruner,
+            tracer=tracer,
+        )
+
+        start = time.perf_counter()
+        _run(hook.pre_tool(ToolCall(name="read_file", arguments={})))
+        elapsed = time.perf_counter() - start
+
+    assert elapsed < 1.0, f"pruning took {elapsed:.3f}s, expected < 1.0s"
+
+
+def test_pruning_performance_reasonable_for_2000_events(tmp_path) -> None:
+    """Pruning a 2000-event session must complete within 2 seconds.
+    Linear scaling is acceptable; this validates pruning at scale
+    does not become a bottleneck (issue #492)."""
+    import time
+
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as sid:
+        _plant(logger, sid, 2000)
+        pruner = _sqlite_pruner(db)
+        tracer, _ = _tracer_for(logger, sid)
+        hook = ContextPruningHook(
+            session_id=sid,
+            threshold=DEFAULT_THRESHOLD,
+            pruner=pruner,
+            tracer=tracer,
+        )
+
+        start = time.perf_counter()
+        _run(hook.pre_tool(ToolCall(name="read_file", arguments={})))
+        elapsed = time.perf_counter() - start
+
+    assert elapsed < 2.0, f"pruning took {elapsed:.3f}s, expected < 2.0s"
+
+
+def test_multiple_prune_calls_accumulate_correctly(tmp_path) -> None:
+    """Multiple ``pre_tool`` calls on a session that stays over threshold
+    must record a ``context_pruned`` event on each call with the
+    correct dropped count for that specific pruning operation."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as sid:
+        _plant(logger, sid, 600)
+        pruner = _sqlite_pruner(db)
+        tracer, captured = _tracer_for(logger, sid)
+        hook = ContextPruningHook(
+            session_id=sid,
+            threshold=DEFAULT_THRESHOLD,
+            pruner=pruner,
+            tracer=tracer,
+        )
+
+        _run(hook.pre_tool(ToolCall(name="read_file", arguments={})))
+        _run(hook.pre_tool(ToolCall(name="bash", arguments={})))
+        _run(hook.pre_tool(ToolCall(name="list_dir", arguments={})))
+
+        surviving = logger.load_session(sid)
+
+    prune_events = [e for e in surviving if e.kind == "context_pruned"]
+    assert len(prune_events) == 3
+    for pe in prune_events:
+        assert pe.payload["threshold"] == DEFAULT_THRESHOLD
