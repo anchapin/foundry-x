@@ -677,14 +677,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default="logs/traces.db",
         help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
     )
-    prune_group = prune_parser.add_mutually_exclusive_group(required=True)
-    prune_group.add_argument(
+    prune_parser.add_argument(
         "--keep-last",
         type=int,
         metavar="N",
         help="Keep only the N most recent sessions (by started_at).",
     )
-    prune_group.add_argument(
+    prune_parser.add_argument(
         "--older-than",
         type=int,
         metavar="DAYS",
