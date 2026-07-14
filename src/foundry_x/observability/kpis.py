@@ -567,68 +567,6 @@ def render_history_markdown(entries: Sequence[KpiHistoryEntry]) -> str:
     return "\n".join(lines)
 
 
-def _resolve_format(args_format: str | None, out: str | None) -> str:
-    """Return ``"markdown"`` or ``"json"``.
-
-    The explicit ``--format`` flag always wins. When unset, the format is
-    inferred from the ``--out`` file extension (``.json`` → JSON);
-    otherwise Markdown is returned. Issue #101 keeps the decision local to
-    the CLI layer so the pydantic model remains the single source of truth.
-    """
-    if args_format is not None:
-        return args_format
-    if out is not None and Path(out).suffix.lower() == ".json":
-        return "json"
-    return "markdown"
-
-
-def _render_json(summary: KpiSummary) -> str:
-    """Serialize a KPI summary as a stable JSON snapshot (issue #101)."""
-    return summary.model_dump_json(indent=2)
-
-
-def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> str:
-    """Render baseline / candidate / delta columns for the three PRD KPIs.
-
-    Issue #100 requires the comparison to surface a delta column whose
-    sign convention follows the PRD: improvement-rate up is good,
-    regression-rate and cycle-time up are bad.
-    """
-    lines = [
-        "| KPI | Baseline | Candidate | Delta |",
-        "| --- | --- | --- | --- |",
-        "| Cycle Time (seconds) | "
-        f"{_format_value(baseline.cycle_time_seconds)} | "
-        f"{_format_value(candidate.cycle_time_seconds)} | "
-        f"{_format_delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds, higher_is_better=False)} |",
-        "| Regression Rate | "
-        f"{_format_value(baseline.regression_rate)} | "
-        f"{_format_value(candidate.regression_rate)} | "
-        f"{_format_delta(baseline.regression_rate, candidate.regression_rate, higher_is_better=False)} |",
-        "| Improvement Rate | "
-        f"{_format_value(baseline.improvement_rate)} | "
-        f"{_format_value(candidate.improvement_rate)} | "
-        f"{_format_delta(baseline.improvement_rate, candidate.improvement_rate, higher_is_better=True)} |",
-    ]
-    return "\n".join(lines)
-
-
-def _render_comparison_json(comparison: KpiComparison) -> str:
-    """Serialize a baseline-vs-candidate comparison as JSON (issue #100)."""
-    return comparison.model_dump_json(indent=2)
-
-
-def _now_iso() -> str:
-    """Return a UTC ISO-8601 timestamp with offset suffix.
-
-    Issue #183 uses this to stamp each appended history row. The
-    timezone-aware form keeps the line unambiguous when CI runs
-    across multiple regions; ``datetime.fromisoformat`` (Python 3.11+)
-    accepts the ``+00:00`` suffix without modification.
-    """
-    return datetime.now(timezone.utc).isoformat()
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="foundry-kpis",
