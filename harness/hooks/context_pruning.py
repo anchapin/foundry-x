@@ -52,6 +52,7 @@ _log = logging.getLogger("harness.hooks.context_pruning")
 
 
 DEFAULT_THRESHOLD: int = 200
+DEFAULT_TOKEN_THRESHOLD: int = 8192
 
 # Event kinds the hook never drops. ``tool_result`` is the response the
 # model has already seen and must keep referencing; ``user_prompt`` is
@@ -115,15 +116,21 @@ class ContextPruningHook:
         *,
         session_id: str,
         threshold: int = DEFAULT_THRESHOLD,
+        token_threshold: int = DEFAULT_TOKEN_THRESHOLD,
         pruner: Pruner,
         tracer: Tracer,
     ) -> None:
         if threshold < 1:
             raise ValueError(f"context_pruning: threshold must be >= 1, got {threshold!r}")
+        if token_threshold < 1:
+            raise ValueError(
+                f"context_pruning: token_threshold must be >= 1, got {token_threshold!r}"
+            )
         if not session_id:
             raise ValueError("context_pruning: session_id must be a non-empty string")
         self._session_id = session_id
         self._threshold = threshold
+        self._token_threshold = token_threshold
         self._pruner = pruner
         self._tracer = tracer
 
@@ -135,19 +142,28 @@ class ContextPruningHook:
     def threshold(self) -> int:
         return self._threshold
 
+    @property
+    def token_threshold(self) -> int:
+        return self._token_threshold
+
     async def pre_tool(self, call: ToolCall) -> ToolCall:
         dropped = self._pruner(self._session_id, _PRESERVE_KINDS, self._threshold)
         if dropped > 0:
             self._tracer(
                 self._session_id,
                 "context_pruned",
-                {"dropped": dropped, "threshold": self._threshold},
+                {
+                    "dropped": dropped,
+                    "threshold": self._threshold,
+                    "token_threshold": self._token_threshold,
+                },
             )
             _log.info(
-                "context_pruning: dropped %d event(s) from session %r (threshold=%d)",
+                "context_pruning: dropped %d event(s) from session %r (threshold=%d, token_threshold=%d)",
                 dropped,
                 self._session_id,
                 self._threshold,
+                self._token_threshold,
             )
         return call
 
@@ -160,6 +176,7 @@ def register_into(
     *,
     session_id: str,
     threshold: int = DEFAULT_THRESHOLD,
+    token_threshold: int = DEFAULT_TOKEN_THRESHOLD,
     pruner: Pruner,
     tracer: Tracer,
 ) -> ContextPruningHook:
@@ -178,6 +195,7 @@ def register_into(
     hook = ContextPruningHook(
         session_id=session_id,
         threshold=threshold,
+        token_threshold=token_threshold,
         pruner=pruner,
         tracer=tracer,
     )
@@ -188,6 +206,7 @@ def register_into(
 __all__ = [
     "ContextPruningHook",
     "DEFAULT_THRESHOLD",
+    "DEFAULT_TOKEN_THRESHOLD",
     "Pruner",
     "Tracer",
     "register_into",

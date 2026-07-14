@@ -127,7 +127,7 @@ The "Failure-signalling subset" subsection below cross-references the
 | Kind | Producer | Payload contract | Failure signal? |
 | --- | --- | --- | --- |
 | **`injection_blocked`** | `InjectionFirewallHook` (`harness/hooks/injection_firewall.py`, one per block) | `{"markers": list[str], "tool": str, "preview": str}` — sorted unique marker names, originating tool name, and the first 120 characters of the suppressed text with newlines folded to spaces (safe to persist; never re-injected into a prompt). The Digester aggregates every block in a session into one `FailureReport` with `proposed_class == 'injection-attempt'` and one entry per block in `failed_steps` so the Evolver sees the full adversarial surface. See issue #120. | **yes** (adversarial) |
-| **`context_pruned`** | `ContextPruningHook` (`harness/hooks/context_pruning.py`, opt-in via `harness/manifest.json`) | `{"dropped": int, "threshold": int}` — number of older events the pruner dropped to bring the session back under the per-session cap, plus the threshold in effect. See issue #106. | no |
+| **`context_pruned`** | `ContextPruningHook` (`harness/hooks/context_pruning.py`, opt-in via `harness/manifest.json`) | `{"dropped": int, "threshold": int, "token_threshold": int}` — number of older events the pruner dropped to bring the session back under the per-session event cap (`threshold`), plus the token threshold in effect (`token_threshold`, configurable via `harness/manifest.json` `context_pruning.token_threshold`, default 8192). See issue #106, issue #491. | no |
 
 ### Critic pipeline
 
