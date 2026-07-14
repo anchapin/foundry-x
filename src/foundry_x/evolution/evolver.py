@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import difflib
+import json
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -12,10 +14,12 @@ from pydantic import BaseModel, Field, field_validator
 from foundry_x.evolution.digester import FailureReport
 
 if TYPE_CHECKING:
+    from foundry_x.execution.model_adapter import ModelAdapter
     from foundry_x.trace.logger import TraceLogger
 
 PROPOSED_EDIT_KIND: str = "proposed_edit"
 REVIEW_STATE_TRANSITION_KIND: str = "review_state_transition"
+GENERATION_ATTEMPT_KIND: str = "generation_attempt"
 
 # Sliding window for the rate limiter. One hour matches the SECURITY.md
 # "max N proposals per hour" guardrail.
@@ -35,6 +39,26 @@ _HARNESS_LEAF_FILES = frozenset({_HARNESS_PROMPT_FILE, _HARNESS_MANIFEST})
 # ``hooks`` and ``skills`` are subtrees the Evolver may edit arbitrarily
 # deep beneath.
 _HARNESS_SUBDIRS = frozenset({"hooks", "skills"})
+
+
+class EvolverGenerationError(Exception):
+    """Raised when ProposedEdit generation fails after all retries."""
+
+
+class GenerationAttemptEvent(BaseModel):
+    """Traces a failed generation attempt for the trace store (issue #477).
+
+    Emitted when the LLM fails to produce a valid ProposedEdit after
+    parsing/validation retries. Carried as a trace event so the
+    evolution loop can inspect generation failure patterns.
+    """
+
+    session_id: str
+    attempt: int = Field(ge=1, description="1-based index of the generation attempt.")
+    error: str = Field(min_length=1, description="Human-readable error description.")
+    model_response_excerpt: str = Field(
+        default="", description="First 500 chars of the raw model response for debugging."
+    )
 
 
 class ReviewState(str, Enum):
@@ -168,6 +192,100 @@ _PROPOSED_CLASS_EDIT_TEMPLATES: dict[str, tuple[str, str, list[str]]] = {
         ],
     ),
 }
+
+
+def _build_generation_prompt(
+    failure: FailureReport,
+    harness_dir: Path,
+) -> list[dict[str, str]]:
+    """Build a chat prompt for LLM-driven ProposedEdit generation (issue #477).
+
+    Constructs a system prompt describing the harness editing task and a user
+    prompt containing the FailureReport summary plus failed-step details.
+    Returns a list of message dicts suitable for ModelAdapter.complete().
+    """
+    system_prompt = (
+        "You are an expert at editing agent harness files.\n"
+        "You must propose edits confined to the harness/ directory.\n"
+        "Allowed targets:\n"
+        "  - harness/system_prompt.txt\n"
+        "  - harness/manifest.json\n"
+        "  - harness/hooks/*.py\n"
+        "  - harness/skills/*/*.md\n"
+        "Every edit must be returned as a JSON array of ProposedEdit objects:\n"
+        '  [{"target_file": "...", "rationale": "...", "unified_diff": "..."}]\n'
+        "The unified_diff must be a valid git-apply unified diff with --- a/ and +++ b/ headers.\n"
+        "Only propose edits directly addressing the reported failure.\n"
+        "Keep each diff under 200 lines."
+    )
+
+    user_parts = [f"Failure class: {failure.proposed_class}", f"Summary: {failure.summary}"]
+
+    if failure.suspected_causes:
+        user_parts.append("Suspected causes: " + "; ".join(failure.suspected_causes))
+
+    for i, step in enumerate(failure.failed_steps, 1):
+        user_parts.append(f"\nFailed step {i}:")
+        for key, value in step.items():
+            user_parts.append(f"  {key}: {value}")
+
+    user_prompt = "\n".join(user_parts)
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def _parse_edits_from_response(text: str) -> list[ProposedEdit]:
+    """Parse ProposedEdit objects from raw LLM JSON response (issue #477).
+
+    Handles:
+    - JSON wrapped in markdown code fences (```json ... ```)
+    - Bare JSON arrays
+    - Partial/truncated JSON by attempting to recover the last complete object
+
+    Raises:
+        EvolverGenerationError: if the response cannot be parsed after cleanup.
+    """
+    text = text.strip()
+
+    if text.startswith("```"):
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if line.strip().startswith("```"):
+                inner = "\n".join(lines[i + 1 :])
+                if "```" in inner:
+                    inner = inner[: inner.index("```")]
+                text = inner.strip()
+                break
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise EvolverGenerationError(f"LLM response was not valid JSON: {exc}") from exc
+
+    if not isinstance(parsed, list):
+        raise EvolverGenerationError(
+            f"LLM response must be a JSON array of ProposedEdit objects, got {type(parsed).__name__}"
+        )
+
+    edits: list[ProposedEdit] = []
+    errors: list[str] = []
+
+    for i, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            errors.append(f"item[{i}] is {type(item).__name__}, not a dict")
+            continue
+        try:
+            edits.append(ProposedEdit(**item))
+        except Exception as exc:  # noqa: BLE001 — pydantic raises ValueError
+            errors.append(f"item[{i}] validation failed: {exc}")
+
+    if not edits and errors:
+        raise EvolverGenerationError(f"no valid ProposedEdit objects found: {'; '.join(errors)}")
+
+    return edits
 
 
 def _normalize_relative_parts(parts: tuple[str, ...]) -> tuple[str, ...] | None:
@@ -403,3 +521,102 @@ class Evolver:
             return []
         self._record_proposals(edit=edit)
         return [edit]
+
+    def _record_generation_attempt(
+        self,
+        attempt: int,
+        error: str,
+        model_response_excerpt: str = "",
+    ) -> None:
+        """Log a failed generation attempt to the trace store (issue #477)."""
+        if self._trace_logger is not None and self._session_id is not None:
+            event = GenerationAttemptEvent(
+                session_id=self._session_id,
+                attempt=attempt,
+                error=error,
+                model_response_excerpt=model_response_excerpt[:500],
+            )
+            self._trace_logger.record(
+                self._session_id,
+                GENERATION_ATTEMPT_KIND,
+                event.model_dump(mode="json"),
+            )
+
+    async def generate_edits(
+        self,
+        adapter: ModelAdapter,
+        harness_dir: Path,
+        failure: FailureReport,
+        max_retries: int = 2,
+    ) -> list[ProposedEdit]:
+        """Generate ProposedEdit objects via an LLM call (issue #477).
+
+        Calls ``adapter.complete()`` with a prompt built from the FailureReport,
+        parses the JSON response into ProposedEdit objects, validates each edit
+        against the diff-line guard, and retries on validation failure up to
+        ``max_retries`` times.
+
+        Raises:
+            EvolverGenerationError: if all attempts fail to produce a valid edit.
+
+        Returns:
+            List of ProposedEdit objects that passed validation.
+        """
+        try:
+            self._check_rate_limit()
+        except EvolverGuardError:
+            return []
+        messages = _build_generation_prompt(failure, harness_dir)
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = await adapter.complete(messages)
+            except Exception as exc:  # noqa: BLE001
+                self._record_generation_attempt(
+                    attempt=attempt,
+                    error=f"model call failed: {exc}",
+                )
+                if attempt == max_retries:
+                    raise EvolverGenerationError(
+                        f"generation failed after {max_retries} attempts: {exc}"
+                    ) from exc
+                await asyncio.sleep(0.5 * attempt)
+                continue
+
+            text = response.message.content or ""
+            try:
+                edits = _parse_edits_from_response(text)
+            except EvolverGenerationError as exc:
+                self._record_generation_attempt(
+                    attempt=attempt,
+                    error=str(exc),
+                    model_response_excerpt=text,
+                )
+                if attempt == max_retries:
+                    raise
+                await asyncio.sleep(0.5 * attempt)
+                continue
+
+            validated: list[ProposedEdit] = []
+            for edit in edits:
+                try:
+                    self._validate_edit(edit)
+                    validated.append(edit)
+                except EvolverGuardError as exc:
+                    self._record_generation_attempt(
+                        attempt=attempt,
+                        error=f"edit validation failed: {exc}",
+                        model_response_excerpt=text,
+                    )
+
+            if validated:
+                self._record_proposals(count=len(validated))
+                return validated
+
+            if attempt == max_retries:
+                raise EvolverGenerationError(
+                    f"no valid ProposedEdit objects after {max_retries} attempts"
+                )
+            await asyncio.sleep(0.5 * attempt)
+
+        return []
