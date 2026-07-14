@@ -26,6 +26,14 @@ GENERATION_ATTEMPT_KIND: str = "generation_attempt"
 # "max N proposals per hour" guardrail.
 _RATE_WINDOW = timedelta(hours=1)
 
+# Sliding windows for LLM rate limiting.
+_LLM_RATE_WINDOW = timedelta(hours=1)
+_LLM_COST_WINDOW = timedelta(days=1)
+
+# LLM rate limit defaults: 60 calls/hour and $5.00/day.
+_DEFAULT_LLM_CALLS_PER_HOUR = 60
+_DEFAULT_MAX_COST_PER_DAY = 5.00
+
 # ADR-0004 + AGENTS.md §2: the only files the Evolver (the meta-agent as defined
 # in CONTEXT.md §Concepts) may propose edits to
 # live under ``harness/``. The harness tree contains other files (e.g.
@@ -406,14 +414,15 @@ class ProposedEdit(BaseModel):
 
 
 class EvolverGuardError(ValueError):
-    """Raised when an edit or proposal cadence violates a guardrail.
+    """Raised when an edit, proposal cadence, or LLM call violates a guardrail.
 
     Implements the SECURITY.md "Rate limits" guardrail: max N proposals per
-    hour, max M lines of harness diff per proposal. Violations are raised,
-    never swallowed, per AGENTS.md §4 ("no swallowed exceptions"). Surfacing
-    the failure is the "surface it or re-raise" option in that rule; a
-    TraceLogger event will be attached once the propose() body lands and a
-    session context is available.
+    hour, max M lines of harness diff per proposal, max LLM calls per hour,
+    and max cost per day. Violations are raised, never swallowed, per
+    AGENTS.md §4 ("no swallowed exceptions"). Surfacing the failure is the
+    "surface it or re-raise" option in that rule; a TraceLogger event will
+    be attached once the propose() body lands and a session context is
+    available.
     """
 
 
@@ -423,18 +432,27 @@ class Evolver:
     The guardrails are enforced *before* any proposal work happens so a
     runaway loop cannot emit unbounded edits before the Critic catches them
     (PHILOSOPHY.md §2 — reversibility by default). Defaults (10 proposals /
-    hour, 200 diff lines) mirror the SECURITY.md prose and are configurable
-    via the constructor.
+    hour, 200 diff lines, 60 LLM calls/hour, $5/day) mirror the SECURITY.md
+    prose and are configurable via the constructor.
+
+    LLM rate limiting is shared across all Evolver instances to enforce
+    per-process budget limits (ADR-0004). Proposal and diff-rate limiting
+    are per-instance.
 
     When a :class:`ModelAdapter` is provided, ``propose()`` first attempts to
     generate edits via an LLM call before falling back to the template-based
     approach.
     """
 
+    _llm_call_times: deque[datetime] = deque()
+    _llm_call_costs: deque[tuple[datetime, float]] = deque()
+
     def __init__(
         self,
         max_proposals_per_hour: int = 10,
         max_diff_lines: int = 200,
+        max_llm_calls_per_hour: int = _DEFAULT_LLM_CALLS_PER_HOUR,
+        max_cost_per_day: float = _DEFAULT_MAX_COST_PER_DAY,
         trace_logger: TraceLogger | None = None,
         session_id: str | None = None,
         model_adapter: ModelAdapter | None = None,
@@ -443,8 +461,14 @@ class Evolver:
             raise EvolverGuardError("max_proposals_per_hour must be >= 1")
         if max_diff_lines < 1:
             raise EvolverGuardError("max_diff_lines must be >= 1")
+        if max_llm_calls_per_hour < 1:
+            raise EvolverGuardError("max_llm_calls_per_hour must be >= 1")
+        if max_cost_per_day < 0:
+            raise EvolverGuardError("max_cost_per_day must be >= 0")
         self.max_proposals_per_hour = max_proposals_per_hour
         self.max_diff_lines = max_diff_lines
+        self.max_llm_calls_per_hour = max_llm_calls_per_hour
+        self.max_cost_per_day = max_cost_per_day
         self._trace_logger: TraceLogger | None = trace_logger
         self._session_id: str | None = session_id
         self._model_adapter: ModelAdapter | None = model_adapter
@@ -475,6 +499,41 @@ class Evolver:
                 PROPOSED_EDIT_KIND,
                 edit.model_dump(mode="json"),
             )
+
+    def _purge_llm_state(self, now: datetime | None = None) -> None:
+        """Drop LLM timestamps and costs that have fallen outside their windows."""
+        utc_now = now or datetime.now(timezone.utc)
+        call_cutoff = utc_now - _LLM_RATE_WINDOW
+        while self._llm_call_times and self._llm_call_times[0] < call_cutoff:
+            self._llm_call_times.popleft()
+        cost_cutoff = utc_now - _LLM_COST_WINDOW
+        while self._llm_call_costs and self._llm_call_costs[0][0] < cost_cutoff:
+            self._llm_call_costs.popleft()
+
+    def _check_llm_rate_limit(self) -> None:
+        """Raise if LLM call count or cost has hit the cap (shared across instances)."""
+        self._purge_llm_state()
+        if len(self._llm_call_times) >= self.max_llm_calls_per_hour:
+            raise EvolverGuardError(
+                f"LLM rate limit exceeded: {len(self._llm_call_times)} calls in "
+                f"the last hour (cap={self.max_llm_calls_per_hour})"
+            )
+        total_cost = sum(cost for _, cost in self._llm_call_costs)
+        if total_cost >= self.max_cost_per_day:
+            raise EvolverGuardError(
+                f"LLM cost limit exceeded: ${total_cost:.4f} in the last day "
+                f"(cap=${self.max_cost_per_day:.4f})"
+            )
+
+    def record_llm_call(self, cost: float = 0.0) -> None:
+        """Record an LLM call and its cost for rate limiting (shared across instances).
+
+        Call this before each LLM invocation. The cost is expressed in dollars
+        (e.g., 0.02 for two cents) and accumulated against the daily cost budget.
+        """
+        now = datetime.now(timezone.utc)
+        self._llm_call_times.append(now)
+        self._llm_call_costs.append((now, cost))
 
     def _validate_edit(self, edit: ProposedEdit) -> None:
         """Reject an edit whose unified diff exceeds the line cap."""

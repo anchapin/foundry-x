@@ -48,8 +48,13 @@ We design against these threats:
   (`ignore previous instructions`, role-tag injection, etc.) and
   either truncated or flagged for human review.
 - **Rate limits.** The `Evolver` is rate-limited: max N proposals per
-  hour, max M lines of harness diff per proposal. Defaults live in
-  `src/foundry_x/evolution/evolver.py`.
+  hour, max M lines of harness diff per proposal, max LLM calls per hour,
+  and max cost per day. Defaults live in
+  `src/foundry_x/evolution/evolver.py`:
+  - Proposals: 10/hour
+  - Diff lines: 200/proposal
+  - LLM calls: 60/hour (shared across all Evolver instances)
+  - LLM cost: $5.00/day (shared across all Evolver instances)
 - **Runaway detection.** The runner enforces two resource caps per task:
   - ``FOUNDRY_TASK_TIMEOUT`` (wall-clock seconds, default 300): when exceeded,
     ``run_with_limits`` records ``task_aborted(reason="wall_clock")`` and
