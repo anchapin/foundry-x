@@ -305,3 +305,77 @@ class TestProposeWithLlm:
         result = e.propose(harness_dir, failure=failure)
         assert len(result) == 1
         assert result[0].rationale == "address bad-prompt failure: add disambiguation guidance"
+
+
+class TestLLMRateLimiting:
+    def setup_method(self) -> None:
+        Evolver._llm_call_times.clear()
+        Evolver._llm_call_costs.clear()
+
+    def teardown_method(self) -> None:
+        Evolver._llm_call_times.clear()
+        Evolver._llm_call_costs.clear()
+
+    def test_defaults_match_security_doc(self) -> None:
+        e = Evolver()
+        assert e.max_llm_calls_per_hour == 60
+        assert e.max_cost_per_day == 5.00
+
+    def test_invalid_llm_limits_rejected(self) -> None:
+        with pytest.raises(EvolverGuardError, match="max_llm_calls_per_hour"):
+            Evolver(max_llm_calls_per_hour=0)
+        with pytest.raises(EvolverGuardError, match="max_cost_per_day"):
+            Evolver(max_cost_per_day=-1.0)
+
+    def test_llm_rate_limit_triggers_after_call_cap(self) -> None:
+        e = Evolver(max_llm_calls_per_hour=3, max_cost_per_day=10.0)
+        e._llm_call_times.extend([datetime.now(timezone.utc)] * 3)
+        with pytest.raises(EvolverGuardError, match="LLM rate limit exceeded"):
+            e._check_llm_rate_limit()
+
+    def test_llm_rate_limit_below_cap_passes(self) -> None:
+        e = Evolver(max_llm_calls_per_hour=3, max_cost_per_day=10.0)
+        e._llm_call_times.extend([datetime.now(timezone.utc)] * 2)
+        e._check_llm_rate_limit()
+
+    def test_llm_cost_limit_triggers_after_daily_cap(self) -> None:
+        e = Evolver(max_llm_calls_per_hour=100, max_cost_per_day=1.0)
+        now = datetime.now(timezone.utc)
+        e._llm_call_costs.extend([(now, 0.6)] * 2)
+        with pytest.raises(EvolverGuardError, match="LLM cost limit exceeded"):
+            e._check_llm_rate_limit()
+
+    def test_llm_cost_limit_below_cap_passes(self) -> None:
+        e = Evolver(max_llm_calls_per_hour=100, max_cost_per_day=1.0)
+        now = datetime.now(timezone.utc)
+        e._llm_call_costs.extend([(now, 0.5)])
+        e._check_llm_rate_limit()
+
+    def test_old_llm_calls_purged_after_window(self) -> None:
+        e = Evolver(max_llm_calls_per_hour=2, max_cost_per_day=10.0)
+        stale = datetime.now(timezone.utc) - timedelta(hours=2)
+        e._llm_call_times.append(stale)
+        e._llm_call_times.append(stale)
+        e._check_llm_rate_limit()
+
+    def test_old_llm_costs_purged_after_window(self) -> None:
+        e = Evolver(max_llm_calls_per_hour=100, max_cost_per_day=0.5)
+        stale = datetime.now(timezone.utc) - timedelta(days=2)
+        e._llm_call_costs.append((stale, 10.0))
+        e._check_llm_rate_limit()
+
+    def test_record_llm_call_updates_shared_state(self) -> None:
+        e1 = Evolver(max_llm_calls_per_hour=10, max_cost_per_day=10.0)
+        e2 = Evolver(max_llm_calls_per_hour=10, max_cost_per_day=10.0)
+        e1.record_llm_call(cost=0.5)
+        e2.record_llm_call(cost=0.3)
+        assert len(e1._llm_call_times) == 2
+        assert len(e2._llm_call_times) == 2
+        assert len(Evolver._llm_call_times) == 2
+        total_cost = sum(cost for _, cost in Evolver._llm_call_costs)
+        assert abs(total_cost - 0.8) < 0.001
+
+    def test_record_llm_call_accepts_zero_cost(self) -> None:
+        e = Evolver(max_llm_calls_per_hour=10, max_cost_per_day=10.0)
+        e.record_llm_call(cost=0.0)
+        assert len(e._llm_call_times) == 1
