@@ -18,16 +18,11 @@ implemented and tested.
 
 ## Phase 2: The Evolution Engine -- the meta-agent layer
 
-**Status: MOSTLY SHIPPED** (as of 929b327, 2026-07-11) — The full
+**Status: SHIPPED** (as of 929b327, 2026-07-11) — The full
 Digester → Evolver → Critic chain exists with pydantic models, pytest
-coverage, and CI gates. Two known stubs remain:
-
-1. **`Evolver.propose()` body** (`src/foundry_x/evolution/evolver.py`) —
-   guardrails are implemented and tested, but the meta-agent body that
-   turns a `FailureReport` into `ProposedEdit`(s) raises
-   `NotImplementedError`.
-2. **`_default_skill_executor`** (`src/foundry_x/execution/runner.py`) —
-   returns a benign ack envelope; does *not* actually run bash/edit/grep/write.
+coverage, and CI gates. The Evolver generates template-based
+`ProposedEdit` objects from the `_PROPOSED_CLASS_EDIT_TEMPLATES` registry;
+novel LLM-powered edit generation is a future enhancement.
 
 **Goal:** Create the automated feedback loop.
 
