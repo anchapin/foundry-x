@@ -16,15 +16,12 @@ Before you write code in this repo, read in this order:
 3. `docs/ROADMAP.md` — current phase and milestones.
 4. `docs/PHILOSOPHY.md` — the principles you must not violate.
 5. `docs/SECURITY.md` — guardrails, especially for `harness/` edits.
-   Note: `harness/manifest.json` controls which hooks are active;
-   adding or removing a hook file requires updating the manifest.
-6. `docs/adr/` — every significant decision has a record. Read the relevant
-   ADRs before proposing changes in those areas. Key ADRs by area:
-   - `harness/` changes → ADR-0004 (Critic gate, self-modification guardrails)
-   - `pyproject.toml` / dependency changes → ADR-0002 (uv for dependency management)
-   - `src/foundry_x/trace/` → ADR-0007 (trace-driven development), ADR-0003 (SQLite store)
-   - `benchmarks/` → ADR-0004, ADR-0005 (pytest as evaluation framework)
-   - Module-boundary data models → ADR-0006 (pydantic for structured data)
+   `harness/manifest.json` controls which hooks are active; adding or
+   removing a hook file requires updating the manifest.
+6. `docs/adr/` — read the relevant ADR before changing that area:
+   - `harness/` → ADR-0004 | `pyproject.toml` / deps → ADR-0002
+   - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
+   - Module-boundary models → ADR-0006
 7. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
@@ -105,6 +102,10 @@ mirrors the way our product works:
   - Benchmarks live alongside unit tests in `benchmarks/tasks/` and are
     marked `@pytest.mark.benchmark` (ADR-0004, ADR-0005).
   - Run the full benchmark suite: `uv run pytest -m benchmark`
+- **CLI tools:**
+  - `uv run foundry-x-trace` — inspect trace sessions (`--help` for flags)
+  - `uv run foundry-kpis` — compute PRD success-metric KPIs from traces
+  - `uv run fx-trace regression-report` — aggregate Critic verdicts
 - **Type discipline:** Python 3.11+ syntax. `pydantic` for all
   structured data at module boundaries (ADR-0006). No `Any` without
   a comment explaining why.
@@ -144,15 +145,12 @@ practice what we preach.
 
 ## 7. The self-reference loop
 
-This is unusual and worth stating plainly: the agent harness in this
-repo is written using tools shaped by the harness in this repo. Be
-especially disciplined about keeping the two layers separate:
+The agent harness in this repo is written using tools shaped by the harness.
+Keep the two layers strictly separate:
 
-- **`src/foundry_x/`** is the *foundry* — the Python code that wraps
-  and evolves agents.
-- **`harness/`** is the *artifact being evolved* — the agent's own DNA.
+- **`src/foundry_x/`** — the *foundry*: Python code that wraps and evolves agents.
+  When you read `src/foundry_x/execution/runner.py`, that is the code that talks to the agent.
+- **`harness/`** — the *artifact being evolved*: the agent's own DNA (system prompt, hooks, skills).
+  When you read `harness/system_prompt.txt`, that is the agent you are talking to.
 
-When you read `harness/system_prompt.txt`, that is the agent you are
-talking to. When you read `src/foundry_x/execution/runner.py`, that is
-the code that talks to the agent. Mixing them up is the most common
-mistake newcomers make.
+Mixing these up is the most common mistake newcomers make.
