@@ -183,9 +183,9 @@ def test_every_tmpfs_entry_carries_explicit_size_cap(compose: dict) -> None:
     assert entries, "foundryx service must declare at least one tmpfs: entry"
     for path, opts in entries.items():
         match = _SIZE_CAP_PATTERN.search(opts)
-        assert (
-            match is not None
-        ), f"tmpfs {path!r} must declare an explicit size= cap (issue #123); got opts={opts!r}"
+        assert match is not None, (
+            f"tmpfs {path!r} must declare an explicit size= cap (issue #123); got opts={opts!r}"
+        )
 
 
 @pytest.mark.benchmark
@@ -256,9 +256,9 @@ def test_deploy_resources_limits_set(compose: dict) -> None:
     assert limits, "deploy.resources.limits must be declared (issue #118)"
     assert limits.get("memory"), "deploy.resources.limits.memory must be set"
     assert limits.get("cpus"), "deploy.resources.limits.cpus must be set"
-    assert (
-        int(limits.get("pids", 0)) >= 1
-    ), f"deploy.resources.limits.pids must be a positive integer; got {limits.get('pids')!r}"
+    assert int(limits.get("pids", 0)) >= 1, (
+        f"deploy.resources.limits.pids must be a positive integer; got {limits.get('pids')!r}"
+    )
 
 
 @pytest.mark.benchmark
@@ -273,9 +273,9 @@ def test_pids_limit_matches_deploy_resources_pids(compose: dict) -> None:
     svc = _service(compose)
     top_level = int(svc.get("pids_limit", 0))
     deploy_pids = int(svc.get("deploy", {}).get("resources", {}).get("limits", {}).get("pids", 0))
-    assert (
-        top_level == _EXPECTED_PIDS_LIMIT
-    ), f"pids_limit must be {_EXPECTED_PIDS_LIMIT} per issue #118; got {top_level}"
+    assert top_level == _EXPECTED_PIDS_LIMIT, (
+        f"pids_limit must be {_EXPECTED_PIDS_LIMIT} per issue #118; got {top_level}"
+    )
     assert deploy_pids == _EXPECTED_PIDS_LIMIT, (
         f"deploy.resources.limits.pids must be {_EXPECTED_PIDS_LIMIT} "
         f"per issue #118; got {deploy_pids}"
@@ -302,6 +302,6 @@ def test_capabilities_dropped_and_no_new_privileges(compose: dict) -> None:
 
     security_opt = svc.get("security_opt") or []
     normalised = {str(opt).lower() for opt in security_opt}
-    assert any(
-        opt in {"no-new-privileges", "no-new-privileges:true"} for opt in normalised
-    ), f"security_opt must include 'no-new-privileges:true' (issue #124); got {security_opt!r}"
+    assert any(opt in {"no-new-privileges", "no-new-privileges:true"} for opt in normalised), (
+        f"security_opt must include 'no-new-privileges:true' (issue #124); got {security_opt!r}"
+    )

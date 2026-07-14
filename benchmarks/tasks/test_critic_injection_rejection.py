@@ -102,7 +102,7 @@ def _make_minimal_harness(root: Path) -> Path:
     tests_dir = root / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
     (tests_dir / "test_smoke.py").write_text(
-        "import pytest\n\n" "@pytest.mark.benchmark\n" "def test_smoke():\n" "    assert True\n"
+        "import pytest\n\n@pytest.mark.benchmark\ndef test_smoke():\n    assert True\n"
     )
     return root
 

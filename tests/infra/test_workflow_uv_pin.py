@@ -138,12 +138,12 @@ def test_composite_action_pins_version(composite_action_text: str) -> None:
     )
     assert m, "Composite action must declare an `uv-version` input with a default."
     version = m.group(1)
-    assert (
-        version.lower() != "latest"
-    ), f"uv-version must be a pinned release, not 'latest' (got {version!r})"
-    assert re.match(
-        r"^\d+\.\d+\.\d+", version
-    ), f"uv-version must look like semver x.y.z (got {version!r})"
+    assert version.lower() != "latest", (
+        f"uv-version must be a pinned release, not 'latest' (got {version!r})"
+    )
+    assert re.match(r"^\d+\.\d+\.\d+", version), (
+        f"uv-version must look like semver x.y.z (got {version!r})"
+    )
 
 
 def test_composite_action_pins_sha256(composite_action_text: str) -> None:

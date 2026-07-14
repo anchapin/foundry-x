@@ -265,15 +265,15 @@ def test_max_steps_caps_loop(tmp_path, monkeypatch):
     events = logger.load_session(logger.list_sessions()[0].session_id)
 
     outcome = _outcome_event(events)
-    assert (
-        outcome["status"] == "truncated"
-    ), f"step cap must mark the run truncated; got status={outcome['status']!r}"
-    assert (
-        outcome["reason"] == "max_steps"
-    ), f"step cap must terminate with reason='max_steps'; got {outcome['reason']!r}"
-    assert (
-        outcome["steps"] == max_steps_cap
-    ), f"step cap must bound steps at {max_steps_cap}; got {outcome['steps']!r}"
+    assert outcome["status"] == "truncated", (
+        f"step cap must mark the run truncated; got status={outcome['status']!r}"
+    )
+    assert outcome["reason"] == "max_steps", (
+        f"step cap must terminate with reason='max_steps'; got {outcome['reason']!r}"
+    )
+    assert outcome["steps"] == max_steps_cap, (
+        f"step cap must bound steps at {max_steps_cap}; got {outcome['steps']!r}"
+    )
 
     tool_calls = [event for event in events if event.kind == "tool_call"]
     assert len(tool_calls) == max_steps_cap, (
@@ -381,9 +381,9 @@ def test_wall_clock_caps_loop(tmp_path, monkeypatch):
         "target is the cap firing -- if no task_aborted event is present, "
         "asyncio.wait_for was bypassed or the timeout was disabled"
     )
-    assert (
-        aborted["reason"] == "wall_clock"
-    ), f"task_aborted reason must be 'wall_clock'; got {aborted['reason']!r}"
+    assert aborted["reason"] == "wall_clock", (
+        f"task_aborted reason must be 'wall_clock'; got {aborted['reason']!r}"
+    )
     assert aborted["timeout_s"] == wall_clock_cap, (
         f"task_aborted must carry the exceeded timeout_s={wall_clock_cap}; "
         f"got {aborted['timeout_s']!r}"
@@ -412,9 +412,9 @@ def test_wall_clock_caps_loop(tmp_path, monkeypatch):
     # regression that swallows the TimeoutError after the cap fires is
     # caught here too.
     failed = [event.payload for event in events if event.kind == "task_failed"]
-    assert (
-        len(failed) == 1
-    ), f"TimeoutError from the cap must surface as a single task_failed event; got {len(failed)}"
+    assert len(failed) == 1, (
+        f"TimeoutError from the cap must surface as a single task_failed event; got {len(failed)}"
+    )
     assert failed[0]["error_type"] == "TimeoutError"
 
 
@@ -466,17 +466,17 @@ def test_benign_terminates(tmp_path, monkeypatch):
     events = logger.load_session(logger.list_sessions()[0].session_id)
 
     outcome = _outcome_event(events)
-    assert (
-        outcome["status"] == "success"
-    ), f"benign task must terminate successfully; got status={outcome['status']!r}"
+    assert outcome["status"] == "success", (
+        f"benign task must terminate successfully; got status={outcome['status']!r}"
+    )
     assert outcome["reason"] == "final_answer", (
         f"benign task must terminate with reason='final_answer'; "
         f"got {outcome['reason']!r} -- a cap tightened past the default "
         "would surface here"
     )
-    assert (
-        outcome["steps"] == 2
-    ), f"2-turn benign task must record steps=2; got {outcome['steps']!r}"
+    assert outcome["steps"] == 2, (
+        f"2-turn benign task must record steps=2; got {outcome['steps']!r}"
+    )
 
     # No cap-shaped terminal events may appear on a benign path.
     assert _task_aborted_event(events) is None, "benign task must not trigger the wall-clock cap"

@@ -77,7 +77,7 @@ def _make_minimal_harness(root: Path) -> Path:
     tests_dir = root / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
     (tests_dir / "test_smoke.py").write_text(
-        "import pytest\n\n" "@pytest.mark.benchmark\n" "def test_smoke():\n" "    assert True\n"
+        "import pytest\n\n@pytest.mark.benchmark\ndef test_smoke():\n    assert True\n"
     )
     return root
 
@@ -119,8 +119,7 @@ def test_critic_rejects_oversized_diff(benchmark_workspace: Path) -> None:
         f"got approved={verdict.approved}"
     )
     assert "diff_size_cap" in verdict.failed_checks, (
-        f"task {TASK.name}: expected 'diff_size_cap' in failed_checks, "
-        f"got {verdict.failed_checks}"
+        f"task {TASK.name}: expected 'diff_size_cap' in failed_checks, got {verdict.failed_checks}"
     )
     assert "git apply" not in verdict.passed_checks, (
         f"task {TASK.name}: 'git apply' must not appear in passed_checks; "
@@ -150,9 +149,9 @@ def test_critic_accepts_rightsized_diff(benchmark_workspace: Path) -> None:
         )
     )
     actual_lines = len(rightsized_diff.splitlines())
-    assert (
-        actual_lines <= cap
-    ), f"test precondition: diff must be within cap ({actual_lines} vs {cap})"
+    assert actual_lines <= cap, (
+        f"test precondition: diff must be within cap ({actual_lines} vs {cap})"
+    )
 
     critic = Critic(harness, max_diff_lines=cap)
     verdict = critic.evaluate(rightsized_diff)

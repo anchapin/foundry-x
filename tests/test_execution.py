@@ -653,9 +653,9 @@ def test_fx_runner_help_prints_documented_argparse_surface(tmp_path):
     import subprocess
 
     runner = shutil.which("fx-runner")
-    assert (
-        runner is not None
-    ), "fx-runner console script not on PATH; install with 'uv pip install -e .'"
+    assert runner is not None, (
+        "fx-runner console script not on PATH; install with 'uv pip install -e .'"
+    )
 
     result = subprocess.run(
         [runner, "--help"],
@@ -684,9 +684,9 @@ def test_fx_runner_console_script_lands_session_in_trace_store(tmp_path):
     import subprocess
 
     runner = shutil.which("fx-runner")
-    assert (
-        runner is not None
-    ), "fx-runner console script not on PATH; install with 'uv pip install -e .'"
+    assert runner is not None, (
+        "fx-runner console script not on PATH; install with 'uv pip install -e .'"
+    )
 
     harness_dir = tmp_path / "harness"
     _stub_harness(harness_dir)
