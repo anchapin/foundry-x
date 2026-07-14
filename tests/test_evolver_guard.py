@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -174,3 +175,133 @@ def test_propose_records_proposal(tmp_path):
         assert len(result) == 1
     events = list(logger.iter_events(session_id, kind=PROPOSED_EDIT_KIND))
     assert len(events) == 1
+
+
+class TestBuildLlmPrompt:
+    def test_prompt_includes_failure_summary(self):
+        e = Evolver()
+        failure = FailureReport(
+            session_id="s",
+            summary="Agent called wrong tool",
+            proposed_class="wrong-tool",
+        )
+        prompt = e._build_llm_prompt(failure)
+        assert "Agent called wrong tool" in prompt
+        assert "wrong-tool" in prompt
+
+    def test_prompt_includes_suspected_causes(self):
+        e = Evolver()
+        failure = FailureReport(
+            session_id="s",
+            summary="failure",
+            suspected_causes=["cause 1", "cause 2"],
+            proposed_class="bad-prompt",
+        )
+        prompt = e._build_llm_prompt(failure)
+        assert "cause 1" in prompt
+        assert "cause 2" in prompt
+
+    def test_prompt_includes_constraints(self):
+        e = Evolver()
+        failure = FailureReport(session_id="s", summary="f", proposed_class="clean")
+        prompt = e._build_llm_prompt(failure)
+        assert "harness/" in prompt
+        assert "system_prompt.txt" in prompt
+        assert "--- a/" in prompt
+
+
+class TestParseLlmResponse:
+    def test_parses_valid_json_with_proposed_edits(self):
+        e = Evolver()
+        content = '{"proposed_edits": [{"target_file": "harness/system_prompt.txt", "rationale": "test", "unified_diff": "--- a/harness/system_prompt.txt\\n+++ b/harness/system_prompt.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n"}]}'
+        edits = e._parse_llm_response(content)
+        assert len(edits) == 1
+        assert edits[0].target_file == "harness/system_prompt.txt"
+        assert edits[0].rationale == "test"
+
+    def test_parses_raw_json_array(self):
+        e = Evolver()
+        content = '{"proposed_edits": [{"target_file": "harness/manifest.json", "rationale": "update", "unified_diff": "--- a/harness/manifest.json\\n+++ b/harness/manifest.json\\n@@ -1 +1 @@\\n-a\\n+b\\n"}]}'
+        edits = e._parse_llm_response(content)
+        assert len(edits) == 1
+
+    def test_skips_malformed_edits(self):
+        e = Evolver()
+        content = '{"proposed_edits": [{"target_file": "harness/system_prompt.txt", "rationale": "valid edit", "unified_diff": "--- a/harness/system_prompt.txt\\n+++ b/harness/system_prompt.txt\\n@@ -1 +1 @@\\n-a\\n+b\\n"}, {"target_file": "harness/hooks/bad.py", "rationale": "missing diff"}]}'
+        edits = e._parse_llm_response(content)
+        assert len(edits) == 1
+        assert edits[0].rationale == "valid edit"
+
+    def test_returns_empty_on_invalid_json(self):
+        e = Evolver()
+        assert e._parse_llm_response("not json") == []
+        assert e._parse_llm_response('{"proposed_edits": null}') == []
+        assert e._parse_llm_response("") == []
+
+    def test_rejects_out_of_tree_target(self):
+        e = Evolver()
+        content = '{"proposed_edits": [{"target_file": "../etc/passwd", "rationale": "test", "unified_diff": "--- a/etc/passwd\\n+++ b/etc/passwd\\n@@ -1 +1 @@\\n-a\\n+b\\n"}]}'
+        edits = e._parse_llm_response(content)
+        assert len(edits) == 0
+
+    def test_rejects_diff_without_headers(self):
+        e = Evolver()
+        content = '{"proposed_edits": [{"target_file": "harness/system_prompt.txt", "rationale": "test", "unified_diff": "@@ -1 +1 @@\\n-old\\n+new\\n"}]}'
+        edits = e._parse_llm_response(content)
+        assert len(edits) == 0
+
+
+class TestProposeWithLlm:
+    def test_propose_uses_llm_when_adapter_configured(self, tmp_path):
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        prompt_file = harness_dir / "system_prompt.txt"
+        prompt_file.write_text("You are FoundryAgent.\n", encoding="utf-8")
+        mock_adapter = MagicMock()
+        mock_response = MagicMock()
+        mock_response.message.content = '{"proposed_edits": [{"target_file": "harness/system_prompt.txt", "rationale": "llm generated", "unified_diff": "--- a/harness/system_prompt.txt\\n+++ b/harness/system_prompt.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n"}]}'
+        mock_adapter.complete = AsyncMock(return_value=mock_response)
+        e = Evolver(max_proposals_per_hour=10, max_diff_lines=200, model_adapter=mock_adapter)
+        failure = FailureReport(session_id="s", summary="test", proposed_class="wrong-tool")
+        result = e.propose(harness_dir, failure=failure)
+        assert len(result) == 1
+        assert result[0].rationale == "llm generated"
+        mock_adapter.complete.assert_called_once()
+
+    def test_propose_falls_back_to_template_on_llm_failure(self, tmp_path):
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        prompt_file = harness_dir / "system_prompt.txt"
+        prompt_file.write_text("You are FoundryAgent.\n", encoding="utf-8")
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
+        e = Evolver(max_proposals_per_hour=10, max_diff_lines=200, model_adapter=mock_adapter)
+        failure = FailureReport(session_id="s", summary="test", proposed_class="wrong-tool")
+        result = e.propose(harness_dir, failure=failure)
+        assert len(result) == 1
+        assert result[0].rationale == "address wrong-tool failure: reinforce tool list adherence"
+
+    def test_propose_falls_back_to_template_on_invalid_llm_output(self, tmp_path):
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        prompt_file = harness_dir / "system_prompt.txt"
+        prompt_file.write_text("You are FoundryAgent.\n", encoding="utf-8")
+        mock_adapter = MagicMock()
+        mock_response = MagicMock()
+        mock_response.message.content = "not valid json"
+        mock_adapter.complete = AsyncMock(return_value=mock_response)
+        e = Evolver(max_proposals_per_hour=10, max_diff_lines=200, model_adapter=mock_adapter)
+        failure = FailureReport(session_id="s", summary="test", proposed_class="wrong-tool")
+        result = e.propose(harness_dir, failure=failure)
+        assert len(result) == 1
+
+    def test_propose_without_adapter_uses_template(self, tmp_path):
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        prompt_file = harness_dir / "system_prompt.txt"
+        prompt_file.write_text("You are FoundryAgent.\n", encoding="utf-8")
+        e = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+        failure = FailureReport(session_id="s", summary="test", proposed_class="bad-prompt")
+        result = e.propose(harness_dir, failure=failure)
+        assert len(result) == 1
+        assert result[0].rationale == "address bad-prompt failure: add disambiguation guidance"

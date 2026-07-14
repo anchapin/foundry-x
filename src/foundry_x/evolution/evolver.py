@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import json
+import re
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -14,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 from foundry_x.evolution.digester import FailureReport
 
 if TYPE_CHECKING:
-    from foundry_x.execution.model_adapter import ModelAdapter
+    from foundry_x.execution.model_adapter import ModelAdapter, ModelMessage
     from foundry_x.trace.logger import TraceLogger
 
 PROPOSED_EDIT_KIND: str = "proposed_edit"
@@ -424,6 +425,10 @@ class Evolver:
     (PHILOSOPHY.md §2 — reversibility by default). Defaults (10 proposals /
     hour, 200 diff lines) mirror the SECURITY.md prose and are configurable
     via the constructor.
+
+    When a :class:`ModelAdapter` is provided, ``propose()`` first attempts to
+    generate edits via an LLM call before falling back to the template-based
+    approach.
     """
 
     def __init__(
@@ -432,6 +437,7 @@ class Evolver:
         max_diff_lines: int = 200,
         trace_logger: TraceLogger | None = None,
         session_id: str | None = None,
+        model_adapter: ModelAdapter | None = None,
     ) -> None:
         if max_proposals_per_hour < 1:
             raise EvolverGuardError("max_proposals_per_hour must be >= 1")
@@ -441,6 +447,7 @@ class Evolver:
         self.max_diff_lines = max_diff_lines
         self._trace_logger: TraceLogger | None = trace_logger
         self._session_id: str | None = session_id
+        self._model_adapter: ModelAdapter | None = model_adapter
         self._proposal_times: deque[datetime] = deque()
 
     def _purge_old(self, now: datetime | None = None) -> None:
@@ -478,18 +485,211 @@ class Evolver:
                 f"(cap={self.max_diff_lines})"
             )
 
-    def propose(
+    def _build_llm_prompt(self, failure: FailureReport) -> str:
+        """Build an LLM prompt from a failure report.
+
+        Constructs a detailed prompt that includes the failure summary,
+        suspected causes, and the class of failure to guide the LLM in
+        generating context-aware harness modifications.
+        """
+        lines = [
+            "You are an expert agent harness engineer. Your task is to propose",
+            "targeted edits to the agent harness to fix failures.",
+            "",
+            "FAILURE REPORT",
+            "=" * 50,
+            f"Summary: {failure.summary}",
+            f"Failure class: {failure.proposed_class}",
+            "",
+        ]
+        if failure.suspected_causes:
+            lines.append("Suspected causes:")
+            for cause in failure.suspected_causes:
+                lines.append(f"  - {cause}")
+            lines.append("")
+        if failure.failed_steps:
+            lines.append("Failed steps:")
+            for step in failure.failed_steps:
+                lines.append(f"  - {step}")
+            lines.append("")
+        lines.extend(
+            [
+                "HARNESS EDIT CONSTRAINTS",
+                "=" * 50,
+                "You may only propose edits to files under the `harness/` directory.",
+                "Allowed targets:",
+                "  - harness/system_prompt.txt (leaf file)",
+                "  - harness/manifest.json (leaf file)",
+                "  - harness/hooks/*.py (arbitrary depth)",
+                "  - harness/skills/*.py (arbitrary depth)",
+                "",
+                "Each proposed edit must include:",
+                "  1. target_file: path relative to harness/",
+                "  2. rationale: brief explanation of why this edit addresses the failure",
+                "  3. unified_diff: a valid git-apply unified diff with --- a/ and +++ b/ headers",
+                "",
+                "OUTPUT FORMAT",
+                "=" * 50,
+                "Respond with a JSON object containing a list of proposed edits:",
+                '{"proposed_edits": [{"target_file": "...", "rationale": "...", "unified_diff": "..."}]}',
+                "",
+                "Only output valid JSON. Each unified_diff must start with '--- a/' and '+++ b/' headers.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _build_llm_messages(self, failure: FailureReport) -> list[ModelMessage]:
+        """Build the message list for an LLM completion request."""
+        from foundry_x.execution.model_adapter import ModelMessage
+
+        prompt = self._build_llm_prompt(failure)
+        return [
+            ModelMessage(
+                role="system", content="You are a helpful assistant that proposes harness edits."
+            ),
+            ModelMessage(role="user", content=prompt),
+        ]
+
+    async def _call_llm(self, failure: FailureReport) -> str:
+        """Make an LLM call to generate proposed edits.
+
+        Returns the raw text response from the model.
+        Raises an exception if the LLM call fails.
+        """
+        if self._model_adapter is None:
+            raise RuntimeError("ModelAdapter not configured")
+        messages = self._build_llm_messages(failure)
+        response = await self._model_adapter.complete(messages)
+        if response.message.content is None:
+            raise RuntimeError("LLM returned no content")
+        return response.message.content
+
+    _EDIT_JSON_RE = re.compile(
+        r'\{[^{}]*"proposed_edits"[^{}]*\[[\s\S]*?\][^{}]*\}',
+        re.MULTILINE,
+    )
+    _EDIT_ITEM_RE = re.compile(
+        r'\{"target_file"\s*:\s*"([^"]+)"\s*,\s*"rationale"\s*:\s*"([^"]+)"\s*,\s*"unified_diff"\s*:\s*"([\s\S]*?)"\s*\}',
+        re.MULTILINE,
+    )
+
+    def _parse_llm_response(self, content: str) -> list[ProposedEdit]:
+        """Parse LLM response text into ProposedEdit objects.
+
+        Attempts to extract a JSON array of edits from the LLM output.
+        Each edit must have target_file, rationale, and unified_diff fields.
+        Malformed edits are skipped; returns empty list if no valid edits found.
+        """
+        try:
+            match = self._EDIT_JSON_RE.search(content)
+            if match:
+                data = json.loads(match.group())
+                edits = data.get("proposed_edits", [])
+            else:
+                data = json.loads(content)
+                edits = data.get("proposed_edits", []) if isinstance(data, dict) else data
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return []
+
+        if not isinstance(edits, list):
+            return []
+
+        results: list[ProposedEdit] = []
+        for item in edits:
+            if not isinstance(item, dict):
+                continue
+            target_file = item.get("target_file")
+            rationale = item.get("rationale")
+            unified_diff = item.get("unified_diff")
+            if not all([target_file, rationale, unified_diff]):
+                continue
+            try:
+                edit = ProposedEdit(
+                    target_file=target_file,
+                    rationale=rationale,
+                    unified_diff=unified_diff,
+                )
+                self._validate_edit(edit)
+                results.append(edit)
+            except (ValueError, EvolverGuardError):
+                continue
+        return results
+
+    async def propose_async(
         self,
         harness_dir: Path,
         failure: FailureReport,
         current_diff: str | None = None,
     ) -> list[ProposedEdit]:
+        """Async variant of propose() that attempts LLM-driven edit generation.
+
+        This method first attempts to generate edits via an LLM call using the
+        failure report context. If the LLM call fails or returns invalid output,
+        it falls back to the template-based approach.
+        """
         try:
             self._check_rate_limit()
         except EvolverGuardError:
             return []
         if failure.proposed_class == "clean":
             return []
+
+        if self._model_adapter is not None:
+            try:
+                content = await self._call_llm(failure)
+                edits = self._parse_llm_response(content)
+                if edits:
+                    for edit in edits:
+                        self._record_proposals(edit=edit)
+                    return edits
+            except Exception:
+                pass
+
+        return self._propose_from_template(harness_dir, failure)
+
+    def propose(
+        self,
+        harness_dir: Path,
+        failure: FailureReport,
+        current_diff: str | None = None,
+    ) -> list[ProposedEdit]:
+        """Propose harness edits for a given failure report.
+
+        First attempts LLM-driven edit generation if a ModelAdapter is configured.
+        Falls back to template-based proposals if the LLM call fails or is
+        unavailable.
+        """
+        try:
+            self._check_rate_limit()
+        except EvolverGuardError:
+            return []
+        if failure.proposed_class == "clean":
+            return []
+
+        if self._model_adapter is not None:
+            try:
+                import asyncio
+
+                content = asyncio.run(self._call_llm(failure))
+                edits = self._parse_llm_response(content)
+                if edits:
+                    for edit in edits:
+                        self._record_proposals(edit=edit)
+                    return edits
+            except Exception:
+                pass
+
+        return self._propose_from_template(harness_dir, failure)
+
+    def _propose_from_template(
+        self,
+        harness_dir: Path,
+        failure: FailureReport,
+    ) -> list[ProposedEdit]:
+        """Generate a proposal from the template-based approach.
+
+        Used as fallback when LLM call fails or is unavailable.
+        """
         template = _PROPOSED_CLASS_EDIT_TEMPLATES.get(failure.proposed_class)
         if template is None:
             return []
