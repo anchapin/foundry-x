@@ -32,6 +32,7 @@ from foundry_x.trace.logger import TraceLogger
 from harness.hooks.base import ToolCall, HookRegistry, ToolResult
 from harness.hooks.context_pruning import (
     DEFAULT_THRESHOLD,
+    DEFAULT_TOKEN_THRESHOLD,
     ContextPruningHook,
     Tracer,
     TokenAwarePruningHook,
@@ -124,6 +125,7 @@ def test_pre_tool_prunes_when_over_threshold(tmp_path) -> None:
     assert prune_event.payload == {
         "dropped": _PLANTS - DEFAULT_THRESHOLD,
         "threshold": DEFAULT_THRESHOLD,
+        "token_threshold": DEFAULT_TOKEN_THRESHOLD,
     }
     assert captured == [
         {
@@ -132,6 +134,7 @@ def test_pre_tool_prunes_when_over_threshold(tmp_path) -> None:
             "payload": {
                 "dropped": _PLANTS - DEFAULT_THRESHOLD,
                 "threshold": DEFAULT_THRESHOLD,
+                "token_threshold": DEFAULT_TOKEN_THRESHOLD,
             },
         }
     ]
@@ -200,10 +203,12 @@ def test_pre_tool_preserves_tool_result_and_user_prompt(tmp_path) -> None:
     assert prune_events[0].payload == {
         "dropped": 100,
         "threshold": DEFAULT_THRESHOLD,
+        "token_threshold": DEFAULT_TOKEN_THRESHOLD,
     }
     assert captured[0]["payload"] == {
         "dropped": 100,
         "threshold": DEFAULT_THRESHOLD,
+        "token_threshold": DEFAULT_TOKEN_THRESHOLD,
     }
 
 
@@ -263,6 +268,42 @@ def test_constructor_rejects_empty_session_id(tmp_path) -> None:
         )
 
 
+def test_constructor_rejects_invalid_token_threshold(tmp_path) -> None:
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as sid:
+        pass
+    with pytest.raises(ValueError, match="token_threshold must be >= 1"):
+        ContextPruningHook(
+            session_id=sid,
+            threshold=DEFAULT_THRESHOLD,
+            token_threshold=0,
+            pruner=_sqlite_pruner(db),
+            tracer=lambda *a, **k: None,
+        )
+
+
+def test_token_threshold_property() -> None:
+    hook = ContextPruningHook(
+        session_id="any",
+        threshold=DEFAULT_THRESHOLD,
+        token_threshold=4096,
+        pruner=lambda *a, **k: 0,
+        tracer=lambda *a, **k: None,
+    )
+    assert hook.token_threshold == 4096
+
+
+def test_token_threshold_defaults_to_default() -> None:
+    hook = ContextPruningHook(
+        session_id="any",
+        threshold=DEFAULT_THRESHOLD,
+        pruner=lambda *a, **k: 0,
+        tracer=lambda *a, **k: None,
+    )
+    assert hook.token_threshold == DEFAULT_TOKEN_THRESHOLD
+
+
 # ---------------------------------------------------------------------------
 # Critic-sandbox entry point: register_into(targeted_registry)
 # ---------------------------------------------------------------------------
@@ -282,6 +323,7 @@ def test_register_into_installs_into_targeted_registry(tmp_path) -> None:
             fresh,
             session_id=sid,
             threshold=DEFAULT_THRESHOLD,
+            token_threshold=DEFAULT_TOKEN_THRESHOLD,
             pruner=_sqlite_pruner(db),
             tracer=lambda *a, **k: None,
         )
@@ -290,6 +332,7 @@ def test_register_into_installs_into_targeted_registry(tmp_path) -> None:
         assert hook not in default_before._hooks  # noqa: SLF001
         assert hook.session_id == sid
         assert hook.threshold == DEFAULT_THRESHOLD
+        assert hook.token_threshold == DEFAULT_TOKEN_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
