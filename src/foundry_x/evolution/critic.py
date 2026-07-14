@@ -191,9 +191,7 @@ class Critic:
 
         model_base = Path(model_path_env)
         if not model_base.exists():
-            raise FileNotFoundError(
-                f"FOUNDRY_MODEL_PATH does not exist: {model_path_env}"
-            )
+            raise FileNotFoundError(f"FOUNDRY_MODEL_PATH does not exist: {model_path_env}")
 
         if model_glob_patterns is None:
             model_glob_patterns = {q: f"*.{q}.gguf" for q in quantizations}
