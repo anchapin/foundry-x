@@ -429,7 +429,7 @@ async def test_run_task_warns_and_zero_tokens_when_usage_missing(tmp_path):
     model_responses = [event for event in events if event.kind == "model_response"]
     assert len(model_responses) == 2
     for event in model_responses:
-        assert event.payload["usage"] is None
+        assert event.payload["token_usage"] is None
         assert event.payload["tokens_used"] == 0
 
     outcome = next(event for event in events if event.kind == "outcome")
