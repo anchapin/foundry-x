@@ -13,7 +13,7 @@ import statistics
 import subprocess
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -106,7 +106,7 @@ _DEFAULT_REQUEST_TIMEOUT_S: float = 30.0
 _WORKSPACE_ROOT_ENV = "FOUNDRY_WORKSPACE_ROOT"
 
 
-def _resolve_workspace_root(env: dict[str, str] | None = None) -> Path:
+def _resolve_workspace_root(env: Mapping[str, str] | None = None) -> Path:
     """Resolve the agent workspace root for file-operation skill executors.
 
     ``FOUNDRY_WORKSPACE_ROOT`` is the explicit override. When absent or
@@ -176,7 +176,7 @@ class _ParsedToolArguments:
     error: str | None
 
 
-def resolve_trace_backend(env: dict[str, str] | None = None) -> str:
+def resolve_trace_backend(env: Mapping[str, str] | None = None) -> str:
     """Resolve the trace backend from ``FOUNDRY_TRACE_BACKEND`` (issue #13).
 
     The value is lower-cased and whitespace-stripped before comparison so a
@@ -196,6 +196,7 @@ def resolve_trace_backend(env: dict[str, str] | None = None) -> str:
             f"Unsupported FOUNDRY_TRACE_BACKEND={backend!r}; valid options are: {valid}"
         )
     return backend
+
 
 # Trace-backend selection (issue #13). ``.env.example`` documents
 # ``FOUNDRY_TRACE_BACKEND`` as the way to switch the trace store between the
@@ -208,29 +209,7 @@ _SUPPORTED_TRACE_BACKENDS: frozenset[str] = frozenset({"sqlite", "jsonl"})
 _DEFAULT_TRACE_BACKEND: str = "sqlite"
 
 
-def resolve_trace_backend(env: dict[str, str] | None = None) -> str:
-    """Resolve the trace backend from ``FOUNDRY_TRACE_BACKEND`` (issue #13).
-
-    The value is lower-cased and whitespace-stripped before comparison so a
-    value such as ``"JSONL"`` or ``" sqlite "`` from a hand-edited ``.env``
-    is accepted. An empty/absent value yields the :data:`_DEFAULT_TRACE_BACKEND`
-    (``sqlite``), matching ``.env.example``. An unrecognized value raises
-    :class:`ValueError` naming the valid options — failing fast at startup is
-    preferable to a silent fall-through that writes nothing and leaves the
-    engineer debugging why no trace appeared (AGENTS.md §2).
-    """
-    source = env if env is not None else os.environ
-    raw = source.get(_TRACE_BACKEND_ENV, "").strip().lower()
-    backend = raw or _DEFAULT_TRACE_BACKEND
-    if backend not in _SUPPORTED_TRACE_BACKENDS:
-        valid = ", ".join(sorted(_SUPPORTED_TRACE_BACKENDS))
-        raise ValueError(
-            f"Unsupported FOUNDRY_TRACE_BACKEND={backend!r}; valid options are: {valid}"
-        )
-    return backend
-
-
-def resolve_model_id(env: dict[str, str] | None = None) -> str | None:
+def resolve_model_id(env: Mapping[str, str] | None = None) -> str | None:
     """Resolve the model identity to stamp into the trace session (issue #12).
 
     Resolution order, highest precedence first:
@@ -270,7 +249,7 @@ def resolve_model_id(env: dict[str, str] | None = None) -> str | None:
     return None
 
 
-def _resolve_model_request_name(env: dict[str, str] | None = None) -> str:
+def _resolve_model_request_name(env: Mapping[str, str] | None = None) -> str:
     """Resolve the model name sent to an OpenAI-compatible endpoint.
 
     ``resolve_model_id`` may fall back to the endpoint host for provenance,
@@ -290,7 +269,7 @@ def _resolve_model_request_name(env: dict[str, str] | None = None) -> str:
     return _FALLBACK_REQUEST_MODEL
 
 
-def build_model_adapter(env: dict[str, str] | None = None) -> OpenAICompatibleAdapter:
+def build_model_adapter(env: Mapping[str, str] | None = None) -> OpenAICompatibleAdapter:
     """Create the default OpenAI-compatible ModelAdapter from environment.
 
     ``OPENCODE_SERVER_URL`` remains the primary endpoint knob from
@@ -385,7 +364,7 @@ class RunLimits(BaseModel):
     )
 
 
-def run_limits_from_env(env: dict[str, str] | None = None) -> RunLimits:
+def run_limits_from_env(env: Mapping[str, str] | None = None) -> RunLimits:
     """Build :class:`RunLimits` from environment variables.
 
     Recognized keys (consistent with ``.env.example``):
@@ -442,7 +421,7 @@ async def run_with_limits(
         raise
 
 
-def _resolve_max_steps(env: dict[str, str] | None = None) -> int:
+def _resolve_max_steps(env: Mapping[str, str] | None = None) -> int:
     """Resolve the per-task step cap (issue #89, ADR-0010).
 
     ``FOUNDRY_MAX_AGENT_STEPS`` is the foundry-owned override. An empty /
@@ -459,7 +438,7 @@ def _resolve_max_steps(env: dict[str, str] | None = None) -> int:
     return value if value > 0 else _DEFAULT_MAX_AGENT_STEPS
 
 
-def _resolve_request_timeout(env: dict[str, str] | None = None) -> float:
+def _resolve_request_timeout(env: Mapping[str, str] | None = None) -> float:
     """Resolve the per-request httpx timeout in seconds (issue #201).
 
     ``FOUNDRY_REQUEST_TIMEOUT_S`` caps a single chat-completion HTTP
