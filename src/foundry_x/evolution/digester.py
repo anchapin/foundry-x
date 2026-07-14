@@ -179,16 +179,6 @@ _CLASS_CAUSE_TEMPLATES: dict[str, str] = {
         "as compromised for this session; consider tightening the firewall "
         "patterns or the upstream tool-result scrubbing policy."
     ),
-    # Issue #120: structured ``injection_blocked`` events aggregate into a
-    # single ``injection-attempt`` report. The template references the first
-    # block's marker list as evidence; later blocks are listed in
-    # ``failed_steps`` for full traceability.
-    "injection-attempt": (
-        "InjectionFirewallHook suppressed {count} tool result(s) for prompt-"
-        "injection markers (first block matched: {match}). Treat the agent "
-        "as compromised for this session; consider tightening the firewall "
-        "patterns or the upstream tool-result scrubbing policy."
-    ),
 }
 
 
