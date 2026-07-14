@@ -104,6 +104,7 @@ _REQUEST_TIMEOUT_ENV = "FOUNDRY_REQUEST_TIMEOUT_S"
 _DEFAULT_REQUEST_TIMEOUT_S: float = 30.0
 
 _WORKSPACE_ROOT_ENV = "FOUNDRY_WORKSPACE_ROOT"
+_FOUNDRY_CONTEXT_TOKENS_ENV = "FOUNDRY_CONTEXT_TOKENS"
 
 
 def _resolve_workspace_root(env: Mapping[str, str] | None = None) -> Path:
@@ -507,7 +508,11 @@ def _load_tool_definitions(skills_dir: Path) -> list[ToolDefinition]:
     return definitions
 
 
-def _resolve_hook_registry(log: TraceLogger, session_id: str) -> Any | None:
+def _resolve_hook_registry(
+    log: TraceLogger,
+    session_id: str,
+    token_state: dict[str, int] | None = None,
+) -> Any | None:
     """Return the harness hook registry, or ``None`` if no harness is wired.
 
     The foundry's AGENTS.md §7 self-reference rule forbids depending on the
@@ -530,13 +535,24 @@ def _resolve_hook_registry(log: TraceLogger, session_id: str) -> Any | None:
     carrying ``error_type`` and ``message`` so the Digester and the
     operator can observe that the firewall layer is off, while still
     completing the session in degraded mode (``registry is None``).
+
+    When ``token_state`` is provided and ``FOUNDRY_CONTEXT_TOKENS`` is set,
+    a :class:`TokenAwarePruningHook` is registered alongside the registry's
+    existing hooks. The ``get_tokens`` closure reads from
+    ``token_state["tokens"]`` which the runner updates after each
+    ``model_response`` (issue #465).
     """
     try:
         from harness.hooks import get_registry
+        from harness.hooks.context_pruning import (
+            Pruner,
+            register_token_aware_into,
+            resolve_token_threshold,
+        )
     except ImportError:
         return None
     try:
-        return get_registry()
+        registry = get_registry()
     except Exception as exc:
         log.record(
             session_id,
@@ -547,6 +563,59 @@ def _resolve_hook_registry(log: TraceLogger, session_id: str) -> Any | None:
             },
         )
         return None
+
+    if token_state is not None:
+        token_threshold = resolve_token_threshold()
+        if token_threshold is not None:
+
+            def _build_pruner(tracer_log: TraceLogger, sid: str) -> Pruner:
+                import sqlite3
+
+                def _drop(sid: str, keep_kinds: frozenset[str], target: int) -> int:
+                    not_in_clause = ", ".join("?" for _ in keep_kinds)
+                    with sqlite3.connect(tracer_log.path) as conn:
+                        total = conn.execute(
+                            "SELECT COUNT(*) FROM events WHERE session_id = ?",
+                            (sid,),
+                        ).fetchone()[0]
+                        if total <= target:
+                            return 0
+                        to_drop = total - target
+                        params: list[object] = [sid, *keep_kinds, to_drop]
+                        cursor = conn.execute(
+                            "SELECT event_id FROM events "
+                            "WHERE session_id = ? AND kind NOT IN (" + not_in_clause + ") "
+                            "ORDER BY timestamp LIMIT ?",
+                            params,
+                        )
+                        ids = [row[0] for row in cursor.fetchall()]
+                        if not ids:
+                            return 0
+                        placeholders = ", ".join("?" for _ in ids)
+                        conn.execute(
+                            "DELETE FROM events WHERE event_id IN (" + placeholders + ")",
+                            ids,
+                        )
+                        return len(ids)
+
+                return _drop
+
+            def _tracer(sid: str, kind: str, payload: dict[str, object]) -> None:
+                log.record(sid, kind=kind, payload=payload)
+
+            def _get_tokens(sid: str) -> int:
+                return token_state["tokens"]
+
+            register_token_aware_into(
+                registry,
+                session_id=session_id,
+                token_threshold=token_threshold,
+                get_tokens=_get_tokens,
+                pruner=_build_pruner(log, session_id),
+                tracer=_tracer,
+            )
+
+    return registry
 
 
 def _import_hook_types() -> tuple[type, type]:
@@ -1310,7 +1379,8 @@ async def run_task(
 
         adapter.on_retry = _on_retry
 
-    registry = _resolve_hook_registry(log, session_id)
+    token_state: dict[str, int] = {"tokens": 0}
+    registry = _resolve_hook_registry(log, session_id, token_state)
     hook_call_cls, hook_result_cls = _import_hook_types()
 
     resolved_workspace_root = (
@@ -1388,6 +1458,7 @@ async def run_task(
                 turn_ttfts.append(ttft_ms)
             step_tokens = response.usage.total_tokens if response.usage is not None else 0
             tokens_used += step_tokens
+            token_state["tokens"] = tokens_used
 
             log.record(
                 session_id,
