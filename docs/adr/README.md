@@ -29,5 +29,6 @@ format and process.
 | [0015](./0015-model-abstraction.md) | Model abstraction layer for model-swapping milestone | Proposed |
 | [0016](./0016-phase-3-quantization-sweep.md) | Phase 3 quantization sweep | Proposed |
 | [0017](./0017-review-state-machine.md) | Review State Machine for ProposedEdits | Accepted |
+| [0018](./0018-evolver-meta-prompt-design.md) | Evolver meta-prompt design | Accepted |
 
 When adding a new ADR, append it to this table in the same PR.
