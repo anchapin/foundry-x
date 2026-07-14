@@ -1313,6 +1313,31 @@ async def run_task(
     registry = _resolve_hook_registry(log, session_id)
     hook_call_cls, hook_result_cls = _import_hook_types()
 
+    # Token-aware pruning (issue #465): when FOUNDRY_CONTEXT_TOKENS is set,
+    # register TokenAwarePruningHook so the runner's accumulated tokens_used
+    # drives pruning decisions instead of raw event count. The get_tokens
+    # closure captures tokens_used by reference so the hook reads the current
+    # value on every pre_tool call.
+    context_tokens_threshold = os.environ.get("FOUNDRY_CONTEXT_TOKENS", "").strip()
+    if context_tokens_threshold:
+        _token_threshold = int(context_tokens_threshold)
+        from harness.hooks.context_pruning import (
+            _sqlite_pruner,
+            register_token_aware_into,
+        )
+
+        def _tracer(sid: str, kind: str, payload: dict[str, object]) -> None:
+            log.record(sid, kind=kind, payload=payload)
+
+        register_token_aware_into(
+            registry,
+            session_id=session_id,
+            token_threshold=_token_threshold,
+            pruner=_sqlite_pruner(log.path),
+            tracer=_tracer,
+            get_tokens=lambda sid: tokens_used,
+        )
+
     resolved_workspace_root = (
         workspace_root if workspace_root is not None else _resolve_workspace_root()
     )
