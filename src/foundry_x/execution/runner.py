@@ -1389,6 +1389,17 @@ async def run_task(
             step_tokens = response.usage.total_tokens if response.usage is not None else 0
             tokens_used += step_tokens
 
+            if response.usage is None:
+                log.record(
+                    session_id,
+                    kind="token_usage_missing",
+                    payload={
+                        "step": step,
+                        "message": "endpoint did not report token usage; "
+                        "counting zero tokens for this step",
+                    },
+                )
+
             log.record(
                 session_id,
                 kind="model_response",
