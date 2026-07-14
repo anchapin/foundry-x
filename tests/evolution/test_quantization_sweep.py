@@ -35,6 +35,8 @@ class TestQuantizationResult:
         assert r.task_shaped_failures == 0
         assert r.pass_rate == 0.0
         assert r.total_tokens == 0
+        assert r.token_efficiency is None
+        assert r.cost_per_task is None
 
     def test_full_fields(self):
         r = QuantizationResult(
@@ -48,6 +50,8 @@ class TestQuantizationResult:
             pass_rate=0.8,
             avg_cycle_time_s=42.5,
             total_tokens=12345,
+            token_efficiency=290.0,
+            cost_per_task=0.0015,
         )
         assert r.total_tasks == 10
         assert r.passed_tasks == 8
@@ -56,6 +60,8 @@ class TestQuantizationResult:
         assert r.pass_rate == 0.8
         assert r.avg_cycle_time_s == 42.5
         assert r.total_tokens == 12345
+        assert r.token_efficiency == 290.0
+        assert r.cost_per_task == 0.0015
 
     def test_round_trips_through_pydantic(self):
         r = QuantizationResult(
@@ -65,6 +71,24 @@ class TestQuantizationResult:
             pass_rate=0.75,
         )
         assert QuantizationResult.model_validate(r.model_dump()) == r
+
+    def test_token_efficiency_and_cost_per_task_computed(self):
+        r = QuantizationResult(
+            quantization="Q4_K_M",
+            model_path="/srv/models/test.Q4_K_M.gguf",
+            model_id="Q4_K_M",
+            total_tasks=10,
+            passed_tasks=8,
+            total_tokens=8000,
+            avg_cycle_time_s=20.0,
+            pass_rate=0.8,
+            token_efficiency=400.0,
+            cost_per_task=0.001,
+        )
+        assert r.token_efficiency == 400.0
+        assert r.cost_per_task == 0.001
+        assert r.total_tokens == 8000
+        assert r.avg_cycle_time_s == 20.0
 
 
 class TestQuantizationVerdict:
@@ -127,12 +151,16 @@ class TestRenderQuantizationResult:
             pass_rate=0.8,
             avg_cycle_time_s=42.5,
             total_tokens=12345,
+            token_efficiency=290.0,
+            cost_per_task=0.0015,
         )
         output = _render_quantization_result(r)
         assert "Q5_K_M" in output
         assert "80.0%" in output
         assert "42.5s" in output
         assert "12345" in output
+        assert "290.0" in output
+        assert "$0.0015" in output
 
     def test_render_without_avg_time(self):
         r = QuantizationResult(
@@ -183,6 +211,7 @@ class TestSweepParser:
         assert args.harness_dir == Path("/tmp/harness")
         assert args.baseline is None
         assert args.regression_threshold == 2.0
+        assert args.cost_per_token is None
 
     def test_custom_baseline(self):
         parser = _build_sweep_parser()
@@ -211,6 +240,20 @@ class TestSweepParser:
             ]
         )
         assert args.regression_threshold == 1.5
+
+    def test_cost_per_token_argument(self):
+        parser = _build_sweep_parser()
+        args = parser.parse_args(
+            [
+                "--quantizations",
+                "Q4_K_S",
+                "--harness-dir",
+                "/tmp/harness",
+                "--cost-per-token",
+                "0.00001",
+            ]
+        )
+        assert args.cost_per_token == 0.00001
 
 
 class TestSweepMainValidation:

@@ -84,6 +84,21 @@ class QuantizationResult(BaseModel):
     pass_rate: float = 0.0
     avg_cycle_time_s: float | None = None
     total_tokens: int = 0
+    token_efficiency: float | None = Field(
+        default=None,
+        description=(
+            "Tokens processed per second of cycle time (total_tokens / avg_cycle_time_s). "
+            "Requires both total_tokens > 0 and avg_cycle_time_s > 0 to compute."
+        ),
+    )
+    cost_per_task: float | None = Field(
+        default=None,
+        description=(
+            "Estimated cost per completed task in dollars. Computed as "
+            "(total_tokens * cost_per_token) / passed_tasks when both are available. "
+            "Requires FOUNDRY_COST_PER_TOKEN or cost_per_token argument to be set."
+        ),
+    )
 
 
 class QuantizationVerdict(BaseModel):
@@ -156,6 +171,7 @@ class Critic:
         model_glob_patterns: dict[str, str] | None = None,
         baseline_quantization: str | None = None,
         regression_threshold_pp: float = DEFAULT_REGRESSION_THRESHOLD_PP,
+        cost_per_token: float | None = None,
     ) -> QuantizationVerdict:
         """Run the benchmark suite against each quantization and produce a comparison.
 
@@ -173,6 +189,9 @@ class Critic:
             regression_threshold_pp: regression threshold in percentage points.
                 A candidate's pass rate must be within this many pp of the
                 baseline to be considered non-regressing (default 2.0 pp).
+            cost_per_token: cost per token in USD for cost-per-task computation.
+                When provided, ``cost_per_task`` is computed for each quantization
+                result. Can also be set via ``FOUNDRY_COST_PER_TOKEN`` env var.
 
         Returns:
             A ``QuantizationVerdict`` with per-quantization results and a
@@ -195,6 +214,12 @@ class Critic:
 
         if model_glob_patterns is None:
             model_glob_patterns = {q: f"*.{q}.gguf" for q in quantizations}
+
+        effective_cost = cost_per_token
+        if effective_cost is None:
+            cost_env = os.environ.get("FOUNDRY_COST_PER_TOKEN")
+            if cost_env is not None:
+                effective_cost = float(cost_env)
 
         results: list[QuantizationResult] = []
 
@@ -223,7 +248,9 @@ class Critic:
             os.environ["FOUNDRY_MODEL_ID"] = model_id
 
             try:
-                sweep_result = self._run_sweep_for_quant(model_file, model_id)
+                sweep_result = self._run_sweep_for_quant(
+                    model_file, model_id, cost_per_token=effective_cost
+                )
                 results.append(sweep_result)
             finally:
                 if original_model_path is not None:
@@ -258,10 +285,18 @@ class Critic:
             regression=regression,
         )
 
-    def _run_sweep_for_quant(self, model_file: str, model_id: str) -> QuantizationResult:
+    def _run_sweep_for_quant(
+        self,
+        model_file: str,
+        model_id: str,
+        cost_per_token: float | None = None,
+    ) -> QuantizationResult:
         """Run the benchmark suite for a single quantization.
 
         Returns a ``QuantizationResult`` with metrics parsed from pytest output.
+        If *cost_per_token* is provided, ``cost_per_task`` is computed.
+        ``token_efficiency`` is computed when ``total_tokens`` and
+        ``avg_cycle_time_s`` are both available (requires trace integration).
         """
         quant_label = Path(model_file).stem
         result = subprocess.run(
@@ -301,6 +336,17 @@ class Critic:
 
         pass_rate = (passed / total) if total > 0 else 0.0
 
+        total_tokens = 0
+        avg_cycle_time_s: float | None = None
+
+        token_efficiency: float | None = None
+        if total_tokens > 0 and avg_cycle_time_s is not None and avg_cycle_time_s > 0:
+            token_efficiency = total_tokens / avg_cycle_time_s
+
+        cost_per_task: float | None = None
+        if cost_per_token is not None and passed > 0:
+            cost_per_task = (total_tokens * cost_per_token) / passed
+
         return QuantizationResult(
             quantization=quant_label,
             model_path=model_file,
@@ -310,7 +356,10 @@ class Critic:
             failed_tasks=failed,
             task_shaped_failures=task_shaped,
             pass_rate=pass_rate,
-            total_tokens=0,
+            total_tokens=total_tokens,
+            avg_cycle_time_s=avg_cycle_time_s,
+            token_efficiency=token_efficiency,
+            cost_per_task=cost_per_task,
         )
 
     def evaluate(self, proposed_diff: str) -> CriticVerdict:
