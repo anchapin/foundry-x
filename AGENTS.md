@@ -16,8 +16,15 @@ Before you write code in this repo, read in this order:
 3. `docs/ROADMAP.md` — current phase and milestones.
 4. `docs/PHILOSOPHY.md` — the principles you must not violate.
 5. `docs/SECURITY.md` — guardrails, especially for `harness/` edits.
+   Note: `harness/manifest.json` controls which hooks are active;
+   adding or removing a hook file requires updating the manifest.
 6. `docs/adr/` — every significant decision has a record. Read the relevant
-   ADRs before proposing changes in those areas.
+   ADRs before proposing changes in those areas. Key ADRs by area:
+   - `harness/` changes → ADR-0004 (Critic gate, self-modification guardrails)
+   - `pyproject.toml` / dependency changes → ADR-0002 (uv for dependency management)
+   - `src/foundry_x/trace/` → ADR-0007 (trace-driven development), ADR-0003 (SQLite store)
+   - `benchmarks/` → ADR-0004, ADR-0005 (pytest as evaluation framework)
+   - Module-boundary data models → ADR-0006 (pydantic for structured data)
 7. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
@@ -36,7 +43,10 @@ and ask the human.
   ADR-0004.
 - **Never bypass the `Critic` gate.** No "I'll just push and run tests
   later." Every harness edit ships through the Critic or it does not
-  ship.
+  ship. The `Critic` runs in an isolated sandbox and evaluates harness
+  edits against the full pytest suite *plus* the benchmark suite
+  (`benchmarks/tasks/`, marked `@pytest.mark.benchmark`). Regressing a
+  previously-passing benchmark blocks the gate. See ADR-0004.
 - **Never run destructive commands** (`rm -rf`, `git reset --hard`,
   force-push to a branch other than your own throwaway, dropping a
   database) without an explicit rollback path stated in the response.
@@ -44,7 +54,9 @@ and ask the human.
   `.env.example` is the template; real values live in `.env` (gitignored).
 - **Never assume a library is available** without checking
   `pyproject.toml` and `uv.lock` first. If it is not there, add it via
-  `uv add <package>` and explain why in the PR.
+  `uv add <package>` and explain why in the PR. The lockfile (`uv.lock`)
+  is committed — always run `uv sync` after adding a dependency so the
+  lockfile stays in sync with `pyproject.toml`.
 - **Never silently swallow an exception.** Log it via the project's
   `TraceLogger`, surface it, or re-raise. Bare `except: pass` is a bug.
 - **Never widen scope.** A bug fix is not a refactor. A feature is not a
@@ -65,7 +77,8 @@ This project is itself an agent harness foundry. The way we work here
 mirrors the way our product works:
 
 1. **Observe.** Read the trace (`logs/`) and the existing code before
-   proposing a change. The trace store is ground truth.
+   proposing a change. The trace store is ground truth. Note: `logs/` is
+   gitignored; it contains live SQLite/JSONL trace data from agent runs.
 2. **Digest.** Write a small failure report ("the existing approach
    breaks when X because Y").
 3. **Propose the smallest viable change.** One file if possible. One
@@ -91,6 +104,7 @@ mirrors the way our product works:
   - Single benchmark: `uv run pytest benchmarks/tasks/test_name.py -m benchmark`
   - Benchmarks live alongside unit tests in `benchmarks/tasks/` and are
     marked `@pytest.mark.benchmark` (ADR-0004, ADR-0005).
+  - Run the full benchmark suite: `uv run pytest -m benchmark`
 - **Type discipline:** Python 3.11+ syntax. `pydantic` for all
   structured data at module boundaries (ADR-0006). No `Any` without
   a comment explaining why.
