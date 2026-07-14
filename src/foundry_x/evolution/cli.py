@@ -559,7 +559,7 @@ def _main_sweep(args: argparse.Namespace) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
 
 
 def sweep_main(argv: list[str] | None = None) -> int:
