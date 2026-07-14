@@ -346,10 +346,11 @@ def resolve_harness_version(harness_dir: Path) -> str:
 class RunLimits(BaseModel):
     """Configurable caps guarding against resource exhaustion (SECURITY.md).
 
-    ``task_timeout_s`` is enforced today via :func:`run_with_limits`.
-    ``token_budget`` is a hook point that ``run_task`` will consult once the
-    model client is wired (a prerequisite for ADR-0004); it is **not** counted
-    yet, only plumbed through so the budget is observable in abort events.
+    ``task_timeout_s`` is enforced via :func:`run_with_limits`.
+    ``token_budget`` is enforced in :func:`run_task` after each
+    ``ModelResponse``: when the running token total exceeds the cap,
+    the loop emits ``task_aborted(reason="token_budget")`` and terminates
+    with ``outcome.status="failed"``, ``outcome.reason="token_budget"``.
     """
 
     task_timeout_s: float | None = Field(
@@ -359,8 +360,9 @@ class RunLimits(BaseModel):
     )
     token_budget: int | None = Field(
         default=None,
-        description="Total tokens permitted per evolution cycle (hook point; "
-        "enforced when the model client lands).",
+        description="Total tokens permitted per task (issue #197). When the "
+        "running total exceeds this cap after a ModelResponse, the loop "
+        "aborts with a task_aborted event.",
     )
 
 

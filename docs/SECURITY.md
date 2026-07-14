@@ -50,8 +50,17 @@ We design against these threats:
 - **Rate limits.** The `Evolver` is rate-limited: max N proposals per
   hour, max M lines of harness diff per proposal. Defaults live in
   `src/foundry_x/evolution/evolver.py`.
-- **Runaway detection.** The runner monitors wall-clock per task and
-  total tokens per evolution cycle; exceeding the cap aborts the run.
+- **Runaway detection.** The runner enforces two resource caps per task:
+  - ``FOUNDRY_TASK_TIMEOUT`` (wall-clock seconds, default 300): when exceeded,
+    ``run_with_limits`` records ``task_aborted(reason="wall_clock")`` and
+    raises ``asyncio.TimeoutError``.
+  - ``FOUNDRY_TOKEN_BUDGET`` (total tokens, unset by default): when the
+    running token total (accumulated from each ``ModelResponse.usage``) exceeds
+    this cap, ``run_task`` records ``task_aborted(reason="token_budget")`` and
+    terminates with ``outcome.status="failed"``, ``outcome.reason="token_budget"``.
+  Both caps emit a ``task_aborted`` trace event and set the terminal
+  ``outcome`` accordingly so KPI consumers (``token_budget_abort_count``,
+  ``token_budget_hit``) can observe the abort.
 - **Sandbox.** Run benchmarks and evolution inside a Docker
   container with read-only mounts for the host filesystem (see
   `infra/`). The default local dev path runs unsandboxed but should
