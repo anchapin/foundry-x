@@ -24,7 +24,7 @@ FoundryX reads the endpoint from two environment variables, checked in this orde
 | 1 | `OPENCODE_SERVER_URL` | `http://127.0.0.1:4096` | Primary knob — any OpenAI-compatible endpoint |
 | 2 | `LLAMACPP_HOST` | `http://127.0.0.1:8080` | Local-first fallback for llama.cpp servers |
 
-Set **one** of these in your `.env` (copy from [`.env.example`](.env.example)).
+Set **one** of these in your `.env` (copy from [`.env.example`](../.env.example)).
 
 ### Resolving model identity
 
