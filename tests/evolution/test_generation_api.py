@@ -10,6 +10,7 @@ from foundry_x.evolution.digester import FailureReport
 from foundry_x.evolution.evolver import (
     Evolver,
     EvolverGenerationError,
+    EvolverLLMError,
     _build_generation_prompt,
     _parse_edits_from_response,
 )
@@ -169,7 +170,7 @@ class TestGenerateEdits:
     ) -> None:
         mock_adapter.complete.side_effect = Exception("model error")
         evolver = Evolver()
-        with pytest.raises(EvolverGenerationError, match="generation failed after"):
+        with pytest.raises(EvolverLLMError, match="generation failed after"):
             await evolver.generate_edits(mock_adapter, tmp_path, failure_report, max_retries=2)
 
     @pytest.mark.asyncio
