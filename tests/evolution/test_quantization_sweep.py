@@ -9,9 +9,11 @@ from foundry_x.evolution.critic import (
     QuantizationResult,
     QuantizationVerdict,
     DEFAULT_REGRESSION_THRESHOLD_PP,
+    TaskResult,
 )
 from foundry_x.evolution.cli import (
     _build_sweep_parser,
+    _build_sweep_subparser,
     _render_quantization_result,
     _render_quantization_verdict,
     sweep_main,
@@ -89,6 +91,65 @@ class TestQuantizationResult:
         assert r.cost_per_task == 0.001
         assert r.total_tokens == 8000
         assert r.avg_cycle_time_s == 20.0
+
+
+class TestTaskResult:
+    def test_required_fields(self):
+        t = TaskResult(name="test_two_sum", passed=True)
+        assert t.name == "test_two_sum"
+        assert t.passed is True
+
+    def test_failed_task(self):
+        t = TaskResult(name="test_fix_syntax_error", passed=False)
+        assert t.name == "test_fix_syntax_error"
+        assert t.passed is False
+
+    def test_round_trips_through_pydantic(self):
+        t = TaskResult(name="test_sort_a_list", passed=True)
+        assert TaskResult.model_validate(t.model_dump()) == t
+
+
+class TestQuantizationResultWithTaskResults:
+    def test_task_results_field(self):
+        task_results = [
+            TaskResult(name="test_two_sum", passed=True),
+            TaskResult(name="test_sort_a_list", passed=False),
+        ]
+        r = QuantizationResult(
+            quantization="Q4_K_S",
+            model_path="/srv/models/test.Q4_K_S.gguf",
+            model_id="Q4_K_S",
+            total_tasks=2,
+            passed_tasks=1,
+            failed_tasks=1,
+            task_results=task_results,
+        )
+        assert len(r.task_results) == 2
+        assert r.task_results[0].name == "test_two_sum"
+        assert r.task_results[0].passed is True
+        assert r.task_results[1].name == "test_sort_a_list"
+        assert r.task_results[1].passed is False
+
+    def test_task_results_default_empty(self):
+        r = QuantizationResult(
+            quantization="Q5_K_M",
+            model_path="/srv/models/test.Q5_K_M.gguf",
+            model_id="Q5_K_M",
+        )
+        assert r.task_results == []
+
+    def test_task_results_round_trip(self):
+        task_results = [
+            TaskResult(name="test_two_sum", passed=True),
+            TaskResult(name="test_fix_syntax_error", passed=True),
+        ]
+        r = QuantizationResult(
+            quantization="Q8_0",
+            model_path="/srv/models/test.Q8_0.gguf",
+            model_id="Q8_0",
+            task_results=task_results,
+        )
+        assert QuantizationResult.model_validate(r.model_dump()) == r
 
 
 class TestQuantizationVerdict:
@@ -302,3 +363,99 @@ class TestSweepMainModelNotFound:
 class TestSweepDefaultThreshold:
     def test_default_threshold_is_2pp(self):
         assert DEFAULT_REGRESSION_THRESHOLD_PP == 2.0
+
+
+class TestExtractTaskName:
+    def test_extracts_parametrized_test_name(self):
+        from foundry_x.evolution.critic import Critic
+
+        critic = Critic(harness_dir=Path("/tmp/nonexistent"))
+        line = "benchmarks/tasks/test_two_sum.py::test_two_sum[basic] PASSED"
+        assert critic._extract_task_name(line) == "test_two_sum"
+
+    def test_extracts_simple_test_name(self):
+        from foundry_x.evolution.critic import Critic
+
+        critic = Critic(harness_dir=Path("/tmp/nonexistent"))
+        line = "benchmarks/tasks/test_smoke.py::test_smoke PASSED"
+        assert critic._extract_task_name(line) == "test_smoke"
+
+    def test_extracts_failed_test(self):
+        from foundry_x.evolution.critic import Critic
+
+        critic = Critic(harness_dir=Path("/tmp/nonexistent"))
+        line = "benchmarks/tasks/test_fix_syntax_error.py::test_fix_syntax_error FAILED"
+        assert critic._extract_task_name(line) == "test_fix_syntax_error"
+
+    def test_returns_none_for_non_test_line(self):
+        from foundry_x.evolution.critic import Critic
+
+        critic = Critic(harness_dir=Path("/tmp/nonexistent"))
+        line = "=== 5 passed ==="
+        assert critic._extract_task_name(line) is None
+
+    def test_returns_none_for_empty_line(self):
+        from foundry_x.evolution.critic import Critic
+
+        critic = Critic(harness_dir=Path("/tmp/nonexistent"))
+        assert critic._extract_task_name("") is None
+
+
+class TestSweepOutputFlag:
+    def test_output_flag_in_parser(self):
+        parser = _build_sweep_parser()
+        args = parser.parse_args(
+            [
+                "--quantizations",
+                "Q4_K_S",
+                "--harness-dir",
+                "/tmp/harness",
+                "--output",
+                "logs/quantization_results.json",
+            ]
+        )
+        assert args.output == "logs/quantization_results.json"
+
+    def test_output_flag_default_none(self):
+        parser = _build_sweep_parser()
+        args = parser.parse_args(
+            [
+                "--quantizations",
+                "Q4_K_S",
+                "--harness-dir",
+                "/tmp/harness",
+            ]
+        )
+        assert args.output is None
+
+    def test_output_flag_in_subparser(self):
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        _build_sweep_subparser(parser)
+        args = parser.parse_args(
+            [
+                "--quantizations",
+                "Q4_K_S,Q5_K_M",
+                "--harness-dir",
+                "/tmp/harness",
+                "--output",
+                "logs/quantization_results.json",
+            ]
+        )
+        assert args.output == "logs/quantization_results.json"
+
+    def test_output_flag_default_none_in_subparser(self):
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        _build_sweep_subparser(parser)
+        args = parser.parse_args(
+            [
+                "--quantizations",
+                "Q4_K_S",
+                "--harness-dir",
+                "/tmp/harness",
+            ]
+        )
+        assert args.output is None

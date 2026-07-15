@@ -16,6 +16,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -366,6 +367,16 @@ def _build_sweep_parser() -> argparse.ArgumentParser:
             "Can also be set via FOUNDRY_COST_PER_TOKEN environment variable."
         ),
     )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        dest="output",
+        help=(
+            "Path to write the quantization verdict as JSON. "
+            "If not specified, results are not persisted to disk."
+        ),
+    )
     return parser
 
 
@@ -534,6 +545,16 @@ def _build_sweep_subparser(parser: argparse.ArgumentParser) -> None:
             "Can also be set via FOUNDRY_COST_PER_TOKEN environment variable."
         ),
     )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        dest="output",
+        help=(
+            "Path to write the quantization verdict as JSON. "
+            "If not specified, results are not persisted to disk."
+        ),
+    )
 
 
 def _main_evolve(args: argparse.Namespace) -> int:
@@ -576,6 +597,12 @@ def _main_sweep(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
 
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(verdict.model_dump(mode="json"), indent=2))
+        print(f"Results written to {output_path}", file=sys.stderr)
+
     print(_render_quantization_verdict(verdict))
     return 0 if not verdict.regression else 1
 
@@ -615,6 +642,12 @@ def sweep_main(argv: list[str] | None = None) -> int:
     except (ValueError, FileNotFoundError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
+
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(verdict.model_dump(mode="json"), indent=2))
+        print(f"Results written to {output_path}", file=sys.stderr)
 
     print(_render_quantization_verdict(verdict))
     return 0 if not verdict.regression else 1

@@ -71,6 +71,13 @@ class CriticVerdict(BaseModel):
     notes: str = ""
 
 
+class TaskResult(BaseModel):
+    """Per-task pass/fail result within a quantization sweep (issue #495)."""
+
+    name: str
+    passed: bool
+
+
 class QuantizationResult(BaseModel):
     """Per-quantization benchmark result (ADR-0016)."""
 
@@ -97,6 +104,13 @@ class QuantizationResult(BaseModel):
             "Estimated cost per completed task in dollars. Computed as "
             "(total_tokens * cost_per_token) / passed_tasks when both are available. "
             "Requires FOUNDRY_COST_PER_TOKEN or cost_per_token argument to be set."
+        ),
+    )
+    task_results: list[TaskResult] = Field(
+        default_factory=list,
+        description=(
+            "Per-task pass/fail breakdown for this quantization. Enables "
+            "comparable success rates across quantizations (issue #495)."
         ),
     )
 
@@ -309,8 +323,10 @@ class Critic:
         failed = 0
         task_shaped = 0
         total = 0
+        task_results: list[TaskResult] = []
 
-        for line in (result.stdout or "").splitlines():
+        output_lines = (result.stdout or "").splitlines()
+        for line in output_lines:
             if " passed" in line:
                 parts = line.split()
                 for i, p in enumerate(parts):
@@ -330,6 +346,17 @@ class Critic:
                             break
                         except (IndexError, ValueError):
                             pass
+
+            stripped = line.strip()
+            if " PASSED" in stripped or " FAILED" in stripped:
+                task_name = self._extract_task_name(stripped)
+                if task_name:
+                    task_results.append(
+                        TaskResult(
+                            name=task_name,
+                            passed="PASSED" in stripped,
+                        )
+                    )
 
         if passed + failed > 0:
             total = passed + failed
@@ -360,7 +387,23 @@ class Critic:
             avg_cycle_time_s=avg_cycle_time_s,
             token_efficiency=token_efficiency,
             cost_per_task=cost_per_task,
+            task_results=task_results,
         )
+
+    def _extract_task_name(self, line: str) -> str | None:
+        """Extract task name from a pytest verbose output line.
+
+        Handles formats:
+        - test_file.py::test_name[case] PASSED
+        - test_file.py::test_name PASSED
+        """
+        import re
+
+        pattern = r"::(test_\w+)"
+        match = re.search(pattern, line)
+        if match:
+            return match.group(1)
+        return None
 
     def evaluate(self, proposed_diff: str) -> CriticVerdict:
         """Apply ``proposed_diff`` to a sandbox copy of the harness and gate it.
