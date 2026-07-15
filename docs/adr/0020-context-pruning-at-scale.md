@@ -1,4 +1,4 @@
-# ADR-0019: Context pruning at scale — Phase 3 findings
+# ADR-0020: Context pruning at scale — Phase 3 findings
 
 ## Status
 
