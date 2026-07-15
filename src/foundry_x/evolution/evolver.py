@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import json
+import random
 import re
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
 PROPOSED_EDIT_KIND: str = "proposed_edit"
 REVIEW_STATE_TRANSITION_KIND: str = "review_state_transition"
 GENERATION_ATTEMPT_KIND: str = "generation_attempt"
+GENERATION_EXHAUSTED_KIND: str = "generation_exhausted"
 
 # Sliding window for the rate limiter. One hour matches the SECURITY.md
 # "max N proposals per hour" guardrail.
@@ -52,6 +54,16 @@ _HARNESS_SUBDIRS = frozenset({"hooks", "skills"})
 
 class EvolverGenerationError(Exception):
     """Raised when ProposedEdit generation fails after all retries."""
+
+
+class EvolverLLMError(Exception):
+    """Raised when an LLM call fails or returns invalid output after all retries.
+
+    This exception wraps LLM-specific failures including:
+    - Model API errors and rate limits
+    - Malformed JSON responses
+    - Invalid ProposedEdit objects from LLM output
+    """
 
 
 class GenerationAttemptEvent(BaseModel):
@@ -315,6 +327,20 @@ def _normalize_relative_parts(parts: tuple[str, ...]) -> tuple[str, ...] | None:
             continue
         stack.append(part)
     return tuple(stack)
+
+
+def _jittered_backoff(attempt: int, base: float = 0.5, max_jitter: float = 0.5) -> float:
+    """Exponential backoff with jitter for LLM retry logic.
+
+    Args:
+        attempt: 1-based attempt number
+        base: base delay in seconds (default 0.5)
+        max_jitter: maximum jitter to add in seconds (default 0.5)
+
+    Returns:
+        Delay in seconds with random jitter
+    """
+    return base * attempt + random.uniform(0, max_jitter * attempt)
 
 
 def _confine_to_harness_tree(raw: str) -> str:
@@ -810,6 +836,26 @@ class Evolver:
                 event.model_dump(mode="json"),
             )
 
+    def _record_generation_exhausted(
+        self,
+        max_retries: int,
+        final_error: str,
+    ) -> None:
+        """Log when all generation retries have been exhausted (issue #532).
+
+        Records a trace event indicating that the LLM failed to produce valid
+        ProposedEdit objects after all retry attempts.
+        """
+        if self._trace_logger is not None and self._session_id is not None:
+            self._trace_logger.record(
+                self._session_id,
+                GENERATION_EXHAUSTED_KIND,
+                {
+                    "max_retries": max_retries,
+                    "final_error": final_error,
+                },
+            )
+
     async def generate_edits(
         self,
         adapter: ModelAdapter,
@@ -838,6 +884,12 @@ class Evolver:
 
         for attempt in range(1, max_retries + 1):
             try:
+                self._check_llm_rate_limit()
+            except EvolverGuardError:
+                raise EvolverLLMError("LLM rate limit exceeded before attempt") from None
+
+            self.record_llm_call()
+            try:
                 response = await adapter.complete(messages)
             except Exception as exc:  # noqa: BLE001
                 self._record_generation_attempt(
@@ -845,10 +897,11 @@ class Evolver:
                     error=f"model call failed: {exc}",
                 )
                 if attempt == max_retries:
-                    raise EvolverGenerationError(
+                    self._record_generation_exhausted(max_retries, f"model call failed: {exc}")
+                    raise EvolverLLMError(
                         f"generation failed after {max_retries} attempts: {exc}"
                     ) from exc
-                await asyncio.sleep(0.5 * attempt)
+                await asyncio.sleep(_jittered_backoff(attempt))
                 continue
 
             text = response.message.content or ""
@@ -861,16 +914,21 @@ class Evolver:
                     model_response_excerpt=text,
                 )
                 if attempt == max_retries:
-                    raise
-                await asyncio.sleep(0.5 * attempt)
+                    self._record_generation_exhausted(max_retries, str(exc))
+                    raise EvolverLLMError(
+                        f"generation failed after {max_retries} attempts: {exc}"
+                    ) from exc
+                await asyncio.sleep(_jittered_backoff(attempt))
                 continue
 
             validated: list[ProposedEdit] = []
+            validation_errors: list[str] = []
             for edit in edits:
                 try:
                     self._validate_edit(edit)
                     validated.append(edit)
                 except EvolverGuardError as exc:
+                    validation_errors.append(str(exc))
                     self._record_generation_attempt(
                         attempt=attempt,
                         error=f"edit validation failed: {exc}",
@@ -882,9 +940,13 @@ class Evolver:
                 return validated
 
             if attempt == max_retries:
-                raise EvolverGenerationError(
-                    f"no valid ProposedEdit objects after {max_retries} attempts"
+                error_summary = (
+                    "; ".join(validation_errors) if validation_errors else "no valid edits"
                 )
-            await asyncio.sleep(0.5 * attempt)
+                self._record_generation_exhausted(max_retries, error_summary)
+                raise EvolverLLMError(
+                    f"no valid ProposedEdit objects after {max_retries} attempts: {error_summary}"
+                )
+            await asyncio.sleep(_jittered_backoff(attempt))
 
         return []

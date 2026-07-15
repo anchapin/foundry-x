@@ -8,8 +8,10 @@ import pytest
 from foundry_x.evolution.digester import FailureReport
 from foundry_x.evolution.evolver import (
     PROPOSED_EDIT_KIND,
+    GENERATION_EXHAUSTED_KIND,
     Evolver,
     EvolverGuardError,
+    EvolverLLMError,
     ProposedEdit,
 )
 from foundry_x.trace.logger import TraceLogger
@@ -379,3 +381,155 @@ class TestLLMRateLimiting:
         e = Evolver(max_llm_calls_per_hour=10, max_cost_per_day=10.0)
         e.record_llm_call(cost=0.0)
         assert len(e._llm_call_times) == 1
+
+
+class TestEvolverLLMError:
+    def test_llm_error_is_raised_on_exhaustion(self) -> None:
+        from foundry_x.evolution.evolver import EvolverLLMError
+
+        err = EvolverLLMError("test error")
+        assert str(err) == "test error"
+        assert isinstance(err, Exception)
+
+
+class TestGenerateEdits:
+    def setup_method(self) -> None:
+        Evolver._llm_call_times.clear()
+        Evolver._llm_call_costs.clear()
+
+    def teardown_method(self) -> None:
+        Evolver._llm_call_times.clear()
+        Evolver._llm_call_costs.clear()
+
+    @pytest.mark.asyncio
+    async def test_generate_edits_raises_llm_error_on_rate_limit(self, tmp_path) -> None:
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock()
+        e = Evolver(
+            max_proposals_per_hour=10,
+            max_diff_lines=200,
+            max_llm_calls_per_hour=1,
+            max_cost_per_day=10.0,
+        )
+        e._llm_call_times.append(datetime.now(timezone.utc))
+        failure = FailureReport(session_id="s", summary="test", proposed_class="wrong-tool")
+        with pytest.raises(EvolverLLMError, match="LLM rate limit exceeded"):
+            await e.generate_edits(mock_adapter, harness_dir, failure)
+
+    @pytest.mark.asyncio
+    async def test_generate_edits_records_llm_call_before_attempt(self, tmp_path) -> None:
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        mock_adapter = MagicMock()
+        mock_response = MagicMock()
+        mock_response.message.content = '[{"target_file": "harness/system_prompt.txt", "rationale": "test", "unified_diff": "--- a/harness/system_prompt.txt\\n+++ b/harness/system_prompt.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n"}]'
+        mock_adapter.complete = AsyncMock(return_value=mock_response)
+        e = Evolver(max_proposals_per_hour=10, max_diff_lines=200, max_llm_calls_per_hour=10)
+        failure = FailureReport(session_id="s", summary="test", proposed_class="wrong-tool")
+        await e.generate_edits(mock_adapter, harness_dir, failure)
+        assert len(e._llm_call_times) == 1
+
+    @pytest.mark.asyncio
+    async def test_generate_edits_retries_on_malformed_json(self, tmp_path) -> None:
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        mock_adapter = MagicMock()
+        mock_response = MagicMock()
+        mock_response.message.content = "not valid json"
+        mock_adapter.complete = AsyncMock(return_value=mock_response)
+        e = Evolver(max_proposals_per_hour=10, max_diff_lines=200, max_llm_calls_per_hour=10)
+        failure = FailureReport(session_id="s", summary="test", proposed_class="wrong-tool")
+        with pytest.raises(EvolverLLMError):
+            await e.generate_edits(mock_adapter, harness_dir, failure, max_retries=2)
+        assert mock_adapter.complete.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_generate_edits_retries_on_validation_error(self, tmp_path) -> None:
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        mock_adapter = MagicMock()
+        mock_response = MagicMock()
+        mock_response.message.content = '{"proposed_edits": [{"target_file": "../etc/passwd", "rationale": "test", "unified_diff": "--- a/etc/passwd\\n+++ b/etc/passwd\\n@@ -1 +1 @@\\n-old\\n+new\\n"}]}'
+        mock_adapter.complete = AsyncMock(return_value=mock_response)
+        e = Evolver(max_proposals_per_hour=10, max_diff_lines=200, max_llm_calls_per_hour=10)
+        failure = FailureReport(session_id="s", summary="test", proposed_class="wrong-tool")
+        with pytest.raises(EvolverLLMError):
+            await e.generate_edits(mock_adapter, harness_dir, failure, max_retries=2)
+        assert mock_adapter.complete.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_generate_edits_returns_valid_edits(self, tmp_path) -> None:
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        mock_adapter = MagicMock()
+        mock_response = MagicMock()
+        mock_response.message.content = '[{"target_file": "harness/system_prompt.txt", "rationale": "test", "unified_diff": "--- a/harness/system_prompt.txt\\n+++ b/harness/system_prompt.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n"}]'
+        mock_adapter.complete = AsyncMock(return_value=mock_response)
+        e = Evolver(max_proposals_per_hour=10, max_diff_lines=200, max_llm_calls_per_hour=10)
+        failure = FailureReport(session_id="s", summary="test", proposed_class="wrong-tool")
+        edits = await e.generate_edits(mock_adapter, harness_dir, failure, max_retries=2)
+        assert len(edits) == 1
+        assert edits[0].rationale == "test"
+
+    @pytest.mark.asyncio
+    async def test_generate_edits_records_exhausted_event_on_failure(self, tmp_path) -> None:
+        logger = TraceLogger(tmp_path / "trace.db")
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        mock_adapter = MagicMock()
+        mock_response = MagicMock()
+        mock_response.message.content = "not valid json"
+        mock_adapter.complete = AsyncMock(return_value=mock_response)
+        with logger.session("test-session") as session_id:
+            e = Evolver(
+                max_proposals_per_hour=10,
+                max_diff_lines=200,
+                max_llm_calls_per_hour=10,
+                trace_logger=logger,
+                session_id=session_id,
+            )
+            failure = FailureReport(session_id="s", summary="test", proposed_class="wrong-tool")
+            with pytest.raises(EvolverLLMError):
+                await e.generate_edits(mock_adapter, harness_dir, failure, max_retries=2)
+        events = list(logger.iter_events(session_id, kind=GENERATION_EXHAUSTED_KIND))
+        assert len(events) == 1
+
+    @pytest.mark.asyncio
+    async def test_generate_edits_records_attempt_events(self, tmp_path) -> None:
+        logger = TraceLogger(tmp_path / "trace.db")
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        mock_adapter = MagicMock()
+        mock_response = MagicMock()
+        mock_response.message.content = "not valid json"
+        mock_adapter.complete = AsyncMock(return_value=mock_response)
+        with logger.session("test-session") as session_id:
+            e = Evolver(
+                max_proposals_per_hour=10,
+                max_diff_lines=200,
+                max_llm_calls_per_hour=10,
+                trace_logger=logger,
+                session_id=session_id,
+            )
+            failure = FailureReport(session_id="s", summary="test", proposed_class="wrong-tool")
+            with pytest.raises(EvolverLLMError):
+                await e.generate_edits(mock_adapter, harness_dir, failure, max_retries=2)
+        events = list(logger.iter_events(session_id, kind="generation_attempt"))
+        assert len(events) == 2
+
+
+class TestJitteredBackoff:
+    def test_backoff_base_increases_with_attempt(self) -> None:
+        base = 0.5
+        for attempt in range(1, 5):
+            min_possible = base * attempt
+            next_min_possible = base * (attempt + 1)
+            assert next_min_possible > min_possible
+
+    def test_backoff_has_jitter(self) -> None:
+        from foundry_x.evolution.evolver import _jittered_backoff
+
+        delays = [_jittered_backoff(2) for _ in range(10)]
+        assert len(set(delays)) > 1

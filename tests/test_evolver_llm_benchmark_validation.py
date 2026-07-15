@@ -28,7 +28,7 @@ from foundry_x.evolution.evolver import (
     GENERATION_ATTEMPT_KIND,
     PROPOSED_EDIT_KIND,
     Evolver,
-    EvolverGenerationError,
+    EvolverLLMError,
     ProposedEdit,
 )
 from foundry_x.trace.logger import TraceLogger
@@ -331,7 +331,7 @@ class TestLlmEvolverTraceEventsRecorded:
                 summary="gen attempt failure test",
                 proposed_class="tool-error",
             )
-            with pytest.raises(EvolverGenerationError):
+            with pytest.raises(EvolverLLMError):
                 await evolver.generate_edits(mock_adapter, harness, failure=failure, max_retries=2)
 
         events = list(logger.iter_events(session_id, kind=GENERATION_ATTEMPT_KIND))
@@ -365,7 +365,7 @@ class TestLlmEvolverTraceEventsRecorded:
                 summary="invalid llm output test",
                 proposed_class="wrong-tool",
             )
-            with pytest.raises(EvolverGenerationError):
+            with pytest.raises(EvolverLLMError):
                 await evolver.generate_edits(mock_adapter, harness, failure=failure, max_retries=1)
 
         events = list(logger.iter_events(session_id, kind=GENERATION_ATTEMPT_KIND))
@@ -441,7 +441,7 @@ class TestLlmEvolverPerformance:
             proposed_class="tool-error",
         )
 
-        with pytest.raises(EvolverGenerationError, match="transient error"):
+        with pytest.raises(EvolverLLMError, match="transient error"):
             await evolver.generate_edits(
                 adapter=mock_adapter,
                 harness_dir=harness,
