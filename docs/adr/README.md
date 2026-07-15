@@ -30,5 +30,6 @@ format and process.
 | [0016](./0016-phase-3-quantization-sweep.md) | Phase 3 quantization sweep | Proposed |
 | [0017](./0017-review-state-machine.md) | Review State Machine for ProposedEdits | Accepted |
 | [0018](./0018-evolver-meta-prompt-design.md) | Evolver meta-prompt design | Accepted |
+| [0019](./0019-quantization-intelligence-floor.md) | Quantization intelligence floor findings | Proposed |
 
 When adding a new ADR, append it to this table in the same PR.
