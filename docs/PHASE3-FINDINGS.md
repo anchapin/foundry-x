@@ -216,4 +216,5 @@ to 6144 to account for reduced context capacity.
 - [Issue #541](https://github.com/anchapin/foundry-x/issues/541): Run foundry-sweep on RX 6600 XT
 - `docs/adr/0019-quantization-intelligence-floor.md`: Full ADR with quantization tradeoffs
 - `docs/adr/0016-phase-3-quantization-sweep.md`: `Critic.quantization_sweep()` design
+- `docs/adr/0020-context-pruning-at-scale.md`: Context pruning at scale findings (issue #553)
 - `logs/run-sweep-rx6600xt.sh`: Sweep automation script
