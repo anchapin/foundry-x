@@ -117,24 +117,27 @@ def _render_quantization_result(result: QuantizationResult) -> str:
     """Render a single QuantizationResult as a table row."""
     pass_rate_pct = result.pass_rate * 100
     avg_time = f"{result.avg_cycle_time_s:.1f}s" if result.avg_cycle_time_s else "N/A"
+    token_eff = f"{result.token_efficiency:.1f}" if result.token_efficiency else "N/A"
+    cost = f"${result.cost_per_task:.4f}" if result.cost_per_task else "N/A"
     return (
         f"  {result.quantization:<15} | {pass_rate_pct:>6.1f}% | "
         f"{avg_time:>8} | {result.total_tokens:>10} | "
-        f"{result.model_id}"
+        f"{token_eff:>8} | {cost:>10} | {result.model_id}"
     )
 
 
 def _render_quantization_verdict(verdict: QuantizationVerdict) -> str:
     """Render a QuantizationVerdict as a comparison table."""
-    lines = ["Quantization Sweep Results", "=" * 70]
+    lines = ["Quantization Sweep Results", "=" * 90]
     header = (
-        f"  {'Quantization':<15} | {'Pass Rate':>9} | {'Avg Cycle':>10} | {'Tokens':>10} | Model ID"
+        f"  {'Quantization':<15} | {'Pass Rate':>9} | {'Avg Cycle':>10} | "
+        f"{'Tokens':>10} | {'Tok/s':>8} | {'Cost/Task':>10} | Model ID"
     )
     lines.append(header)
-    lines.append("-" * 70)
+    lines.append("-" * 90)
     for result in verdict.quantizations:
         lines.append(_render_quantization_result(result))
-    lines.append("=" * 70)
+    lines.append("=" * 90)
     reg_status = "REGRESSION DETECTED" if verdict.regression else "No regression"
     lines.append(f"Recommended: {verdict.recommended}  [{reg_status}]")
     return "\n".join(lines)
@@ -354,6 +357,15 @@ def _build_sweep_parser() -> argparse.ArgumentParser:
             "considered non-regressing (default: 2.0)."
         ),
     )
+    parser.add_argument(
+        "--cost-per-token",
+        type=float,
+        default=None,
+        help=(
+            "Cost per token in USD for cost-per-task computation. "
+            "Can also be set via FOUNDRY_COST_PER_TOKEN environment variable."
+        ),
+    )
     return parser
 
 
@@ -513,6 +525,15 @@ def _build_sweep_subparser(parser: argparse.ArgumentParser) -> None:
         default=2.0,
         help=("Regression threshold in percentage points (default: 2.0)."),
     )
+    parser.add_argument(
+        "--cost-per-token",
+        type=float,
+        default=None,
+        help=(
+            "Cost per token in USD for cost-per-task computation. "
+            "Can also be set via FOUNDRY_COST_PER_TOKEN environment variable."
+        ),
+    )
 
 
 def _main_evolve(args: argparse.Namespace) -> int:
@@ -549,6 +570,7 @@ def _main_sweep(args: argparse.Namespace) -> int:
             quantizations=quantizations,
             baseline_quantization=args.baseline,
             regression_threshold_pp=args.regression_threshold,
+            cost_per_token=args.cost_per_token,
         )
     except (ValueError, FileNotFoundError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
@@ -588,6 +610,7 @@ def sweep_main(argv: list[str] | None = None) -> int:
             quantizations=quantizations,
             baseline_quantization=args.baseline,
             regression_threshold_pp=args.regression_threshold,
+            cost_per_token=args.cost_per_token,
         )
     except (ValueError, FileNotFoundError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
