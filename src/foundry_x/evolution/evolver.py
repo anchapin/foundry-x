@@ -936,7 +936,8 @@ class Evolver:
                     )
 
             if validated:
-                self._record_proposals(count=len(validated))
+                for edit in validated:
+                    self._record_proposals(edit=edit)
                 return validated
 
             if attempt == max_retries:
