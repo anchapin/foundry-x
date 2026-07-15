@@ -59,6 +59,9 @@ from foundry_x.evolution.digester import INJECTION_BLOCKED_KIND
 from foundry_x.observability.regression_report import VerdictRecord
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
+TASK_ABORTED_KIND = "task_aborted"
+TOKEN_BUDGET_REASON = "token_budget"
+
 
 class KpiSummary(BaseModel):
     """Structured summary of the three PRD KPIs.
@@ -81,6 +84,11 @@ class KpiSummary(BaseModel):
     that recorded at least one ``task_aborted(reason="token_budget")``
     event. Surfaced as an auxiliary operator signal alongside
     ``injection_blocks`` and ``token_totals``.
+
+    Issue #551 adds ``token_budget_hit_rate``: the fraction of sessions
+    that recorded at least one ``task_aborted(reason="token_budget")``
+    event. This is a fourth tracked metric exposed via ``foundry-kpis``
+    and the regression report, alongside the three PRD KPIs.
     """
 
     cycle_time_seconds: float | None = None
@@ -89,6 +97,7 @@ class KpiSummary(BaseModel):
     injection_blocks: dict[str, int] = {}
     token_totals: dict[str, int] = {}
     token_budget_abort_count: int = 0
+    token_budget_hit_rate: float = 0.0
 
 
 class KpiComparison(BaseModel):
@@ -132,10 +141,6 @@ class KpiHistoryEntry(BaseModel):
     injection_blocks: dict[str, int] = {}
 
 
-TASK_ABORTED_KIND = "task_aborted"
-TOKEN_BUDGET_REASON = "token_budget"
-
-
 def compute_kpis(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -163,6 +168,7 @@ def compute_kpis(
     injection_blocks = _injection_blocks(logger, harness_version=harness_version)
     token_totals = _token_totals(logger, harness_version=harness_version)
     token_budget_abort_count = _token_budget_aborts(logger, harness_version=harness_version)
+    token_budget_hit_rate = _token_budget_hit_rate(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -171,6 +177,7 @@ def compute_kpis(
         injection_blocks=injection_blocks,
         token_totals=token_totals,
         token_budget_abort_count=token_budget_abort_count,
+        token_budget_hit_rate=token_budget_hit_rate,
     )
 
 
@@ -209,6 +216,9 @@ def _compute_deltas(
         "cycle_time_seconds": _delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds),
         "regression_rate": _delta(baseline.regression_rate, candidate.regression_rate),
         "improvement_rate": _delta(baseline.improvement_rate, candidate.improvement_rate),
+        "token_budget_hit_rate": _delta(
+            baseline.token_budget_hit_rate, candidate.token_budget_hit_rate
+        ),
     }
 
 
@@ -350,7 +360,7 @@ def _token_totals(
         kind="model_response",
         harness_version=harness_version,
     ):
-        usage = event.payload.get("token_usage")
+        usage = event.payload.get("usage")
         if not isinstance(usage, dict):
             continue
         step_total = usage.get("total_tokens", 0)
@@ -384,6 +394,39 @@ def _token_budget_aborts(
         if event.payload.get("reason") == TOKEN_BUDGET_REASON:
             sessions_with_abort.add(event.session_id)
     return len(sessions_with_abort)
+
+
+def _token_budget_hit_rate(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> float:
+    """Fraction of sessions with at least one ``task_aborted(reason="token_budget")`` event.
+
+    Issue #551 — the token budget hit rate is a fourth tracked metric
+    exposed via ``foundry-kpis`` alongside the three PRD KPIs. It signals
+    whether the harness is driving tasks that repeatedly hit the token
+    budget, which would indicate the context-pruning hook is not aggressive
+    enough, or that the model-context window is being misspent.
+
+    A session contributes to the numerator if it has at least one
+    ``task_aborted`` event whose ``payload["reason"] == "token_budget"``.
+    The denominator is the total number of sessions that have a
+    ``task_received`` event (matching the harness version filter), which
+    is the natural population boundary for the KPI.
+    """
+    sessions_with_abort: set[str] = set()
+    all_sessions: set[str] = set()
+
+    for event in logger.query_events(kind="task_received", harness_version=harness_version):
+        all_sessions.add(event.session_id)
+
+    for event in logger.query_events(kind="task_aborted", harness_version=harness_version):
+        if event.payload.get("reason") == "token_budget":
+            sessions_with_abort.add(event.session_id)
+
+    if not all_sessions:
+        return 0.0
+    return len(sessions_with_abort) / len(all_sessions)
 
 
 def _format_value(value: float | None) -> str:
@@ -424,6 +467,7 @@ def _render_markdown(summary: KpiSummary) -> str:
         f"| Cycle Time (seconds) | {_format_value(summary.cycle_time_seconds)} |",
         f"| Regression Rate | {_format_value(summary.regression_rate)} |",
         f"| Improvement Rate | {_format_value(summary.improvement_rate)} |",
+        f"| Token Budget Hit Rate | {_format_value(summary.token_budget_hit_rate)} |",
     ]
     # Issue #120: surface per-session ``injection_blocked`` counts only when
     # at least one session has ≥1 block; a clean trace store stays compact.
@@ -454,7 +498,6 @@ def _render_markdown(summary: KpiSummary) -> str:
         lines.append("| --- | --- |")
         for sid, count in sorted(summary.token_totals.items()):
             lines.append(f"| {sid} | {count} |")
-    # Issue #466: surface token budget abort count when at least one session hit it.
     if summary.token_budget_abort_count > 0:
         lines.append("")
         lines.append(
@@ -506,6 +549,10 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{_format_value(baseline.improvement_rate)} | "
         f"{_format_value(candidate.improvement_rate)} | "
         f"{_format_delta(baseline.improvement_rate, candidate.improvement_rate, higher_is_better=True)} |",
+        "| Token Budget Hit Rate | "
+        f"{_format_value(baseline.token_budget_hit_rate)} | "
+        f"{_format_value(candidate.token_budget_hit_rate)} | "
+        f"{_format_delta(baseline.token_budget_hit_rate, candidate.token_budget_hit_rate, higher_is_better=False)} |",
     ]
     return "\n".join(lines)
 
@@ -609,6 +656,72 @@ def render_history_markdown(entries: Sequence[KpiHistoryEntry]) -> str:
             f"{_format_value(entry.improvement_rate)} |"
         )
     return "\n".join(lines)
+
+
+def _resolve_format(args_format: str | None, out: str | None) -> str:
+    """Return ``"markdown"`` or ``"json"``.
+
+    The explicit ``--format`` flag always wins. When unset, the format is
+    inferred from the ``--out`` file extension (``.json`` → JSON);
+    otherwise Markdown is returned. Issue #101 keeps the decision local to
+    the CLI layer so the pydantic model remains the single source of truth.
+    """
+    if args_format is not None:
+        return args_format
+    if out is not None and Path(out).suffix.lower() == ".json":
+        return "json"
+    return "markdown"
+
+
+def _render_json(summary: KpiSummary) -> str:
+    """Serialize a KPI summary as a stable JSON snapshot (issue #101)."""
+    return summary.model_dump_json(indent=2)
+
+
+def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> str:
+    """Render baseline / candidate / delta columns for the three PRD KPIs.
+
+    Issue #100 requires the comparison to surface a delta column whose
+    sign convention follows the PRD: improvement-rate up is good,
+    regression-rate and cycle-time up are bad.
+    """
+    lines = [
+        "| KPI | Baseline | Candidate | Delta |",
+        "| --- | --- | --- | --- |",
+        "| Cycle Time (seconds) | "
+        f"{_format_value(baseline.cycle_time_seconds)} | "
+        f"{_format_value(candidate.cycle_time_seconds)} | "
+        f"{_format_delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds, higher_is_better=False)} |",
+        "| Regression Rate | "
+        f"{_format_value(baseline.regression_rate)} | "
+        f"{_format_value(candidate.regression_rate)} | "
+        f"{_format_delta(baseline.regression_rate, candidate.regression_rate, higher_is_better=False)} |",
+        "| Improvement Rate | "
+        f"{_format_value(baseline.improvement_rate)} | "
+        f"{_format_value(candidate.improvement_rate)} | "
+        f"{_format_delta(baseline.improvement_rate, candidate.improvement_rate, higher_is_better=True)} |",
+        "| Token Budget Hit Rate | "
+        f"{_format_value(baseline.token_budget_hit_rate)} | "
+        f"{_format_value(candidate.token_budget_hit_rate)} | "
+        f"{_format_delta(baseline.token_budget_hit_rate, candidate.token_budget_hit_rate, higher_is_better=False)} |",
+    ]
+    return "\n".join(lines)
+
+
+def _render_comparison_json(comparison: KpiComparison) -> str:
+    """Serialize a baseline-vs-candidate comparison as JSON (issue #100)."""
+    return comparison.model_dump_json(indent=2)
+
+
+def _now_iso() -> str:
+    """Return a UTC ISO-8601 timestamp with offset suffix.
+
+    Issue #183 uses this to stamp each appended history row. The
+    timezone-aware form keeps the line unambiguous when CI runs
+    across multiple regions; ``datetime.fromisoformat`` (Python 3.11+)
+    accepts the ``+00:00`` suffix without modification.
+    """
+    return datetime.now(timezone.utc).isoformat()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -81,6 +81,30 @@ many times per day against a benchmark suite.
   root cause; consumed by the `Evolver` as the basis for a
   `ProposedEdit`.
 
+## KPIs
+
+The FoundryX KPIs are the project's definition of progress (PRD §5).
+Canonical implementations live in `src/foundry_x/observability/kpis.py`.
+
+The three PRD KPIs cannot move until the Runner and Critic are in place
+(ADR-0010).
+
+- **Cycle Time** — mean wall-clock time from the first `task_received`
+  event to the first `critic_verdict` event per session.
+- **Regression Rate** — fraction of sessions with a `critic_verdict` in which
+  a task previously seen in `passed_checks` later appears in `failed_checks`.
+- **Improvement Rate** — fraction of `critic_verdict` events whose
+  persisted payload has `approved: true`.
+
+A fourth tracked metric is also exposed via `foundry-kpis` alongside the
+three PRD KPIs:
+
+- **Token Budget Hit Rate** — fraction of sessions that recorded at least
+  one `task_aborted(reason="token_budget")` event. Signals whether the
+  context-pruning hook is aggressive enough, or whether the model-context
+  window is being misspent. The raw session count
+  (`token_budget_abort_count`) is retained as an auxiliary signal.
+
 ## Event kinds
 
 The vocabulary of `kind` values persisted by the `TraceLogger` onto
