@@ -31,6 +31,6 @@ format and process.
 | [0017](./0017-review-state-machine.md) | Review State Machine for ProposedEdits | Accepted |
 | [0018](./0018-evolver-meta-prompt-design.md) | Evolver meta-prompt design | Accepted |
 | [0019](./0019-quantization-intelligence-floor.md) | Quantization intelligence floor findings | Proposed |
-| [0020](./0020-context-pruning-at-scale.md) | Context pruning at scale findings | Proposed |
+| [0021](./0021-context-pruning-at-scale.md) | Context pruning at scale findings | Proposed |
 
 When adding a new ADR, append it to this table in the same PR.
