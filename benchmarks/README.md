@@ -153,6 +153,34 @@ def test_sort_a_list(benchmark_workspace: Path) -> None:
     assert actual == expected, f"task {TASK.name}: output mismatch"
 ```
 
+## Model-agnostic test fixtures
+
+Benchmark tasks can use the shared ``model_adapter`` fixture from
+``tests/conftest.py``. The fixture is switched by the ``TEST_MODEL_MODE``
+environment variable:
+
+- ``TEST_MODEL_MODE=mock`` (default): ``MockModelAdapter`` — deterministic,
+  no network, suitable for offline CI and local development.
+- ``TEST_MODEL_MODE=real``: ``OpenAICompatibleAdapter`` backed by
+  ``OPENCODE_SERVER_URL`` / ``LLAMACPP_HOST``. Suitable for integration
+  testing against a live endpoint.
+
+To use in a benchmark task::
+
+    import pytest
+    from tests._model_fixtures import MockModelAdapterConfig
+
+    @pytest.mark.benchmark
+    async def test_my_task(benchmark_workspace: Path, model_adapter) -> None:
+        model_adapter.set_response(MockModelAdapterConfig(
+            response_content="task completed",
+        ))
+        await run_task("do the task", benchmark_workspace, logger, session_id, model_adapter=model_adapter)
+
+``MockModelAdapter`` implements the ``ModelAdapter`` protocol and yields
+streaming chunks matching the response content, so it exercises the same
+code paths as a real adapter.
+
 ## When to write an ADR instead
 
 A new task never needs an ADR. But a change to *how* benchmarks work —
