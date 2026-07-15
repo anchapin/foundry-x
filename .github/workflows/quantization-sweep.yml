@@ -1,0 +1,87 @@
+name: quantization-sweep
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "harness/**"
+      - "src/foundry_x/evolution/**"
+      - "benchmarks/**"
+      - ".github/workflows/quantization-sweep.yml"
+
+  schedule:
+    - cron: "0 0 * * 0"  # Weekly: every Sunday at midnight UTC
+
+env:
+  FOUNDRY_MODEL_PATH: ${{ github.workspace }}/models
+
+jobs:
+  quantization-sweep:
+    name: quantization sweep (ADR-0016 §4)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv (hash-verified)
+        uses: ./.github/actions/install-uv
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Provision model directory
+        run: mkdir -p "$FOUNDRY_MODEL_PATH"
+        shell: bash
+
+      - name: Download model files
+        run: |
+          # ADR-0016 §4 / issue #550: FOUNDRY_MODEL_PATH must point to a directory
+          # containing at least two quantization variants (e.g. Q4_K_M and Q5_K_M).
+          # Model files are matched via glob: *.<quant>.gguf (e.g. *.Q4_K_M.gguf).
+          #
+          # Provision models here. Options:
+          #   - Download from a private model bucket / HuggingFace cache
+          #   - Attach as a GitHub Actions artifact from a prior provisioning job
+          #   - Mount a pre-provisioned volume on the runner
+          #
+          # Example with gh CLI (requires MODEL_ASSET_ID env var):
+          #   gh release download "$MODEL_ASSET_ID" -p "*.Q4_K_M.gguf" -p "*.Q5_K_M.gguf" -D "$FOUNDRY_MODEL_PATH"
+          #
+          # For now the sweep will run against whatever is in FOUNDRY_MODEL_PATH.
+          # A missing model file causes the sweep to exit 2 (usage error).
+          echo "FOUNDRY_MODEL_PATH=$FOUNDRY_MODEL_PATH"
+          echo "Models must be provisioned at this path before the sweep can run."
+          ls -la "$FOUNDRY_MODEL_PATH" || true
+
+      - name: Run quantization sweep
+        run: |
+          mkdir -p logs
+          uv run foundry-sweep \
+            --quantizations Q4_K_M,Q5_K_M \
+            --harness-dir ./harness \
+            --output logs/sweep.json
+        continue-on-error: false
+
+      - name: Upload sweep artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantization-sweep-results-${{ github.run_number }}
+          path: logs/sweep.json
+          retention-days: 30
+
+      - name: Check regression flag
+        run: |
+          if [ -f logs/sweep.json ]; then
+            regression=$(python3 -c "import json; print(json.load(open('logs/sweep.json')).get('regression', False))")
+            if [ "$regression" = "True" ]; then
+              echo "REGRESSION: sweep.regression == true — blocking release gate (ADR-0016 §3)"
+              exit 1
+            fi
+            echo "No regression detected — release gate passed"
+          else
+            echo "sweep.json not found — sweep may have failed before producing output"
+            exit 1
+          fi
