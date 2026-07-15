@@ -78,3 +78,26 @@ To override the glob pattern per quantization, pass ``model_glob_patterns`` to `
       --harness-dir ./harness
 
 Each sweep run is stamped with ``FOUNDRY_MODEL_ID`` (e.g. ``Q4_K_S``) in the trace store so per-quantization KPI queries are possible.
+
+### CI smoke job
+
+`.github/workflows/real-llm.yml` runs the benchmark suite against a live `llama-server` endpoint:
+
+- **Triggers**: weekly (Sunday midnight UTC) and manual `workflow_dispatch`
+- **Matrix**: `Q4_K_S` and `Q5_K_M` quantizations
+- **Env vars**: `FOUNDRY_RUN_LIVE_LLM=1` gates the live tests; `LLAMACPP_HOST` points at the serving endpoint
+- **Artifact**: `logs/` is uploaded after each run for KPI inspection
+
+To trigger manually:
+
+```bash
+gh workflow run real-llm.yml
+```
+
+To override the quantizations:
+
+```bash
+gh workflow run real-llm.yml -f quantization=Q6_K,Q8_0
+```
+
+The job requires a running `llama-server` accessible at `LLAMACPP_HOST`. Set that env var on the self-hosted runner or in `.env` before the workflow runs.
