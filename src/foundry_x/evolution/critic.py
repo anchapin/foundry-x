@@ -507,12 +507,23 @@ class Critic:
                 )
             passed_checks.append("load_check")
 
-            # Gate 4: Pytest benchmark suite.
+            # Gate 4: Pytest benchmark suite (issue #548).
+            # Plumb token_budget from BenchmarkTask through to the subprocess
+            # via FOUNDRY_TOKEN_BUDGET so the Runner enforces it.
+            token_budget: int | None = None
+            for task in self.benchmark_tasks:
+                if task.token_budget is not None:
+                    if token_budget is None or task.token_budget < token_budget:
+                        token_budget = task.token_budget
+            pytest_env = os.environ.copy()
+            if token_budget is not None:
+                pytest_env["FOUNDRY_TOKEN_BUDGET"] = str(token_budget)
             pytest_result = subprocess.run(
                 [sys.executable, "-m", "pytest", *self.pytest_args],
                 cwd=sandbox_root,
                 capture_output=True,
                 text=True,
+                env=pytest_env,
             )
             if pytest_result.returncode == 0:
                 passed_checks.append("pytest")
