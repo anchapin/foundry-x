@@ -1,4 +1,4 @@
-# ADR-0020: Context Pruning at Scale Findings
+# ADR-0021: Context pruning at scale — Phase 3 findings
 
 ## Status
 
@@ -6,161 +6,183 @@ Proposed.
 
 ## Context
 
-Issue #553 tracks the validation and documentation of context pruning at scale behavior. The `TokenAwarePruningHook` (issue #465) is wired into `runner.run_task` for when `FOUNDRY_CONTEXT_TOKENS` is set, but the pruning threshold has not been empirically validated for the 5600G / 6600 XT hardware constraints.
+Issue #553 calls for validation and documentation of the context pruning
+behavior on the 5600G / 6600 XT hardware target. The
+`TokenAwarePruningHook` (issue #465) is wired into `runner.run_task` for
+when `FOUNDRY_CONTEXT_TOKENS` is set, but:
 
-This ADR captures:
-1. What the benchmark sweep was designed to measure
-2. The current state of benchmark data
-3. The relationship between `FOUNDRY_CONTEXT_TOKENS` and `FOUNDRY_TOKEN_BUDGET`
-4. General-knowledge recommendations until live sweep data is collected
+1. The pruning threshold has not been empirically validated against the
+   VRAM and context-window constraints of the target hardware.
+2. The interaction between `FOUNDRY_CONTEXT_TOKENS` (pruning threshold)
+   and `FOUNDRY_TOKEN_BUDGET` (hard abort threshold) is documented in
+   ADR-0016 §6 but has not been benchmarked.
+3. The existing hook drops events but does not summarize them (out of
+   scope per issue #553).
 
-## Background: Token-Aware Pruning Mechanism
+This ADR captures the findings from code analysis and the benchmark
+methodology required to validate the defaults.
 
-### How it works
+## Decision
 
-`TokenAwarePruningHook` (`harness/hooks/context_pruning.py`) intercepts every `pre_tool` call and queries cumulative `tokens_used` from `model_response` trace events. When the token count exceeds `token_threshold`, the hook drops the oldest non-preserved events (`tool_result` and `user_prompt` are always kept) and emits a `context_pruned` trace event.
+### 1. Current pruning architecture
 
-The `context_pruned` payload shape:
+Two pruning mechanisms coexist:
 
-```
-kind="context_pruned"
-payload={
-  "dropped": <int>,           -- events removed
-  "threshold_tokens": <int>,  -- trigger threshold
-  "session_tokens": <int>     -- tokens at time of prune
-}
-```
+**Event-count pruning** (`ContextPruningHook`, issue #106):
+- Triggered when `FOUNDRY_CONTEXT_TOKENS` is **absent or empty**.
+- Threshold: `DEFAULT_THRESHOLD = 200` events.
+- Drops oldest events whose `kind` is not in `_PRESERVE_KINDS`
+  (`tool_result`, `user_prompt`) until count is at or below threshold.
+- Suitable for development and for sessions where token counting is
+  unavailable from the model endpoint.
 
-### Relationship to FOUNDRY_TOKEN_BUDGET
+**Token-aware pruning** (`TokenAwarePruningHook`, issue #465):
+- Triggered when `FOUNDRY_CONTEXT_TOKENS` is **set** to a positive int.
+- Threshold: `DEFAULT_TOKEN_THRESHOLD = 8192` tokens (matches the llama.cpp
+  `--ctx-size 8192` default on the 6600 XT).
+- Queries cumulative `tokens_used` from the most recent `model_response`
+  event (written by the runner on every step; see `runner.py:1407`).
+- Drops all non-preserved events when session tokens exceed the threshold.
+- Suitable for production where `tokens_used` telemetry is available.
+
+Both hooks record a `context_pruned` trace event carrying the dropped
+count and the active threshold, enabling post-hoc KPI analysis.
+
+### 2. Hardware constraints
+
+| Hardware | VRAM | Context window | Notes |
+|---|---|---|---|
+| RX 6600 XT | 8 GB | 8192 tokens (default) | Q5_K_M full offload recommended; see `infra/llama-cpp/README.md` §"ROCm pitfalls" |
+| 5600G (APU) | Shared with RAM | 8192 tokens | Integrated GPU; VRAM is system RAM; throughput lower than discrete GPU |
+
+**Key trade-off (infra/llama-cpp/README.md §"ROCm pitfalls"):**
+> Watch VRAM headroom when bumping `--ctx-size`: context caching competes
+> with model weights.
+
+At `--ctx-size 8192` on the 6600 XT, the KV cache occupies a portion of
+the 8 GB VRAM alongside the model weights. Setting
+`FOUNDRY_CONTEXT_TOKENS` above the context window is ineffective — the
+model will abort before the pruning hook fires. The effective operating
+range is **4096–8192 tokens** on this hardware.
+
+### 3. Relationship between FOUNDRY_CONTEXT_TOKENS and FOUNDRY_TOKEN_BUDGET
 
 Per ADR-0016 §6:
 
-| Parameter | Purpose | Behavior when exceeded |
-|-----------|---------|----------------------|
-| `FOUNDRY_CONTEXT_TOKENS` | Pruning threshold | Drops old events via `TokenAwarePruningHook`; task continues |
-| `FOUNDRY_TOKEN_BUDGET` | Hard abort threshold | `task_aborted(reason="token_budget")`; task fails |
+| Env var | Role | Behavior when reached |
+|---|---|---|
+| `FOUNDRY_CONTEXT_TOKENS` | **Pruning threshold** — hook fires to drop events | Session continues with truncated history |
+| `FOUNDRY_TOKEN_BUDGET` | **Hard abort threshold** — runner terminates session | Session classified as `task_aborted(reason="token_budget")` |
 
-These serve different purposes and coexist. A token budget abort indicates the task was too large for the model/context budget, not a harness defect.
+These serve different purposes and coexist. The pruning hook runs
+*before* the hard abort; it is a proactive measure that tries to keep
+the session within budget. If pruning is insufficient and
+`FOUNDRY_TOKEN_BUDGET` is also set, the runner aborts rather than
+allowing the model to process an over-budget prompt.
 
-## Current Status
+**Recommended ordering:** `FOUNDRY_CONTEXT_TOKENS` ≤ `FOUNDRY_TOKEN_BUDGET`.
+If the pruning threshold exceeds the abort threshold, pruning never fires
+before the abort.
 
-The pruning infrastructure is implemented and tests exist (`tests/harness/test_context_pruning.py`). However, **a systematic benchmark sweep across `FOUNDRY_CONTEXT_TOKENS` values has not been executed** with results persisted to the trace store.
+### 4. Default recommendation
 
-The benchmark sweep would run the full benchmark suite (`uv run pytest -m benchmark`) against multiple `FOUNDRY_CONTEXT_TOKENS` values (e.g., 4096, 8192, 16384) to establish:
-- Benchmark pass rate vs. context token threshold
-- Average tokens per session (from `model_response.token_usage`)
-- `token_budget_hit_rate` — sessions that would have triggered `task_aborted(reason='token_budget')`
+The current default of **8192 tokens** is:
+- **Correct** as an upper bound — it matches the llama.cpp context
+  window, so pruning fires before an OOM abort on well-formed tasks.
+- **Potentially aggressive** for complex multi-step tasks — a long
+  session may prune events that the model needs to maintain coherence.
 
-## Benchmark Sweep Design
+Preliminary guidance (awaiting benchmark confirmation):
 
-### What to measure
+| Value | Use case |
+|---|---|
+| 4096 | Memory-constrained sessions; short tasks; 5600G APU |
+| 8192 | Default; matches `--ctx-size` on 6600 XT |
+| 16384 | Tasks requiring longer context; discrete GPU with headroom |
 
-For each `FOUNDRY_CONTEXT_TOKENS` value under test:
+The manifest default (`harness/manifest.json`
+`context_pruning.token_threshold`) should remain at **8192** until
+benchmark data shows a statistically significant regression or improvement
+at a different value.
 
-| Metric | Description | How to obtain |
-|--------|-------------|---------------|
-| Pass rate | Benchmark pass rate at this threshold | `passed_tasks / total_tasks` |
-| Avg session tokens | Mean `tokens_used` per session | AVG from `model_response` events |
-| Prune rate | How often pruning triggers | COUNT `context_pruned` events |
-| Token budget hit rate | Sessions hitting hard abort | COUNT `task_aborted(reason='token_budget')` |
-| Prune efficiency | Token reduction per prune | AVG `session_tokens - threshold_tokens` at prune time |
+### 5. Benchmark methodology
 
-### SQL queries for sweep analysis
+When the 6600 XT hardware is available, run the benchmark suite with
+three `FOUNDRY_CONTEXT_TOKENS` values:
 
-```sql
--- Prune event rate per session
-SELECT session_id, COUNT(*) as prune_count
-FROM events WHERE kind = 'context_pruned'
-GROUP BY session_id;
-
--- Token budget aborts
-SELECT COUNT(*) FROM events
-WHERE kind = 'task_aborted'
-  AND json_extract(payload, '$.reason') = 'token_budget';
-
--- Average tokens at prune time
-SELECT AVG(json_extract(payload, '$.session_tokens'))
-FROM events WHERE kind = 'context_pruned';
+```bash
+for threshold in 4096 8192 16384; do
+  FOUNDRY_CONTEXT_TOKENS=$threshold \
+    uv run pytest -m benchmark -v \
+      --tb=short \
+      --log-cli-level=INFO \
+      2>&1 | tee "benchmark_context_${threshold}.log"
+done
 ```
 
-### Threshold values to test
+Collect from each run:
+- **Pass rate** — fraction of benchmark tasks that pass.
+- **Average tokens per session** — from `foundry-kpis --harness-version <version>`,
+  the `token_totals` map.
+- **`token_budget_hit_rate`** — fraction of sessions with
+  `task_aborted(reason="token_budget")`. Computed from the trace store:
+  ```python
+  from foundry_x.trace.logger import TraceLogger
+  from foundry_x.observability.kpis import KpiSummary
+  # token_budget_abort_count / total_sessions
+  ```
 
-| Threshold | Rationale |
-|-----------|-----------|
-| 4096 | Lower bound — aggressive pruning, may lose context |
-| 8192 | Current default — moderate pruning |
-| 16384 | Upper bound — minimal pruning, may hit token budget |
+Compare pass rates across thresholds. If 4096 yields a statistically
+significant regression (>5 pp) compared to 8192, retain 8192 as default.
+If 16384 shows no regression and the 5600G can tolerate it, consider
+upward adjustment.
 
-## General Knowledge: Token Threshold Tradeoffs
+### 6. KPI layer integration
 
-Until live sweep data is available, the following represents generally understood tradeoffs for 7B coding models on RX 6600 XT (8 GB VRAM):
+The `context_pruned` payload carries the fields needed for post-hoc
+efficiency analysis:
 
-### Threshold Tradeoffs
+```python
+# Event-count pruning payload
+{"dropped": int, "threshold": int, "token_threshold": int}
 
-| Threshold | Context Retention | Memory Pressure | Risk |
-|-----------|-----------------|-----------------|------|
-| **4096** | Low — aggressive pruning | Minimal | May lose intermediate context |
-| **8192** | Medium — balanced | Moderate | Current default; generally safe |
-| **16384** | High — minimal pruning | Higher | May hit token budget on long sessions |
+# Token-aware pruning payload
+{"dropped": int, "threshold_tokens": int, "session_tokens": int}
+```
 
-### Key Observations
+The `foundry-kpis` tool does not yet compute a `context_efficiency` KPI.
+When issue #553 acceptance is confirmed, a future ADR should define:
 
-1. **8192 is the generally recommended default** for 7B models on the RX 6600 XT. It provides sufficient context for most benchmark tasks without excessive memory pressure.
+```
+context_efficiency = 1 - (dropped_events / total_events_in_session)
+```
 
-2. **Lower thresholds (4096) may cause context loss** on complex multi-step tasks where the model needs to reference earlier parts of the conversation.
-
-3. **Higher thresholds (16384) risk hitting token budget** on long sessions but preserve more context for the model.
-
-4. **The optimal threshold depends on task complexity** — simpler tasks may work fine with aggressive pruning, while complex refactoring tasks may need more context.
-
-## Threshold Recommendations (Pending Benchmark Data)
-
-| Model Size | Recommended `token_threshold` | Rationale |
-|------------|------------------------------|-----------|
-| 7B | 8192 (default) | Room for full benchmark session |
-| 13B+ | 6144 | Fewer tokens fit in context at same VRAM |
-| RX 6600 XT 8 GB | 8192 | Current default; adjust after sweep |
-
-## Recommendations
-
-### Maintain Current Default
-
-**Keep `FOUNDRY_CONTEXT_TOKENS=8192`** as the default in `harness/manifest.json` until benchmark data indicates otherwise.
-
-Rationale:
-- The current default is a reasonable middle ground between context retention and memory pressure
-- No benchmark data exists to justify changing the default
-- The `FOUNDRY_TOKEN_BUDGET` provides a hard abort cap as a safety net
-
-### Future Sweep Requirements
-
-When the sweep is executed, capture:
-1. Per-threshold pass rates (overall and per-task-difficulty)
-2. Average `tokens_used` per session at each threshold
-3. `context_pruned` event frequency and token reduction per prune
-4. `task_aborted(reason='token_budget')` count at each threshold
-5. Per-task breakdown to identify which tasks are threshold-sensitive
-
-### If Benchmark Data Supports a Change
-
-If sweep data shows:
-- **Pass rate improves significantly** with a higher threshold (e.g., 16384) without excessive token budget hits → recommend increasing default
-- **Pass rate is unchanged** at a lower threshold (e.g., 4096) → recommend decreasing default to reduce memory pressure
-- **Token budget hit rate increases** at higher thresholds → maintain or decrease default
-
-Any change to the manifest default must be routed through the Critic (ADR-0004) before shipping.
+A value near 1.0 means pruning rarely fired; near 0.0 means heavy pruning
+throughout the session.
 
 ## Consequences
 
-- Until live sweep data is collected, token threshold recommendations are based on general knowledge rather than measured data.
-- The `TokenAwarePruningHook` and `resolve_context_tokens_threshold()` are implemented and functional.
-- Results should be attached to this ADR or a linked issue when the sweep is executed.
-- The current default of 8192 is preserved until benchmark data justifies a change.
+- The `manifest.json` `context_pruning.token_threshold` default remains at
+  **8192** pending benchmark confirmation.
+- A follow-up ADR will define `context_efficiency` KPI once benchmark
+  data is available.
+- The benchmark methodology in §5 enables operators to reproduce the
+  validation on their own hardware.
+- No code changes are required to implement this ADR; it is a
+  documentation and validation artifact.
 
-## References
+## Cross-References
 
-- [Issue #465](https://github.com/anchapin/foundry-x/issues/465): TokenAwarePruningHook implementation
-- [Issue #553](https://github.com/anchapin/foundry-x/issues/553): Validate and document context pruning at scale behavior
-- [ADR-0016 §6](./0016-phase-3-quantization-sweep.md#6-token-budget-abort-classification): Token budget vs. context tokens distinction
-- `harness/hooks/context_pruning.py`: TokenAwarePruningHook implementation
-- `harness/manifest.json`: Default `context_pruning.token_threshold` value
+- [ADR-0016 §6](./0016-phase-3-quantization-sweep.md#6-token-budget-abort-classification):
+  `FOUNDRY_TOKEN_BUDGET` vs. `FOUNDRY_CONTEXT_TOKENS` distinction.
+- [`harness/hooks/context_pruning.py`](../../harness/hooks/context_pruning.py):
+  `TokenAwarePruningHook` and `ContextPruningHook` implementation.
+- [`src/foundry_x/execution/runner.py:1385-1408`](../../src/foundry_x/execution/runner.py):
+  Hook wiring in `run_task`.
+- [`infra/llama-cpp/README.md`](../../infra/llama-cpp/README.md):
+  Hardware targets (5600G / 6600 XT).
+- [`docs/CONTEXT.md`](../../docs/CONTEXT.md): `context_pruned` event
+  payload contract.
+- Issue #465: `TokenAwarePruningHook` implementation.
+- Issue #492: Large-session pruning validation.
+- Issue #551: `token_budget_hit_rate` KPI.

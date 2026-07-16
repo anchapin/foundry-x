@@ -819,3 +819,164 @@ def test_multiple_prune_calls_accumulate_correctly(tmp_path) -> None:
     assert len(prune_events) == 3
     for pe in prune_events:
         assert pe.payload["threshold"] == DEFAULT_THRESHOLD
+
+
+# ---------------------------------------------------------------------------
+# Token-aware pruning: large-session and edge cases (issue #492, #553)
+# ---------------------------------------------------------------------------
+
+
+def test_token_aware_prunes_multiple_times_when_over_threshold(tmp_path) -> None:
+    """Multiple ``pre_tool`` calls on a session that stays over the token
+    threshold must record a ``context_pruned`` event on each call, as long
+    as there are events left to drop. After the first call drops all
+    non-preserved events, subsequent calls find an empty pool and record no
+    new prune event."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    token_map: dict[str, int] = {}
+    with logger.session(harness_version="test-0.0") as sid:
+        _plant(logger, sid, _PLANTS)
+        token_map[sid] = 5000
+        pruner = _sqlite_pruner(db)
+        tracer, captured = _tracer_for(logger, sid)
+        hook = TokenAwarePruningHook(
+            session_id=sid,
+            token_threshold=1000,
+            pruner=pruner,
+            tracer=tracer,
+            get_tokens=_fake_token_counter(token_map),
+        )
+
+        _run(hook.pre_tool(ToolCall(name="read_file", arguments={})))
+        _run(hook.pre_tool(ToolCall(name="bash", arguments={})))
+        _run(hook.pre_tool(ToolCall(name="list_dir", arguments={})))
+
+        surviving = logger.load_session(sid)
+
+    prune_events = [e for e in surviving if e.kind == "context_pruned"]
+    assert len(prune_events) == 1
+    assert prune_events[0].payload["threshold_tokens"] == 1000
+    assert prune_events[0].payload["session_tokens"] == 5000
+
+
+def test_token_aware_does_not_prune_at_exact_threshold(tmp_path) -> None:
+    """When session_tokens equals (not exceeds) token_threshold, the hook
+    must be a no-op. The condition is strictly greater-than."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    token_map: dict[str, int] = {}
+    with logger.session(harness_version="test-0.0") as sid:
+        _plant(logger, sid, _PLANTS)
+        token_map[sid] = 1000
+        pruner = _sqlite_pruner(db)
+        tracer, captured = _tracer_for(logger, sid)
+        hook = TokenAwarePruningHook(
+            session_id=sid,
+            token_threshold=1000,
+            pruner=pruner,
+            tracer=tracer,
+            get_tokens=_fake_token_counter(token_map),
+        )
+        _run(hook.pre_tool(ToolCall(name="read_file", arguments={})))
+        surviving = logger.load_session(sid)
+
+    prune_events = [e for e in surviving if e.kind == "context_pruned"]
+    assert len(prune_events) == 0
+    assert captured == []
+    assert len(surviving) == _PLANTS
+
+
+def test_token_aware_prunes_with_large_token_counts(tmp_path) -> None:
+    """Token-aware pruning must handle sessions with very large token
+    counts (e.g. 50000 tokens on a 6600 XT with --ctx-size 8192).
+    Pruning should fire and drop all non-preserved events."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    token_map: dict[str, int] = {}
+    with logger.session(harness_version="test-0.0") as sid:
+        _plant(logger, sid, 500)
+        token_map[sid] = 50000
+        pruner = _sqlite_pruner(db)
+        tracer, captured = _tracer_for(logger, sid)
+        hook = TokenAwarePruningHook(
+            session_id=sid,
+            token_threshold=8192,
+            pruner=pruner,
+            tracer=tracer,
+            get_tokens=_fake_token_counter(token_map),
+        )
+        _run(hook.pre_tool(ToolCall(name="read_file", arguments={})))
+        surviving = logger.load_session(sid)
+
+    prune_events = [e for e in surviving if e.kind == "context_pruned"]
+    real_events = [e for e in surviving if e.kind != "context_pruned"]
+    assert len(prune_events) == 1
+    assert len(real_events) == 0
+    assert prune_events[0].payload["threshold_tokens"] == 8192
+    assert prune_events[0].payload["session_tokens"] == 50000
+    assert prune_events[0].payload["dropped"] == 500
+
+
+def test_token_aware_token_threshold_property() -> None:
+    """TokenAwarePruningHook must expose token_threshold as a property."""
+    hook = TokenAwarePruningHook(
+        session_id="any",
+        token_threshold=16384,
+        pruner=lambda *a, **k: 0,
+        tracer=lambda *a, **k: None,
+        get_tokens=lambda s: 0,
+    )
+    assert hook.token_threshold == 16384
+
+
+def test_resolve_context_tokens_threshold_parses_int_correctly(monkeypatch) -> None:
+    """``resolve_context_tokens_threshold`` must return the exact int value."""
+    monkeypatch.setenv("FOUNDRY_CONTEXT_TOKENS", "16384")
+    assert resolve_context_tokens_threshold() == 16384
+
+
+def test_resolve_context_tokens_threshold_rejects_non_digit(monkeypatch) -> None:
+    """Non-numeric FOUNDRY_CONTEXT_TOKENS must raise ValueError."""
+    monkeypatch.setenv("FOUNDRY_CONTEXT_TOKENS", "not_a_number")
+    with pytest.raises(ValueError, match="invalid literal"):
+        resolve_context_tokens_threshold()
+
+
+def test_token_aware_pruning_at_5600g_6600xt_context_window(tmp_path) -> None:
+    """Simulate the 6600 XT context window (8192 tokens). When session_tokens
+    is 9000 (exceeds context window) and FOUNDRY_CONTEXT_TOKENS is 8192,
+    pruning must fire and preserve tool_result and user_prompt events."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    token_map: dict[str, int] = {}
+    with logger.session(harness_version="test-0.0") as sid:
+        for _ in range(100):
+            logger.record(sid, kind="tool_result", payload={"i": 0})
+        for _ in range(50):
+            logger.record(sid, kind="user_prompt", payload={"i": 0})
+        for _ in range(200):
+            logger.record(sid, kind="tool_call", payload={"i": 0})
+        token_map[sid] = 9000
+        pruner = _sqlite_pruner(db)
+        tracer, captured = _tracer_for(logger, sid)
+        hook = TokenAwarePruningHook(
+            session_id=sid,
+            token_threshold=8192,
+            pruner=pruner,
+            tracer=tracer,
+            get_tokens=_fake_token_counter(token_map),
+        )
+        _run(hook.pre_tool(ToolCall(name="read_file", arguments={})))
+        surviving = logger.load_session(sid)
+
+    real_events = [e for e in surviving if e.kind != "context_pruned"]
+    kinds = [e.kind for e in real_events]
+    assert kinds.count("tool_result") == 100
+    assert kinds.count("user_prompt") == 50
+    assert kinds.count("tool_call") == 0
+    prune_events = [e for e in surviving if e.kind == "context_pruned"]
+    assert len(prune_events) == 1
+    assert prune_events[0].payload["dropped"] == 200
+    assert prune_events[0].payload["threshold_tokens"] == 8192
+    assert prune_events[0].payload["session_tokens"] == 9000
