@@ -259,40 +259,6 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stdout.write("\n")
         return 0
 
-    if args.command == "timeline":
-        backend = _infer_backend(args.db)
-        logger = TraceLogger(args.db, backend=backend)
-        events = logger.load_session(args.session_id)
-        if not events:
-            sys.stderr.write(f"session {args.session_id} not found or empty\n")
-            return 2
-        sys.stdout.write(format_timeline(events))
-        sys.stdout.write("\n")
-        return 0
-
-    if args.command == "session-summary":
-        backend = _infer_backend(args.db)
-        logger = TraceLogger(args.db, backend=backend)
-        rows = build_session_summary(logger, harness_version=args.harness_version)
-        sys.stdout.write(render_session_summary(rows, limit=args.limit))
-        sys.stdout.write("\n")
-        return 0
-
-    if args.command == "tool-latency":
-        logger = TraceLogger(args.db)
-        report = aggregate_tool_latency(logger, since=args.since)
-        if args.format == "json":
-            rendered = render_tool_latency_json(report)
-        else:
-            rendered = render_tool_latency_markdown(report)
-        if args.out:
-            Path(args.out).write_text(rendered, encoding="utf-8")
-        else:
-            sys.stdout.write(rendered)
-            if not rendered.endswith("\n"):
-                sys.stdout.write("\n")
-        return 0
-
     return 1
 
 
