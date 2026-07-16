@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from foundry_x.trace.logger import TraceLogger
 
 PROPOSED_EDIT_KIND: str = "proposed_edit"
+APPROVED_EDIT_KIND: str = "approved_edit"
 REVIEW_STATE_TRANSITION_KIND: str = "review_state_transition"
 GENERATION_ATTEMPT_KIND: str = "generation_attempt"
 GENERATION_EXHAUSTED_KIND: str = "generation_exhausted"
@@ -154,22 +155,36 @@ class ReviewStateMachine:
         edit_id: str,
         current: ReviewState,
         next_state: ReviewState,
+        failure_class: str = "",
+        edit: ProposedEdit | None = None,
     ) -> None:
         """Perform a state transition after validating it is allowed.
 
         Logs the transition to the trace store if a logger is configured.
+        When transitioning to APPROVED, also records the approved edit for few-shot learning.
         """
         self.validate_transition(current, next_state)
         if self._trace_logger is not None and self._session_id is not None:
+            payload = {
+                "edit_id": edit_id,
+                "from_state": current.value,
+                "to_state": next_state.value,
+            }
+            if failure_class:
+                payload["failure_class"] = failure_class
             self._trace_logger.record(
                 self._session_id,
                 REVIEW_STATE_TRANSITION_KIND,
-                {
-                    "edit_id": edit_id,
-                    "from_state": current.value,
-                    "to_state": next_state.value,
-                },
+                payload,
             )
+            if next_state == ReviewState.APPROVED and edit is not None and failure_class:
+                approved_payload = edit.model_dump(mode="json")
+                approved_payload["failure_class"] = failure_class
+                self._trace_logger.record(
+                    self._session_id,
+                    APPROVED_EDIT_KIND,
+                    approved_payload,
+                )
 
 
 # Template edits per failure class. Each entry is a
@@ -515,16 +530,54 @@ class Evolver:
                 f"the last hour (cap={self.max_proposals_per_hour})"
             )
 
-    def _record_proposals(self, count: int = 1, edit: ProposedEdit | None = None) -> None:
+    def _record_proposals(
+        self, count: int = 1, edit: ProposedEdit | None = None, failure_class: str = ""
+    ) -> None:
         now = datetime.now(timezone.utc)
         for _ in range(count):
             self._proposal_times.append(now)
         if edit is not None and self._trace_logger is not None and self._session_id is not None:
+            payload = edit.model_dump(mode="json")
+            if failure_class:
+                payload["failure_class"] = failure_class
             self._trace_logger.record(
                 self._session_id,
                 PROPOSED_EDIT_KIND,
-                edit.model_dump(mode="json"),
+                payload,
             )
+
+    def _record_approved_edit(self, edit: ProposedEdit, failure_class: str) -> None:
+        """Record an approved ProposedEdit to the trace store for few-shot learning."""
+        if self._trace_logger is None or self._session_id is None:
+            return
+        payload = edit.model_dump(mode="json")
+        payload["failure_class"] = failure_class
+        self._trace_logger.record(self._session_id, APPROVED_EDIT_KIND, payload)
+
+    def _get_past_successful_edits(self, failure_class: str) -> list[ProposedEdit]:
+        """Query the trace store for approved edits with the same failure class.
+
+        Used for few-shot learning: retrieves previously successful harness edits
+        that addressed the same failure class, providing proven patterns to the LLM.
+
+        Returns up to 5 most recent approved edits for the given failure class.
+        """
+        if self._trace_logger is None:
+            return []
+        edits: list[ProposedEdit] = []
+        for event in self._trace_logger.query_events(kind=APPROVED_EDIT_KIND):
+            if event.payload.get("failure_class") == failure_class:
+                try:
+                    edit = ProposedEdit(**event.payload)
+                    edits.append(edit)
+                except Exception:
+                    continue
+        edits.sort(key=lambda e: e.target_file)
+        unique: dict[str, ProposedEdit] = {}
+        for edit in edits:
+            if edit.target_file not in unique:
+                unique[edit.target_file] = edit
+        return list(unique.values())[:5]
 
     def _purge_llm_state(self, now: datetime | None = None) -> None:
         """Drop LLM timestamps and costs that have fallen outside their windows."""
@@ -570,12 +623,19 @@ class Evolver:
                 f"(cap={self.max_diff_lines})"
             )
 
-    def _build_llm_prompt(self, failure: FailureReport) -> str:
+    def _build_llm_prompt(
+        self, failure: FailureReport, few_shot_edits: list[ProposedEdit] | None = None
+    ) -> str:
         """Build an LLM prompt from a failure report.
 
         Constructs a detailed prompt that includes the failure summary,
         suspected causes, and the class of failure to guide the LLM in
         generating context-aware harness modifications.
+
+        Args:
+            failure: The failure report to generate edits for.
+            few_shot_edits: Optional list of previously successful edits to use
+                as few-shot examples, providing proven edit patterns for the LLM.
         """
         lines = [
             "You are an expert agent harness engineer. Your task is to propose",
@@ -597,6 +657,22 @@ class Evolver:
             for step in failure.failed_steps:
                 lines.append(f"  - {step}")
             lines.append("")
+        if few_shot_edits:
+            lines.extend(
+                [
+                    "PREVIOUSLY SUCCESSFUL EDITS FOR THIS FAILURE CLASS",
+                    "=" * 50,
+                    "The following edits have successfully addressed similar failures. "
+                    "Use them as guidance when proposing new edits:",
+                    "",
+                ]
+            )
+            for i, edit in enumerate(few_shot_edits, 1):
+                lines.append(f"Example {i}:")
+                lines.append(f"  Target: {edit.target_file}")
+                lines.append(f"  Rationale: {edit.rationale}")
+                lines.append(f"  Diff:\n{edit.unified_diff}")
+                lines.append("")
         lines.extend(
             [
                 "HARNESS EDIT CONSTRAINTS",
@@ -623,11 +699,19 @@ class Evolver:
         )
         return "\n".join(lines)
 
-    def _build_llm_messages(self, failure: FailureReport) -> list[ModelMessage]:
-        """Build the message list for an LLM completion request."""
+    def _build_llm_messages(
+        self, failure: FailureReport, few_shot_edits: list[ProposedEdit] | None = None
+    ) -> list[ModelMessage]:
+        """Build the message list for an LLM completion request.
+
+        Args:
+            failure: The failure report to generate edits for.
+            few_shot_edits: Optional list of previously successful edits to use
+                as few-shot examples in the prompt.
+        """
         from foundry_x.execution.model_adapter import ModelMessage
 
-        prompt = self._build_llm_prompt(failure)
+        prompt = self._build_llm_prompt(failure, few_shot_edits=few_shot_edits)
         return [
             ModelMessage(
                 role="system", content="You are a helpful assistant that proposes harness edits."
@@ -643,7 +727,8 @@ class Evolver:
         """
         if self._model_adapter is None:
             raise RuntimeError("ModelAdapter not configured")
-        messages = self._build_llm_messages(failure)
+        few_shot_edits = self._get_past_successful_edits(failure.proposed_class)
+        messages = self._build_llm_messages(failure, few_shot_edits=few_shot_edits)
         response = await self._model_adapter.complete(messages)
         if response.message.content is None:
             raise RuntimeError("LLM returned no content")
@@ -734,7 +819,7 @@ class Evolver:
                 edits = self._parse_llm_response(content)
                 if edits:
                     for edit in edits:
-                        self._record_proposals(edit=edit)
+                        self._record_proposals(edit=edit, failure_class=failure.proposed_class)
                     return edits
             except Exception:
                 pass
@@ -768,7 +853,7 @@ class Evolver:
                 edits = self._parse_llm_response(content)
                 if edits:
                     for edit in edits:
-                        self._record_proposals(edit=edit)
+                        self._record_proposals(edit=edit, failure_class=failure.proposed_class)
                     return edits
             except Exception:
                 pass
@@ -813,7 +898,7 @@ class Evolver:
             self._validate_edit(edit)
         except EvolverGuardError:
             return []
-        self._record_proposals(edit=edit)
+        self._record_proposals(edit=edit, failure_class=failure.proposed_class)
         return [edit]
 
     def _record_generation_attempt(
@@ -936,7 +1021,8 @@ class Evolver:
                     )
 
             if validated:
-                self._record_proposals(count=len(validated))
+                for edit in validated:
+                    self._record_proposals(edit=edit, failure_class=failure.proposed_class)
                 return validated
 
             if attempt == max_retries:

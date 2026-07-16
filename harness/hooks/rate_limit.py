@@ -128,6 +128,8 @@ def get_default_rate_window_hours() -> int:
 
 
 class RateLimitHook:
+    _phase: int = 3
+
     """Hook that enforces per-hour evolver call cap (issue #332).
 
     Implements the ``Hook`` protocol. ``pre_tool`` checks the sliding

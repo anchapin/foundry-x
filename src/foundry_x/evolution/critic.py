@@ -7,12 +7,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from benchmarks.models import BenchmarkTask
 from benchmarks.registry import load_all_tasks
+from foundry_x.trace.logger import TraceLogger
 
 DEFAULT_REGRESSION_THRESHOLD_PP = 2.0
 
@@ -363,15 +365,15 @@ class Critic:
 
         pass_rate = (passed / total) if total > 0 else 0.0
 
-        total_tokens = 0
-        avg_cycle_time_s: float | None = None
+        trace_path = os.environ.get("FOUNDRY_TRACE_PATH", "./logs/traces.db")
+        total_tokens, avg_cycle_time_s = self._compute_token_metrics(model_id, trace_path)
 
         token_efficiency: float | None = None
         if total_tokens > 0 and avg_cycle_time_s is not None and avg_cycle_time_s > 0:
             token_efficiency = total_tokens / avg_cycle_time_s
 
         cost_per_task: float | None = None
-        if cost_per_token is not None and passed > 0:
+        if cost_per_token is not None and passed > 0 and total_tokens > 0:
             cost_per_task = (total_tokens * cost_per_token) / passed
 
         return QuantizationResult(
@@ -404,6 +406,74 @@ class Critic:
         if match:
             return match.group(1)
         return None
+
+    def _compute_token_metrics(
+        self,
+        model_id: str,
+        trace_path: str | None = None,
+    ) -> tuple[int, float | None]:
+        """Query the trace store for sessions matching *model_id* and compute token metrics.
+
+        After a pytest run creates sessions in the trace store, this method
+        identifies sessions by their ``model_id`` and computes:
+        - ``total_tokens``: sum of ``model_response.token_usage.total_tokens``
+          across all steps in all matching sessions
+        - ``avg_cycle_time_s``: mean wall-clock time from ``task_received``
+          to ``outcome`` across sessions that have both events
+
+        Returns ``(total_tokens, avg_cycle_time_s)``. Returns ``(0, None)`` if
+        no matching sessions are found or the trace store cannot be read.
+
+        The caller is responsible for computing
+        ``token_efficiency = total_tokens / avg_cycle_time_s`` when both
+        values are non-zero / non-None.
+        """
+        if trace_path is None:
+            trace_path = os.environ.get("FOUNDRY_TRACE_PATH", "./logs/traces.db")
+
+        try:
+            logger = TraceLogger(trace_path)
+        except Exception:
+            return 0, None
+
+        sessions = logger.list_sessions()
+        matching = [s for s in sessions if s.model_id == model_id]
+
+        if not matching:
+            return 0, None
+
+        total_tokens = 0
+        cycle_times: list[float] = []
+
+        for session in matching:
+            events = logger.load_session(session.session_id)
+
+            task_received_ts: str | None = None
+            outcome_ts: str | None = None
+
+            for event in events:
+                kind = event.kind
+                if kind == "task_received":
+                    task_received_ts = event.timestamp
+                elif kind == "outcome":
+                    outcome_ts = event.timestamp
+                elif kind == "model_response":
+                    token_usage = event.payload.get("token_usage")
+                    if token_usage and isinstance(token_usage, dict):
+                        total_tokens += token_usage.get("total_tokens", 0)
+
+            if task_received_ts and outcome_ts:
+                try:
+                    t0 = datetime.fromisoformat(task_received_ts)
+                    t1 = datetime.fromisoformat(outcome_ts)
+                    delta = (t1 - t0).total_seconds()
+                    if delta > 0:
+                        cycle_times.append(delta)
+                except ValueError:
+                    pass
+
+        avg_cycle_time_s = sum(cycle_times) / len(cycle_times) if cycle_times else None
+        return total_tokens, avg_cycle_time_s
 
     def evaluate(self, proposed_diff: str) -> CriticVerdict:
         """Apply ``proposed_diff`` to a sandbox copy of the harness and gate it.
@@ -507,12 +577,23 @@ class Critic:
                 )
             passed_checks.append("load_check")
 
-            # Gate 4: Pytest benchmark suite.
+            # Gate 4: Pytest benchmark suite (issue #548).
+            # Plumb token_budget from BenchmarkTask through to the subprocess
+            # via FOUNDRY_TOKEN_BUDGET so the Runner enforces it.
+            token_budget: int | None = None
+            for task in self.benchmark_tasks:
+                if task.token_budget is not None:
+                    if token_budget is None or task.token_budget < token_budget:
+                        token_budget = task.token_budget
+            pytest_env = os.environ.copy()
+            if token_budget is not None:
+                pytest_env["FOUNDRY_TOKEN_BUDGET"] = str(token_budget)
             pytest_result = subprocess.run(
                 [sys.executable, "-m", "pytest", *self.pytest_args],
                 cwd=sandbox_root,
                 capture_output=True,
                 text=True,
+                env=pytest_env,
             )
             if pytest_result.returncode == 0:
                 passed_checks.append("pytest")

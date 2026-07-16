@@ -268,6 +268,8 @@ def scan_for_injection(text: str) -> ScanResult:
 
 
 class InjectionFirewallHook:
+    _phase: int = 1
+
     """Hook that truncates/flags tool results containing injection markers.
 
     Implements the :class:`~harness.hooks.base.Hook` Protocol. ``pre_tool``

@@ -459,3 +459,192 @@ class TestSweepOutputFlag:
             ]
         )
         assert args.output is None
+
+
+class TestComputeTokenMetrics:
+    """Integration tests for token-efficiency population from trace store (issue #549)."""
+
+    def test_compute_token_metrics_sums_total_tokens(self, tmp_path):
+        """total_tokens is the sum of model_response.token_usage.total_tokens across steps."""
+        from foundry_x.evolution.critic import Critic
+        from foundry_x.trace.logger import TraceLogger
+
+        trace_path = tmp_path / "traces.db"
+        logger = TraceLogger(trace_path)
+
+        model_id = "Q4_K_S"
+        with logger.session(harness_version="test", model_id=model_id) as sid:
+            logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+            logger.record(
+                sid,
+                kind="model_response",
+                payload={
+                    "step": 0,
+                    "token_usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                    },
+                },
+            )
+            logger.record(
+                sid,
+                kind="model_response",
+                payload={
+                    "step": 1,
+                    "token_usage": {
+                        "prompt_tokens": 20,
+                        "completion_tokens": 10,
+                        "total_tokens": 30,
+                    },
+                },
+            )
+            logger.record(
+                sid,
+                kind="outcome",
+                payload={"status": "success", "reason": "final_answer", "steps": 2},
+            )
+
+        critic = Critic(harness_dir=Path("/tmp/nonexistent"))
+        total_tokens, avg_cycle_time_s = critic._compute_token_metrics(model_id, str(trace_path))
+
+        assert total_tokens == 45
+        assert avg_cycle_time_s is not None
+        assert avg_cycle_time_s > 0
+
+    def test_compute_token_metrics_computes_avg_cycle_time(self, tmp_path):
+        """avg_cycle_time_s is the mean wall-clock time from task_received to outcome."""
+        from foundry_x.evolution.critic import Critic
+        from foundry_x.trace.logger import TraceLogger
+
+        trace_path = tmp_path / "traces.db"
+        logger = TraceLogger(trace_path)
+
+        model_id = "Q5_K_M"
+        import time
+
+        with logger.session(harness_version="test", model_id=model_id) as sid:
+            logger.record(sid, kind="task_received", payload={"prompt": "task 1"})
+            time.sleep(0.01)
+            logger.record(
+                sid,
+                kind="outcome",
+                payload={"status": "success", "reason": "final_answer", "steps": 1},
+            )
+
+        with logger.session(harness_version="test", model_id=model_id) as sid2:
+            logger.record(sid2, kind="task_received", payload={"prompt": "task 2"})
+            time.sleep(0.02)
+            logger.record(
+                sid2,
+                kind="outcome",
+                payload={"status": "success", "reason": "final_answer", "steps": 1},
+            )
+
+        critic = Critic(harness_dir=Path("/tmp/nonexistent"))
+        total_tokens, avg_cycle_time_s = critic._compute_token_metrics(model_id, str(trace_path))
+
+        assert avg_cycle_time_s is not None
+        assert avg_cycle_time_s >= 0.01
+
+    def test_compute_token_metrics_returns_zero_when_no_sessions(self, tmp_path):
+        """Returns (0, None) when no sessions match the model_id."""
+        from foundry_x.evolution.critic import Critic
+        from foundry_x.trace.logger import TraceLogger
+
+        trace_path = tmp_path / "traces.db"
+        logger = TraceLogger(trace_path)
+
+        with logger.session(harness_version="test", model_id="other-model") as sid:
+            logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+
+        critic = Critic(harness_dir=Path("/tmp/nonexistent"))
+        total_tokens, avg_cycle_time_s = critic._compute_token_metrics("Q4_K_S", str(trace_path))
+
+        assert total_tokens == 0
+        assert avg_cycle_time_s is None
+
+    def test_compute_token_metrics_skips_sessions_without_outcome(self, tmp_path):
+        """Sessions without an outcome event contribute cycle time but not tokens."""
+        from foundry_x.evolution.critic import Critic
+        from foundry_x.trace.logger import TraceLogger
+
+        trace_path = tmp_path / "traces.db"
+        logger = TraceLogger(trace_path)
+
+        model_id = "Q4_K_S"
+        with logger.session(harness_version="test", model_id=model_id) as sid:
+            logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+            logger.record(
+                sid,
+                kind="model_response",
+                payload={
+                    "step": 0,
+                    "token_usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                    },
+                },
+            )
+
+        critic = Critic(harness_dir=Path("/tmp/nonexistent"))
+        total_tokens, avg_cycle_time_s = critic._compute_token_metrics(model_id, str(trace_path))
+
+        assert total_tokens == 15
+        assert avg_cycle_time_s is None
+
+    def test_token_efficiency_computed_from_trace_metrics(self, tmp_path):
+        """token_efficiency = total_tokens / avg_cycle_time_s when both are available."""
+        from foundry_x.evolution.critic import Critic, QuantizationResult
+        from foundry_x.trace.logger import TraceLogger
+
+        trace_path = tmp_path / "traces.db"
+        logger = TraceLogger(trace_path)
+
+        model_id = "Q4_K_M"
+        import time
+
+        with logger.session(harness_version="test", model_id=model_id) as sid:
+            logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+            time.sleep(0.01)
+            logger.record(
+                sid,
+                kind="model_response",
+                payload={
+                    "step": 0,
+                    "token_usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 50,
+                        "total_tokens": 150,
+                    },
+                },
+            )
+            logger.record(
+                sid,
+                kind="outcome",
+                payload={"status": "success", "reason": "final_answer", "steps": 1},
+            )
+
+        critic = Critic(harness_dir=Path("/tmp/nonexistent"))
+        total_tokens, avg_cycle_time_s = critic._compute_token_metrics(model_id, str(trace_path))
+
+        token_efficiency = None
+        if total_tokens > 0 and avg_cycle_time_s is not None and avg_cycle_time_s > 0:
+            token_efficiency = total_tokens / avg_cycle_time_s
+
+        assert token_efficiency is not None
+        assert token_efficiency > 0
+        assert avg_cycle_time_s is not None
+        result = QuantizationResult(
+            quantization="Q4_K_M",
+            model_path="/srv/models/test.Q4_K_M.gguf",
+            model_id=model_id,
+            total_tasks=1,
+            passed_tasks=1,
+            total_tokens=total_tokens,
+            avg_cycle_time_s=avg_cycle_time_s,
+            token_efficiency=token_efficiency,
+        )
+        assert result.token_efficiency == token_efficiency
+        assert result.total_tokens == 150
