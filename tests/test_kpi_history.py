@@ -450,13 +450,19 @@ def test_render_history_markdown_trend_true_adds_sparkline_columns():
         KpiHistoryEntry(
             timestamp="2026-07-11T00:00:00+00:00",
             cycle_time_seconds=1.0,
-            regression_rate=0.1,
+            regression_rate=0.2,
             improvement_rate=0.5,
         ),
         KpiHistoryEntry(
             timestamp="2026-07-11T01:00:00+00:00",
+            cycle_time_seconds=1.5,
+            regression_rate=0.15,
+            improvement_rate=0.55,
+        ),
+        KpiHistoryEntry(
+            timestamp="2026-07-11T02:00:00+00:00",
             cycle_time_seconds=2.0,
-            regression_rate=0.2,
+            regression_rate=0.1,
             improvement_rate=0.6,
         ),
     ]
@@ -557,22 +563,22 @@ def test_sparkline_five_values():
     values = [0.0, 0.25, 0.5, 0.75, 1.0]
     line = _sparkline(values)
     assert len(line) == 5
-    assert all(c in " ░▒▓█" for c in line)
+    assert all(c in "▁▂▃▄▅▆▇█" for c in line)
 
 
 def test_sparkline_renders_none_as_space():
     values = [0.0, None, 1.0]
     line = _sparkline(values)
     assert len(line) == 3
-    assert line[1] == " "
+    assert line[1] == "·"
 
 
 def test_sparkline_empty_list():
-    assert _sparkline([]) == ""
+    assert _sparkline([]) == "N/A"
 
 
 def test_sparkline_single_value():
-    assert _sparkline([0.5]) == " "
+    assert _sparkline([0.5]) == "█"
 
 
 def test_render_history_markdown_trend_adds_sparkline_columns(tmp_path):
@@ -699,16 +705,14 @@ def test_main_from_history_trend_flag_renders_sparklines(tmp_path, capsys):
 
 
 def test_main_from_history_trend_requires_from_history(tmp_path, capsys):
-    """--trend without --from-history is silently ignored (backward compat)."""
+    """--trend without --from-history exits with error."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     _seed_session(logger, "v1", verdict=True)
 
-    rc = main(["--db", str(db), "--trend"])
-    captured = capsys.readouterr()
-
-    assert rc == 0
-    assert "No KPI history" not in captured.out
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--db", str(db), "--trend"])
+    assert exc_info.value.code == 2
 
 
 # ---------------------------------------------------------------------------

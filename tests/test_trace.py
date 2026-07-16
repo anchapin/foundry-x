@@ -96,6 +96,74 @@ def test_payload_redaction_masks_api_key_and_bearer(tmp_path, backend):
 
 
 @_BACKENDS
+def test_payload_redaction_covers_all_secret_patterns(tmp_path, backend):
+    """Every supported secret pattern is redacted to its sentinel on both backends.
+
+    Covers: sk-... (api-key), Bearer ... (bearer), PEM blocks, JWTs, GitHub
+    classic PATs, GitHub fine-grained PATs, AWS access key IDs, Stripe live
+    keys, and Slack tokens (issue #121 / #627).
+    """
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    api_key = "sk-" + "1234567890abcdef"
+    bearer = "Bea" + "rer " + "mF_9.B5f-4.1JqM"
+    pem = (
+        # gitleaks:allow - test fixture, not a real secret
+        "-----BEGIN PRIVATE KEY-----\n"
+        "TEST_REDACTED_FAKE_KEY_DATA_NOT_A_REAL_SECRET_PLACEHOLDER\n"
+        "-----END PRIVATE KEY-----"
+    )
+    jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjg"
+    github_classic_pat = "ghp_" + "A" * 36
+    github_fine_grained_pat = "github_pat_" + "B" * 37
+    aws_access_key = "AKIA" + "J" * 16
+    stripe_key = "sk_live_" + "4" * 24
+    slack_token = "xoxb-" + "c" * 22
+
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(
+            sid,
+            kind="tool_call",
+            payload={
+                "my_api_key": api_key,
+                "auth_bearer": bearer,
+                "pem_key": pem,
+                "raw_jwt_token": jwt,
+                "gh_pat": github_classic_pat,
+                "gh_fg_pat": github_fine_grained_pat,
+                "aws_key_val": aws_access_key,
+                "stripe_key_val": stripe_key,
+                "slack_tok_val": slack_token,
+            },
+        )
+
+    events = logger.load_session(sid)
+    assert len(events) == 1
+    payload = events[0].payload
+    serialized = json.dumps(payload)
+
+    assert "[REDACTED:api-key]" in payload["my_api_key"]
+    assert "[REDACTED:bearer]" in payload["auth_bearer"]
+    assert "[REDACTED:pem]" in payload["pem_key"]
+    assert "[REDACTED:jwt]" in payload["raw_jwt_token"]
+    assert "[REDACTED:github-pat]" in payload["gh_pat"]
+    assert "[REDACTED:github-pat]" in payload["gh_fg_pat"]
+    assert "[REDACTED:aws-access-key]" in payload["aws_key_val"]
+    assert "[REDACTED:stripe-key]" in payload["stripe_key_val"]
+    assert "[REDACTED:slack-token]" in payload["slack_tok_val"]
+
+    assert api_key not in serialized
+    assert bearer not in serialized
+    assert pem not in serialized
+    assert jwt not in serialized
+    assert github_classic_pat not in serialized
+    assert github_fine_grained_pat not in serialized
+    assert aws_access_key not in serialized
+    assert stripe_key not in serialized
+    assert slack_token not in serialized
+
+
+@_BACKENDS
 def test_session_emits_ended_at_and_duration(tmp_path, backend):
     """Exiting session() stamps ended_at and session_duration() > 0."""
     path = tmp_path / f"traces{_suffix(backend)}"
