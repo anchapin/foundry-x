@@ -108,7 +108,8 @@ def test_payload_redaction_covers_all_secret_patterns(tmp_path, backend):
     api_key = "sk-" + "1234567890abcdef"
     bearer = "Bea" + "rer " + "mF_9.B5f-4.1JqM"
     pem = (
-        "-----BEGIN PRIVATE KEY-----\n"  # gitleaks:allow - test fixture, not a real secret
+        # gitleaks:allow - test fixture, not a real secret
+        "-----BEGIN PRIVATE KEY-----\n"
         "TEST_REDACTED_FAKE_KEY_DATA_NOT_A_REAL_SECRET_PLACEHOLDER\n"
         "-----END PRIVATE KEY-----"
     )
