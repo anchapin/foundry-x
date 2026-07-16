@@ -43,6 +43,81 @@ def test_record_proposal_emits_trace_event(tmp_path):
     assert events[0].payload == edit.model_dump(mode="json")
 
 
+def test_record_proposal_with_failure_class(tmp_path):
+    logger = TraceLogger(tmp_path / "trace.db")
+    edit = _edit(_make_diff("be precise"))
+    with logger.session("harness-v1") as session_id:
+        evolver = Evolver(trace_logger=logger, session_id=session_id)
+        evolver._record_proposals(edit=edit, failure_class="wrong-tool")
+
+    events = list(logger.iter_events(session_id, kind=PROPOSED_EDIT_KIND))
+    assert len(events) == 1
+    assert events[0].payload["failure_class"] == "wrong-tool"
+    assert events[0].payload["review_state"] == "PROPOSED"
+
+
+def test_record_approved_edit_emits_event(tmp_path):
+    logger = TraceLogger(tmp_path / "trace.db")
+    edit = _edit(_make_diff("be precise"))
+    with logger.session("harness-v1") as session_id:
+        evolver = Evolver(trace_logger=logger, session_id=session_id)
+        evolver._record_approved_edit(edit, failure_class="wrong-tool")
+
+    from foundry_x.evolution.evolver import APPROVED_EDIT_KIND
+
+    events = list(logger.iter_events(session_id, kind=APPROVED_EDIT_KIND))
+    assert len(events) == 1
+    assert events[0].payload["failure_class"] == "wrong-tool"
+    assert events[0].payload["review_state"] == "PROPOSED"
+
+
+def test_get_past_successful_edits_returns_approved(tmp_path):
+    logger = TraceLogger(tmp_path / "trace.db")
+    edit1 = _edit(_make_diff("be precise"))
+    edit2 = ProposedEdit(
+        target_file="harness/hooks/check_tool.py",
+        rationale="add tool validation",
+        unified_diff="--- a/harness/hooks/check_tool.py\n+++ b/harness/hooks/check_tool.py\n@@ -0,0 +1 @@\n+def check():\n",
+    )
+    with logger.session("harness-v1") as session_id:
+        evolver = Evolver(trace_logger=logger, session_id=session_id)
+        evolver._record_approved_edit(edit1, failure_class="wrong-tool")
+        evolver._record_approved_edit(edit2, failure_class="wrong-tool")
+
+    past_edits = evolver._get_past_successful_edits("wrong-tool")
+    assert len(past_edits) == 2
+    assert all(e.review_state.value == "PROPOSED" for e in past_edits)
+
+
+def test_get_past_successful_edits_filters_by_class(tmp_path):
+    logger = TraceLogger(tmp_path / "trace.db")
+    edit1 = _edit(_make_diff("be precise"))
+    edit2 = _edit(_make_diff("check twice"))
+    with logger.session("harness-v1") as session_id:
+        evolver = Evolver(trace_logger=logger, session_id=session_id)
+        evolver._record_approved_edit(edit1, failure_class="wrong-tool")
+        evolver._record_approved_edit(edit2, failure_class="bad-prompt")
+
+    past_edits = evolver._get_past_successful_edits("wrong-tool")
+    assert len(past_edits) == 1
+    assert past_edits[0].target_file == "harness/system_prompt.txt"
+
+
+def test_build_llm_prompt_with_few_shot_examples():
+    failure = FailureReport(
+        session_id="test",
+        summary="tool used incorrectly",
+        proposed_class="wrong-tool",
+        failed_steps=[{"step": "invoke", "tool": "bash"}],
+    )
+    edit = _edit(_make_diff("check tool list"))
+    e = Evolver()
+    prompt = e._build_llm_prompt(failure, few_shot_edits=[edit])
+    assert "PREVIOUSLY SUCCESSFUL EDITS" in prompt
+    assert "wrong-tool" in prompt
+    assert "check tool list" in prompt
+
+
 def test_defaults_match_security_doc():
     e = Evolver()
     assert e.max_proposals_per_hour == 10
