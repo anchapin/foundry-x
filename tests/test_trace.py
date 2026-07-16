@@ -469,6 +469,37 @@ def test_query_events_kind_and_harness_version_filter_compose(tmp_path, backend)
 
 
 @_BACKENDS
+def test_query_events_kind_and_harness_version_equivalence(tmp_path, backend):
+    """query_events(kind=X, harness_version=Y) yields the same events as
+    iterating all sessions and calling iter_events for each (issue #630).
+
+    Both backends must pass. The nested-loop baseline iterates ALL sessions
+    (no pre-filter) and applies the harness_version check in Python so the
+    comparison is unbiased — it does not shortcut through list_sessions with
+    the same filter that query_events also receives.
+    """
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    _seed_multi_session_fixture(logger)
+
+    for kind in ("task_received", "critic_verdict", "injection_blocked"):
+        for harness_version in ("v1", "v2"):
+            actual = list(logger.query_events(kind=kind, harness_version=harness_version))
+
+            nested: list = []
+            for session in logger.list_sessions():
+                if session.harness_version != harness_version:
+                    continue
+                nested.extend(logger.iter_events(session.session_id, kind=kind))
+
+            assert _by_event_id(actual) == _by_event_id(nested), (
+                f"mismatch for kind={kind!r}, harness_version={harness_version!r}: "
+                f"query_events returned {_by_event_id(actual)}, "
+                f"nested loop returned {_by_event_id(nested)}"
+            )
+
+
+@_BACKENDS
 def test_query_events_empty_store_yields_nothing(tmp_path, backend):
     """An empty trace store yields no rows without raising (issue #273)."""
     path = tmp_path / f"traces{_suffix(backend)}"
