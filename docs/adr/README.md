@@ -29,3 +29,5 @@ format and process.
 | [0015](./0015-model-abstraction.md) | Model abstraction layer for model-swapping milestone | Proposed |
 
 When adding a new ADR, append it to this table in the same PR.
+Mark the status `Accepted` in the same PR that ships the implementation;
+see [ADR-0001 §Process](./0001-record-architecture-decisions.md#process).
