@@ -8,7 +8,8 @@
     "rate_limit"
   ],
   "context_pruning": {
-    "token_threshold": 8192
+    "token_threshold": 8192,
+    "event_threshold": 200
   },
   "skills": [
     "bash.json",

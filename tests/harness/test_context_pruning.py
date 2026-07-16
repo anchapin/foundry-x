@@ -397,7 +397,7 @@ def _fake_token_counter(token_map: dict[str, int]) -> TokenCounter:
 
 def test_token_aware_prunes_when_over_token_threshold(tmp_path) -> None:
     """When session_tokens exceeds token_threshold, the hook must prune
-    and record the token-aware payload."""
+    down to event_threshold (not zero) and record the token-aware payload."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     token_map: dict[str, int] = {}
@@ -410,6 +410,7 @@ def test_token_aware_prunes_when_over_token_threshold(tmp_path) -> None:
         hook = TokenAwarePruningHook(
             session_id=sid,
             token_threshold=1000,
+            event_threshold=DEFAULT_THRESHOLD,
             pruner=pruner,
             tracer=tracer,
             get_tokens=get_tokens,
@@ -420,13 +421,14 @@ def test_token_aware_prunes_when_over_token_threshold(tmp_path) -> None:
     prune_events = [e for e in surviving if e.kind == "context_pruned"]
     assert len(prune_events) == 1
     prune_event = prune_events[0]
+    expected_dropped = _PLANTS - DEFAULT_THRESHOLD
     assert prune_event.payload == {
-        "dropped": _PLANTS,
+        "dropped": expected_dropped,
         "threshold_tokens": 1000,
         "session_tokens": 3000,
     }
     assert captured[0]["payload"] == {
-        "dropped": _PLANTS,
+        "dropped": expected_dropped,
         "threshold_tokens": 1000,
         "session_tokens": 3000,
     }
@@ -527,6 +529,48 @@ def test_token_aware_constructor_rejects_empty_session_id(tmp_path) -> None:
         )
 
 
+def test_token_aware_constructor_rejects_invalid_event_threshold(tmp_path) -> None:
+    """event_threshold < 1 must raise ValueError (issue #581)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as sid:
+        pass
+    with pytest.raises(ValueError, match="event_threshold must be >= 1"):
+        TokenAwarePruningHook(
+            session_id=sid,
+            token_threshold=1000,
+            event_threshold=0,
+            pruner=_sqlite_pruner(db),
+            tracer=lambda *a, **k: None,
+            get_tokens=lambda s: 0,
+        )
+
+
+def test_token_aware_event_threshold_property() -> None:
+    """TokenAwarePruningHook must expose event_threshold as a property."""
+    hook = TokenAwarePruningHook(
+        session_id="any",
+        token_threshold=16384,
+        event_threshold=300,
+        pruner=lambda *a, **k: 0,
+        tracer=lambda *a, **k: None,
+        get_tokens=lambda s: 0,
+    )
+    assert hook.event_threshold == 300
+
+
+def test_token_aware_event_threshold_defaults_to_default_threshold() -> None:
+    """event_threshold defaults to DEFAULT_THRESHOLD when not specified."""
+    hook = TokenAwarePruningHook(
+        session_id="any",
+        token_threshold=16384,
+        pruner=lambda *a, **k: 0,
+        tracer=lambda *a, **k: None,
+        get_tokens=lambda s: 0,
+    )
+    assert hook.event_threshold == DEFAULT_THRESHOLD
+
+
 def test_token_aware_post_tool_is_pass_through(tmp_path) -> None:
     """``post_tool`` must return the result untouched."""
     hook = TokenAwarePruningHook(
@@ -592,6 +636,7 @@ def test_token_aware_payload_json_round_tripable(tmp_path) -> None:
         hook = TokenAwarePruningHook(
             session_id=sid,
             token_threshold=1000,
+            event_threshold=DEFAULT_THRESHOLD,
             pruner=pruner,
             tracer=tracer,
             get_tokens=_fake_token_counter(token_map),
@@ -603,7 +648,7 @@ def test_token_aware_payload_json_round_tripable(tmp_path) -> None:
     encoded = prune_event.model_dump_json()
     decoded = json.loads(encoded)
     assert decoded["kind"] == "context_pruned"
-    assert decoded["payload"]["dropped"] == _PLANTS
+    assert decoded["payload"]["dropped"] == _PLANTS - DEFAULT_THRESHOLD
     assert decoded["payload"]["threshold_tokens"] == 1000
     assert decoded["payload"]["session_tokens"] == 3000
 
@@ -829,9 +874,8 @@ def test_multiple_prune_calls_accumulate_correctly(tmp_path) -> None:
 def test_token_aware_prunes_multiple_times_when_over_threshold(tmp_path) -> None:
     """Multiple ``pre_tool`` calls on a session that stays over the token
     threshold must record a ``context_pruned`` event on each call, as long
-    as there are events left to drop. After the first call drops all
-    non-preserved events, subsequent calls find an empty pool and record no
-    new prune event."""
+    as there are events left to drop. Prunes to event_threshold (not zero)
+    per issue #581 fix."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     token_map: dict[str, int] = {}
@@ -843,6 +887,7 @@ def test_token_aware_prunes_multiple_times_when_over_threshold(tmp_path) -> None
         hook = TokenAwarePruningHook(
             session_id=sid,
             token_threshold=1000,
+            event_threshold=DEFAULT_THRESHOLD,
             pruner=pruner,
             tracer=tracer,
             get_tokens=_fake_token_counter(token_map),
@@ -855,9 +900,9 @@ def test_token_aware_prunes_multiple_times_when_over_threshold(tmp_path) -> None
         surviving = logger.load_session(sid)
 
     prune_events = [e for e in surviving if e.kind == "context_pruned"]
-    assert len(prune_events) == 1
-    assert prune_events[0].payload["threshold_tokens"] == 1000
-    assert prune_events[0].payload["session_tokens"] == 5000
+    assert len(prune_events) == 3
+    assert all(p.payload["threshold_tokens"] == 1000 for p in prune_events)
+    assert all(p.payload["session_tokens"] == 5000 for p in prune_events)
 
 
 def test_token_aware_does_not_prune_at_exact_threshold(tmp_path) -> None:
@@ -890,7 +935,7 @@ def test_token_aware_does_not_prune_at_exact_threshold(tmp_path) -> None:
 def test_token_aware_prunes_with_large_token_counts(tmp_path) -> None:
     """Token-aware pruning must handle sessions with very large token
     counts (e.g. 50000 tokens on a 6600 XT with --ctx-size 8192).
-    Pruning should fire and drop all non-preserved events."""
+    Pruning fires and prunes down to event_threshold, not zero (issue #581)."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     token_map: dict[str, int] = {}
@@ -902,6 +947,7 @@ def test_token_aware_prunes_with_large_token_counts(tmp_path) -> None:
         hook = TokenAwarePruningHook(
             session_id=sid,
             token_threshold=8192,
+            event_threshold=DEFAULT_THRESHOLD,
             pruner=pruner,
             tracer=tracer,
             get_tokens=_fake_token_counter(token_map),
@@ -912,10 +958,10 @@ def test_token_aware_prunes_with_large_token_counts(tmp_path) -> None:
     prune_events = [e for e in surviving if e.kind == "context_pruned"]
     real_events = [e for e in surviving if e.kind != "context_pruned"]
     assert len(prune_events) == 1
-    assert len(real_events) == 0
+    assert len(real_events) == DEFAULT_THRESHOLD
     assert prune_events[0].payload["threshold_tokens"] == 8192
     assert prune_events[0].payload["session_tokens"] == 50000
-    assert prune_events[0].payload["dropped"] == 500
+    assert prune_events[0].payload["dropped"] == 500 - DEFAULT_THRESHOLD
 
 
 def test_token_aware_token_threshold_property() -> None:
@@ -946,7 +992,8 @@ def test_resolve_context_tokens_threshold_rejects_non_digit(monkeypatch) -> None
 def test_token_aware_pruning_at_5600g_6600xt_context_window(tmp_path) -> None:
     """Simulate the 6600 XT context window (8192 tokens). When session_tokens
     is 9000 (exceeds context window) and FOUNDRY_CONTEXT_TOKENS is 8192,
-    pruning must fire and preserve tool_result and user_prompt events."""
+    pruning must fire and preserve tool_result and user_prompt events.
+    Prunes to event_threshold (200), not zero (issue #581 fix)."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     token_map: dict[str, int] = {}
@@ -963,6 +1010,7 @@ def test_token_aware_pruning_at_5600g_6600xt_context_window(tmp_path) -> None:
         hook = TokenAwarePruningHook(
             session_id=sid,
             token_threshold=8192,
+            event_threshold=DEFAULT_THRESHOLD,
             pruner=pruner,
             tracer=tracer,
             get_tokens=_fake_token_counter(token_map),
@@ -974,9 +1022,9 @@ def test_token_aware_pruning_at_5600g_6600xt_context_window(tmp_path) -> None:
     kinds = [e.kind for e in real_events]
     assert kinds.count("tool_result") == 100
     assert kinds.count("user_prompt") == 50
-    assert kinds.count("tool_call") == 0
+    assert kinds.count("tool_call") == 50
     prune_events = [e for e in surviving if e.kind == "context_pruned"]
     assert len(prune_events) == 1
-    assert prune_events[0].payload["dropped"] == 200
+    assert prune_events[0].payload["dropped"] == 150
     assert prune_events[0].payload["threshold_tokens"] == 8192
     assert prune_events[0].payload["session_tokens"] == 9000
