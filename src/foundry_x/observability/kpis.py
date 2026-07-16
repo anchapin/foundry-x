@@ -629,7 +629,51 @@ def read_kpi_history(path: Path) -> list[KpiHistoryEntry]:
     return entries
 
 
-def render_history_markdown(entries: Sequence[KpiHistoryEntry]) -> str:
+def _sparkline(values: list[float], width: int = 20) -> str:
+    """Render an ASCII sparkline for *values* using Unicode block characters.
+
+    The sparkline maps each value to one of the five Unicode density
+    characters based on its position in the ``[min, max]`` range.
+    ``min_val`` and ``max_val`` must not be equal (a single-entry history
+    would have no range; the caller is responsible for guarding that case).
+
+    Characters used (darkest to lightest):
+        ``█`` (U+2588) — highest value
+        ``▓`` (U+2593)
+        ``▒`` (U+2592)
+        ``░`` (U+2591)
+        `` `` (space) — lowest value / missing
+
+    When a value is ``None`` (cycle time not measured) it is rendered as
+    a single space so column alignment is preserved.
+    """
+    if not values:
+        return ""
+    num_chars = len(values)
+    blocks = [" ", "░", "▒", "▓", "█"]
+    float_vals = [v for v in values if v is not None]
+    if not float_vals:
+        return " " * num_chars
+    min_val = min(float_vals)
+    max_val = max(float_vals)
+    if min_val == max_val:
+        return " " * num_chars
+    result = []
+    for v in values:
+        if v is None:
+            result.append(" ")
+            continue
+        normalized = (v - min_val) / (max_val - min_val)
+        bucket = min(int(normalized * (len(blocks) - 1)), len(blocks) - 1)
+        result.append(blocks[bucket])
+    return "".join(result)
+
+
+def render_history_markdown(
+    entries: Sequence[KpiHistoryEntry],
+    *,
+    trend: bool = False,
+) -> str:
     """Render a Markdown trend table from KPI history entries (issue #183).
 
     The table preserves file order, which is the same as append order
@@ -639,23 +683,83 @@ def render_history_markdown(entries: Sequence[KpiHistoryEntry]) -> str:
 
     An empty history renders a single placeholder line so CI summary
     cells that template-embed the table are never completely blank.
-    Plotting (matplotlib, ASCII sparklines) is explicitly out of
-    scope per the issue; a pure table is the contract.
+
+    When *trend* is ``True``, a single-row ASCII sparkline column is
+    appended to each KPI, giving operators a visual cue without requiring
+    external charting tooling (issue #565).
     """
     if not entries:
         return "_No KPI history entries yet._"
-    lines = [
-        "| Timestamp | Cycle Time (s) | Regression Rate | Improvement Rate |",
-        "| --- | --- | --- | --- |",
-    ]
-    for entry in entries:
-        lines.append(
+
+    cycle_times = [e.cycle_time_seconds for e in entries]
+    regression_rates = [e.regression_rate for e in entries]
+    improvement_rates = [e.improvement_rate for e in entries]
+
+    header = "| Timestamp | Cycle Time (s) | Regression Rate | Improvement Rate |"
+    if trend:
+        header += " Cycle Time | Reg. Rate | Impr. Rate |"
+    lines = [header, "| --- | --- | --- | --- |" + (" --- | --- | --- |" if trend else "")]
+
+    sparkline_cycle = _sparkline(cycle_times) if trend else None
+    sparkline_reg = _sparkline(regression_rates) if trend else None
+    sparkline_imp = _sparkline(improvement_rates) if trend else None
+
+    for idx, entry in enumerate(entries):
+        row = (
             f"| {entry.timestamp} | "
             f"{_format_value(entry.cycle_time_seconds)} | "
             f"{_format_value(entry.regression_rate)} | "
             f"{_format_value(entry.improvement_rate)} |"
         )
+        if trend:
+            sc = sparkline_cycle[idx] if sparkline_cycle else " "
+            sr = sparkline_reg[idx] if sparkline_reg else " "
+            si = sparkline_imp[idx] if sparkline_imp else " "
+            row += f" {sc} | {sr} | {si} |"
+        lines.append(row)
     return "\n".join(lines)
+
+
+def export_prometheus(
+    entries: Sequence[KpiHistoryEntry],
+    *,
+    metric_name_prefix: str = "foundryx",
+) -> str:
+    """Render Prometheus-format metrics from KPI history entries (issue #565).
+
+    Emits one ``foundryx_kpi_entry`` sample per history entry per KPI
+    with a ``kpi`` label identifying the metric. The ``harness_version``
+    label is set to the entry's value or ``"unknown"`` if absent.
+    This makes it straightforward to scrape and ingest into Grafana
+    without a custom exporter.
+
+    The metric is gauge-typed so the most recent value is always the
+    current KPI state; the scrape timestamp becomes the ``timestamp``
+    field in Prometheus (seconds since epoch).
+    """
+    if not entries:
+        return f"# No KPI history entries — {metric_name_prefix}_kpi_entry is empty.\n"
+
+    lines: list[str] = [
+        f"# HELP {metric_name_prefix}_kpi_entry FoundryX KPI from history (issue #565)",
+        f"# TYPE {metric_name_prefix}_kpi_entry gauge",
+    ]
+    for entry in entries:
+        ts = entry.timestamp
+        harness = entry.harness_version or "unknown"
+        labels = f'harness_version="{harness}",kpi="cycle_time_seconds"'
+        value = f"{entry.cycle_time_seconds:.6f}" if entry.cycle_time_seconds is not None else "NaN"
+        lines.append(f"{metric_name_prefix}_kpi_entry{{{labels}}} {value} {ts}")
+
+        labels = f'harness_version="{harness}",kpi="regression_rate"'
+        lines.append(f"{metric_name_prefix}_kpi_entry{{{labels}}} {entry.regression_rate:.6f} {ts}")
+
+        labels = f'harness_version="{harness}",kpi="improvement_rate"'
+        lines.append(
+            f"{metric_name_prefix}_kpi_entry{{{labels}}} {entry.improvement_rate:.6f} {ts}"
+        )
+
+    return "\n".join(lines) + "\n"
 
 
 def _resolve_format(args_format: str | None, out: str | None) -> str:
@@ -790,6 +894,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             " render a placeholder table."
         ),
     )
+    parser.add_argument(
+        "--alert-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Exit non-zero when the computed regression_rate exceeds this"
+            " threshold (issue #565). Applies only to live KPI computation"
+            " (not --from-history). Example: --alert-threshold 0.1"
+            " causes a non-zero exit when regression_rate > 0.1."
+        ),
+    )
+    parser.add_argument(
+        "--export-prometheus",
+        action="store_true",
+        default=False,
+        help=(
+            "Emit Prometheus-format metrics to stdout (issue #565)."
+            " When used with --from-history, reads the JSONL history log"
+            " and exports one sample per entry per KPI. The output is"
+            " compatible with Prometheus scraping and Grafana ingestion."
+        ),
+    )
+    parser.add_argument(
+        "--trend",
+        action="store_true",
+        default=False,
+        help=(
+            "Append ASCII sparkline columns to the Markdown trend table"
+            " (issue #565). Requires --from-history. Each KPI gets a"
+            " Unicode-block sparkline showing the full history at a glance."
+        ),
+    )
     args = parser.parse_args(argv)
 
     baseline_version = args.baseline_harness_version
@@ -804,7 +940,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # it does not require a trace store, so we short-circuit before
         # opening the SQLite database. ``--out`` still works as a sink.
         entries = read_kpi_history(Path(args.from_history))
-        output = render_history_markdown(entries)
+        if args.export_prometheus:
+            output = export_prometheus(entries)
+        else:
+            output = render_history_markdown(entries, trend=args.trend)
         if args.out:
             Path(args.out).write_text(output, encoding="utf-8")
         else:
@@ -820,23 +959,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             output = _render_comparison_json(comparison)
         else:
             output = _render_comparison_markdown(comparison.baseline, comparison.candidate)
-    else:
-        summary = compute_kpis(logger, harness_version=args.harness_version)
-        # Issue #183: append-only history log. Comparison runs are
-        # intentionally not logged (the history is per single-summary
-        # run; a comparison is a one-off baseline-vs-candidate diff).
-        if args.log_to is not None:
-            append_kpi_history(
-                Path(args.log_to),
-                summary,
-                harness_version=args.harness_version,
-            )
-        output = _render_json(summary) if fmt == "json" else _render_markdown(summary)
+        if args.out:
+            Path(args.out).write_text(output, encoding="utf-8")
+        else:
+            print(output)
+        return 0
+
+    summary = compute_kpis(logger, harness_version=args.harness_version)
+    if args.log_to is not None:
+        append_kpi_history(
+            Path(args.log_to),
+            summary,
+            harness_version=args.harness_version,
+        )
+    output = _render_json(summary) if fmt == "json" else _render_markdown(summary)
 
     if args.out:
         Path(args.out).write_text(output, encoding="utf-8")
     else:
         print(output)
+
+    # Issue #565: alert threshold — regression rate above threshold triggers CI gate.
+    if args.alert_threshold is not None and summary.regression_rate > args.alert_threshold:
+        sys.stderr.write(
+            f"[ALERT] regression_rate {summary.regression_rate:.4f}"
+            f" exceeds threshold {args.alert_threshold:.4f}\n"
+        )
+        return 1
     return 0
 
 
