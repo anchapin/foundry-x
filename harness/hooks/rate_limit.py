@@ -143,7 +143,7 @@ class RateLimitHook:
 
     __slots__ = ()
 
-    def pre_tool(self, call: ToolCall) -> ToolCall:
+    async def pre_tool(self, call: ToolCall) -> ToolCall:
         if call.name != _EVOLVER_TOOL_NAME:
             return call
         window = _get_window()
@@ -157,7 +157,7 @@ class RateLimitHook:
             )
         return call
 
-    def post_tool(self, call: ToolCall, result: ToolResult) -> ToolResult:
+    async def post_tool(self, call: ToolCall, result: ToolResult) -> ToolResult:
         if call.name != _EVOLVER_TOOL_NAME:
             return result
         window = _get_window()
