@@ -96,6 +96,80 @@ def test_export_to_file(tmp_path):
     json.loads(lines[0])
 
 
+def test_session_stats_empty_db(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["session-stats", "--db", str(db)])
+
+    assert rc == 0
+    assert "No sessions found" in capsys.readouterr().out
+
+
+def test_session_stats_single_session_no_tokens(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+
+    rc = main(["session-stats", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert sid in out
+    assert "event_count" in out
+    assert "total_tokens" in out
+
+
+def test_session_stats_with_tokens(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="1.0.0", model_id="gpt-4") as sid:
+        logger.record(sid, "user_prompt", {"prompt": "hello"})
+        logger.record(
+            sid,
+            "model_response",
+            {"content": "hi", "usage": {"total_tokens": 150}},
+        )
+        logger.record(
+            sid,
+            "model_response",
+            {"content": "there", "usage": {"total_tokens": 200}},
+        )
+
+    rc = main(["session-stats", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert sid in out
+    assert "3" in out
+    assert "350" in out
+
+
+def test_session_stats_multiple_sessions(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="1.0.0") as sid1:
+        logger.record(sid1, "user_prompt", {"prompt": "one"})
+        logger.record(sid1, "model_response", {"usage": {"total_tokens": 100}})
+    with logger.session(harness_version="1.0.0") as sid2:
+        logger.record(sid2, "user_prompt", {"prompt": "two"})
+        logger.record(sid2, "model_response", {"usage": {"total_tokens": 200}})
+        logger.record(sid2, "model_response", {"usage": {"total_tokens": 300}})
+
+    rc = main(["session-stats", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert sid1 in out
+    assert sid2 in out
+
+
+def test_session_stats_invalid_db_path(capsys):
+    rc = main(["session-stats", "--db", "/nonexistent/invalid/path/db"])
+
+    assert rc == 1
+    assert "Invalid db path" in capsys.readouterr().err
+
+
 def test_list_sessions_method(tmp_path):
     db = tmp_path / "traces.db"
     sid = _populate(db)

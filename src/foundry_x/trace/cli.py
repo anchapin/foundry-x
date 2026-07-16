@@ -51,6 +51,46 @@ def _sessions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _session_stats(args: argparse.Namespace) -> int:
+    """Print per-session event_count and total_tokens (issue #629).
+
+    Exit codes: 0 on success (including empty store), 1 on invalid db path.
+    """
+    try:
+        logger = TraceLogger(args.db)
+    except Exception as exc:
+        sys.stderr.write(f"Invalid db path: {exc}\n")
+        return 1
+
+    sessions = logger.list_sessions()
+    if not sessions:
+        sys.stdout.write("No sessions found.\n")
+        return 0
+
+    event_counts: dict[str, int] = {s.session_id: 0 for s in sessions}
+    token_totals: dict[str, int] = {s.session_id: 0 for s in sessions}
+
+    for event in logger.query_events():
+        event_counts[event.session_id] = event_counts.get(event.session_id, 0) + 1
+        if event.kind == "model_response":
+            usage = event.payload.get("usage")
+            if isinstance(usage, dict):
+                step_total = usage.get("total_tokens", 0)
+                if isinstance(step_total, int):
+                    token_totals[event.session_id] = (
+                        token_totals.get(event.session_id, 0) + step_total
+                    )
+
+    sys.stdout.write("session_id  event_count  total_tokens\n")
+    for session in sessions:
+        sys.stdout.write(
+            f"{session.session_id}  "
+            f"{event_counts[session.session_id]}  "
+            f"{token_totals[session.session_id]}\n"
+        )
+    return 0
+
+
 def _show(args: argparse.Namespace) -> int:
     logger = TraceLogger(args.db)
     events = logger.load_session(args.session_id)
@@ -658,6 +698,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to the trace SQLite database (default: logs/traces.db).",
     )
     sessions_parser.set_defaults(func=_sessions)
+
+    session_stats_parser = sub.add_parser(
+        "session-stats",
+        help="Print per-session event_count and total_tokens (issue #629).",
+    )
+    session_stats_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database (default: logs/traces.db).",
+    )
+    session_stats_parser.set_defaults(func=_session_stats)
 
     show_parser = sub.add_parser(
         "show",
