@@ -47,6 +47,19 @@ class TraceSession(BaseModel):
     ended_at: str | None = None
 
 
+class ModelConfig(BaseModel):
+    """Model configuration for trace attribution (issue #361).
+
+    Records the model identity and hardware configuration so the improvement
+    rate KPI can attribute benchmark outcomes to specific quantizations.
+    """
+
+    model_id: str | None = Field(default=None, description="Model identifier or quantization name")
+    quantization: str | None = Field(default=None, description="Quantization scheme (e.g. Q5_K_M)")
+    context_window: int | None = Field(default=None, description="Context window size in tokens")
+    hardware: str | None = Field(default=None, description="Hardware accelerator used")
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
@@ -235,6 +248,7 @@ class TraceLogger:
         harness_version: str,
         model_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        model_config: Any = None,
     ) -> Iterator[str]:
         # Issue #121: scrub the metadata dict before either backend writes it.
         # The original ``record()`` path already redacts its payload; the
@@ -622,6 +636,44 @@ class TraceLogger:
                 }
             )
 
+    def _query_events_sqlite(
+        self,
+        kind: str | None = None,
+        harness_version: str | None = None,
+    ) -> Iterator[TraceEvent]:
+        # Issue #273 — one streaming cursor across all matching sessions.
+        # The optional ``harness_version`` filter is implemented as a JOIN
+        # against the sessions table rather than a Python-side filter so
+        # the database prunes non-matching sessions before rows cross the
+        # process boundary. ``ORDER BY timestamp`` preserves the promise
+        # ``iter_events`` makes within a single session, extended to the
+        # cross-session stream.
+        query = "SELECT e.event_id, e.session_id, e.timestamp, e.kind, e.payload FROM events e"
+        params: list[Any] = []
+        conditions: list[str] = []
+        if harness_version is not None:
+            query += " JOIN sessions s ON e.session_id = s.session_id"
+            conditions.append("s.harness_version = ?")
+            params.append(harness_version)
+        if kind is not None:
+            conditions.append("e.kind = ?")
+            params.append(kind)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY e.timestamp"
+        assert self._conn is not None  # backend == "sqlite"
+        cursor = self._conn.execute(query, params)
+        for event_id, sid, ts, k, payload in cursor:
+            yield TraceEvent.model_validate(
+                {
+                    "event_id": event_id,
+                    "session_id": sid,
+                    "timestamp": ts,
+                    "kind": k,
+                    "payload": json.loads(payload),
+                }
+            )
+
     def _load_session_jsonl(self, session_id: str) -> list[TraceEvent]:
         """Replay events for a session from a JSONL trace file.
 
@@ -688,6 +740,60 @@ class TraceLogger:
                 kept.append(line)
         with self.path.open("w", encoding="utf-8") as fh:
             fh.writelines(kept)
+
+    def compact(self) -> int:
+        """Rewrite the JSONL file removing orphaned session markers.
+
+        An orphaned ``session_end`` marker is one where the ``session_id`` has
+        no corresponding ``session_start`` marker in the file. This can happen
+        if a session was deleted and then a stale ``session_end`` marker was
+        written afterward.
+
+        Returns the number of orphaned ``session_end`` markers removed.
+        Only works on the JSONL backend; SQLite VACUUM is handled automatically
+        by the database engine (per issue #632 out-of-scope).
+        """
+        if self.backend != "jsonl":
+            return 0
+        if not self.path.exists():
+            return 0
+
+        kept: list[str] = []
+        seen_starts: set[str] = set()
+        orphaned: list[str] = []
+
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    kept.append(line)
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except json.JSONDecodeError:
+                    kept.append(line)
+                    continue
+
+                kind = record.get("kind")
+                session_id = record.get("session_id")
+
+                if kind == "session_start":
+                    if session_id not in seen_starts:
+                        seen_starts.add(session_id)
+                    kept.append(line)
+                elif kind == "session_end":
+                    if session_id not in seen_starts:
+                        orphaned.append(line)
+                    else:
+                        kept.append(line)
+                else:
+                    kept.append(line)
+
+        orphaned_count = len(orphaned)
+        with self.path.open("w", encoding="utf-8") as fh:
+            fh.writelines(kept)
+
+        return orphaned_count
 
     def redact_event(
         self,
