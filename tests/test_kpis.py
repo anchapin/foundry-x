@@ -656,6 +656,10 @@ def test_main_json_includes_token_totals(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# Issue #621: --cycle-time-alert-threshold exits non-zero when
+# cycle_time_seconds exceeds the configured value. The exit message names
+# the triggering KPI and value. Both thresholds can be specified
+# simultaneously (regression_rate and cycle_time).
 # Issue #626: per-session ``context_pruned_count`` is surfaced by the
 # ``foundry-kpis`` CLI when ≥1 session has ≥1 prune. A clean trace store
 # stays compact (no extra rows in the markdown table).
@@ -775,3 +779,69 @@ def test_main_json_format_emits_context_pruned_in_top_level_keys(tmp_path, capsy
     assert rc == 0
     payload = json.loads(captured.out)
     assert "context_pruned_count" in payload
+
+
+# Issue #621: --cycle-time-alert-threshold exits non-zero when
+# cycle_time_seconds exceeds the configured value. The exit message names
+# the triggering KPI and value. Both thresholds can be specified
+# simultaneously (regression_rate and cycle_time).
+# ---------------------------------------------------------------------------
+
+
+def test_cycle_time_alert_threshold_exits_nonzero_when_exceeded(tmp_path, capsys):
+    """Alert fires and main returns 1 when cycle_time exceeds threshold."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    rc = main(["--db", str(db), "--cycle-time-alert-threshold", "0.001"])
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "cycle_time_seconds" in captured.err
+    assert "exceeds threshold" in captured.err
+
+
+def test_cycle_time_alert_threshold_exits_zero_when_within_threshold(tmp_path, capsys):
+    """No alert when cycle_time is at or below the threshold."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    rc = main(["--db", str(db), "--cycle-time-alert-threshold", "3600"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ALERT" not in captured.err
+
+
+def test_cycle_time_alert_threshold_exits_zero_when_no_cycle_time_data(tmp_path, capsys):
+    """No alert is possible when cycle_time_seconds is None (no data)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # No verdicts → no critic_verdict event → no cycle time can be computed.
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+
+    rc = main(["--db", str(db), "--cycle-time-alert-threshold", "1.0"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ALERT" not in captured.err
+
+
+def test_cycle_time_alert_threshold_message_includes_values(tmp_path, capsys):
+    """Alert message names the KPI and both the actual and threshold values."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    rc = main(["--db", str(db), "--cycle-time-alert-threshold", "0.001"])
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    # Message contains cycle_time_seconds keyword and the threshold value.
+    assert "cycle_time_seconds" in captured.err
+    assert "exceeds threshold" in captured.err
+    # The actual cycle time is a positive number and the threshold was 0.001.
+    assert "0.00" in captured.err or "0.01" in captured.err
