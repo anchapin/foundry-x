@@ -267,6 +267,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "hooks_disabled_rate",
         "token_budget_abort_count",
         "token_budget_hit_rate",
+        "streaming_quality",
     }
 
 

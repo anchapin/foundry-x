@@ -1221,7 +1221,7 @@ async def _consume_model_stream(
     log: TraceLogger,
     session_id: str,
     step: int,
-) -> tuple[ModelResponse, int | None, int]:
+) -> tuple[ModelResponse, int | None, int, int]:
     """Consume ``adapter.stream()``, emit per-chunk trace events (issue #199).
 
     For every SSE delta a ``model_response_chunk`` trace event is recorded
@@ -1229,10 +1229,11 @@ async def _consume_model_stream(
     so a KPI consumer can observe model latency as it happens rather than
     only at the terminal ``model_response``.
 
-    Returns ``(assembled_response, time_to_first_token_ms, chunk_count)``.
+    Returns ``(assembled_response, time_to_first_token_ms, chunk_count, total_stream_ms)``.
     ``time_to_first_token_ms`` is measured from stream start to the first
     delta carrying content or a tool-call fragment; it is ``None`` when the
     stream produced no payload deltas.
+    ``total_stream_ms`` is the wall-clock duration of the entire stream.
     """
     stream_start = time.monotonic()
     content_parts: list[str] = []
@@ -1286,7 +1287,8 @@ async def _consume_model_stream(
         delta_index += 1
 
     response = _assemble_streamed_response(content_parts, tool_call_acc, finish_reason, usage)
-    return response, ttft_ms, delta_index
+    total_stream_ms = int((time.monotonic() - stream_start) * 1000)
+    return response, ttft_ms, delta_index, total_stream_ms
 
 
 async def run_task(
@@ -1461,7 +1463,7 @@ async def run_task(
                 },
             )
             try:
-                response, ttft_ms, chunk_count = await _consume_model_stream(
+                response, ttft_ms, chunk_count, total_stream_ms = await _consume_model_stream(
                     adapter, messages, tool_definitions, log, session_id, step
                 )
             except Exception as exc:
@@ -1504,6 +1506,7 @@ async def run_task(
                     "tool_calls": [call.model_dump(mode="json") for call in response.tool_calls],
                     "time_to_first_token_ms": ttft_ms,
                     "chunk_count": chunk_count,
+                    "total_stream_ms": total_stream_ms,
                     "token_usage": response.usage.model_dump(mode="json")
                     if response.usage is not None
                     else None,
