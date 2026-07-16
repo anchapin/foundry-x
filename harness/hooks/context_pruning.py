@@ -154,6 +154,8 @@ def _sqlite_pruner(db_path: str | os.PathLike) -> Pruner:
 
 
 class ContextPruningHook:
+    _phase: int = 2
+
     """Hook that bounds per-session event accumulation (issue #106).
 
     ``pre_tool`` is the gate. On every tool call it asks the injected
