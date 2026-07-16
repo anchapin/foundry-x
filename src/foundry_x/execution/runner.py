@@ -576,6 +576,40 @@ def _load_tool_definitions(skills_dir: Path) -> list[ToolDefinition]:
     return definitions
 
 
+def _inject_skill_list(harness_dir: Path, system_prompt: str) -> str:
+    """Replace ``{{ SKILL_LIST }}`` in ``system_prompt`` with current skill inventory.
+
+    Reads ``harness/manifest.json`` and extracts the ``skill_inventory`` field.
+    If the field is absent or empty, falls back to computing skill names from
+    the ``skills`` filename list in the manifest (stripping the ``.json`` suffix).
+    If no manifest exists, returns the prompt unchanged.
+
+    Issue #582: skill list must be runtime-injected, not hard-coded in
+    ``system_prompt.txt``.
+    """
+    manifest_path = harness_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return system_prompt
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return system_prompt
+
+    skill_inventory: list[dict[str, str]] | None = manifest.get("skill_inventory")
+    if not skill_inventory:
+        skills: list[str] = manifest.get("skills", [])
+        skill_names = sorted({s[:-5] if s.endswith(".json") else s for s in skills})
+        if not skill_names:
+            return system_prompt.replace("{{ SKILL_LIST }}", "")
+        bullet_list = "\n".join(f"- {name}" for name in skill_names)
+        return system_prompt.replace("{{ SKILL_LIST }}", bullet_list)
+
+    sorted_inventory = sorted(skill_inventory, key=lambda e: e.get("name", ""))
+    bullet_list = "\n".join(f"- {entry['name']}" for entry in sorted_inventory)
+    return system_prompt.replace("{{ SKILL_LIST }}", bullet_list)
+
+
 def _resolve_hook_registry(log: TraceLogger, session_id: str) -> Any | None:
     """Return the harness hook registry, or ``None`` if no harness is wired.
 
@@ -1358,6 +1392,8 @@ async def run_task(
     system_prompt_path = harness_dir / "system_prompt.txt"
     system_prompt = system_prompt_path.read_text(encoding="utf-8")
     tool_definitions = _load_tool_definitions(harness_dir / "skills")
+
+    system_prompt = _inject_skill_list(harness_dir, system_prompt)
 
     messages: list[ModelMessage] = [
         ModelMessage(role="system", content=system_prompt),
