@@ -1,8 +1,14 @@
 # Ideas
 
-This directory holds design ideas, proposals, and explorations that
-have not yet been accepted into the project. They live here so that
-we preserve reasoning without committing to implementation.
+## Status
+
+**Retired.** This pipeline was documented in 2026 but never exercised.
+No idea files were ever created. Keeping an unused process in the tree
+creates maintenance burden and misleads contributors into thinking the
+pipeline is active. See issue #645.
+
+The directory is preserved in read-only form so any existing links to it
+remain valid. To propose a design idea, open a GitHub issue instead.
 
 ## Why this exists
 

@@ -225,7 +225,7 @@ subset of the broader kind vocabulary above.
 - `benchmarks/` — pytest-marked tasks the Critic uses to gate harness
   changes.
 - `docs/adr/` — recorded architecture decisions, numbered sequentially.
-- `docs/ideas/` — design ideas not yet accepted into the project.
+- `docs/ideas/` — retired (issue #645). Was: design ideas not yet accepted.
 
 ## Roles
 
