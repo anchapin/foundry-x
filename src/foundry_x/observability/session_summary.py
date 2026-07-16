@@ -45,6 +45,9 @@ _STEPS_WIDTH = 5
 _PLACEHOLDER = "_"
 
 
+CONTEXT_PRUNED_KIND = "context_pruned"
+
+
 class SessionSummaryRow(BaseModel):
     """One row of the cross-session outcome roll-up table (issue #184).
 
@@ -60,6 +63,10 @@ class SessionSummaryRow(BaseModel):
     event, ``False`` when the session has outcome data but no token
     budget abort, and ``None`` when the session has no outcome event
     at all (the underscore placeholder is rendered in that case).
+
+    Issue #626 adds ``context_pruned``: the number of ``context_pruned``
+    events recorded for this session by the pruning hook. ``None`` when
+    no pruning occurred for this session.
     """
 
     session_id: str
@@ -69,6 +76,7 @@ class SessionSummaryRow(BaseModel):
     outcome_reason: str | None
     steps: int | None
     token_budget_hit: bool | None = None
+    context_pruned: int | None = None
 
 
 def _truncate(value: str, width: int) -> str:
@@ -128,6 +136,17 @@ def _latest_outcome(events: Iterable[TraceEvent]) -> TraceEvent | None:
     return latest
 
 
+def _count_context_pruned_events(
+    logger: TraceLogger,
+    session_id: str,
+) -> int:
+    """Count ``context_pruned`` events for *session_id* (issue #626)."""
+    count = 0
+    for _ in logger.iter_events(session_id, kind=CONTEXT_PRUNED_KIND):
+        count += 1
+    return count
+
+
 def build_session_summary(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -154,6 +173,10 @@ def build_session_summary(
         raw_steps = payload.get("steps")
         steps_value: int | None = raw_steps if isinstance(raw_steps, int) else None
         token_budget_hit = _has_token_budget_abort(logger, session.session_id)
+        context_pruned_count = _count_context_pruned_events(logger, session.session_id)
+        context_pruned_value: int | None = (
+            context_pruned_count if context_pruned_count > 0 else None
+        )
         rows.append(
             SessionSummaryRow(
                 session_id=session.session_id,
@@ -163,6 +186,7 @@ def build_session_summary(
                 outcome_reason=_string_or_none(payload.get("reason")),
                 steps=steps_value,
                 token_budget_hit=token_budget_hit,
+                context_pruned=context_pruned_value,
             )
         )
     rows.sort(key=lambda row: row.started_at, reverse=True)

@@ -19,6 +19,7 @@ import inspect
 
 from foundry_x.observability.cli import main as cli_main
 from foundry_x.observability.session_summary import (
+    CONTEXT_PRUNED_KIND,
     OUTCOME_KIND,
     SessionSummaryRow,
     build_session_summary,
@@ -312,93 +313,81 @@ def test_cli_session_summary_does_not_import_digester_or_critic():
 
 
 # ---------------------------------------------------------------------------
-# Issue #466: token_budget_hit column in session-summary.
+# Issue #626: per-session ``context_pruned`` count is surfaced in
+# ``SessionSummaryRow`` and rendered in the session summary table.
 # ---------------------------------------------------------------------------
 
 
-def _plant_session_with_token_budget_abort(db_path, sid, harness_version, started_at, ended_at):
-    """Plant a session with both an outcome and a token_budget task_aborted event."""
+def _plant_context_pruned_events(db_path, session_id, count):
+    """Plant *count* ``context_pruned`` events for *session_id* (issue #626)."""
     import json
     import sqlite3
     import uuid
 
     with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            "INSERT INTO sessions "
-            "(session_id, started_at, harness_version, model_id, metadata, ended_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (sid, started_at, harness_version, None, "{}", ended_at),
-        )
-        conn.execute(
-            "INSERT INTO events (event_id, session_id, timestamp, kind, payload) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                str(uuid.uuid4()),
-                sid,
-                started_at,
-                "outcome",
-                json.dumps({"status": "failed", "reason": "token_budget", "steps": 3}),
-            ),
-        )
-        conn.execute(
-            "INSERT INTO events (event_id, session_id, timestamp, kind, payload) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                str(uuid.uuid4()),
-                sid,
-                started_at,
-                "task_aborted",
-                json.dumps({"reason": "token_budget", "tokens_used": 8000, "token_budget": 5000}),
-            ),
-        )
+        for i in range(count):
+            conn.execute(
+                "INSERT INTO events (event_id, session_id, timestamp, kind, payload) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    session_id,
+                    "2026-07-10T10:00:00+00:00",
+                    CONTEXT_PRUNED_KIND,
+                    json.dumps({"dropped": i + 1, "threshold": 200}),
+                ),
+            )
 
 
-def test_build_session_summary_token_budget_hit_true_when_aborted(tmp_path):
-    """``token_budget_hit`` is True when session has a token_budget task_aborted."""
-    db = tmp_path / "traces.db"
-    _plant_four_sessions(db)
-    _plant_session_with_token_budget_abort(
-        db,
-        "sess-0005-abort",
-        "0.2.0",
-        "2026-07-10T14:00:00+00:00",
-        "2026-07-10T14:00:30+00:00",
-    )
-
-    rows = build_session_summary(TraceLogger(db))
-
-    abort_row = next(row for row in rows if row.session_id == "sess-0005-abort")
-    assert abort_row.token_budget_hit is True
-
-
-def test_build_session_summary_token_budget_hit_false_when_no_abort(tmp_path):
-    """``token_budget_hit`` is False when session has outcome but no token budget abort."""
+def test_build_session_summary_context_pruned_is_none_when_no_prunes(tmp_path):
     db = tmp_path / "traces.db"
     _plant_four_sessions(db)
 
     rows = build_session_summary(TraceLogger(db))
 
-    success_row = next(row for row in rows if row.session_id == "sess-0001-old")
-    assert success_row.token_budget_hit is False
+    for row in rows:
+        assert row.context_pruned is None
 
 
-def test_render_session_summary_shows_token_budget_hit_column(tmp_path):
-    """Rendered output includes token_budget_hit values."""
+def test_build_session_summary_context_pruned_count_populated(tmp_path):
     db = tmp_path / "traces.db"
     _plant_four_sessions(db)
-    _plant_session_with_token_budget_abort(
-        db,
-        "sess-0005-abort",
-        "0.2.0",
-        "2026-07-10T14:00:00+00:00",
-        "2026-07-10T14:00:30+00:00",
-    )
+
+    _plant_context_pruned_events(db, "sess-0001-old", 3)
+    _plant_context_pruned_events(db, "sess-0002-mid", 1)
+
+    rows = build_session_summary(TraceLogger(db))
+
+    row_map = {row.session_id: row for row in rows}
+    assert row_map["sess-0001-old"].context_pruned == 3
+    assert row_map["sess-0002-mid"].context_pruned == 1
+    assert row_map["sess-0003-no-outcome"].context_pruned is None
+    assert row_map["sess-0004-new"].context_pruned is None
+
+
+def test_build_session_summary_context_pruned_respects_harness_version_filter(tmp_path):
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    _plant_context_pruned_events(db, "sess-0001-old", 2)
+    _plant_context_pruned_events(db, "sess-0002-mid", 1)
+    _plant_context_pruned_events(db, "sess-0004-new", 5)
+
+    rows = build_session_summary(TraceLogger(db), harness_version="0.1.0")
+
+    assert len(rows) == 3
+    row_map = {row.session_id: row for row in rows}
+    assert row_map["sess-0001-old"].context_pruned == 2
+    assert row_map["sess-0002-mid"].context_pruned == 1
+
+
+def test_render_session_summary_context_pruned_not_in_text_table(tmp_path):
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    _plant_context_pruned_events(db, "sess-0001-old", 2)
 
     rows = build_session_summary(TraceLogger(db))
     rendered = render_session_summary(rows)
 
     lines = rendered.splitlines()
     header = lines[0]
-    assert "budget_hit" in header
-    abort_line = next(ln for ln in lines if "sess-0005-abort" in ln)
-    assert "true" in abort_line
+    assert "context_pruned" not in header

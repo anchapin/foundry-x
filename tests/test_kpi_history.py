@@ -304,6 +304,7 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "timestamp",
         "hooks_disabled_count",
         "hooks_disabled_rate",
+        "context_pruned_count",
     }
     assert "injection_blocks" not in payload
     assert "token_totals" not in payload

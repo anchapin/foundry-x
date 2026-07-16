@@ -63,6 +63,9 @@ TASK_ABORTED_KIND = "task_aborted"
 TOKEN_BUDGET_REASON = "token_budget"
 
 
+CONTEXT_PRUNED_KIND = "context_pruned"
+
+
 class KpiSummary(BaseModel):
     """Structured summary of the three PRD KPIs.
 
@@ -101,6 +104,12 @@ class KpiSummary(BaseModel):
     (avg TTFT, chunk count, avg chunk interval) derived from the timing
     fields on each ``model_response`` event. Empty by default; populated
     only when at least one ``model_response`` event carries timing data.
+
+    Issue #626 adds ``context_pruned_count``: a ``session_id -> count`` map
+    of ``context_pruned`` events per session, sourced from the pruning hook.
+    Empty by default; populated only when at least one ``context_pruned``
+    event has been recorded. Like ``injection_blocks`` and ``token_totals``
+    this is an auxiliary operator signal.
     """
 
     cycle_time_seconds: float | None = None
@@ -113,6 +122,7 @@ class KpiSummary(BaseModel):
     token_budget_abort_count: int = 0
     token_budget_hit_rate: float = 0.0
     streaming_quality: dict[str, "StreamingQualityData"] = {}
+    context_pruned_count: dict[str, int] = {}
 
 
 class StreamingQualityData(BaseModel):
@@ -207,6 +217,7 @@ def compute_kpis(
     token_budget_abort_count = _token_budget_aborts(logger, harness_version=harness_version)
     token_budget_hit_rate = _token_budget_hit_rate(logger, harness_version=harness_version)
     streaming_quality = _streaming_quality(logger, harness_version=harness_version)
+    context_pruned_count = _context_pruned(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -219,6 +230,7 @@ def compute_kpis(
         token_budget_abort_count=token_budget_abort_count,
         token_budget_hit_rate=token_budget_hit_rate,
         streaming_quality=streaming_quality,
+        context_pruned_count=context_pruned_count,
     )
 
 
@@ -559,6 +571,30 @@ def _streaming_quality(
     return result
 
 
+def _context_pruned(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> dict[str, int]:
+    """Per-session count of ``context_pruned`` events (issue #626).
+
+    Returns a ``session_id -> count`` map including only sessions with at
+    least one prune. Sessions without pruning are omitted so the rendering
+    path can decide whether to add an extra section based on the map being
+    non-empty (mirroring the ``_injection_blocks`` "show only when present"
+    contract).
+
+    Uses one :meth:`TraceLogger.query_events` cursor with the kind and
+    ``harness_version`` filters pushed down.
+    """
+    counts: dict[str, int] = {}
+    for event in logger.query_events(
+        kind=CONTEXT_PRUNED_KIND,
+        harness_version=harness_version,
+    ):
+        counts[event.session_id] = counts.get(event.session_id, 0) + 1
+    return counts
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -648,6 +684,20 @@ def _render_markdown(summary: KpiSummary) -> str:
             avg_ttft = _format_value(sq.avg_ttft_ms)
             avg_interval = _format_value(sq.avg_chunk_interval_ms)
             lines.append(f"| {sid} | {avg_ttft} | {sq.total_chunks} | {avg_interval} |")
+    # Issue #626: surface per-session ``context_pruned`` counts only when
+    # at least one session has ≥1 prune; a clean trace store stays compact.
+    if summary.context_pruned_count:
+        total = sum(summary.context_pruned_count.values())
+        lines.append("")
+        lines.append(
+            f"Context Pruned: {total} prune(s) across "
+            f"{len(summary.context_pruned_count)} session(s)."
+        )
+        lines.append("")
+        lines.append("| Session | context_pruned |")
+        lines.append("| --- | --- |")
+        for sid, count in sorted(summary.context_pruned_count.items()):
+            lines.append(f"| {sid} | {count} |")
     return "\n".join(lines)
 
 
