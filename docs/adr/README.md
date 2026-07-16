@@ -35,3 +35,5 @@ format and process.
 | [0021](./0021-context-pruning-at-scale.md) | Context pruning at scale — Phase 3 findings | Proposed |
 
 When adding a new ADR, append it to this table in the same PR.
+Mark the status `Accepted` in the same PR that ships the implementation;
+see [ADR-0001 §Process](./0001-record-architecture-decisions.md#process).
