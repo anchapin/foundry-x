@@ -59,17 +59,6 @@ def _make_fixture_harness(
 
 
 @pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
-@pytest.mark.xfail(
-    reason=(
-        "Issue #278: harness/skills/example_skill.json declares name='read_file', "
-        "which violates the new filename-to-name invariant enforced by load_check. "
-        "Renaming the skill file is a harness DNA edit (AGENTS.md \u00a72) and must "
-        "go through the Evolver -> Critic loop (ADR-0004). This strict xfail tracks "
-        "that Evolver target: once the rename lands, the test xpasses and the strict "
-        "marker flips it red to remind us to remove the marker."
-    ),
-    strict=True,
-)
 def test_load_check_passes_against_real_harness_dir() -> None:
     """Against the canonical ``harness/`` directory the script must exit 0."""
     proc = subprocess.run(
