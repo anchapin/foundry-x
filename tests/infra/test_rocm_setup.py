@@ -369,18 +369,24 @@ def test_rocm_setup_same_ref_skips_fetch_checkout(tmp_path: Path) -> None:
     _write_executable(
         fake_bin / "git",
         f"""#!/usr/bin/env bash
+# Skip -C <dir> prefix (git -C <dir> <subcommand> ...)
+if [[ "$1" == "-C" ]]; then
+    shift 2
+fi
 case "$1" in
     rev-parse)
         if [[ "$2" == "HEAD" ]]; then
             cat "{rev_parse_marker}"
         fi
         ;;
-    fetch)
+    fetch|checkout)
         touch "{fetch_marker}"
         ;;
-    clone|--no-checkout|--filter=blob:none)
-        ;;
-    checkout)
+    clone)
+        # URL is $4, DIR is $5 (clone [opts] URL DIR)
+        mkdir -p "$5"
+        GIT_DIR="$5" /usr/local/bin/git init
+        GIT_DIR="$5" /usr/local/bin/git commit --allow-empty -m init
         ;;
 esac
 exit 0
@@ -462,18 +468,24 @@ def test_rocm_setup_different_ref_triggers_fetch_checkout(tmp_path: Path) -> Non
     _write_executable(
         fake_bin / "git",
         f"""#!/usr/bin/env bash
+# Skip -C <dir> prefix (git -C <dir> <subcommand> ...)
+if [[ "$1" == "-C" ]]; then
+    shift 2
+fi
 case "$1" in
     rev-parse)
         if [[ "$2" == "HEAD" ]]; then
             cat "{rev_parse_marker}"
         fi
         ;;
-    fetch)
+    fetch|checkout)
         touch "{fetch_marker}"
         ;;
-    clone|--no-checkout|--filter=blob:none)
-        ;;
-    checkout)
+    clone)
+        # URL is $4, DIR is $5 (clone [opts] URL DIR)
+        mkdir -p "$5"
+        GIT_DIR="$5" /usr/local/bin/git init
+        GIT_DIR="$5" /usr/local/bin/git commit --allow-empty -m init
         ;;
 esac
 exit 0
