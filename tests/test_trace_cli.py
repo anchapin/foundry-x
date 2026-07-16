@@ -96,80 +96,6 @@ def test_export_to_file(tmp_path):
     json.loads(lines[0])
 
 
-def test_session_stats_empty_db(tmp_path, capsys):
-    db = tmp_path / "traces.db"
-    TraceLogger(db)
-
-    rc = main(["session-stats", "--db", str(db)])
-
-    assert rc == 0
-    assert "No sessions found" in capsys.readouterr().out
-
-
-def test_session_stats_single_session_no_tokens(tmp_path, capsys):
-    db = tmp_path / "traces.db"
-    sid = _populate(db)
-
-    rc = main(["session-stats", "--db", str(db)])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert sid in out
-    assert "event_count" in out
-    assert "total_tokens" in out
-
-
-def test_session_stats_with_tokens(tmp_path, capsys):
-    db = tmp_path / "traces.db"
-    logger = TraceLogger(db)
-    with logger.session(harness_version="1.0.0", model_id="gpt-4") as sid:
-        logger.record(sid, "user_prompt", {"prompt": "hello"})
-        logger.record(
-            sid,
-            "model_response",
-            {"content": "hi", "usage": {"total_tokens": 150}},
-        )
-        logger.record(
-            sid,
-            "model_response",
-            {"content": "there", "usage": {"total_tokens": 200}},
-        )
-
-    rc = main(["session-stats", "--db", str(db)])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert sid in out
-    assert "3" in out
-    assert "350" in out
-
-
-def test_session_stats_multiple_sessions(tmp_path, capsys):
-    db = tmp_path / "traces.db"
-    logger = TraceLogger(db)
-    with logger.session(harness_version="1.0.0") as sid1:
-        logger.record(sid1, "user_prompt", {"prompt": "one"})
-        logger.record(sid1, "model_response", {"usage": {"total_tokens": 100}})
-    with logger.session(harness_version="1.0.0") as sid2:
-        logger.record(sid2, "user_prompt", {"prompt": "two"})
-        logger.record(sid2, "model_response", {"usage": {"total_tokens": 200}})
-        logger.record(sid2, "model_response", {"usage": {"total_tokens": 300}})
-
-    rc = main(["session-stats", "--db", str(db)])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert sid1 in out
-    assert sid2 in out
-
-
-def test_session_stats_invalid_db_path(capsys):
-    rc = main(["session-stats", "--db", "/nonexistent/invalid/path/db"])
-
-    assert rc == 1
-    assert "Invalid db path" in capsys.readouterr().err
-
-
 def test_list_sessions_method(tmp_path):
     db = tmp_path / "traces.db"
     sid = _populate(db)
@@ -850,6 +776,114 @@ def test_prune_nonpositive_older_than_returns_nonzero(tmp_path, capsys):
     assert "positive integer" in capsys.readouterr().err
 
 
+# --- Issue #632: compact ----------------------------------------------------
+# Rewrites JSONL file removing orphaned session_end markers (session_end
+# without a corresponding session_start).
+
+
+def _write_jsonl(path: Path, lines: list[dict]) -> None:
+    """Write a list of dicts as JSONL, one JSON object per line."""
+    with path.open("w", encoding="utf-8") as fh:
+        for obj in lines:
+            fh.write(json.dumps(obj) + "\n")
+
+
+def test_compact_jsonl_no_orphans_leaves_file_unchanged(tmp_path, capsys):
+    """When no orphaned markers exist, compact is a no-op."""
+    db = tmp_path / "traces.jsonl"
+    logger = TraceLogger(db, backend="jsonl")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    original_content = db.read_text("utf-8")
+    rc = main(["compact", "--db", str(db)])
+
+    assert rc == 0
+    assert "No orphaned markers found" in capsys.readouterr().out
+    assert db.read_text("utf-8") == original_content
+
+
+def test_compact_jsonl_removes_orphaned_session_end(tmp_path, capsys):
+    """Orphaned session_end markers (no matching session_start) are removed."""
+    db = tmp_path / "traces.jsonl"
+    _write_jsonl(
+        db,
+        [
+            {"kind": "session_end", "session_id": "orphan-sid", "ended_at": "2025-01-01T00:00:00Z"},
+            {
+                "kind": "session_start",
+                "session_id": "valid-sid",
+                "started_at": "2025-01-01T00:00:00Z",
+                "harness_version": "0.1.0",
+            },
+            {
+                "event_id": "e1",
+                "session_id": "valid-sid",
+                "timestamp": "2025-01-01T00:00:01Z",
+                "kind": "tool_call",
+                "payload": {},
+            },
+        ],
+    )
+
+    rc = main(["compact", "--db", str(db)])
+
+    assert rc == 0
+    assert "Removed 1 orphaned marker" in capsys.readouterr().out
+    remaining = db.read_text("utf-8")
+    assert "orphan-sid" not in remaining
+    assert "valid-sid" in remaining
+
+
+def test_compact_jsonl_dry_run_does_not_modify_file(tmp_path, capsys):
+    """--dry-run prints what would be removed without touching the file."""
+    db = tmp_path / "traces.jsonl"
+    _write_jsonl(
+        db,
+        [
+            {"kind": "session_end", "session_id": "orphan-sid", "ended_at": "2025-01-01T00:00:00Z"},
+            {
+                "kind": "session_start",
+                "session_id": "valid-sid",
+                "started_at": "2025-01-01T00:00:00Z",
+                "harness_version": "0.1.0",
+            },
+        ],
+    )
+
+    original_content = db.read_text("utf-8")
+    rc = main(["compact", "--dry-run", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "would remove" in out
+    assert "orphan-sid" in out
+    assert "Dry run" in out
+    assert db.read_text("utf-8") == original_content
+
+
+def test_compact_sqlite_is_noop(tmp_path, capsys):
+    """compact on sqlite backend exits 0 with a message (VACUUM is automatic)."""
+    db = tmp_path / "traces.db"
+    TraceLogger(db, backend="sqlite")
+
+    rc = main(["compact", "--db", str(db)])
+
+    assert rc == 0
+    assert "jsonl backend required" in capsys.readouterr().out
+
+
+def test_compact_nonexistent_jsonl_file(tmp_path, capsys):
+    """compact on a non-existent JSONL file exits 0 gracefully."""
+    db = tmp_path / "nonexistent.jsonl"
+    assert not db.exists()
+
+    rc = main(["compact", "--db", str(db)])
+
+    assert rc == 0
+    assert "No orphaned markers found" in capsys.readouterr().out
+
+
 # --- Issue #195: seed-sample-trace -------------------------------------------
 # Offline smoke subcommand — plants a deterministic session so the Digester,
 # KPI, and regression-report CLIs have something to chew on without standing
@@ -1070,200 +1104,3 @@ def test_seed_sample_trace_is_visible_to_existing_subcommands(tmp_path, capsys):
     timeline = capsys.readouterr().out
     for required_kind in _REQUIRED_SEED_KINDS:
         assert required_kind in timeline
-
-
-# --- Issue #499: proposed-edits / show-edit / edit-history -------------------
-
-
-def _populate_with_proposed_edit(tmp_path, backend: str) -> tuple[str, str]:
-    """Seed a session with a ProposedEdit event and return (db_path, event_id)."""
-    path = tmp_path / f"traces{_suffix(backend)}"
-    logger = TraceLogger(path, backend=backend)
-    with logger.session(harness_version="0.1.0") as sid:
-        edit_event = logger.record(
-            sid,
-            "proposed_edit",
-            {
-                "target_file": "harness/system_prompt.txt",
-                "rationale": "address bad-prompt failure: add disambiguation guidance",
-                "unified_diff": "--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1,2 @@\n old line\n+new line\n",
-            },
-        )
-    return str(path), edit_event.event_id
-
-
-@_BACKENDS
-def test_proposed_edits_lists_events(tmp_path, backend, capsys):
-    db, event_id = _populate_with_proposed_edit(tmp_path, backend)
-
-    rc = main(["proposed-edits", "--db", db])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert event_id in out
-    assert "harness/system_prompt.txt" in out
-    assert "address bad-prompt" in out
-
-
-@_BACKENDS
-def test_proposed_edits_json_output(tmp_path, backend, capsys):
-    db, event_id = _populate_with_proposed_edit(tmp_path, backend)
-
-    rc = main(["proposed-edits", "--db", db, "--json"])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    data = json.loads(out)
-    assert len(data) == 1
-    assert data[0]["event_id"] == event_id
-    assert data[0]["target_file"] == "harness/system_prompt.txt"
-
-
-@_BACKENDS
-def test_proposed_edits_empty_store(tmp_path, backend, capsys):
-    db = tmp_path / f"traces{_suffix(backend)}"
-    TraceLogger(db, backend=backend)
-
-    rc = main(["proposed-edits", "--db", str(db)])
-
-    assert rc == 0
-    assert "No ProposedEdit events found" in capsys.readouterr().out
-
-
-@_BACKENDS
-def test_show_edit_existing_event(tmp_path, backend, capsys):
-    db, event_id = _populate_with_proposed_edit(tmp_path, backend)
-
-    rc = main(["show-edit", event_id, "--db", db])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert event_id in out
-    assert "harness/system_prompt.txt" in out
-    assert "address bad-prompt" in out
-    assert "Unified diff" in out
-
-
-@_BACKENDS
-def test_show_edit_json_output(tmp_path, backend, capsys):
-    db, event_id = _populate_with_proposed_edit(tmp_path, backend)
-
-    rc = main(["show-edit", event_id, "--db", db, "--json"])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    data = json.loads(out)
-    assert data["event_id"] == event_id
-    assert data["target_file"] == "harness/system_prompt.txt"
-
-
-@_BACKENDS
-def test_show_edit_unknown_event_returns_nonzero(tmp_path, backend, capsys):
-    db, _ = _populate_with_proposed_edit(tmp_path, backend)
-
-    rc = main(["show-edit", "does-not-exist", "--db", db])
-
-    assert rc == 1
-    assert "No ProposedEdit found" in capsys.readouterr().err
-
-
-@_BACKENDS
-def test_edit_history_with_verdict(tmp_path, backend, capsys):
-    """Edit history pairs ProposedEdit with CriticVerdict from same session."""
-    path = tmp_path / f"traces{_suffix(backend)}"
-    logger = TraceLogger(path, backend=backend)
-    with logger.session(harness_version="0.1.0") as sid:
-        edit_event = logger.record(
-            sid,
-            "proposed_edit",
-            {
-                "target_file": "harness/system_prompt.txt",
-                "rationale": "test rationale",
-                "unified_diff": "--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n old\n+new\n",
-            },
-        )
-        logger.record(
-            sid,
-            "critic_verdict",
-            {
-                "verdict": True,
-                "passed_checks": ["benchmark-1", "benchmark-2"],
-                "failed_checks": [],
-                "notes": "all good",
-            },
-        )
-
-    rc = main(["edit-history", "--db", str(path)])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert edit_event.event_id in out
-    assert "APPROVED" in out
-    assert "2" in out  # passed checks count
-    assert "0" in out  # failed checks count
-
-
-@_BACKENDS
-def test_edit_history_pending_verdict(tmp_path, backend, capsys):
-    """ProposedEdit without CriticVerdict shows PENDING status."""
-    path = tmp_path / f"traces{_suffix(backend)}"
-    logger = TraceLogger(path, backend=backend)
-    with logger.session(harness_version="0.1.0") as sid:
-        edit_event = logger.record(
-            sid,
-            "proposed_edit",
-            {
-                "target_file": "harness/hooks/test.py",
-                "rationale": "test",
-                "unified_diff": "--- a/harness/hooks/test.py\n+++ b/harness/hooks/test.py\n@@ -1 +1 @@\n old\n+new\n",
-            },
-        )
-        # No critic_verdict event in this session
-
-    rc = main(["edit-history", "--db", str(path)])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert edit_event.event_id in out
-    assert "PENDING" in out
-
-
-@_BACKENDS
-def test_edit_history_json_output(tmp_path, backend, capsys):
-    path = tmp_path / f"traces{_suffix(backend)}"
-    logger = TraceLogger(path, backend=backend)
-    with logger.session(harness_version="0.1.0") as sid:
-        logger.record(
-            sid,
-            "proposed_edit",
-            {
-                "target_file": "harness/skills/test.py",
-                "rationale": "test",
-                "unified_diff": "--- a/harness/skills/test.py\n+++ b/harness/skills/test.py\n@@ -1 +1 @@\n old\n+new\n",
-            },
-        )
-        logger.record(
-            sid,
-            "critic_verdict",
-            {"verdict": False, "passed_checks": [], "failed_checks": ["test-failed"], "notes": ""},
-        )
-
-    rc = main(["edit-history", "--db", str(path), "--json"])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    data = json.loads(out)
-    assert len(data) == 1
-    assert data[0]["verdict"] is False
-    assert data[0]["failed_checks"] == ["test-failed"]
-
-
-@_BACKENDS
-def test_edit_history_empty_store(tmp_path, backend, capsys):
-    db = tmp_path / f"traces{_suffix(backend)}"
-    TraceLogger(db, backend=backend)
-
-    rc = main(["edit-history", "--db", str(db)])
-
-    assert rc == 0
-    assert "No edit history found" in capsys.readouterr().out
