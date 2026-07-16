@@ -35,6 +35,7 @@ def _seed_session(
     passed_checks: list[str] | None = None,
     failed_checks: list[str] | None = None,
     injection_block_count: int = 0,
+    hook_registry_error_count: int = 0,
 ) -> str:
     """Create a session with task_received + optional persisted critic_verdict.
 
@@ -45,6 +46,10 @@ def _seed_session(
     Issue #120 adds the optional ``injection_block_count`` parameter: when
     >0, that many ``injection_blocked`` events are planted so the per-
     session KPI counter has something to surface.
+
+    Issue #585 adds the optional ``hook_registry_error_count`` parameter:
+    when >0, that many ``hook_registry_error`` events are planted so the
+    hooks-disabled KPI has something to surface.
     """
     with logger.session(harness_version=harness_version) as sid:
         logger.record(sid, kind="task_received", payload={"prompt": "do work"})
@@ -68,6 +73,15 @@ def _seed_session(
                     "markers": ["ignore_previous"],
                     "tool": "read_file",
                     "preview": f"block {i}",
+                },
+            )
+        for i in range(hook_registry_error_count):
+            logger.record(
+                sid,
+                kind="hook_registry_error",
+                payload={
+                    "error_type": "RegistryError",
+                    "message": f"hook load failed {i}",
                 },
             )
     return sid
@@ -249,6 +263,8 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "improvement_rate",
         "injection_blocks",
         "token_totals",
+        "hooks_disabled_count",
+        "hooks_disabled_rate",
     }
 
 
@@ -647,3 +663,111 @@ def test_main_json_includes_token_totals(tmp_path, capsys):
 
     payload = json.loads(captured.out)
     assert payload["token_totals"] == {s1: 10}
+
+
+# ---------------------------------------------------------------------------
+# Issue #585: ``hooks_disabled_count`` and ``hooks_disabled_rate`` are
+# surfaced by the ``foundry-kpis`` CLI. A ``hook_registry_error`` is emitted
+# when ``harness.hooks.get_registry()`` raises, disabling all hooks including
+# the security-critical ``InjectionFirewallHook``.
+# ---------------------------------------------------------------------------
+
+
+def test_hooks_disabled_count_and_rate_with_errors(tmp_path):
+    """``hooks_disabled_count`` is the total error events; ``rate`` is affected sessions / active sessions."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    # Session 1: 2 hook errors; session 2: 1 hook error.
+    _seed_session(logger, "v1", verdict=True, hook_registry_error_count=2)
+    _seed_session(logger, "v1", verdict=True, hook_registry_error_count=1)
+    # Clean session — no hook errors.
+    _seed_session(logger, "v1", verdict=True)
+
+    summary = compute_kpis(logger)
+
+    assert summary.hooks_disabled_count == 3
+    # 2 of 3 sessions had hook errors.
+    assert summary.hooks_disabled_rate == pytest.approx(2 / 3)
+
+
+def test_hooks_disabled_zero_when_no_hook_registry_errors(tmp_path):
+    """Zero hook errors → zero count and zero rate."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    summary = compute_kpis(logger)
+
+    assert summary.hooks_disabled_count == 0
+    assert summary.hooks_disabled_rate == 0.0
+
+
+def test_hooks_disabled_respects_harness_version_filter(tmp_path):
+    """Only sessions matching the harness version are counted."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _seed_session(logger, "v1", verdict=True, hook_registry_error_count=1)
+    _seed_session(logger, "v2", verdict=True, hook_registry_error_count=1)
+
+    summary_v1 = compute_kpis(logger, harness_version="v1")
+    summary_v2 = compute_kpis(logger, harness_version="v2")
+
+    assert summary_v1.hooks_disabled_count == 1
+    assert summary_v2.hooks_disabled_count == 1
+
+
+def test_main_markdown_includes_hooks_disabled_count_and_rate(tmp_path, capsys):
+    """Markdown output includes the hooks-disabled KPI row."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, hook_registry_error_count=2)
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    output = captured.out
+    assert "Hooks Disabled Count" in output
+    assert "Hooks Disabled Rate" in output
+    assert "2" in output  # count value
+
+
+def test_main_json_includes_hooks_disabled_fields(tmp_path, capsys):
+    """JSON output includes hooks_disabled_count and hooks_disabled_rate."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, hook_registry_error_count=2)
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert "hooks_disabled_count" in payload
+    assert "hooks_disabled_rate" in payload
+    assert payload["hooks_disabled_count"] == 2
+    assert payload["hooks_disabled_rate"] == pytest.approx(1.0)  # 1 of 1 sessions
+
+
+def test_main_json_top_level_keys_include_hooks_disabled(tmp_path, capsys):
+    """Stable JSON contract includes the new fields."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert set(payload.keys()) == {
+        "cycle_time_seconds",
+        "regression_rate",
+        "improvement_rate",
+        "injection_blocks",
+        "token_totals",
+        "hooks_disabled_count",
+        "hooks_disabled_rate",
+    }

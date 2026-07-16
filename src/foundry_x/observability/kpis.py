@@ -76,6 +76,12 @@ class KpiSummary(BaseModel):
     with no token data (e.g. an endpoint that never reports usage) keeps
     the summary compact. Like ``injection_blocks`` this is an auxiliary
     operator signal, not one of the three PRD success-metric KPIs.
+
+    Issue #585 adds ``hooks_disabled_count`` and ``hooks_disabled_rate``:
+    the total count of ``hook_registry_error`` events and the fraction of
+    sessions with at least one such event. Emitted when
+    ``harness.hooks.get_registry()`` raises, disabling all hooks including
+    the security-critical ``InjectionFirewallHook``.
     """
 
     cycle_time_seconds: float | None = None
@@ -83,6 +89,8 @@ class KpiSummary(BaseModel):
     improvement_rate: float = 0.0
     injection_blocks: dict[str, int] = {}
     token_totals: dict[str, int] = {}
+    hooks_disabled_count: int = 0
+    hooks_disabled_rate: float = 0.0
 
 
 class KpiComparison(BaseModel):
@@ -111,6 +119,11 @@ class KpiHistoryEntry(BaseModel):
     map is intentionally absent — the history is a one-row-per-run
     summary, and per-session inventory is the trace store's job.
 
+    Issue #585 adds ``hooks_disabled_count`` and ``hooks_disabled_rate``:
+    these scalar fields are included in the history log (unlike the per-
+    session maps) because they represent aggregate KPI signal, not per-
+    session inventory.
+
     The serialized JSON line round-trips through :class:`KpiSummary`
     because pydantic's default ``extra='ignore'`` policy silently
     drops ``timestamp`` and ``harness_version`` on parse, leaving
@@ -124,6 +137,8 @@ class KpiHistoryEntry(BaseModel):
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
     injection_blocks: dict[str, int] = {}
+    hooks_disabled_count: int = 0
+    hooks_disabled_rate: float = 0.0
 
 
 def compute_kpis(
@@ -152,6 +167,9 @@ def compute_kpis(
     regression_rate, improvement_rate = _verdict_rates(logger, harness_version=harness_version)
     injection_blocks = _injection_blocks(logger, harness_version=harness_version)
     token_totals = _token_totals(logger, harness_version=harness_version)
+    hooks_disabled_count, hooks_disabled_rate = _hook_registry_errors(
+        logger, harness_version=harness_version
+    )
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -159,6 +177,8 @@ def compute_kpis(
         improvement_rate=improvement_rate,
         injection_blocks=injection_blocks,
         token_totals=token_totals,
+        hooks_disabled_count=hooks_disabled_count,
+        hooks_disabled_rate=hooks_disabled_rate,
     )
 
 
@@ -349,6 +369,42 @@ def _token_totals(
     return totals
 
 
+def _hook_registry_errors(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> tuple[int, float]:
+    """Total count and session-fraction of ``hook_registry_error`` events (issue #585).
+
+    Returns ``(total_count, disabled_rate)`` where ``disabled_rate`` is the
+    fraction of sessions with a ``task_received`` event that also had at
+    least one ``hook_registry_error``. A registry error means every hook —
+    including the security-critical ``InjectionFirewallHook`` — is silently
+    disabled for the entire session, so any presence is noteworthy.
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    sessions_with_errors: set[str] = set()
+    total_count = 0
+    for event in logger.query_events(
+        kind="hook_registry_error",
+        harness_version=harness_version,
+    ):
+        total_count += 1
+        sessions_with_errors.add(event.session_id)
+
+    if not sessions_with_errors:
+        return 0, 0.0
+
+    # Use sessions with task_received as the denominator (active work sessions).
+    sessions_with_task: set[str] = set()
+    for event in logger.query_events(kind="task_received", harness_version=harness_version):
+        sessions_with_task.add(event.session_id)
+
+    rate = len(sessions_with_errors) / len(sessions_with_task) if sessions_with_task else 0.0
+    return total_count, rate
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -387,6 +443,8 @@ def _render_markdown(summary: KpiSummary) -> str:
         f"| Cycle Time (seconds) | {_format_value(summary.cycle_time_seconds)} |",
         f"| Regression Rate | {_format_value(summary.regression_rate)} |",
         f"| Improvement Rate | {_format_value(summary.improvement_rate)} |",
+        f"| Hooks Disabled Count | {summary.hooks_disabled_count} |",
+        f"| Hooks Disabled Rate | {_format_value(summary.hooks_disabled_rate)} |",
     ]
     # Issue #120: surface per-session ``injection_blocked`` counts only when
     # at least one session has ≥1 block; a clean trace store stays compact.
@@ -492,10 +550,11 @@ def append_kpi_history(
     Each run produces exactly one line. The three PRD-KPI fields are
     emitted via :meth:`KpiSummary.model_dump` with ``injection_blocks``
     and ``token_totals`` excluded (the "minus per-session maps" half of
-    the round-trip contract), then ``timestamp`` and the optional
-    ``harness_version`` are added. Parent directories are created on
-    demand so the operator does not have to ``mkdir`` before the first
-    run.
+    the round-trip contract). ``hooks_disabled_count`` and
+    ``hooks_disabled_rate`` are scalar fields and are included. Then
+    ``timestamp`` and the optional ``harness_version`` are added.
+    Parent directories are created on demand so the operator does not
+    have to ``mkdir`` before the first run.
 
     The file is opened in append mode and a single ``\\n``-terminated
     line is written per call, so concurrent appends from independent
