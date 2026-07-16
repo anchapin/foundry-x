@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import glob
 import os
 import re
@@ -36,10 +37,18 @@ _INJECTION_PATTERNS: tuple[tuple[str, str], ...] = (
     ("ignored_context", r"end\s+of\s+context\s+above"),
     # --- Issue #122 / issue #579: sync with injection_firewall.py patterns ---
     ("ignore_spanish", r"ignora\s+(?:las\s+)?instrucciones\s+anteriores"),
-    ("role_tag_json_escaped", r'\\"role\\":\\"(?:system|assistant|developer|user)'),
+    (
+        "role_tag_json_escaped",
+        r'\\"role\\":\\"(?:system|assistant|developer|user)',
+    ),
     ("unicode_confusable", r"[\u200B-\u200F\u2028-\u202F\u2060-\u2064\uFEFF]"),
-    ("base64_payload", r"[A-Za-z0-9+/]{16,}={1,2}"),
+    ("base64_payload", r"[A-Za-z0-9+/]{16,}={0,2}"),
 )
+
+
+_BASE64_MAX_LEN = 4096
+
+_ZERO_WIDTH_RE = re.compile(r"[\u200B-\u200F\u2028-\u202F\u2060-\u2064\uFEFF]")
 
 
 def _scan_diff_for_injection(diff: str) -> list[str]:
@@ -49,17 +58,54 @@ def _scan_diff_for_injection(diff: str) -> list[str]:
     the diff prefix characters (``+/ /-``) so that the plain content is matched
     against the patterns.  This avoids false negatives where a pattern's ``^``
     anchor would fail to match because the diff line starts with ``+``.
+
+    The pipeline mirrors the firewall's ``scan_for_injection``:
+    1. Strip zero-width / format characters from a copy of the content. The
+       original is kept for ``unicode_confusable`` detection.
+    2. Run all patterns against the cleaned text (except ``base64_payload``,
+       which is handled via decode + rescan).
+    3. Run ``unicode_confusable`` against the raw text.
+    4. Decode every base64 candidate and rescan the decoded content for ASCII
+       markers; emit ``base64_payload`` only when decoded content matches.
     """
-    triggered: list[str] = []
     addition_lines: list[str] = []
     for line in diff.splitlines():
         if line.startswith("+"):
             addition_lines.append(line[1:])
-    clean_content = "\n".join(addition_lines)
+    raw_content = "\n".join(addition_lines)
+    cleaned_content = _ZERO_WIDTH_RE.sub("", raw_content)
+
+    triggered: list[str] = []
+    base64_payload_pat = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}", re.IGNORECASE)
+
     for name, pattern in _INJECTION_PATTERNS:
+        if name == "base64_payload":
+            continue
+        target = raw_content if name == "unicode_confusable" else cleaned_content
         regex = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
-        if regex.search(clean_content):
+        if regex.search(target):
             triggered.append(name)
+
+    for m in base64_payload_pat.finditer(cleaned_content):
+        candidate = m.group(0)
+        if len(candidate) > _BASE64_MAX_LEN:
+            continue
+        try:
+            decoded_bytes = base64.b64decode(candidate, validate=True)
+        except Exception:
+            continue
+        try:
+            decoded = decoded_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        for name, pattern in _INJECTION_PATTERNS:
+            if name in ("base64_payload", "unicode_confusable"):
+                continue
+            regex = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+            if regex.search(decoded):
+                triggered.append("base64_payload")
+                break
+
     return triggered
 
 
