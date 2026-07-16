@@ -38,7 +38,7 @@ _INJECTION_PATTERNS: tuple[tuple[str, str], ...] = (
     ("ignore_spanish", r"ignora\s+(?:las\s+)?instrucciones\s+anteriores"),
     ("role_tag_json_escaped", r'\\"role\\":\\"(?:system|assistant|developer|user)'),
     ("unicode_confusable", r"[\u200B-\u200F\u2028-\u202F\u2060-\u2064\uFEFF]"),
-    ("base64_payload", r"[A-Za-z0-9+/]{16,}={0,2}"),
+    ("base64_payload", r"[A-Za-z0-9+/]{16,}={1,2}"),
 )
 
 
@@ -545,7 +545,7 @@ class Critic:
                 apply_result = subprocess.run(
                     ["git", "apply", "--whitespace=nowarn"],
                     input=proposed_diff,
-                    cwd=sandbox_root,
+                    cwd=sandbox_root.parent,
                     capture_output=True,
                     text=True,
                 )

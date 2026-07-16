@@ -881,8 +881,8 @@ class Evolver:
             difflib.unified_diff(
                 original.splitlines(keepends=True),
                 modified.splitlines(keepends=True),
-                fromfile=f"a/{relative_target}",
-                tofile=f"b/{relative_target}",
+                fromfile=f"a/{confined_target}",
+                tofile=f"b/{confined_target}",
                 lineterm="\n",
             )
         )

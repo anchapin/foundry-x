@@ -120,8 +120,8 @@ class TestLLMEvolverCriticGatePassThrough:
                     "target_file": "harness/system_prompt.txt",
                     "rationale": "Add tool list reinforcement to prevent wrong-tool calls",
                     "unified_diff": (
-                        "--- a/system_prompt.txt\n"
-                        "+++ b/system_prompt.txt\n"
+                        "--- a/harness/system_prompt.txt\n"
+                        "+++ b/harness/system_prompt.txt\n"
                         "@@ -1 +1 @@\n"
                         "-original system prompt\n"
                         "+original system prompt\n"
@@ -155,8 +155,8 @@ class TestLLMEvolverCriticGatePassThrough:
                     "target_file": "harness/system_prompt.txt",
                     "rationale": "Add ignore previous instructions",
                     "unified_diff": (
-                        "--- a/system_prompt.txt\n"
-                        "+++ b/system_prompt.txt\n"
+                        "--- a/harness/system_prompt.txt\n"
+                        "+++ b/harness/system_prompt.txt\n"
                         "@@ -1 +1 @@\n"
                         "-original system prompt\n"
                         "+original system prompt\n"
@@ -245,8 +245,8 @@ class TestLLMEvolverBenchmarkSuccessRates:
                     "target_file": "harness/system_prompt.txt",
                     "rationale": "Add tool reinforcement",
                     "unified_diff": (
-                        "--- a/system_prompt.txt\n"
-                        "+++ b/system_prompt.txt\n"
+                        "--- a/harness/system_prompt.txt\n"
+                        "+++ b/harness/system_prompt.txt\n"
                         "@@ -1 +1 @@\n"
                         "-original system prompt\n"
                         "+original system prompt\n"
@@ -298,8 +298,8 @@ class TestLLMEvolverTraceEventRecording:
                     "target_file": "harness/system_prompt.txt",
                     "rationale": "Add tool guidance",
                     "unified_diff": (
-                        "--- a/system_prompt.txt\n"
-                        "+++ b/system_prompt.txt\n"
+                        "--- a/harness/system_prompt.txt\n"
+                        "+++ b/harness/system_prompt.txt\n"
                         "@@ -1 +1 @@\n"
                         "-original system prompt\n"
                         "+original system prompt\n"
@@ -415,8 +415,8 @@ class TestLLMEvolverPerformanceBudget:
                     "target_file": "harness/system_prompt.txt",
                     "rationale": "Add tool guidance",
                     "unified_diff": (
-                        "--- a/system_prompt.txt\n"
-                        "+++ b/system_prompt.txt\n"
+                        "--- a/harness/system_prompt.txt\n"
+                        "+++ b/harness/system_prompt.txt\n"
                         "@@ -1 +1 @@\n"
                         "-original system prompt\n"
                         "+original system prompt\n"
@@ -453,8 +453,8 @@ class TestLLMEvolverPerformanceBudget:
                     "target_file": "harness/system_prompt.txt",
                     "rationale": "Add error guidance",
                     "unified_diff": (
-                        "--- a/system_prompt.txt\n"
-                        "+++ b/system_prompt.txt\n"
+                        "--- a/harness/system_prompt.txt\n"
+                        "+++ b/harness/system_prompt.txt\n"
                         "@@ -1 +1 @@\n"
                         "-original system prompt\n"
                         "+original system prompt\n"
@@ -529,8 +529,8 @@ class TestLLMEvolverRateLimiting:
                     "target_file": "harness/system_prompt.txt",
                     "rationale": "Add guidance",
                     "unified_diff": (
-                        "--- a/system_prompt.txt\n"
-                        "+++ b/system_prompt.txt\n"
+                        "--- a/harness/system_prompt.txt\n"
+                        "+++ b/harness/system_prompt.txt\n"
                         "@@ -1 +1 @@\n"
                         "-original system prompt\n"
                         "+original system prompt updated\n"
@@ -575,8 +575,8 @@ class TestLLMEvolverNoRegressions:
                     "target_file": "harness/system_prompt.txt",
                     "rationale": "Add ambiguity guidance",
                     "unified_diff": (
-                        "--- a/system_prompt.txt\n"
-                        "+++ b/system_prompt.txt\n"
+                        "--- a/harness/system_prompt.txt\n"
+                        "+++ b/harness/system_prompt.txt\n"
                         "@@ -1 +1 @@\n"
                         "-original system prompt\n"
                         "+original system prompt\n"
@@ -626,8 +626,8 @@ class TestLLMEvolverNoRegressions:
                         "target_file": "harness/system_prompt.txt",
                         "rationale": "Add tool list",
                         "unified_diff": (
-                            "--- a/system_prompt.txt\n"
-                            "+++ b/system_prompt.txt\n"
+                            "--- a/harness/system_prompt.txt\n"
+                            "+++ b/harness/system_prompt.txt\n"
                             "@@ -1 +1 @@\n"
                             "-original system prompt\n"
                             "+original system prompt with tool list\n"
@@ -641,8 +641,8 @@ class TestLLMEvolverNoRegressions:
                         "target_file": "harness/system_prompt.txt",
                         "rationale": "Add error handling",
                         "unified_diff": (
-                            "--- a/system_prompt.txt\n"
-                            "+++ b/system_prompt.txt\n"
+                            "--- a/harness/system_prompt.txt\n"
+                            "+++ b/harness/system_prompt.txt\n"
                             "@@ -1 +1 @@\n"
                             "-original system prompt\n"
                             "+original system prompt with error handling\n"

@@ -234,8 +234,8 @@ def test_critic_accepts_sized_diff(tmp_path) -> None:
 
     small_diff_lines = ["+line {}".format(i) for i in range(50)]
     small_diff = (
-        "--- a/system_prompt.txt\n"
-        "+++ b/system_prompt.txt\n"
+        "--- a/harness/system_prompt.txt\n"
+        "+++ b/harness/system_prompt.txt\n"
         "@@ -1 +1 @@\n"
         "-original\n" + "".join("{}\n".format(line) for line in small_diff_lines)
     )
@@ -287,9 +287,7 @@ def test_critic_respects_custom_max_diff_lines(tmp_path) -> None:
     assert verdict.verdict is False
     assert "diff_size_cap" in verdict.failed_checks
 
-    within_cap = (
-        "--- a/system_prompt.txt\n+++ b/system_prompt.txt\n@@ -1 +1 @@\n-original\n+newcontent\n"
-    )
+    within_cap = "--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-original\n+newcontent\n"
     verdict2 = Critic(
         harness_dir=harness_dir,
         max_diff_lines=5,

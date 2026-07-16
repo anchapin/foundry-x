@@ -102,8 +102,8 @@ def test_critic_rejects_oversized_diff(benchmark_workspace: Path) -> None:
         difflib.unified_diff(
             old_lines,
             new_lines,
-            fromfile="a/system_prompt.txt",
-            tofile="b/system_prompt.txt",
+            fromfile="a/harness/system_prompt.txt",
+            tofile="b/harness/system_prompt.txt",
             lineterm="\n",
         )
     )
@@ -143,8 +143,8 @@ def test_critic_accepts_rightsized_diff(benchmark_workspace: Path) -> None:
         difflib.unified_diff(
             old_lines,
             new_lines,
-            fromfile="a/system_prompt.txt",
-            tofile="b/system_prompt.txt",
+            fromfile="a/harness/system_prompt.txt",
+            tofile="b/harness/system_prompt.txt",
             lineterm="\n",
         )
     )
