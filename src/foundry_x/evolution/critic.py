@@ -26,6 +26,10 @@ _NOTES_TAIL_CHARS = 4000
 # (harness/hooks/injection_firewall.py INJECTION_PATTERNS) but expressed as
 # plain strings rather than compiled regexes so the critic can scan a diff
 # without importing the harness package.
+#
+# CRITICAL: This tuple MUST stay in sync with INJECTION_PATTERNS in
+# harness/hooks/injection_firewall.py. When adding a pattern to the firewall,
+# add it here as well. See ADR-0009 and issue #646.
 _INJECTION_PATTERNS: tuple[tuple[str, str], ...] = (
     ("ignore_previous", r"ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions"),
     ("disregard_previous", r"disregard\s+(?:all\s+)?(?:previous|prior|above)\s+instructions"),
