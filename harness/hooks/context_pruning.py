@@ -304,6 +304,11 @@ class TokenAwarePruningHook:
     ``threshold_tokens`` and ``session_tokens`` so the KPI layer can
     report context efficiency (issue #465 acceptance criterion).
 
+    When token threshold fires, the hook prunes down to ``event_threshold``
+    (from manifest, default 200) rather than dropping all non-preserved
+    events. This preserves recent context instead of all-or-nothing pruning
+    (issue #581).
+
     The hook is constructed with a ``get_tokens`` callable that returns
     the current cumulative token count for the session. The runner
     supplies a closure over its ``tokens_used`` variable so the value
@@ -317,6 +322,10 @@ class TokenAwarePruningHook:
     token_threshold:
         Maximum cumulative tokens permitted before pruning triggers.
         Must be ``>= 1``.
+    event_threshold:
+        Maximum number of events to retain after token-aware pruning.
+        When token threshold fires, the hook prunes down to this count
+        instead of zero. Defaults to ``DEFAULT_THRESHOLD`` (200).
     pruner:
         Callable implementing the deletion contract (see :data:`Pruner`).
     tracer:
@@ -334,6 +343,7 @@ class TokenAwarePruningHook:
         *,
         session_id: str,
         token_threshold: int,
+        event_threshold: int = DEFAULT_THRESHOLD,
         pruner: Pruner,
         tracer: Tracer,
         get_tokens: TokenCounter,
@@ -342,10 +352,15 @@ class TokenAwarePruningHook:
             raise ValueError(
                 f"token_aware_pruning: token_threshold must be >= 1, got {token_threshold!r}"
             )
+        if event_threshold < 1:
+            raise ValueError(
+                f"token_aware_pruning: event_threshold must be >= 1, got {event_threshold!r}"
+            )
         if not session_id:
             raise ValueError("token_aware_pruning: session_id must be a non-empty string")
         self._session_id = session_id
         self._token_threshold = token_threshold
+        self._event_threshold = event_threshold
         self._pruner = pruner
         self._tracer = tracer
         self._get_tokens = get_tokens
@@ -358,10 +373,14 @@ class TokenAwarePruningHook:
     def token_threshold(self) -> int:
         return self._token_threshold
 
+    @property
+    def event_threshold(self) -> int:
+        return self._event_threshold
+
     async def pre_tool(self, call: ToolCall) -> ToolCall:
         session_tokens = self._get_tokens(self._session_id)
         if session_tokens > self._token_threshold:
-            dropped = self._pruner(self._session_id, _PRESERVE_KINDS, 0)
+            dropped = self._pruner(self._session_id, _PRESERVE_KINDS, self._event_threshold)
             self._tracer(
                 self._session_id,
                 "context_pruned",
@@ -373,11 +392,12 @@ class TokenAwarePruningHook:
             )
             _log.info(
                 "token_aware_pruning: dropped %d event(s) from session %r "
-                "(threshold_tokens=%d, session_tokens=%d)",
+                "(threshold_tokens=%d, session_tokens=%d, event_threshold=%d)",
                 dropped,
                 self._session_id,
                 self._token_threshold,
                 session_tokens,
+                self._event_threshold,
             )
         return call
 
@@ -390,6 +410,7 @@ def register_token_aware_into(
     *,
     session_id: str,
     token_threshold: int,
+    event_threshold: int = DEFAULT_THRESHOLD,
     pruner: Pruner,
     tracer: Tracer,
     get_tokens: TokenCounter,
@@ -402,6 +423,7 @@ def register_token_aware_into(
     hook = TokenAwarePruningHook(
         session_id=session_id,
         token_threshold=token_threshold,
+        event_threshold=event_threshold,
         pruner=pruner,
         tracer=tracer,
         get_tokens=get_tokens,
