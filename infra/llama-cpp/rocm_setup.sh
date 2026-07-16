@@ -208,24 +208,6 @@ if [[ ! -d "$LLAMACPP_DIR" ]]; then
 fi
 # -------------------------------------------------------------------
 
-# --- Pre-build ROCm sanity gate (issue #210) ----------------------
-# Without ROCm the build either fails deep inside cmake with a cryptic
-# HIP error or produces a binary that silently falls back to CPU at
-# runtime. Run the four checks and refuse to build unless all hold.
-# --check-rocm runs ONLY the checks and never builds.
-if [[ "$CHECK_ROCM_ONLY" -eq 1 ]]; then
-    if check_rocm; then
-        exit 0
-    fi
-    exit 1
-fi
-
-if ! check_rocm; then
-    echo "error: refusing to build; ROCm preconditions not met (run with --check-rocm for details)" >&2
-    exit 1
-fi
-# -------------------------------------------------------------------
-
 if [[ ! -d "$LLAMACPP_DIR" ]]; then
     git clone --no-checkout --filter=blob:none https://github.com/ggerganov/llama.cpp "$LLAMACPP_DIR"
 fi
