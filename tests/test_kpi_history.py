@@ -403,6 +403,126 @@ def test_main_from_history_writes_to_out_path(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Issue #622: --from-history --trend appends ASCII sparkline columns.
+# ---------------------------------------------------------------------------
+
+
+def test_sparkline_renders_increasing_sequence():
+    """An increasing sequence maps to progressively taller block characters."""
+    result = _sparkline([0.0, 0.25, 0.5, 0.75, 1.0])
+    assert len(result) == 5
+    assert result[0] == "▁"
+    assert result[-1] == "█"
+
+
+def test_sparkline_renders_decreasing_sequence():
+    """A decreasing sequence maps to progressively shorter block characters."""
+    result = _sparkline([1.0, 0.75, 0.5, 0.25, 0.0])
+    assert len(result) == 5
+    assert result[0] == "█"
+    assert result[-1] == "▁"
+
+
+def test_sparkline_flat_line():
+    """A constant value fills all cells with the tallest block."""
+    result = _sparkline([0.5, 0.5, 0.5])
+    assert len(result) == 3
+    assert all(c == "█" for c in result)
+
+
+def test_sparkline_handles_none():
+    """None values render as '·' and are excluded from the scale."""
+    result = _sparkline([0.0, None, 1.0])
+    assert len(result) == 3
+    assert result[0] == "▁"
+    assert result[1] == "·"
+    assert result[2] == "█"
+
+
+def test_sparkline_all_none_returns_n_a():
+    """A sequence of only Nones returns 'N/A'."""
+    assert _sparkline([None, None]) == "N/A"
+
+
+def test_render_history_markdown_trend_true_adds_sparkline_columns():
+    """trend=True appends three sparkline columns to every row."""
+    entries = [
+        KpiHistoryEntry(
+            timestamp="2026-07-11T00:00:00+00:00",
+            cycle_time_seconds=1.0,
+            regression_rate=0.1,
+            improvement_rate=0.5,
+        ),
+        KpiHistoryEntry(
+            timestamp="2026-07-11T01:00:00+00:00",
+            cycle_time_seconds=2.0,
+            regression_rate=0.2,
+            improvement_rate=0.6,
+        ),
+    ]
+    table = render_history_markdown(entries, trend=True)
+    lines = table.splitlines()
+
+    # Header has 7 columns (timestamp + 3 KPIs + 3 sparklines).
+    header_cols = lines[0].split("|")
+    assert len(header_cols) == 9  # leading/trailing empty from split
+
+    # Data rows carry the same sparkline string in each row's sparkline cells.
+    assert "▁" in lines[2]
+    assert "█" in lines[2]
+
+
+def test_render_history_markdown_trend_false_has_no_sparkline_columns():
+    """trend=False (default) produces the original 4-column table."""
+    entries = [
+        KpiHistoryEntry(
+            timestamp="2026-07-11T00:00:00+00:00",
+            cycle_time_seconds=1.0,
+            regression_rate=0.1,
+            improvement_rate=0.5,
+        ),
+    ]
+    table = render_history_markdown(entries, trend=False)
+    lines = table.splitlines()
+    # Header + separator + 1 data row.
+    assert len(lines) == 3
+    # No sparkline characters in the data row.
+    assert "▁" not in lines[2]
+    assert "█" not in lines[2]
+
+
+def test_main_trend_without_from_history_exits_with_error(tmp_path, capsys):
+    """--trend without --from-history exits with a helpful error."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--db", str(db), "--trend"])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert "--trend requires --from-history" in captured.err
+
+
+def test_main_from_history_trend_appends_sparklines(tmp_path, capsys):
+    """--from-history --trend renders sparkline columns in the output."""
+    log = tmp_path / "kpi-history.jsonl"
+    append_kpi_history(log, KpiSummary(cycle_time_seconds=1.0, improvement_rate=0.2))
+    append_kpi_history(log, KpiSummary(cycle_time_seconds=2.0, improvement_rate=0.8))
+
+    rc = main(["--from-history", str(log), "--trend"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    out = captured.out
+    # Sparkline characters appear in the output.
+    assert "▁" in out or "█" in out
+    # Both history rows are present.
+    assert "0.20" in out
+    assert "0.80" in out
+
+
+# ---------------------------------------------------------------------------
 # Static guard: the history file is gitignored. A future contributor who
 # wipes ``logs/*.jsonl`` from ``.gitignore`` would silently start
 # committing KPI history to the repo; this test fails loudly so the

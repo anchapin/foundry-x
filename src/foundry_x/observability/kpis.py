@@ -778,44 +778,31 @@ def read_kpi_history(path: Path) -> list[KpiHistoryEntry]:
     return entries
 
 
-def _sparkline(values: list[float], width: int = 20) -> str:
-    """Render an ASCII sparkline for *values* using Unicode block characters.
+def _sparkline(values: list[float | None]) -> str:
+    """Render a minimal ASCII sparkline for a sequence of values.
 
-    The sparkline maps each value to one of the five Unicode density
-    characters based on its position in the ``[min, max]`` range.
-    ``min_val`` and ``max_val`` must not be equal (a single-entry history
-    would have no range; the caller is responsible for guarding that case).
-
-    Characters used (darkest to lightest):
-        ``█`` (U+2588) — highest value
-        ``▓`` (U+2593)
-        ``▒`` (U+2592)
-        ``░`` (U+2591)
-        `` `` (space) — lowest value / missing
-
-    When a value is ``None`` (cycle time not measured) it is rendered as
-    a single space so column alignment is preserved.
+    Uses Unicode block characters to approximate a bar-chart feel:
+    ``▁▂▃▄▅▆▇█`` (U+2581–U+2588), where each character represents one
+    data point scaled linearly across the min/max range.
+    ``None`` values render as ``·`` and are excluded from the scale.
     """
-    if not values:
-        return ""
-    num_chars = len(values)
-    blocks = [" ", "░", "▒", "▓", "█"]
-    float_vals = [v for v in values if v is not None]
-    if not float_vals:
-        return " " * num_chars
-    min_val = min(float_vals)
-    max_val = max(float_vals)
-    if min_val == max_val:
-        return " " * num_chars
-    result = []
-    for v in values:
+    valid = [v for v in values if v is not None]
+    if not valid:
+        return "N/A"
+    lo, hi = min(valid), max(valid)
+    span = hi - lo
+    blocks = "▁▂▃▄▅▆▇█"
+
+    def _char(v: float | None) -> str:
         if v is None:
-            result.append(" ")
-            continue
-        normalized = (v - min_val) / (max_val - min_val)
-        bucket = min(int(normalized * (len(blocks) - 1)), len(blocks) - 1)
-        result.append(blocks[bucket])
-    return "".join(result)
+            return "·"
+        if span == 0:
+            idx = len(blocks) - 1
+        else:
+            idx = min(int((v - lo) / span * (len(blocks) - 1)), len(blocks) - 1)
+        return blocks[idx]
+
+    return "".join(_char(v) for v in values)
 
 
 def render_history_markdown(
@@ -830,12 +817,13 @@ def render_history_markdown(
     PRD KPIs formatted with two decimals; ``None`` cycle times render
     as ``N/A`` (same convention as :func:`_render_markdown`).
 
+    When *trend* is ``True`` (issue #622), three ASCII sparkline
+    columns are appended to the table — one per numeric KPI — giving
+    operators a quick visual read of direction without opening a chart.
+
     An empty history renders a single placeholder line so CI summary
     cells that template-embed the table are never completely blank.
 
-    When *trend* is ``True``, a single-row ASCII sparkline column is
-    appended to each KPI, giving operators a visual cue without requiring
-    external charting tooling (issue #565).
     """
     if not entries:
         return "_No KPI history entries yet._"
@@ -1016,6 +1004,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (baseline_version is None) != (candidate_version is None):
         parser.error(
             "--baseline-harness-version and --candidate-harness-version must be supplied together"
+        )
+
+    if args.trend and args.from_history is None:
+        parser.error(
+            "--trend requires --from-history: sparklines are rendered from the KPI history log"
         )
 
     if args.from_history is not None:
