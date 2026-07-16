@@ -121,6 +121,49 @@ def test_format_timeline_omits_tool_latency_when_missing():
 
 
 # ---------------------------------------------------------------------------
+# Issue #631: timeline shows empty summary for hook_registry_error events.
+# ---------------------------------------------------------------------------
+
+
+def test_format_timeline_shows_hook_registry_error_message():
+    events = [
+        _event(
+            "hook_registry_error",
+            timedelta(seconds=0.0),
+            {"error_type": "HookRegistryError", "message": "get_registry() raised"},
+        ),
+    ]
+    output = format_timeline(events)
+    assert "get_registry() raised" in output
+
+
+def test_format_timeline_shows_error_type_when_message_absent():
+    events = [
+        _event(
+            "hook_registry_error",
+            timedelta(seconds=0.0),
+            {"error_type": "RuntimeError"},
+        ),
+    ]
+    output = format_timeline(events)
+    assert "RuntimeError" in output
+
+
+def test_build_timeline_records_hook_registry_error_is_error_flag():
+    records = build_timeline_records(
+        [
+            _event(
+                "hook_registry_error",
+                timedelta(seconds=0.0),
+                {"error_type": "HookRegistryError", "message": "get_registry() raised"},
+            ),
+        ]
+    )
+    assert len(records) == 1
+    assert records[0].is_error is True
+
+
+# ---------------------------------------------------------------------------
 # Issue #271: timeline shows cumulative token count on model_response lines.
 # ---------------------------------------------------------------------------
 
