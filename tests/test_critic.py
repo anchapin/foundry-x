@@ -82,7 +82,7 @@ def test_noop_diff_on_clean_harness_approves(harness_dir: Path) -> None:
 
 def test_diff_that_breaks_test_is_rejected(harness_dir: Path) -> None:
     breaking = _make_diff(
-        "tests/test_sanity.py",
+        "harness/tests/test_sanity.py",
         _SANITY_TEST,
         _SANITY_TEST.replace("assert True", "assert False"),
     )
@@ -95,7 +95,7 @@ def test_diff_that_breaks_test_is_rejected(harness_dir: Path) -> None:
 
 def test_live_harness_is_byte_identical_after_evaluate(harness_dir: Path) -> None:
     breaking = _make_diff(
-        "tests/test_sanity.py",
+        "harness/tests/test_sanity.py",
         _SANITY_TEST,
         _SANITY_TEST.replace("assert True", "assert False"),
     )
@@ -107,7 +107,7 @@ def test_live_harness_is_byte_identical_after_evaluate(harness_dir: Path) -> Non
 
 def test_patch_that_does_not_apply_is_rejected(harness_dir: Path) -> None:
     bad_diff = _make_diff(
-        "tests/test_sanity.py",
+        "harness/tests/test_sanity.py",
         "this content does not exist\n",
         "replacement\n",
     )
@@ -120,7 +120,7 @@ def test_patch_that_does_not_apply_is_rejected(harness_dir: Path) -> None:
 
 def test_clean_diff_that_passes_is_approved(harness_dir: Path) -> None:
     clean_diff = _make_diff(
-        "system_prompt.txt",
+        "harness/system_prompt.txt",
         _SYSTEM_PROMPT,
         "You are an excellent agent.\n",
     )
