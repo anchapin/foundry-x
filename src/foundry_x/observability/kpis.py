@@ -1027,6 +1027,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--cycle-time-alert-threshold",
+        type=float,
+        default=None,
+        dest="cycle_time_alert_threshold",
+        help=(
+            "Exit non-zero when cycle_time_seconds exceeds this value (issue #621)."
+            " The exit message names the triggering KPI and value."
+        ),
+    )
+    parser.add_argument(
         "--export-prometheus",
         action="store_true",
         default=False,
@@ -1090,15 +1100,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(output)
         return 0
-
-    summary = compute_kpis(logger, harness_version=args.harness_version)
-    if args.log_to is not None:
-        append_kpi_history(
-            Path(args.log_to),
-            summary,
-            harness_version=args.harness_version,
-        )
-    output = _render_json(summary) if fmt == "json" else _render_markdown(summary)
+    else:
+        summary = compute_kpis(logger, harness_version=args.harness_version)
+        if args.log_to is not None:
+            append_kpi_history(
+                Path(args.log_to),
+                summary,
+                harness_version=args.harness_version,
+            )
+        if (
+            args.cycle_time_alert_threshold is not None
+            and summary.cycle_time_seconds is not None
+            and summary.cycle_time_seconds > args.cycle_time_alert_threshold
+        ):
+            print(
+                f"ALERT: cycle_time_seconds ({summary.cycle_time_seconds:.2f}) exceeds "
+                f"threshold ({args.cycle_time_alert_threshold:.2f})",
+                file=sys.stderr,
+            )
+            return 1
+        output = _render_json(summary) if fmt == "json" else _render_markdown(summary)
 
     if args.out:
         Path(args.out).write_text(output, encoding="utf-8")
