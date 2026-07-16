@@ -265,6 +265,8 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "token_totals",
         "hooks_disabled_count",
         "hooks_disabled_rate",
+        "token_budget_abort_count",
+        "token_budget_hit_rate",
     }
 
 
@@ -718,6 +720,102 @@ def test_hooks_disabled_respects_harness_version_filter(tmp_path):
     assert summary_v2.hooks_disabled_count == 1
 
 
+# ---------------------------------------------------------------------------
+# Issue #551: ``token_budget_hit_rate`` is a fourth tracked metric exposed
+# via ``foundry-kpis``. It is the fraction of sessions that recorded at least
+# one ``task_aborted(reason="token_budget")`` event.
+# ---------------------------------------------------------------------------
+
+
+def _seed_token_budget_abort(
+    logger: TraceLogger,
+    harness_version: str,
+    abort_token_budget: bool = True,
+) -> str:
+    """Plant a session with an optional ``task_aborted(reason="token_budget")`` event.
+
+    When *abort_token_budget* is True, the session records one
+    ``task_aborted`` event with ``reason="token_budget"``. Otherwise
+    the session has no abort events at all.
+    """
+    with logger.session(harness_version=harness_version) as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+        if abort_token_budget:
+            logger.record(
+                sid,
+                kind="task_aborted",
+                payload={
+                    "reason": "token_budget",
+                    "token_budget": 100000,
+                    "timeout_s": None,
+                },
+            )
+    return sid
+
+
+def test_token_budget_hit_rate_fraction_of_sessions_with_abort(tmp_path):
+    """``token_budget_hit_rate`` = sessions with >=1 token-budget abort / total sessions."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    # 2 sessions with token-budget abort, 1 clean session → rate = 2/3.
+    _seed_token_budget_abort(logger, "v1", abort_token_budget=True)
+    _seed_token_budget_abort(logger, "v1", abort_token_budget=True)
+    _seed_token_budget_abort(logger, "v1", abort_token_budget=False)
+
+    summary = compute_kpis(logger)
+
+    assert summary.token_budget_hit_rate == pytest.approx(2 / 3)
+
+
+def test_token_budget_hit_rate_zero_when_no_aborts(tmp_path):
+    """Zero sessions with token-budget abort → rate = 0.0."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_token_budget_abort(logger, "v1", abort_token_budget=False)
+    _seed_token_budget_abort(logger, "v1", abort_token_budget=False)
+
+    summary = compute_kpis(logger)
+
+    assert summary.token_budget_hit_rate == 0.0
+
+
+def test_token_budget_hit_rate_all_sessions_abort(tmp_path):
+    """All sessions with token-budget abort → rate = 1.0."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_token_budget_abort(logger, "v1", abort_token_budget=True)
+    _seed_token_budget_abort(logger, "v1", abort_token_budget=True)
+
+    summary = compute_kpis(logger)
+
+    assert summary.token_budget_hit_rate == 1.0
+
+
+def test_token_budget_hit_rate_respects_harness_version(tmp_path):
+    """Harness version filter applies to both sessions and abort events."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_token_budget_abort(logger, "v1", abort_token_budget=True)
+    _seed_token_budget_abort(logger, "v2", abort_token_budget=False)
+
+    summary_v1 = compute_kpis(logger, harness_version="v1")
+    summary_v2 = compute_kpis(logger, harness_version="v2")
+
+    assert summary_v1.token_budget_hit_rate == 1.0
+    assert summary_v2.token_budget_hit_rate == 0.0
+
+
+def test_token_budget_hit_rate_zero_on_empty_db(tmp_path):
+    """No sessions → rate = 0.0."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    summary = compute_kpis(logger)
+
+    assert summary.token_budget_hit_rate == 0.0
+
+
 def test_main_markdown_includes_hooks_disabled_count_and_rate(tmp_path, capsys):
     """Markdown output includes the hooks-disabled KPI row."""
     db = tmp_path / "traces.db"
@@ -732,6 +830,20 @@ def test_main_markdown_includes_hooks_disabled_count_and_rate(tmp_path, capsys):
     assert "Hooks Disabled Count" in output
     assert "Hooks Disabled Rate" in output
     assert "2" in output  # count value
+
+
+def test_main_markdown_includes_token_budget_hit_rate(tmp_path, capsys):
+    """Markdown output includes Token Budget Hit Rate in the KPI table."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_token_budget_abort(logger, "v1", abort_token_budget=True)
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    output = captured.out
+    assert "Token Budget Hit Rate" in output
 
 
 def test_main_json_includes_hooks_disabled_fields(tmp_path, capsys):
@@ -749,6 +861,20 @@ def test_main_json_includes_hooks_disabled_fields(tmp_path, capsys):
     assert "hooks_disabled_rate" in payload
     assert payload["hooks_disabled_count"] == 2
     assert payload["hooks_disabled_rate"] == pytest.approx(1.0)  # 1 of 1 sessions
+
+
+def test_main_json_includes_token_budget_hit_rate(tmp_path, capsys):
+    """JSON output includes token_budget_hit_rate at the top level."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_token_budget_abort(logger, "v1", abort_token_budget=True)
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert "token_budget_hit_rate" in payload
 
 
 def test_main_json_top_level_keys_include_hooks_disabled(tmp_path, capsys):
@@ -770,4 +896,67 @@ def test_main_json_top_level_keys_include_hooks_disabled(tmp_path, capsys):
         "token_totals",
         "hooks_disabled_count",
         "hooks_disabled_rate",
+        "token_budget_abort_count",
+        "token_budget_hit_rate",
     }
+
+
+def test_compare_kpis_includes_token_budget_hit_rate_delta(tmp_path):
+    """KpiComparison deltas include token_budget_hit_rate."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_token_budget_abort(logger, "v1", abort_token_budget=False)
+    _seed_token_budget_abort(logger, "v2", abort_token_budget=True)
+
+    comparison = compare_kpis(logger, "v1", "v2")
+
+    assert "token_budget_hit_rate" in comparison.deltas
+    # baseline=0.0, candidate=1.0 → delta = 1.0
+    assert comparison.deltas["token_budget_hit_rate"] == pytest.approx(1.0)
+
+
+def test_main_comparison_includes_token_budget_hit_rate_delta(tmp_path, capsys):
+    """Comparison markdown table includes Token Budget Hit Rate row."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_token_budget_abort(logger, "v1", abort_token_budget=False)
+    _seed_token_budget_abort(logger, "v2", abort_token_budget=True)
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--baseline-harness-version",
+            "v1",
+            "--candidate-harness-version",
+            "v2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    output = captured.out
+    assert "Token Budget Hit Rate" in output
+
+
+def test_token_budget_hit_rate_not_confused_with_wall_clock_abort(tmp_path):
+    """Only ``reason="token_budget"`` counts; wall_clock aborts are ignored."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+        logger.record(
+            sid,
+            kind="task_aborted",
+            payload={
+                "reason": "wall_clock",
+                "token_budget": None,
+                "timeout_s": 300.0,
+            },
+        )
+
+    summary = compute_kpis(logger)
+
+    # wall_clock abort should NOT count toward token_budget_hit_rate
+    assert summary.token_budget_hit_rate == 0.0

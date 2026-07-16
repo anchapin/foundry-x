@@ -59,6 +59,9 @@ from foundry_x.evolution.digester import INJECTION_BLOCKED_KIND
 from foundry_x.observability.regression_report import VerdictRecord
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
+TASK_ABORTED_KIND = "task_aborted"
+TOKEN_BUDGET_REASON = "token_budget"
+
 
 class KpiSummary(BaseModel):
     """Structured summary of the three PRD KPIs.
@@ -82,6 +85,16 @@ class KpiSummary(BaseModel):
     sessions with at least one such event. Emitted when
     ``harness.hooks.get_registry()`` raises, disabling all hooks including
     the security-critical ``InjectionFirewallHook``.
+
+    Issue #466 adds ``token_budget_abort_count``: the number of sessions
+    that recorded at least one ``task_aborted(reason="token_budget")``
+    event. Surfaced as an auxiliary operator signal alongside
+    ``injection_blocks`` and ``token_totals``.
+
+    Issue #551 adds ``token_budget_hit_rate``: the fraction of sessions
+    that recorded at least one ``task_aborted(reason="token_budget")``
+    event. This is a fourth tracked metric exposed via ``foundry-kpis``
+    and the regression report, alongside the three PRD KPIs.
     """
 
     cycle_time_seconds: float | None = None
@@ -91,6 +104,8 @@ class KpiSummary(BaseModel):
     token_totals: dict[str, int] = {}
     hooks_disabled_count: int = 0
     hooks_disabled_rate: float = 0.0
+    token_budget_abort_count: int = 0
+    token_budget_hit_rate: float = 0.0
 
 
 class KpiComparison(BaseModel):
@@ -170,6 +185,8 @@ def compute_kpis(
     hooks_disabled_count, hooks_disabled_rate = _hook_registry_errors(
         logger, harness_version=harness_version
     )
+    token_budget_abort_count = _token_budget_aborts(logger, harness_version=harness_version)
+    token_budget_hit_rate = _token_budget_hit_rate(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -179,6 +196,8 @@ def compute_kpis(
         token_totals=token_totals,
         hooks_disabled_count=hooks_disabled_count,
         hooks_disabled_rate=hooks_disabled_rate,
+        token_budget_abort_count=token_budget_abort_count,
+        token_budget_hit_rate=token_budget_hit_rate,
     )
 
 
@@ -217,6 +236,9 @@ def _compute_deltas(
         "cycle_time_seconds": _delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds),
         "regression_rate": _delta(baseline.regression_rate, candidate.regression_rate),
         "improvement_rate": _delta(baseline.improvement_rate, candidate.improvement_rate),
+        "token_budget_hit_rate": _delta(
+            baseline.token_budget_hit_rate, candidate.token_budget_hit_rate
+        ),
     }
 
 
@@ -405,6 +427,64 @@ def _hook_registry_errors(
     return total_count, rate
 
 
+def _token_budget_aborts(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> int:
+    """Count sessions that hit ``task_aborted(reason="token_budget")`` (issue #466).
+
+    Unlike ``_injection_blocks`` which returns a per-session map, this
+    function returns a single integer: the number of sessions that
+    recorded at least one ``task_aborted`` event with
+    ``reason="token_budget"``. Sessions are counted once regardless of
+    how many times the abort fires within them.
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with
+    the kind and ``harness_version`` filters pushed down.
+    """
+    sessions_with_abort: set[str] = set()
+    for event in logger.query_events(
+        kind=TASK_ABORTED_KIND,
+        harness_version=harness_version,
+    ):
+        if event.payload.get("reason") == TOKEN_BUDGET_REASON:
+            sessions_with_abort.add(event.session_id)
+    return len(sessions_with_abort)
+
+
+def _token_budget_hit_rate(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> float:
+    """Fraction of sessions with at least one ``task_aborted(reason="token_budget")`` event.
+
+    Issue #551 — the token budget hit rate is a fourth tracked metric
+    exposed via ``foundry-kpis`` alongside the three PRD KPIs. It signals
+    whether the harness is driving tasks that repeatedly hit the token
+    budget, which would indicate the context-pruning hook is not aggressive
+    enough, or that the model-context window is being misspent.
+
+    A session contributes to the numerator if it has at least one
+    ``task_aborted`` event whose ``payload["reason"] == "token_budget"``.
+    The denominator is the total number of sessions that have a
+    ``task_received`` event (matching the harness version filter), which
+    is the natural population boundary for the KPI.
+    """
+    sessions_with_abort: set[str] = set()
+    all_sessions: set[str] = set()
+
+    for event in logger.query_events(kind="task_received", harness_version=harness_version):
+        all_sessions.add(event.session_id)
+
+    for event in logger.query_events(kind="task_aborted", harness_version=harness_version):
+        if event.payload.get("reason") == "token_budget":
+            sessions_with_abort.add(event.session_id)
+
+    if not all_sessions:
+        return 0.0
+    return len(sessions_with_abort) / len(all_sessions)
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -445,6 +525,7 @@ def _render_markdown(summary: KpiSummary) -> str:
         f"| Improvement Rate | {_format_value(summary.improvement_rate)} |",
         f"| Hooks Disabled Count | {summary.hooks_disabled_count} |",
         f"| Hooks Disabled Rate | {_format_value(summary.hooks_disabled_rate)} |",
+        f"| Token Budget Hit Rate | {_format_value(summary.token_budget_hit_rate)} |",
     ]
     # Issue #120: surface per-session ``injection_blocked`` counts only when
     # at least one session has ≥1 block; a clean trace store stays compact.
@@ -475,6 +556,12 @@ def _render_markdown(summary: KpiSummary) -> str:
         lines.append("| --- | --- |")
         for sid, count in sorted(summary.token_totals.items()):
             lines.append(f"| {sid} | {count} |")
+    if summary.token_budget_abort_count > 0:
+        lines.append("")
+        lines.append(
+            f"Token Budget Aborts: {summary.token_budget_abort_count} session(s) "
+            "hit the token budget limit."
+        )
     return "\n".join(lines)
 
 
@@ -520,6 +607,10 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{_format_value(baseline.improvement_rate)} | "
         f"{_format_value(candidate.improvement_rate)} | "
         f"{_format_delta(baseline.improvement_rate, candidate.improvement_rate, higher_is_better=True)} |",
+        "| Token Budget Hit Rate | "
+        f"{_format_value(baseline.token_budget_hit_rate)} | "
+        f"{_format_value(candidate.token_budget_hit_rate)} | "
+        f"{_format_delta(baseline.token_budget_hit_rate, candidate.token_budget_hit_rate, higher_is_better=False)} |",
     ]
     return "\n".join(lines)
 
@@ -597,7 +688,51 @@ def read_kpi_history(path: Path) -> list[KpiHistoryEntry]:
     return entries
 
 
-def render_history_markdown(entries: Sequence[KpiHistoryEntry]) -> str:
+def _sparkline(values: list[float], width: int = 20) -> str:
+    """Render an ASCII sparkline for *values* using Unicode block characters.
+
+    The sparkline maps each value to one of the five Unicode density
+    characters based on its position in the ``[min, max]`` range.
+    ``min_val`` and ``max_val`` must not be equal (a single-entry history
+    would have no range; the caller is responsible for guarding that case).
+
+    Characters used (darkest to lightest):
+        ``█`` (U+2588) — highest value
+        ``▓`` (U+2593)
+        ``▒`` (U+2592)
+        ``░`` (U+2591)
+        `` `` (space) — lowest value / missing
+
+    When a value is ``None`` (cycle time not measured) it is rendered as
+    a single space so column alignment is preserved.
+    """
+    if not values:
+        return ""
+    num_chars = len(values)
+    blocks = [" ", "░", "▒", "▓", "█"]
+    float_vals = [v for v in values if v is not None]
+    if not float_vals:
+        return " " * num_chars
+    min_val = min(float_vals)
+    max_val = max(float_vals)
+    if min_val == max_val:
+        return " " * num_chars
+    result = []
+    for v in values:
+        if v is None:
+            result.append(" ")
+            continue
+        normalized = (v - min_val) / (max_val - min_val)
+        bucket = min(int(normalized * (len(blocks) - 1)), len(blocks) - 1)
+        result.append(blocks[bucket])
+    return "".join(result)
+
+
+def render_history_markdown(
+    entries: Sequence[KpiHistoryEntry],
+    *,
+    trend: bool = False,
+) -> str:
     """Render a Markdown trend table from KPI history entries (issue #183).
 
     The table preserves file order, which is the same as append order
@@ -607,85 +742,83 @@ def render_history_markdown(entries: Sequence[KpiHistoryEntry]) -> str:
 
     An empty history renders a single placeholder line so CI summary
     cells that template-embed the table are never completely blank.
-    Plotting (matplotlib, ASCII sparklines) is explicitly out of
-    scope per the issue; a pure table is the contract.
+
+    When *trend* is ``True``, a single-row ASCII sparkline column is
+    appended to each KPI, giving operators a visual cue without requiring
+    external charting tooling (issue #565).
     """
     if not entries:
         return "_No KPI history entries yet._"
-    lines = [
-        "| Timestamp | Cycle Time (s) | Regression Rate | Improvement Rate |",
-        "| --- | --- | --- | --- |",
-    ]
-    for entry in entries:
-        lines.append(
+
+    cycle_times = [e.cycle_time_seconds for e in entries]
+    regression_rates = [e.regression_rate for e in entries]
+    improvement_rates = [e.improvement_rate for e in entries]
+
+    header = "| Timestamp | Cycle Time (s) | Regression Rate | Improvement Rate |"
+    if trend:
+        header += " Cycle Time | Reg. Rate | Impr. Rate |"
+    lines = [header, "| --- | --- | --- | --- |" + (" --- | --- | --- |" if trend else "")]
+
+    sparkline_cycle = _sparkline(cycle_times) if trend else None
+    sparkline_reg = _sparkline(regression_rates) if trend else None
+    sparkline_imp = _sparkline(improvement_rates) if trend else None
+
+    for idx, entry in enumerate(entries):
+        row = (
             f"| {entry.timestamp} | "
             f"{_format_value(entry.cycle_time_seconds)} | "
             f"{_format_value(entry.regression_rate)} | "
             f"{_format_value(entry.improvement_rate)} |"
         )
+        if trend:
+            sc = sparkline_cycle[idx] if sparkline_cycle else " "
+            sr = sparkline_reg[idx] if sparkline_reg else " "
+            si = sparkline_imp[idx] if sparkline_imp else " "
+            row += f" {sc} | {sr} | {si} |"
+        lines.append(row)
     return "\n".join(lines)
 
 
-def _resolve_format(args_format: str | None, out: str | None) -> str:
-    """Return ``"markdown"`` or ``"json"``.
+def export_prometheus(
+    entries: Sequence[KpiHistoryEntry],
+    *,
+    metric_name_prefix: str = "foundryx",
+) -> str:
+    """Render Prometheus-format metrics from KPI history entries (issue #565).
 
-    The explicit ``--format`` flag always wins. When unset, the format is
-    inferred from the ``--out`` file extension (``.json`` → JSON);
-    otherwise Markdown is returned. Issue #101 keeps the decision local to
-    the CLI layer so the pydantic model remains the single source of truth.
+    Emits one ``foundryx_kpi_entry`` sample per history entry per KPI
+    with a ``kpi`` label identifying the metric. The ``harness_version``
+    label is set to the entry's value or ``"unknown"`` if absent.
+    This makes it straightforward to scrape and ingest into Grafana
+    without a custom exporter.
+
+    The metric is gauge-typed so the most recent value is always the
+    current KPI state; the scrape timestamp becomes the ``timestamp``
+    field in Prometheus (seconds since epoch).
     """
-    if args_format is not None:
-        return args_format
-    if out is not None and Path(out).suffix.lower() == ".json":
-        return "json"
-    return "markdown"
+    if not entries:
+        return f"# No KPI history entries — {metric_name_prefix}_kpi_entry is empty.\n"
 
-
-def _render_json(summary: KpiSummary) -> str:
-    """Serialize a KPI summary as a stable JSON snapshot (issue #101)."""
-    return summary.model_dump_json(indent=2)
-
-
-def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> str:
-    """Render baseline / candidate / delta columns for the three PRD KPIs.
-
-    Issue #100 requires the comparison to surface a delta column whose
-    sign convention follows the PRD: improvement-rate up is good,
-    regression-rate and cycle-time up are bad.
-    """
-    lines = [
-        "| KPI | Baseline | Candidate | Delta |",
-        "| --- | --- | --- | --- |",
-        "| Cycle Time (seconds) | "
-        f"{_format_value(baseline.cycle_time_seconds)} | "
-        f"{_format_value(candidate.cycle_time_seconds)} | "
-        f"{_format_delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds, higher_is_better=False)} |",
-        "| Regression Rate | "
-        f"{_format_value(baseline.regression_rate)} | "
-        f"{_format_value(candidate.regression_rate)} | "
-        f"{_format_delta(baseline.regression_rate, candidate.regression_rate, higher_is_better=False)} |",
-        "| Improvement Rate | "
-        f"{_format_value(baseline.improvement_rate)} | "
-        f"{_format_value(candidate.improvement_rate)} | "
-        f"{_format_delta(baseline.improvement_rate, candidate.improvement_rate, higher_is_better=True)} |",
+    lines: list[str] = [
+        f"# HELP {metric_name_prefix}_kpi_entry FoundryX KPI from history (issue #565)",
+        f"# TYPE {metric_name_prefix}_kpi_entry gauge",
     ]
-    return "\n".join(lines)
+    for entry in entries:
+        ts = entry.timestamp
+        harness = entry.harness_version or "unknown"
+        labels = f'harness_version="{harness}",kpi="cycle_time_seconds"'
+        value = f"{entry.cycle_time_seconds:.6f}" if entry.cycle_time_seconds is not None else "NaN"
+        lines.append(f"{metric_name_prefix}_kpi_entry{{{labels}}} {value} {ts}")
 
+        labels = f'harness_version="{harness}",kpi="regression_rate"'
+        lines.append(f"{metric_name_prefix}_kpi_entry{{{labels}}} {entry.regression_rate:.6f} {ts}")
 
-def _render_comparison_json(comparison: KpiComparison) -> str:
-    """Serialize a baseline-vs-candidate comparison as JSON (issue #100)."""
-    return comparison.model_dump_json(indent=2)
+        labels = f'harness_version="{harness}",kpi="improvement_rate"'
+        lines.append(
+            f"{metric_name_prefix}_kpi_entry{{{labels}}} {entry.improvement_rate:.6f} {ts}"
+        )
 
-
-def _now_iso() -> str:
-    """Return a UTC ISO-8601 timestamp with offset suffix.
-
-    Issue #183 uses this to stamp each appended history row. The
-    timezone-aware form keeps the line unambiguous when CI runs
-    across multiple regions; ``datetime.fromisoformat`` (Python 3.11+)
-    accepts the ``+00:00`` suffix without modification.
-    """
-    return datetime.now(timezone.utc).isoformat()
+    return "\n".join(lines) + "\n"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -754,6 +887,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             " render a placeholder table."
         ),
     )
+    parser.add_argument(
+        "--alert-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Exit non-zero when the computed regression_rate exceeds this"
+            " threshold (issue #565). Applies only to live KPI computation"
+            " (not --from-history). Example: --alert-threshold 0.1"
+            " causes a non-zero exit when regression_rate > 0.1."
+        ),
+    )
+    parser.add_argument(
+        "--export-prometheus",
+        action="store_true",
+        default=False,
+        help=(
+            "Emit Prometheus-format metrics to stdout (issue #565)."
+            " When used with --from-history, reads the JSONL history log"
+            " and exports one sample per entry per KPI. The output is"
+            " compatible with Prometheus scraping and Grafana ingestion."
+        ),
+    )
+    parser.add_argument(
+        "--trend",
+        action="store_true",
+        default=False,
+        help=(
+            "Append ASCII sparkline columns to the Markdown trend table"
+            " (issue #565). Requires --from-history. Each KPI gets a"
+            " Unicode-block sparkline showing the full history at a glance."
+        ),
+    )
     args = parser.parse_args(argv)
 
     baseline_version = args.baseline_harness_version
@@ -768,7 +933,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # it does not require a trace store, so we short-circuit before
         # opening the SQLite database. ``--out`` still works as a sink.
         entries = read_kpi_history(Path(args.from_history))
-        output = render_history_markdown(entries)
+        if args.export_prometheus:
+            output = export_prometheus(entries)
+        else:
+            output = render_history_markdown(entries, trend=args.trend)
         if args.out:
             Path(args.out).write_text(output, encoding="utf-8")
         else:
@@ -784,23 +952,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             output = _render_comparison_json(comparison)
         else:
             output = _render_comparison_markdown(comparison.baseline, comparison.candidate)
-    else:
-        summary = compute_kpis(logger, harness_version=args.harness_version)
-        # Issue #183: append-only history log. Comparison runs are
-        # intentionally not logged (the history is per single-summary
-        # run; a comparison is a one-off baseline-vs-candidate diff).
-        if args.log_to is not None:
-            append_kpi_history(
-                Path(args.log_to),
-                summary,
-                harness_version=args.harness_version,
-            )
-        output = _render_json(summary) if fmt == "json" else _render_markdown(summary)
+        if args.out:
+            Path(args.out).write_text(output, encoding="utf-8")
+        else:
+            print(output)
+        return 0
+
+    summary = compute_kpis(logger, harness_version=args.harness_version)
+    if args.log_to is not None:
+        append_kpi_history(
+            Path(args.log_to),
+            summary,
+            harness_version=args.harness_version,
+        )
+    output = _render_json(summary) if fmt == "json" else _render_markdown(summary)
 
     if args.out:
         Path(args.out).write_text(output, encoding="utf-8")
     else:
         print(output)
+
+    # Issue #565: alert threshold — regression rate above threshold triggers CI gate.
+    if args.alert_threshold is not None and summary.regression_rate > args.alert_threshold:
+        sys.stderr.write(
+            f"[ALERT] regression_rate {summary.regression_rate:.4f}"
+            f" exceeds threshold {args.alert_threshold:.4f}\n"
+        )
+        return 1
     return 0
 
 

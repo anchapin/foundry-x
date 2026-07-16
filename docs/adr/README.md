@@ -27,5 +27,11 @@ format and process.
 | [0013](./0013-wal-mode-and-connection-reuse.md) | WAL mode and a single reused SQLite connection | Accepted |
 | [0014](./0014-model-abstraction.md) | Model abstraction layer for model-swapping milestone | Accepted |
 | [0015](./0015-model-abstraction.md) | Model abstraction layer for model-swapping milestone | Proposed |
+| [0016](./0016-phase-3-quantization-sweep.md) | Phase 3 quantization sweep | Proposed |
+| [0017](./0017-review-state-machine.md) | Review State Machine for ProposedEdits | Accepted |
+| [0018](./0018-evolver-meta-prompt-design.md) | Evolver meta-prompt design | Accepted |
+| [0019](./0019-quantization-intelligence-floor.md) | Quantization intelligence floor findings | Proposed |
+| [0020](./0020-phase-3-findings.md) | Phase 3 Intelligence Floor Findings | Proposed |
+| [0021](./0021-context-pruning-at-scale.md) | Context pruning at scale — Phase 3 findings | Proposed |
 
 When adding a new ADR, append it to this table in the same PR.

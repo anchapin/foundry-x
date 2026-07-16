@@ -4,10 +4,12 @@ from dataclasses import asdict, dataclass
 
 from pydantic import BaseModel, Field
 
-from foundry_x.evolution.critic import CriticVerdict
+from foundry_x.evolution.critic import CriticVerdict, QuantizationVerdict
 from foundry_x.trace.logger import TraceLogger
 
 VERDICT_KIND = "critic_verdict"
+TASK_ABORTED_KIND = "task_aborted"
+TOKEN_BUDGET_REASON = "token_budget"
 
 
 class VerdictRecord(BaseModel):
@@ -60,6 +62,12 @@ class RegressionAnalysis(BaseModel):
     and new passes so callers (e.g. ``fx-trace regression-report
     --fail-on-regression``) can both persist the artifact and gate CI off the
     same observation (issue #99).
+
+    Issue #466 adds ``token_budget_abort_count``: the number of sessions
+    that recorded at least one ``task_aborted(reason="token_budget")``
+    event during the analysis window. This is a separate signal from
+    ``regressions`` and ``new_passes`` because token budget aborts are
+    task-shaped failures, not harness regressions.
     """
 
     report: str
@@ -68,6 +76,7 @@ class RegressionAnalysis(BaseModel):
     rejections: int
     regressions: list[RegressionRow] = Field(default_factory=list)
     new_passes: list[NewPassRow] = Field(default_factory=list)
+    token_budget_abort_count: int = 0
 
 
 def record_verdict(logger: TraceLogger, session_id: str, verdict: CriticVerdict) -> None:
@@ -184,6 +193,11 @@ def analyze_regressions(
     Issue #182: ``task`` narrows the regressions / new passes lists to a
     single task name. The summary counts stay at full population so the
     filtered view does not silently hide regressions in unrelated tasks.
+
+    Issue #466: ``token_budget_abort_count`` counts sessions that recorded
+    at least one ``task_aborted(reason="token_budget")`` event. This is
+    reported separately from task regressions because it is a task-sizing
+    problem, not a harness defect.
     """
     events = _load_verdict_events(logger, since)
     total = len(events)
@@ -194,7 +208,16 @@ def analyze_regressions(
     if task is not None:
         regressions = [r for r in regressions if r.task == task]
         new_passes = [p for p in new_passes if p.task == task]
-    report = _render(total, approvals, rejections, regressions, new_passes, task=task)
+    token_budget_abort_count = _count_token_budget_aborts(logger, since=since)
+    report = _render(
+        total,
+        approvals,
+        rejections,
+        regressions,
+        new_passes,
+        token_budget_abort_count=token_budget_abort_count,
+        task=task,
+    )
     return RegressionAnalysis(
         report=report,
         total=total,
@@ -202,20 +225,8 @@ def analyze_regressions(
         rejections=rejections,
         regressions=[RegressionRow(**asdict(r)) for r in regressions],
         new_passes=[NewPassRow(**asdict(p)) for p in new_passes],
+        token_budget_abort_count=token_budget_abort_count,
     )
-
-
-def _session_versions(logger: TraceLogger) -> dict[str, str]:
-    """Build a ``session_id -> harness_version`` map for every known session.
-
-    The map is consumed by :func:`_compute` so each regression / new-pass row
-    can surface the manifest version of its *current-state* session (issue
-    #103: regression_report gains a column showing the manifest version of
-    each verdict's source session). Sessions whose row is missing are
-    rendered as an empty string rather than ``None`` so the Markdown table
-    stays a 4-column shape.
-    """
-    return {s.session_id: s.harness_version for s in logger.list_sessions()}
 
 
 def _session_versions(logger: TraceLogger) -> dict[str, str]:
@@ -237,6 +248,7 @@ def _render(
     rejections: int,
     regressions: list[_Regression],
     new_passes: list[_NewPass],
+    token_budget_abort_count: int = 0,
     task: str | None = None,
 ) -> str:
     # Issue #182: when the task filter narrows both sections to zero rows,
@@ -277,5 +289,123 @@ def _render(
             )
     else:
         lines.append("_None._")
+    # Issue #466: token budget aborts are a distinct failure category,
+    # reported separately from task regressions because they indicate a
+    # task-sizing problem, not a harness defect.
+    lines += ["", "## Token Budget Aborts", ""]
+    lines.append(f"_Token budget aborts: {token_budget_abort_count} session(s)_")
     lines.append("")
     return "\n".join(lines)
+
+
+def _count_token_budget_aborts(
+    logger: TraceLogger,
+    since: str | None = None,
+) -> int:
+    """Count sessions with at least one ``task_aborted(reason="token_budget")`` event.
+
+    Issue #466: token budget aborts are task-shaped failures (a task exceeded
+    the model's context budget), not harness regressions. They are reported
+    as a separate signal in the regression report.
+
+    Sessions are counted once regardless of how many times the abort fires
+    within them. Uses one :meth:`TraceLogger.query_events` cursor.
+    """
+    sessions_with_abort: set[str] = set()
+    for event in logger.query_events(kind=TASK_ABORTED_KIND):
+        if since is not None and event.timestamp < since:
+            continue
+        if event.payload.get("reason") == TOKEN_BUDGET_REASON:
+            sessions_with_abort.add(event.session_id)
+    return len(sessions_with_abort)
+
+
+class QuantizationComparisonReport(BaseModel):
+    """Structured result of a quantization comparison sweep (ADR-0016).
+
+    Carries the rendered Markdown report alongside the structured
+    ``QuantizationVerdict`` so callers (e.g. CI gate) can both persist
+    the artifact and gate off the same observation.
+    """
+
+    report: str
+    verdict: QuantizationVerdict
+    best_token_efficiency: float | None = Field(
+        default=None,
+        description=(
+            "Highest token efficiency (tokens/sec) across all quantizations. "
+            "None when no quantization provides token_efficiency data."
+        ),
+    )
+    best_cost_per_task: float | None = Field(
+        default=None,
+        description=(
+            "Lowest cost per task (USD) across all quantizations. "
+            "None when no quantization provides cost_per_task data."
+        ),
+    )
+
+
+def generate_quantization_comparison_report(
+    verdict: QuantizationVerdict,
+) -> QuantizationComparisonReport:
+    """Produce a Markdown comparison report from a ``QuantizationVerdict``.
+
+    Computes ``best_token_efficiency`` and ``best_cost_per_task`` from the
+    per-quantization results and renders a table comparing all quantizations.
+
+    Args:
+        verdict: The ``QuantizationVerdict`` produced by
+            ``Critic.quantization_sweep``.
+
+    Returns:
+        A ``QuantizationComparisonReport`` with the rendered Markdown report
+        and the structured verdict including best-cost and best-efficiency
+        annotations.
+    """
+    best_eff = None
+    best_cost = None
+
+    for result in verdict.quantizations:
+        if result.token_efficiency is not None:
+            if best_eff is None or result.token_efficiency > best_eff:
+                best_eff = result.token_efficiency
+        if result.cost_per_task is not None:
+            if best_cost is None or result.cost_per_task < best_cost:
+                best_cost = result.cost_per_task
+
+    report_lines: list[str] = [
+        "# Quantization Comparison Report",
+        "",
+        "## Summary",
+        "",
+        f"- Quantizations compared: {len(verdict.quantizations)}",
+        f"- Recommended: **{verdict.recommended}**",
+        f"- Regression detected: {verdict.regression}",
+    ]
+    if best_eff is not None:
+        report_lines.append(f"- Best token efficiency: {best_eff:.1f} tokens/s")
+    if best_cost is not None:
+        report_lines.append(f"- Best cost per task: ${best_cost:.6f}")
+    report_lines.append("")
+    report_lines.append("## Per-Quantization Results")
+    report_lines.append("")
+    report_lines.append("| Quantization | Pass Rate | Avg Cycle | Tokens | Tok/s | Cost/Task |")
+    report_lines.append("|---|---|---|---|---|---|")
+    for result in verdict.quantizations:
+        pr = f"{result.pass_rate * 100:.1f}%"
+        avg_t = f"{result.avg_cycle_time_s:.1f}s" if result.avg_cycle_time_s else "N/A"
+        toks = f"{result.total_tokens:,}" if result.total_tokens else "N/A"
+        eff = f"{result.token_efficiency:.1f}" if result.token_efficiency else "N/A"
+        cost = f"${result.cost_per_task:.6f}" if result.cost_per_task else "N/A"
+        rec_marker = " **(rec)**" if result.quantization == verdict.recommended else ""
+        report_lines.append(
+            f"| {result.quantization}{rec_marker} | {pr} | {avg_t} | {toks} | {eff} | {cost} |"
+        )
+    report_lines.append("")
+    return QuantizationComparisonReport(
+        report="\n".join(report_lines),
+        verdict=verdict,
+        best_token_efficiency=best_eff,
+        best_cost_per_task=best_cost,
+    )

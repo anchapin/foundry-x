@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from foundry_x.evolution.evolver import ProposedEdit, _confine_to_harness_tree
+from foundry_x.evolution.evolver import (
+    InvalidStateTransition,
+    ProposedEdit,
+    ReviewState,
+    ReviewStateMachine,
+    _confine_to_harness_tree,
+)
 
 # A minimal valid diff body; these tests exercise ``target_file`` confinement
 # (ADR-0004), not diff parsing, so a simple non-blank string suffices.
@@ -122,3 +128,105 @@ def test_helper_raises_value_error_for_traversal():
 def test_helper_rejects_manifest_beneath_directory():
     with pytest.raises(ValueError):
         _confine_to_harness_tree("harness/manifest.json/subpath")
+
+
+# --- review state machine (issue #497) ----------------------------------------
+
+
+class TestReviewState:
+    def test_review_state_values(self):
+        assert ReviewState.PROPOSED.value == "PROPOSED"
+        assert ReviewState.PENDING_REVIEW.value == "PENDING_REVIEW"
+        assert ReviewState.APPROVED.value == "APPROVED"
+        assert ReviewState.REJECTED.value == "REJECTED"
+
+
+class TestReviewStateMachine:
+    def test_can_apply_approved(self):
+        sm = ReviewStateMachine()
+        assert sm.can_apply(ReviewState.APPROVED) is True
+
+    def test_cannot_apply_proposed(self):
+        sm = ReviewStateMachine()
+        assert sm.can_apply(ReviewState.PROPOSED) is False
+
+    def test_cannot_apply_pending_review(self):
+        sm = ReviewStateMachine()
+        assert sm.can_apply(ReviewState.PENDING_REVIEW) is False
+
+    def test_cannot_apply_rejected(self):
+        sm = ReviewStateMachine()
+        assert sm.can_apply(ReviewState.REJECTED) is False
+
+    def test_valid_transition_proposed_to_pending_review(self):
+        sm = ReviewStateMachine()
+        sm.validate_transition(ReviewState.PROPOSED, ReviewState.PENDING_REVIEW)
+
+    def test_valid_transition_pending_review_to_approved(self):
+        sm = ReviewStateMachine()
+        sm.validate_transition(ReviewState.PENDING_REVIEW, ReviewState.APPROVED)
+
+    def test_valid_transition_pending_review_to_rejected(self):
+        sm = ReviewStateMachine()
+        sm.validate_transition(ReviewState.PENDING_REVIEW, ReviewState.REJECTED)
+
+    def test_invalid_transition_proposed_to_approved(self):
+        sm = ReviewStateMachine()
+        with pytest.raises(InvalidStateTransition, match="PROPOSED.*APPROVED"):
+            sm.validate_transition(ReviewState.PROPOSED, ReviewState.APPROVED)
+
+    def test_invalid_transition_rejected_to_approved(self):
+        sm = ReviewStateMachine()
+        with pytest.raises(InvalidStateTransition, match="REJECTED.*APPROVED"):
+            sm.validate_transition(ReviewState.REJECTED, ReviewState.APPROVED)
+
+    def test_invalid_transition_approved_to_rejected(self):
+        sm = ReviewStateMachine()
+        with pytest.raises(InvalidStateTransition, match="APPROVED.*REJECTED"):
+            sm.validate_transition(ReviewState.APPROVED, ReviewState.REJECTED)
+
+    def test_terminal_approved_no_outbound(self):
+        sm = ReviewStateMachine()
+        with pytest.raises(InvalidStateTransition, match="APPROVED.*PROPOSED"):
+            sm.validate_transition(ReviewState.APPROVED, ReviewState.PROPOSED)
+
+    def test_terminal_rejected_no_outbound(self):
+        sm = ReviewStateMachine()
+        with pytest.raises(InvalidStateTransition, match="REJECTED.*PENDING_REVIEW"):
+            sm.validate_transition(ReviewState.REJECTED, ReviewState.PENDING_REVIEW)
+
+    def test_transition_calls_record_when_logger_configured(self):
+        from unittest.mock import MagicMock
+
+        mock_logger = MagicMock()
+        sm = ReviewStateMachine(trace_logger=mock_logger, session_id="test-session")
+        sm.transition("edit-1", ReviewState.PROPOSED, ReviewState.PENDING_REVIEW)
+
+        mock_logger.record.assert_called_once_with(
+            "test-session",
+            "review_state_transition",
+            {
+                "edit_id": "edit-1",
+                "from_state": "PROPOSED",
+                "to_state": "PENDING_REVIEW",
+            },
+        )
+
+    def test_transition_does_not_raise_on_valid_transition(self):
+        sm = ReviewStateMachine()
+        sm.transition("edit-1", ReviewState.PROPOSED, ReviewState.PENDING_REVIEW)
+
+
+class TestProposedEditReviewState:
+    def test_proposed_edit_default_review_state(self):
+        edit = _make("harness/system_prompt.txt")
+        assert edit.review_state == ReviewState.PROPOSED
+
+    def test_proposed_edit_can_set_review_state(self):
+        edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="test",
+            unified_diff=_DIFF,
+            review_state=ReviewState.PENDING_REVIEW,
+        )
+        assert edit.review_state == ReviewState.PENDING_REVIEW

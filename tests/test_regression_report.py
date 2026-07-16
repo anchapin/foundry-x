@@ -469,3 +469,79 @@ def test_cli_regression_report_format_json_with_fail_on_regression_gates(tmp_pat
     captured = capsys.readouterr()
     assert rc == 1
     assert json.loads(captured.out)["regressions"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #466: token budget aborts in regression report.
+# The report surfaces token budget aborts as a distinct failure category
+# separate from task regressions.
+# ---------------------------------------------------------------------------
+
+
+def _plant_task_aborted(logger, session_id, reason):
+    """Plant a ``task_aborted`` event for a session."""
+    import time
+
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+        time.sleep(0.01)
+        logger.record(
+            sid,
+            kind="task_aborted",
+            payload={"reason": reason, "tokens_used": 8000, "token_budget": 5000},
+        )
+
+
+def test_analyze_regressions_includes_token_budget_abort_count(tmp_path):
+    """``token_budget_abort_count`` is counted in the regression analysis."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _plant_task_aborted(logger, "sess-1", "token_budget")
+    _plant_task_aborted(logger, "sess-2", "token_budget")
+    _plant_task_aborted(logger, "sess-3", "wall_clock")
+
+    result = analyze_regressions(logger)
+
+    assert result.token_budget_abort_count == 2
+
+
+def test_analyze_regressions_token_budget_abort_zero_when_no_aborts(tmp_path):
+    """``token_budget_abort_count`` is 0 when no session hit the token budget."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _plant_task_aborted(logger, "sess-1", "wall_clock")
+
+    result = analyze_regressions(logger)
+
+    assert result.token_budget_abort_count == 0
+
+
+def test_generate_regression_report_shows_token_budget_aborts_section(tmp_path):
+    """Regression report includes a Token Budget Aborts section."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _plant_task_aborted(logger, "sess-1", "token_budget")
+
+    report = generate_regression_report(logger)
+
+    assert "## Token Budget Aborts" in report
+    assert "1 session(s)" in report
+
+
+def test_cli_regression_report_json_includes_token_budget_abort_count(tmp_path, capsys):
+    """JSON output includes token_budget_abort_count."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _plant_task_aborted(logger, "sess-1", "token_budget")
+    _plant_task_aborted(logger, "sess-2", "token_budget")
+
+    rc = cli_main(["regression-report", "--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert payload["token_budget_abort_count"] == 2

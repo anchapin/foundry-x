@@ -81,6 +81,30 @@ many times per day against a benchmark suite.
   root cause; consumed by the `Evolver` as the basis for a
   `ProposedEdit`.
 
+## KPIs
+
+The FoundryX KPIs are the project's definition of progress (PRD §5).
+Canonical implementations live in `src/foundry_x/observability/kpis.py`.
+
+The three PRD KPIs cannot move until the Runner and Critic are in place
+(ADR-0010).
+
+- **Cycle Time** — mean wall-clock time from the first `task_received`
+  event to the first `critic_verdict` event per session.
+- **Regression Rate** — fraction of sessions with a `critic_verdict` in which
+  a task previously seen in `passed_checks` later appears in `failed_checks`.
+- **Improvement Rate** — fraction of `critic_verdict` events whose
+  persisted payload has `approved: true`.
+
+A fourth tracked metric is also exposed via `foundry-kpis` alongside the
+three PRD KPIs:
+
+- **Token Budget Hit Rate** — fraction of sessions that recorded at least
+  one `task_aborted(reason="token_budget")` event. Signals whether the
+  context-pruning hook is aggressive enough, or whether the model-context
+  window is being misspent. The raw session count
+  (`token_budget_abort_count`) is retained as an auxiliary signal.
+
 ## Event kinds
 
 The vocabulary of `kind` values persisted by the `TraceLogger` onto
@@ -127,7 +151,7 @@ The "Failure-signalling subset" subsection below cross-references the
 | Kind | Producer | Payload contract | Failure signal? |
 | --- | --- | --- | --- |
 | **`injection_blocked`** | `InjectionFirewallHook` (`harness/hooks/injection_firewall.py`, one per block) | `{"markers": list[str], "tool": str, "preview": str}` — sorted unique marker names, originating tool name, and the first 120 characters of the suppressed text with newlines folded to spaces (safe to persist; never re-injected into a prompt). The Digester aggregates every block in a session into one `FailureReport` with `proposed_class == 'injection-attempt'` and one entry per block in `failed_steps` so the Evolver sees the full adversarial surface. See issue #120. | **yes** (adversarial) |
-| **`context_pruned`** | `ContextPruningHook` (`harness/hooks/context_pruning.py`, opt-in via `harness/manifest.json`) | `{"dropped": int, "threshold": int}` — number of older events the pruner dropped to bring the session back under the per-session cap, plus the threshold in effect. See issue #106. | no |
+| **`context_pruned`** | `ContextPruningHook` (`harness/hooks/context_pruning.py`, opt-in via `harness/manifest.json`) | `{"dropped": int, "threshold": int, "token_threshold": int}` — number of older events the pruner dropped to bring the session back under the per-session event cap (`threshold`), plus the token threshold in effect (`token_threshold`, configurable via `harness/manifest.json` `context_pruning.token_threshold`, default 8192). See issue #106, issue #491. | no |
 
 ### Critic pipeline
 
@@ -144,13 +168,16 @@ set the Digester considers structural failure markers; treat it as a
 subset of the broader kind vocabulary above.
 
 - **`FAILURE_KINDS`** (constant in
-  `src/foundry_x/evolution/digester.py:60-68`): `tool_error`,
-  `task_failed`, `run_failed`, `agent_error`, `error`. Of these,
-  `task_failed` is the only kind currently emitted by the production
-  Runner; the remaining four are reserved vocabulary recognized by
-  the Digester for compatibility with legacy producers and tests.
-  Adding a new value here is a vocabulary change and must ship with
-  both a producer and a regression test (ADR-0004).
+  `src/foundry_x/evolution/digester.py:60-69`): `tool_error`,
+  `task_failed`, `task_aborted`, `run_failed`, `agent_error`, `error`.
+  `task_failed` and `task_aborted` are emitted by the production Runner:
+  `task_failed` when the agent loop raises an exception, and
+  `task_aborted` when the wall-clock cap fires (reason=`wall_clock`)
+  or the token budget is exceeded (reason=`token_budget`). The remaining
+  four are reserved vocabulary recognized by the Digester for
+  compatibility with legacy producers and tests. Adding a new value
+  here is a vocabulary change and must ship with both a producer and
+  a regression test (ADR-0004).
 - **`FAILURE_PAYLOAD_KEYS`** (constant in
   `src/foundry_x/evolution/digester.py:70-76`): `error`, `traceback`,
   `exception`. A `tool_result` whose payload has any of these keys is

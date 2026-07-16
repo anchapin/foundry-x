@@ -7,6 +7,9 @@
     "context_pruning",
     "rate_limit"
   ],
+  "context_pruning": {
+    "token_threshold": 8192
+  },
   "skills": [
     "bash.json",
     "edit_file.json",
