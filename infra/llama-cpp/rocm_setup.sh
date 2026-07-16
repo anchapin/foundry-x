@@ -202,23 +202,18 @@ if ! check_rocm; then
     exit 1
 fi
 # -------------------------------------------------------------------
-
-if [[ ! -d "$LLAMACPP_DIR" ]]; then
-    git clone --no-checkout --filter=blob:none https://github.com/ggerganov/llama.cpp "$LLAMACPP_DIR"
-fi
-# -------------------------------------------------------------------
-
 if [[ ! -d "$LLAMACPP_DIR" ]]; then
     git clone --no-checkout --filter=blob:none https://github.com/ggerganov/llama.cpp "$LLAMACPP_DIR"
 fi
 
 echo "Building llama.cpp @ $LLAMACPP_REF"
-git -C "$LLAMACPP_DIR" fetch --depth 1 origin "$LLAMACPP_REF"
-git -C "$LLAMACPP_DIR" checkout --detach FETCH_HEAD
-
-echo "Building llama.cpp @ $LLAMACPP_REF"
-git -C "$LLAMACPP_DIR" fetch --depth 1 origin "$LLAMACPP_REF"
-git -C "$LLAMACPP_DIR" checkout --detach FETCH_HEAD
+current_ref="$(git -C "$LLAMACPP_DIR" rev-parse HEAD 2>/dev/null || true)"
+if [[ -n "$current_ref" && "$current_ref" == "$LLAMACPP_REF" ]]; then
+    echo "llama.cpp @ $LLAMACPP_REF already checked out; skipping fetch+checkout"
+else
+    git -C "$LLAMACPP_DIR" fetch --depth 1 origin "$LLAMACPP_REF"
+    git -C "$LLAMACPP_DIR" checkout --detach FETCH_HEAD
+fi
 
 cd "$LLAMACPP_DIR"
 
