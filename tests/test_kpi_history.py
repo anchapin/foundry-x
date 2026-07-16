@@ -705,16 +705,14 @@ def test_main_from_history_trend_flag_renders_sparklines(tmp_path, capsys):
 
 
 def test_main_from_history_trend_requires_from_history(tmp_path, capsys):
-    """--trend without --from-history is silently ignored (backward compat)."""
+    """--trend without --from-history exits with error."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     _seed_session(logger, "v1", verdict=True)
 
-    rc = main(["--db", str(db), "--trend"])
-    captured = capsys.readouterr()
-
-    assert rc == 0
-    assert "No KPI history" not in captured.out
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--db", str(db), "--trend"])
+    assert exc_info.value.code == 2
 
 
 # ---------------------------------------------------------------------------
