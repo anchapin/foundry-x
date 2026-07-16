@@ -47,19 +47,6 @@ class TraceSession(BaseModel):
     ended_at: str | None = None
 
 
-class ModelConfig(BaseModel):
-    """Model configuration for trace attribution (issue #361).
-
-    Records the model identity and hardware configuration so the improvement
-    rate KPI can attribute benchmark outcomes to specific quantizations.
-    """
-
-    model_id: str | None = Field(default=None, description="Model identifier or quantization name")
-    quantization: str | None = Field(default=None, description="Quantization scheme (e.g. Q5_K_M)")
-    context_window: int | None = Field(default=None, description="Context window size in tokens")
-    hardware: str | None = Field(default=None, description="Hardware accelerator used")
-
-
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
@@ -248,7 +235,6 @@ class TraceLogger:
         harness_version: str,
         model_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-        model_config: Any = None,
     ) -> Iterator[str]:
         # Issue #121: scrub the metadata dict before either backend writes it.
         # The original ``record()`` path already redacts its payload; the
