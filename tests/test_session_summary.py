@@ -391,3 +391,98 @@ def test_render_session_summary_context_pruned_not_in_text_table(tmp_path):
     lines = rendered.splitlines()
     header = lines[0]
     assert "context_pruned" not in header
+
+
+# --- Issue #624: --format json and --out ---------------------------------------
+
+
+def test_cli_session_summary_format_json_emits_json_array(tmp_path, capsys):
+    """Issue #624: --format json emits a JSON array of SessionSummaryRow objects."""
+    import json
+
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rc = cli_main(["session-summary", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Each line is a JSON object (model_dump_json per row).
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 4
+    for line in lines:
+        parsed = json.loads(line)
+        assert "session_id" in parsed
+        assert "started_at" in parsed
+        assert "duration_seconds" in parsed
+        assert "outcome_status" in parsed
+        assert "outcome_reason" in parsed
+        assert "steps" in parsed
+
+
+def test_cli_session_summary_out_writes_to_file(tmp_path, capsys):
+    """Issue #624: --out writes to file; stdout is empty."""
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    out_file = tmp_path / "summary.json"
+
+    rc = cli_main(["session-summary", "--db", str(db), "--format", "json", "--out", str(out_file)])
+
+    assert rc == 0
+    # stdout is empty (no table printed).
+    stdout = capsys.readouterr().out
+    assert stdout == ""
+    # File contains JSON lines.
+    content = out_file.read_text(encoding="utf-8")
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == 4
+
+
+def test_cli_session_summary_format_json_infers_from_out_extension(tmp_path, capsys):
+    """Issue #624: when --out ends in .json, json format is selected automatically."""
+    import json
+
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    out_file = tmp_path / "summary.json"
+
+    rc = cli_main(["session-summary", "--db", str(db), "--out", str(out_file)])
+
+    assert rc == 0
+    content = out_file.read_text(encoding="utf-8")
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == 4
+    # Verify it's valid JSON by parsing.
+    for line in lines:
+        json.loads(line)
+
+
+def test_cli_session_summary_format_json_with_limit(tmp_path, capsys):
+    """Issue #624: --limit applies to JSON output (newest-first ordering)."""
+    import json
+
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    out_file = tmp_path / "summary.json"
+
+    rc = cli_main(
+        [
+            "session-summary",
+            "--db",
+            str(db),
+            "--format",
+            "json",
+            "--limit",
+            "2",
+            "--out",
+            str(out_file),
+        ]
+    )
+
+    assert rc == 0
+    content = out_file.read_text(encoding="utf-8")
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == 2
+    # Verify rows are valid JSON and newest-first.
+    parsed_lines = [json.loads(ln) for ln in lines]
+    assert parsed_lines[0]["session_id"] == "sess-0004-new"
