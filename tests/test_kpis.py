@@ -267,6 +267,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "hooks_disabled_rate",
         "token_budget_abort_count",
         "token_budget_hit_rate",
+        "streaming_quality",
     }
 
 
@@ -505,7 +506,7 @@ def _seed_model_response_usage(
     """Plant a session whose ``model_response`` events carry ``token_usage``.
 
     Each entry in *usage_payloads* becomes one ``model_response`` event whose
-    ``usage`` key matches the runner's wire format
+    ``token_usage`` key matches the runner's wire format
     (``{"prompt_tokens", "completion_tokens", "total_tokens"}``) and whose
     ``tokens_used`` is the running cumulative total, exactly as
     :func:`~foundry_x.execution.runner.run_task` records it (issues #191, #197).
@@ -523,7 +524,7 @@ def _seed_model_response_usage(
                 payload={
                     "step": step,
                     "finish_reason": "stop",
-                    "usage": usage,
+                    "token_usage": usage,
                     "tokens_used": running,
                 },
             )
@@ -898,6 +899,7 @@ def test_main_json_top_level_keys_include_hooks_disabled(tmp_path, capsys):
         "hooks_disabled_rate",
         "token_budget_abort_count",
         "token_budget_hit_rate",
+        "streaming_quality",
     }
 
 

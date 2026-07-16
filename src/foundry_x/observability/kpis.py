@@ -95,6 +95,12 @@ class KpiSummary(BaseModel):
     that recorded at least one ``task_aborted(reason="token_budget")``
     event. This is a fourth tracked metric exposed via ``foundry-kpis``
     and the regression report, alongside the three PRD KPIs.
+
+    Issue #580 adds ``streaming_quality``: a ``session_id ->
+    StreamingQualityData`` map of per-session streaming quality metrics
+    (avg TTFT, chunk count, avg chunk interval) derived from the timing
+    fields on each ``model_response`` event. Empty by default; populated
+    only when at least one ``model_response`` event carries timing data.
     """
 
     cycle_time_seconds: float | None = None
@@ -106,6 +112,19 @@ class KpiSummary(BaseModel):
     hooks_disabled_rate: float = 0.0
     token_budget_abort_count: int = 0
     token_budget_hit_rate: float = 0.0
+    streaming_quality: dict[str, "StreamingQualityData"] = {}
+
+
+class StreamingQualityData(BaseModel):
+    """Streaming quality metrics for one session (issue #580).
+
+    Aggregated from the timing fields on each ``model_response`` event:
+    ``time_to_first_token_ms``, ``chunk_count``, and ``total_stream_ms``.
+    """
+
+    avg_ttft_ms: float | None = None
+    total_chunks: int = 0
+    avg_chunk_interval_ms: float | None = None
 
 
 class KpiComparison(BaseModel):
@@ -187,6 +206,7 @@ def compute_kpis(
     )
     token_budget_abort_count = _token_budget_aborts(logger, harness_version=harness_version)
     token_budget_hit_rate = _token_budget_hit_rate(logger, harness_version=harness_version)
+    streaming_quality = _streaming_quality(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -198,6 +218,7 @@ def compute_kpis(
         hooks_disabled_rate=hooks_disabled_rate,
         token_budget_abort_count=token_budget_abort_count,
         token_budget_hit_rate=token_budget_hit_rate,
+        streaming_quality=streaming_quality,
     )
 
 
@@ -380,7 +401,7 @@ def _token_totals(
         kind="model_response",
         harness_version=harness_version,
     ):
-        usage = event.payload.get("usage")
+        usage = event.payload.get("token_usage")
         if not isinstance(usage, dict):
             continue
         step_total = usage.get("total_tokens", 0)
@@ -485,6 +506,59 @@ def _token_budget_hit_rate(
     return len(sessions_with_abort) / len(all_sessions)
 
 
+def _streaming_quality(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> dict[str, StreamingQualityData]:
+    """Per-session streaming quality metrics (issue #580).
+
+    Aggregates ``time_to_first_token_ms``, ``chunk_count``, and ``total_stream_ms``
+    from every ``model_response`` event the runner records. Computes per-session
+    average TTFT and average chunk interval (total_stream_ms / chunk_count).
+
+    Sessions with no ``model_response`` events, or whose events lack timing
+    data, are omitted from the returned map (mirrors the "show only when present"
+    contract of ``_injection_blocks`` and ``_token_totals``).
+    """
+    session_ttfts: dict[str, list[int]] = {}
+    session_chunks: dict[str, list[int]] = {}
+    session_stream_ms: dict[str, list[int]] = {}
+
+    for event in logger.query_events(
+        kind="model_response",
+        harness_version=harness_version,
+    ):
+        sid = event.session_id
+        ttft = event.payload.get("time_to_first_token_ms")
+        chunk_count = event.payload.get("chunk_count")
+        total_stream_ms = event.payload.get("total_stream_ms")
+
+        if isinstance(ttft, int):
+            session_ttfts.setdefault(sid, []).append(ttft)
+        if isinstance(chunk_count, int):
+            session_chunks.setdefault(sid, []).append(chunk_count)
+        if isinstance(total_stream_ms, int):
+            session_stream_ms.setdefault(sid, []).append(total_stream_ms)
+
+    result: dict[str, StreamingQualityData] = {}
+    for sid in session_ttfts:
+        ttfts = session_ttfts.get(sid, [])
+        chunks = session_chunks.get(sid, [])
+        stream_ms = session_stream_ms.get(sid, [])
+
+        avg_ttft = sum(ttfts) / len(ttfts) if ttfts else None
+        total_chunks = sum(chunks) if chunks else 0
+        total_ms = sum(stream_ms) if stream_ms else 0
+        avg_interval = total_ms / total_chunks if total_chunks > 0 else None
+
+        result[sid] = StreamingQualityData(
+            avg_ttft_ms=avg_ttft,
+            total_chunks=total_chunks,
+            avg_chunk_interval_ms=avg_interval,
+        )
+    return result
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -562,6 +636,18 @@ def _render_markdown(summary: KpiSummary) -> str:
             f"Token Budget Aborts: {summary.token_budget_abort_count} session(s) "
             "hit the token budget limit."
         )
+    # Issue #580: surface per-session streaming quality (avg TTFT) only when
+    # at least one ``model_response`` carried timing data.
+    if summary.streaming_quality:
+        lines.append("")
+        lines.append("Streaming Quality (avg TTFT):")
+        lines.append("")
+        lines.append("| Session | avg TTFT (ms) | total chunks | avg chunk interval (ms) |")
+        lines.append("| --- | --- | --- | --- |")
+        for sid, sq in sorted(summary.streaming_quality.items()):
+            avg_ttft = _format_value(sq.avg_ttft_ms)
+            avg_interval = _format_value(sq.avg_chunk_interval_ms)
+            lines.append(f"| {sid} | {avg_ttft} | {sq.total_chunks} | {avg_interval} |")
     return "\n".join(lines)
 
 
@@ -639,13 +725,14 @@ def append_kpi_history(
     """Append one KPI snapshot to the append-only JSONL history log (issue #183).
 
     Each run produces exactly one line. The three PRD-KPI fields are
-    emitted via :meth:`KpiSummary.model_dump` with ``injection_blocks``
-    and ``token_totals`` excluded (the "minus per-session maps" half of
-    the round-trip contract). ``hooks_disabled_count`` and
-    ``hooks_disabled_rate`` are scalar fields and are included. Then
-    ``timestamp`` and the optional ``harness_version`` are added.
-    Parent directories are created on demand so the operator does not
-    have to ``mkdir`` before the first run.
+    emitted via :meth:`KpiSummary.model_dump` with ``injection_blocks``,
+    ``token_totals``, and ``streaming_quality`` excluded (the "minus
+    per-session maps" half of the round-trip contract).
+    ``hooks_disabled_count``, ``hooks_disabled_rate``,
+    ``token_budget_abort_count``, and ``token_budget_hit_rate`` are scalar
+    fields and are included. Then ``timestamp`` and the optional
+    ``harness_version`` are added. Parent directories are created on
+    demand so the operator does not have to ``mkdir`` before the first run.
 
     The file is opened in append mode and a single ``\\n``-terminated
     line is written per call, so concurrent appends from independent
@@ -654,7 +741,10 @@ def append_kpi_history(
     previous line.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = summary.model_dump(mode="json", exclude={"injection_blocks", "token_totals"})
+    payload = summary.model_dump(
+        mode="json",
+        exclude={"injection_blocks", "token_totals", "streaming_quality"},
+    )
     payload["timestamp"] = _now_iso()
     if harness_version is not None:
         payload["harness_version"] = harness_version

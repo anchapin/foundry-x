@@ -139,7 +139,7 @@ The "Failure-signalling subset" subsection below cross-references the
 | --- | --- | --- | --- |
 | **`user_prompt`** | `Runner.run_task` (issue #89, ADR-0010) | `{"content": str, "tool_count": int}` — the task as fed into the model plus the size of the tool surface the agent sees. | no |
 | **`model_request`** | `Runner.run_task` (one per round-trip) | `{"step": int, "message_count": int, "tool_count": int}` — loop index, conversation length, and tool-surface size at request time. | no |
-| **`model_response`** | `Runner.run_task` (one per round-trip) | `{"step": int, "finish_reason": str, "message": dict, "tool_calls": list[dict]}` — the assistant message plus any tool calls the model emitted. | no |
+| **`model_response`** | `Runner.run_task` (one per round-trip) | `{"step": int, "finish_reason": str | null, "message": dict, "tool_calls": list[dict], "time_to_first_token_ms": int | null, "chunk_count": int, "total_stream_ms": int, "token_usage": dict | null, "tokens_used": int}` — the assistant message plus any tool calls the model emitted, plus streaming timing fields (issue #580). | no |
 | **`model_error`** | `Runner.run_task` (on `adapter.complete` exception) | `{"step": int, "error_type": str, "message": str}` — loop index plus exception class name and `str(exc)`. Paired with a `task_failed` terminal marker. | **yes** |
 | **`tool_call`** | `Runner.run_task` (one per emitted tool call) | `{"step": int, "call_id": str, "name": str, "arguments": dict, "duration_ms": int}` — added in issue #173; per-tool-call latency for KPI slicing. | no |
 | **`tool_result`** | `Runner.run_task` (one per tool execution) | `{"step": int, "call_id": str, "name": str, "duration_ms": int, "output": Any \| null, "error": str \| null}` — non-null `error` flips the event onto the Digester's failure path via `FAILURE_PAYLOAD_KEYS`. | when `error` is non-null |
@@ -191,9 +191,15 @@ subset of the broader kind vocabulary above.
   constant `INJECTION_BLOCKED_KIND` so tests can pin the contract.
 
 - **`model_response`** — emitted by `run_task` for every chat-completion
-  round-trip the runner performs. Payload contract (issue #191):
+  round-trip the runner performs. Payload contract (issue #191, issue #580):
   `{"step": int, "finish_reason": str | null, "message": <serialized
-  ModelMessage>, "tool_calls": list[dict], "token_usage": dict | null}`.
+  ModelMessage>, "tool_calls": list[dict], "time_to_first_token_ms": int | null,
+  "chunk_count": int, "total_stream_ms": int, "token_usage": dict | null,
+  "tokens_used": int}`.
+  The `time_to_first_token_ms` field is the wall-clock milliseconds from
+  stream start to the first content delta; `null` when the stream produced
+  no payload. `chunk_count` is the number of SSE deltas received.
+  `total_stream_ms` is the wall-clock duration of the entire stream.
   The `token_usage` field carries `{"prompt_tokens": int,
   "completion_tokens": int, "total_tokens": int}` when the
   `OpenAICompatibleAdapter` surfaces the wire-level `usage` object on
@@ -202,8 +208,10 @@ subset of the broader kind vocabulary above.
   observable in operator logs without crashing the loop. The Phase 3
   `Digester` reads `token_usage` to compute per-step token deltas, and
   the PRD "Improvement Rate" KPI uses the same field to attribute the
-  cost of a harness edit. Consumers MUST treat `null` as missing data,
-  not as a zero reading.
+  cost of a harness edit. The timing fields (`time_to_first_token_ms`,
+  `total_stream_ms`, `chunk_count`) enable the KPI's Improvement Rate to
+  attribute slow responses to network latency vs. model generation time.
+  Consumers MUST treat `null` as missing data, not as a zero reading.
 
 ## Artifacts on disk
 
