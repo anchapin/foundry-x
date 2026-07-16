@@ -179,11 +179,10 @@ def test_render_session_summary_includes_recorded_outcome_fields(tmp_path):
     new_line = next(ln for ln in rendered.splitlines() if "sess-0004-new" in ln)
     assert "failed" in new_line
     assert "model_error" in new_line
-    # ``steps`` lives in the right-most column with width 5; the integer
-    # is right-justified, so we check the row contains "    4" (3 spaces
-    # + "4") rather than checking for the bare number which would also
-    # match against the ISO-8601 second field.
-    assert new_line.rstrip().endswith("4")
+    # ``steps`` is no longer the right-most column (token_budget_hit is);
+    # we check that "4" appears in the correct position by looking for it
+    # in the context of the steps column.
+    assert "    4  false" in new_line
 
 
 def test_render_session_summary_respects_limit(tmp_path):
@@ -225,10 +224,11 @@ def test_render_session_summary_long_outcome_is_truncated(tmp_path):
     )
     rendered = render_session_summary(rows)
     long_line = next(ln for ln in rendered.splitlines() if "sess-0099-long" in ln)
-    # Each fixed-width cell is separated by two spaces. The rightmost
-    # ``steps`` column ("    1") stays at the end regardless of
-    # truncation of the reason cell.
-    assert long_line.rstrip().endswith("    1")
+    # Each fixed-width cell is separated by two spaces. The right-most
+    # ``token_budget_hit`` column ("_" for this row) stays at the end
+    # regardless of truncation of the reason cell; the ``steps`` column
+    # ("    1") is now second-to-last.
+    assert "    1      _" in long_line
 
 
 # --- CLI integration ---
