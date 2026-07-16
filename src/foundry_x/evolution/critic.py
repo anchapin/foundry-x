@@ -34,6 +34,11 @@ _INJECTION_PATTERNS: tuple[tuple[str, str], ...] = (
     ("role_tag_brackets", r"<{2}(?:system|assistant|developer|user)>{2}"),
     ("chatml_tag", r"<\|(?:im_start|im_end|system|assistant|user|begin_of_text|endoftext)\|>"),
     ("ignored_context", r"end\s+of\s+context\s+above"),
+    # --- Issue #122 / issue #579: sync with injection_firewall.py patterns ---
+    ("ignore_spanish", r"ignora\s+(?:las\s+)?instrucciones\s+anteriores"),
+    ("role_tag_json_escaped", r'\\"role\\":\\"(?:system|assistant|developer|user)'),
+    ("unicode_confusable", r"[\u200B-\u200F\u2028-\u202F\u2060-\u2064\uFEFF]"),
+    ("base64_payload", r"[A-Za-z0-9+/]{16,}={0,2}"),
 )
 
 
