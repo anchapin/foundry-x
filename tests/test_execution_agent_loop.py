@@ -836,3 +836,31 @@ def test_agent_loop_emits_hook_registry_error_when_get_registry_raises(tmp_path,
     # Degraded mode: the session still completes successfully.
     outcome_event = next(event for event in events if event.kind == "outcome")
     assert outcome_event.payload["status"] == "success"
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter"])
+def test_agent_loop_truncates_on_non_stop_finish_reason_without_tool_calls(
+    tmp_path, monkeypatch, finish_reason
+):
+    """Issue #750: when the model returns no tool_calls and finish_reason is
+    not 'stop' (e.g., 'length' for context limit, 'content_filter'), the runner
+    must emit outcome.status='truncated' and outcome.reason=<finish_reason>,
+    not outcome.status='success' with outcome.reason='final_answer'.
+    """
+    db = tmp_path / "traces.db"
+    responses = [
+        ModelResponse(
+            message=ModelMessage(role="assistant", content="partial answer before cutoff"),
+            finish_reason=finish_reason,
+        ),
+    ]
+    adapter = _ScriptedAdapter(responses)
+    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
+    monkeypatch.setattr(sys, "argv", _argv("simple-task", db, REPO_HARNESS_DIR))
+
+    main()
+
+    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
+    outcome_event = next(event for event in events if event.kind == "outcome")
+    assert outcome_event.payload["status"] == "truncated", outcome_event.payload
+    assert outcome_event.payload["reason"] == finish_reason, outcome_event.payload

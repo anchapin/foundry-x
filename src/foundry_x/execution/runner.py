@@ -1657,7 +1657,11 @@ async def run_task(
                 break
 
             if not response.tool_calls:
-                outcome_reason = "final_answer"
+                if response.finish_reason not in (None, "stop"):
+                    outcome_status = "truncated"
+                    outcome_reason = response.finish_reason
+                else:
+                    outcome_reason = "final_answer"
                 break
 
             for tool_call in response.tool_calls:
