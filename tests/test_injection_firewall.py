@@ -510,3 +510,45 @@ def test_register_into_accepts_tracer_kwarg():
     assert out.error is not None
     assert len(captured) == 1
     assert captured[0]["markers"] == ["ignore_previous"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #747: fail-closed on unexpected exception in post_tool.
+#
+# When _coerce_text or scan_for_injection raises, the hook must NOT let the
+# original tool output pass through unchanged (fail-open). Instead it must
+# suppress the output and set an error marker so the result is treated as
+# potentially unsafe. This is the fail-closed contract for a security-critical
+# hook: a scanning error is treated the same as a detected injection.
+# ---------------------------------------------------------------------------
+
+
+class _Uncoerceable:
+    """An object whose repr also raises — used to trigger the fail-closed path."""
+
+    def __repr__(self) -> str:
+        raise RuntimeError("cannot repr")
+
+
+def test_fail_closed_when_coercion_raises():
+    """When _coerce_text raises, the hook must return a suppressed result (fail-closed)."""
+    hook = InjectionFirewallHook()
+    uncoerceable = _Uncoerceable()
+    result = ToolResult(name="test_tool", output=uncoerceable)
+    out = asyncio.run(hook.post_tool(_CALL, result))
+
+    assert out.output == "[injection_firewall] output suppressed: injection scan failed. Treating as potentially unsafe."
+    assert out.error == "injection_scan_error:coercion_or_scan_failed"
+
+
+def test_fail_closed_error_is_distinct_from_detection():
+    """The scan-error error prefix must be distinct from injection_detected/injection_warn."""
+    hook = InjectionFirewallHook()
+    uncoerceable = _Uncoerceable()
+    result = ToolResult(name="test_tool", output=uncoerceable)
+    out = asyncio.run(hook.post_tool(_CALL, result))
+
+    assert out.error is not None
+    assert not out.error.startswith("injection_detected:")
+    assert not out.error.startswith("injection_warn:")
+    assert "injection_scan_error" in out.error
