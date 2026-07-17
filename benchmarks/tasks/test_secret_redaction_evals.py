@@ -40,14 +40,18 @@ _JWT = (
 _AWS_ACCESS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
 _STRIPE_LIVE_KEY = "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc"
 _SLACK_TOKEN = "xox" + "b-1234567890123-1234567890123-" + "abcdefghijklmnopqrstuvwx"
+# GCP token fixtures (issue #746).
+_GCP_ACCESS_TOKEN = "ya29." + "a-bC0dE1fG2hI3jK4lM5nO6pQ7rS8tU9vW0xY1zA2bC3dE4fG5hI6"
+_GCP_SERVICE_ACCOUNT = "my-service-account@developer.gserviceaccount.com"
 
 TASK = BenchmarkTask(
     name="secret_redaction",
     description=(
         "TraceLogger scrubs secret-like substrings (API keys, PEM blocks, "
         "GitHub PATs, JWTs, AWS keys, Stripe live keys, Slack tokens, "
-        "and bearer headers) from event payloads and from the metadata "
-        "dict passed to TraceLogger.session()."
+        "bearer headers, GCP access tokens, GCP service-account emails) "
+        "from event payloads and from the metadata dict passed to "
+        "TraceLogger.session()."
     ),
     prompt=(
         "Inspect src/foundry_x/trace/logger.py: confirm _redact and "
@@ -82,6 +86,8 @@ def test_value_level_redaction_scrubs_each_token_class() -> None:
     assert _redact_value(_STRIPE_LIVE_KEY) == "[REDACTED:stripe-key]"
     assert _redact_value(_SLACK_TOKEN) == "[REDACTED:slack-token]"
     assert _redact_value(_BEARER) == "[REDACTED:bearer]"
+    assert _redact_value(_GCP_ACCESS_TOKEN) == "[REDACTED:gcp-access-token]"
+    assert _redact_value(_GCP_SERVICE_ACCOUNT) == "[REDACTED:gcp-service-account]"
 
 
 @pytest.mark.benchmark

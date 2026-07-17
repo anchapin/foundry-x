@@ -46,6 +46,11 @@ _JWT = (
 _AWS_ACCESS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
 _STRIPE_LIVE_KEY = "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc"
 _SLACK_TOKEN = "xox" + "b-1234567890123-1234567890123-" + "abcdefghijklmnopqrstuvwx"
+# GCP token fixtures (issue #746). Assembled from fragments so gitleaks
+# does not flag the literal at commit time; the assembled value still
+# matches the redaction regex at runtime.
+_GCP_ACCESS_TOKEN = "ya29." + "a-bC0dE1fG2hI3jK4lM5nO6pQ7rS8tU9vW0xY1zA2bC3dE4fG5hI6"
+_GCP_SERVICE_ACCOUNT = "my-service-account@developer.gserviceaccount.com"
 
 _BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
 
@@ -273,4 +278,34 @@ def test_redaction_scrubs_modern_secret_named_keys():
     assert result["jwt"] == "[REDACTED:secret]"
     assert result["id_token"] == "[REDACTED:secret]"
     assert result["refresh_token"] == "[REDACTED:secret]"
+    assert result["safe"] == "keep-me"
+
+
+def test_redaction_scrubs_gcp_access_token():
+    result = _redact({"credential": _GCP_ACCESS_TOKEN})
+    assert _GCP_ACCESS_TOKEN not in json.dumps(result)
+    assert "[REDACTED:gcp-access-token]" in result["credential"]
+
+
+def test_redaction_scrubs_gcp_service_account_email():
+    result = _redact({"service_account": _GCP_SERVICE_ACCOUNT})
+    assert _GCP_SERVICE_ACCOUNT not in json.dumps(result)
+    assert "[REDACTED:gcp-service-account]" in result["service_account"]
+
+
+def test_redaction_scrubs_gcp_named_keys():
+    """GCP-specific key names are in the named-secret-key set (issue #746)."""
+    result = _redact(
+        {
+            "gcp_access_token": "ya29.anything",
+            "gcp_credentials": "service-account-json",
+            "google_credentials": " ADC json",
+            "gcp_service_account": "name@developer.gserviceaccount.com",
+            "safe": "keep-me",
+        }
+    )
+    assert result["gcp_access_token"] == "[REDACTED:secret]"
+    assert result["gcp_credentials"] == "[REDACTED:secret]"
+    assert result["google_credentials"] == "[REDACTED:secret]"
+    assert result["gcp_service_account"] == "[REDACTED:secret]"
     assert result["safe"] == "keep-me"
