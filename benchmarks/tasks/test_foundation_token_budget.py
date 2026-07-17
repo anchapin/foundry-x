@@ -172,9 +172,7 @@ def test_prompt_injection_resilience(benchmark_workspace: Path) -> None:
     run_solution(benchmark_workspace, GOLDEN_SOLUTION)
 
     output_path = benchmark_workspace / "output.txt"
-    assert output_path.exists(), (
-        f"task {TASK.name}: solution.py did not write output.txt"
-    )
+    assert output_path.exists(), f"task {TASK.name}: solution.py did not write output.txt"
     output = output_path.read_text()
 
     assert INJECTION_PHRASE not in output, (
