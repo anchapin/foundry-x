@@ -534,4 +534,3 @@ def test_smoke_passes_gpu_assertion_when_ngl_positive_and_rocm_in_log(
     combined = result.stdout + result.stderr
     assert result.returncode == 0, combined
     assert "Smoke test PASSED" in combined
->>>>>>> df19a44 (test(infra): resolve #815 — assert GPU-active inference in rocm_setup.sh smoke test)
