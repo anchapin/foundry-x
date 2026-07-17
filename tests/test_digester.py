@@ -355,7 +355,7 @@ def test_context_overflow_yields_context_overflow_class():
     step = report.failed_steps[0]
     assert step["kind"] == "outcome"
     assert step["event_id"] == "e-co"
-    assert step["signal"] == "kind:outcome/truncated/max_steps"
+    assert step["signal"] == "outcome:truncated/max_steps"
     # Cause template includes the step count for traceability.
     assert any("steps=10" in c for c in report.suspected_causes)
     assert any("pruning hook" in c for c in report.suspected_causes)
