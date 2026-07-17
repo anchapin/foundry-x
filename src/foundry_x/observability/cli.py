@@ -72,6 +72,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     regression.add_argument(
+        "--harness-version",
+        default=None,
+        help="Only include verdicts from sessions recorded with this harness version.",
+    )
+    regression.add_argument(
         "--format",
         default=None,
         choices=("markdown", "json"),
@@ -154,6 +159,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Show at most N sessions after newest-first ordering.",
     )
+    session_summary.add_argument(
+        "--format",
+        default=None,
+        choices=("markdown", "json"),
+        help=(
+            "Output format (issue #624). Default: 'markdown'. When --out"
+            " ends in '.json', 'json' is selected automatically."
+        ),
+    )
+    session_summary.add_argument(
+        "--out",
+        default=None,
+        help="Write the summary to this path instead of stdout.",
+    )
 
     tool_latency = sub.add_parser(
         "tool-latency",
@@ -188,7 +207,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "regression-report":
         logger = TraceLogger(args.db)
-        analysis = analyze_regressions(logger, since=args.since, task=args.task)
+        analysis = analyze_regressions(
+            logger, since=args.since, task=args.task, harness_version=args.harness_version
+        )
         fmt = _resolve_format(args.format, args.out)
         if fmt == "json":
             rendered = analysis.model_dump_json(indent=2) + "\n"
@@ -240,8 +261,17 @@ def main(argv: list[str] | None = None) -> int:
         backend = _infer_backend(args.db)
         logger = TraceLogger(args.db, backend=backend)
         rows = build_session_summary(logger, harness_version=args.harness_version)
-        sys.stdout.write(render_session_summary(rows, limit=args.limit))
-        sys.stdout.write("\n")
+        fmt = _resolve_format(args.format, args.out)
+        if args.limit is not None:
+            rows = rows[: args.limit]
+        if fmt == "json":
+            rendered = "\n".join(row.model_dump_json() for row in rows) + "\n"
+        else:
+            rendered = render_session_summary(rows) + "\n"
+        if args.out:
+            Path(args.out).write_text(rendered, encoding="utf-8")
+        else:
+            sys.stdout.write(rendered)
         return 0
 
     if args.command == "tool-latency":
@@ -268,29 +298,6 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         sys.stdout.write(format_timeline(events))
         sys.stdout.write("\n")
-        return 0
-
-    if args.command == "session-summary":
-        backend = _infer_backend(args.db)
-        logger = TraceLogger(args.db, backend=backend)
-        rows = build_session_summary(logger, harness_version=args.harness_version)
-        sys.stdout.write(render_session_summary(rows, limit=args.limit))
-        sys.stdout.write("\n")
-        return 0
-
-    if args.command == "tool-latency":
-        logger = TraceLogger(args.db)
-        report = aggregate_tool_latency(logger, since=args.since)
-        if args.format == "json":
-            rendered = render_tool_latency_json(report)
-        else:
-            rendered = render_tool_latency_markdown(report)
-        if args.out:
-            Path(args.out).write_text(rendered, encoding="utf-8")
-        else:
-            sys.stdout.write(rendered)
-            if not rendered.endswith("\n"):
-                sys.stdout.write("\n")
         return 0
 
     return 1

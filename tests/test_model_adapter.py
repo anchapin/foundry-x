@@ -127,8 +127,8 @@ async def test_run_task_calls_injected_adapter_and_records_trace(tmp_path):
     assert "time_to_first_token_ms" in response_event.payload
     assert "chunk_count" in response_event.payload
     assert response_event.payload["chunk_count"] >= 1
-    # Issue #197: model_response carries usage and tokens_used.
-    assert "usage" in response_event.payload
+    # Issue #197: model_response carries token_usage and tokens_used.
+    assert "token_usage" in response_event.payload
     assert "tokens_used" in response_event.payload
     assert response_event.payload["tokens_used"] == 0
     chunk_event = next(event for event in events if event.kind == "model_response_chunk")
@@ -144,6 +144,33 @@ async def test_run_task_calls_injected_adapter_and_records_trace(tmp_path):
     assert outcome_event.payload["ttft_ms"] >= 0
     # Issue #197: outcome event also carries tokens_total.
     assert outcome_event.payload["tokens_total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_task_raises_TypeError_for_non_protocol_model_adapter(tmp_path):
+    (tmp_path / "system_prompt.txt").write_text("system rules", encoding="utf-8")
+    logger = TraceLogger(tmp_path / "traces.db")
+
+    class NotAnAdapter:
+        pass
+
+    with logger.session(harness_version="test-0.0") as session_id:
+        with pytest.raises(TypeError, match="ModelAdapter"):
+            await run_task(
+                "do the task", tmp_path, logger, session_id, model_adapter=NotAnAdapter()
+            )
+
+
+@pytest.mark.asyncio
+async def test_run_task_raises_TypeError_for_dict_model_adapter(tmp_path):
+    (tmp_path / "system_prompt.txt").write_text("system rules", encoding="utf-8")
+    logger = TraceLogger(tmp_path / "traces.db")
+
+    with logger.session(harness_version="test-0.0") as session_id:
+        with pytest.raises(TypeError, match="ModelAdapter"):
+            await run_task(
+                "do the task", tmp_path, logger, session_id, model_adapter={"wrong": "keys"}
+            )
 
 
 @pytest.mark.asyncio

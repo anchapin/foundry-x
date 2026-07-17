@@ -24,6 +24,8 @@ from pydantic import BaseModel
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 OUTCOME_KIND = "outcome"
+TASK_ABORTED_KIND = "task_aborted"
+TOKEN_BUDGET_REASON = "token_budget"
 
 # The kind string persisted on terminal ``outcome`` events by
 # ``src/foundry_x/execution/runner.py`` at lines 644-648. Each event's
@@ -43,6 +45,9 @@ _STEPS_WIDTH = 5
 _PLACEHOLDER = "_"
 
 
+CONTEXT_PRUNED_KIND = "context_pruned"
+
+
 class SessionSummaryRow(BaseModel):
     """One row of the cross-session outcome roll-up table (issue #184).
 
@@ -52,6 +57,16 @@ class SessionSummaryRow(BaseModel):
     ``None`` to the ``_`` placeholder so that an Operator reading
     across a table can never confuse "no outcome event recorded" with
     a literal empty string.
+
+    Issue #466 adds ``token_budget_hit``: ``True`` when the session
+    recorded at least one ``task_aborted(reason="token_budget")``
+    event, ``False`` when the session has outcome data but no token
+    budget abort, and ``None`` when the session has no outcome event
+    at all (the underscore placeholder is rendered in that case).
+
+    Issue #626 adds ``context_pruned``: the number of ``context_pruned``
+    events recorded for this session by the pruning hook. ``None`` when
+    no pruning occurred for this session.
     """
 
     session_id: str
@@ -60,6 +75,8 @@ class SessionSummaryRow(BaseModel):
     outcome_status: str | None
     outcome_reason: str | None
     steps: int | None
+    token_budget_hit: bool | None = None
+    context_pruned: int | None = None
 
 
 def _truncate(value: str, width: int) -> str:
@@ -119,6 +136,17 @@ def _latest_outcome(events: Iterable[TraceEvent]) -> TraceEvent | None:
     return latest
 
 
+def _count_context_pruned_events(
+    logger: TraceLogger,
+    session_id: str,
+) -> int:
+    """Count ``context_pruned`` events for *session_id* (issue #626)."""
+    count = 0
+    for _ in logger.iter_events(session_id, kind=CONTEXT_PRUNED_KIND):
+        count += 1
+    return count
+
+
 def build_session_summary(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -131,6 +159,11 @@ def build_session_summary(
     ``outcome_status``, ``outcome_reason`` and ``steps`` fields are
     ``None``; :func:`render_session_summary` turns those into the
     ``_`` placeholder.
+
+    Issue #466: ``token_budget_hit`` is ``True`` when at least one
+    ``task_aborted(reason="token_budget")`` event was recorded for
+    the session, ``False`` when an outcome exists but no token budget
+    abort, and ``None`` when the session has no outcome event at all.
     """
     sessions = logger.list_sessions(harness_version=harness_version)
     rows: list[SessionSummaryRow] = []
@@ -139,6 +172,11 @@ def build_session_summary(
         payload = outcome.payload if outcome is not None else {}
         raw_steps = payload.get("steps")
         steps_value: int | None = raw_steps if isinstance(raw_steps, int) else None
+        token_budget_hit = _has_token_budget_abort(logger, session.session_id)
+        context_pruned_count = _count_context_pruned_events(logger, session.session_id)
+        context_pruned_value: int | None = (
+            context_pruned_count if context_pruned_count > 0 else None
+        )
         rows.append(
             SessionSummaryRow(
                 session_id=session.session_id,
@@ -147,10 +185,32 @@ def build_session_summary(
                 outcome_status=_string_or_none(payload.get("status")),
                 outcome_reason=_string_or_none(payload.get("reason")),
                 steps=steps_value,
+                token_budget_hit=token_budget_hit,
+                context_pruned=context_pruned_value,
             )
         )
     rows.sort(key=lambda row: row.started_at, reverse=True)
     return rows
+
+
+def _has_token_budget_abort(logger: TraceLogger, session_id: str) -> bool | None:
+    """Return whether session has a ``task_aborted(reason="token_budget")`` event.
+
+    Returns ``True`` when at least one such event exists, ``False``
+    when the session has outcome data but no token budget abort, and
+    ``None`` when the session has no ``outcome`` event at all (the
+    caller uses this to decide whether to render ``_`` or a boolean).
+    """
+    has_outcome = False
+    for event in logger.iter_events(session_id, kind=OUTCOME_KIND):
+        has_outcome = True
+        break
+    if not has_outcome:
+        return None
+    for event in logger.iter_events(session_id, kind=TASK_ABORTED_KIND):
+        if event.payload.get("reason") == TOKEN_BUDGET_REASON:
+            return True
+    return False
 
 
 def _string_or_none(value: object) -> str | None:
@@ -164,6 +224,9 @@ def _string_or_none(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+_TOKEN_BUDGET_HIT_WIDTH = 5
+
+
 def render_session_summary(
     rows: Sequence[SessionSummaryRow],
     limit: int | None = None,
@@ -171,8 +234,9 @@ def render_session_summary(
     """Render *rows* as the cross-session roll-up table (issue #184).
 
     Columns: ``session_id  started_at  duration  outcome.status
-    outcome.reason  steps``. Sessions without a recorded outcome event
-    emit an underscore ``_`` in the three outcome-derived columns.
+    outcome.reason  steps  token_budget_hit``. Sessions without a
+    recorded outcome event emit an underscore ``_`` in the three
+    outcome-derived columns and ``_`` in ``token_budget_hit``.
 
     *limit* truncates the rendered set to the first ``limit`` rows
     *after* newest-first sorting so a small ``--limit N`` always shows
@@ -194,6 +258,7 @@ def render_session_summary(
             "outcome.status".ljust(_OUTCOME_FIELD_WIDTH),
             "outcome.reason".ljust(_OUTCOME_FIELD_WIDTH),
             "steps".rjust(_STEPS_WIDTH),
+            "budget_hit".rjust(_TOKEN_BUDGET_HIT_WIDTH),
         ]
     )
     lines = [header]
@@ -207,6 +272,15 @@ def render_session_summary(
         else:
             steps_cell = str(row.steps).rjust(_STEPS_WIDTH)
         duration_cell = _format_duration(row.duration_seconds).ljust(_DURATION_WIDTH)
+        token_budget_cell = (
+            _PLACEHOLDER.rjust(_TOKEN_BUDGET_HIT_WIDTH)
+            if row.token_budget_hit is None
+            else (
+                "true".rjust(_TOKEN_BUDGET_HIT_WIDTH)
+                if row.token_budget_hit
+                else "false".rjust(_TOKEN_BUDGET_HIT_WIDTH)
+            )
+        )
         lines.append(
             "  ".join(
                 [
@@ -216,6 +290,7 @@ def render_session_summary(
                     status_cell.ljust(_OUTCOME_FIELD_WIDTH),
                     reason_cell.ljust(_OUTCOME_FIELD_WIDTH),
                     steps_cell,
+                    token_budget_cell,
                 ]
             )
         )

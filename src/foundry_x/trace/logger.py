@@ -741,6 +741,60 @@ class TraceLogger:
         with self.path.open("w", encoding="utf-8") as fh:
             fh.writelines(kept)
 
+    def compact(self) -> int:
+        """Rewrite the JSONL file removing orphaned session markers.
+
+        An orphaned ``session_end`` marker is one where the ``session_id`` has
+        no corresponding ``session_start`` marker in the file. This can happen
+        if a session was deleted and then a stale ``session_end`` marker was
+        written afterward.
+
+        Returns the number of orphaned ``session_end`` markers removed.
+        Only works on the JSONL backend; SQLite VACUUM is handled automatically
+        by the database engine (per issue #632 out-of-scope).
+        """
+        if self.backend != "jsonl":
+            return 0
+        if not self.path.exists():
+            return 0
+
+        kept: list[str] = []
+        seen_starts: set[str] = set()
+        orphaned: list[str] = []
+
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    kept.append(line)
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except json.JSONDecodeError:
+                    kept.append(line)
+                    continue
+
+                kind = record.get("kind")
+                session_id = record.get("session_id")
+
+                if kind == "session_start":
+                    if session_id not in seen_starts:
+                        seen_starts.add(session_id)
+                    kept.append(line)
+                elif kind == "session_end":
+                    if session_id not in seen_starts:
+                        orphaned.append(line)
+                    else:
+                        kept.append(line)
+                else:
+                    kept.append(line)
+
+        orphaned_count = len(orphaned)
+        with self.path.open("w", encoding="utf-8") as fh:
+            fh.writelines(kept)
+
+        return orphaned_count
+
     def redact_event(
         self,
         session_id: str,

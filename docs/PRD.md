@@ -54,3 +54,16 @@ evaluation surface is the pytest-marked task suite under
   An external standardized benchmark such as HumanEval is not adopted
   today; ADR-0005 defers any such framework until a concrete
   limitation forces an ADR.
+
+### 5a. Fourth Tracked Metric
+
+In addition to the three PRD KPIs above, Phase 3 introduces a
+fourth tracked metric for token budget enforcement:
+
+- **Token Budget Hit Rate** (tracked, not a PRD KPI): Fraction of
+  sessions that recorded at least one `task_aborted(reason="token_budget")`
+  event. This signals whether the context-pruning hook is aggressive enough,
+  or whether the model-context window is being misspent. It is surfaced
+  via `foundry-kpis` and the regression report alongside the three PRD KPIs.
+  The raw session count (`token_budget_abort_count`) is retained as an
+  auxiliary signal.

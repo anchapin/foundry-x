@@ -10,6 +10,7 @@ unless the upstream stage emitted a non-clean signal.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -28,6 +29,9 @@ class EvolutionResult(BaseModel):
     present when the pipeline ran the full Digester → Evolver → Critic chain;
     it is absent when the report is clean (short-circuit) or when the
     Evolver returned no edits.
+
+    Issue #609 adds ``started_at`` and ``completed_at`` ISO-8601 timestamps
+    stamped around the pipeline for KPI history trend computation.
     """
 
     session_id: str
@@ -35,6 +39,8 @@ class EvolutionResult(BaseModel):
     proposed_edits: list[ProposedEdit] = Field(default_factory=list)
     verdict: CriticVerdict | None = None
     harness_version: str | None = None
+    started_at: str
+    completed_at: str
 
 
 def _edits_to_diff(edits: list[ProposedEdit]) -> str:
@@ -42,6 +48,17 @@ def _edits_to_diff(edits: list[ProposedEdit]) -> str:
     if not edits:
         return ""
     return "\n".join(edit.unified_diff for edit in edits)
+
+
+def _now_iso() -> str:
+    """Return a UTC ISO-8601 timestamp with offset suffix.
+
+    Consistent with :func:`foundry_x.observability.kpis._now_iso` —
+    timezone-aware form keeps the line unambiguous across CI regions;
+    ``datetime.fromisoformat`` (Python 3.11+) accepts the ``+00:00``
+    suffix without modification.
+    """
+    return datetime.now(timezone.utc).isoformat()
 
 
 def run_evolution_step(
@@ -88,6 +105,7 @@ def run_evolution_step(
         and the critic verdict (if the full chain ran).
     """
     harness_version = resolve_harness_version(harness_dir)
+    started_at = _now_iso()
     failure_report = Digester().digest(session_id, events)
 
     if failure_report.proposed_class == "clean":
@@ -97,6 +115,8 @@ def run_evolution_step(
             proposed_edits=[],
             verdict=None,
             harness_version=harness_version,
+            started_at=started_at,
+            completed_at=_now_iso(),
         )
 
     if evolver is None:
@@ -118,6 +138,8 @@ def run_evolution_step(
             proposed_edits=[],
             verdict=None,
             harness_version=harness_version,
+            started_at=started_at,
+            completed_at=_now_iso(),
         )
 
     if critic is None:
@@ -132,4 +154,6 @@ def run_evolution_step(
         proposed_edits=proposed_edits,
         verdict=verdict,
         harness_version=harness_version,
+        started_at=started_at,
+        completed_at=_now_iso(),
     )

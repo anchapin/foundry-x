@@ -16,8 +16,12 @@ Before you write code in this repo, read in this order:
 3. `docs/ROADMAP.md` — current phase and milestones.
 4. `docs/PHILOSOPHY.md` — the principles you must not violate.
 5. `docs/SECURITY.md` — guardrails, especially for `harness/` edits.
-6. `docs/adr/` — every significant decision has a record. Read the relevant
-   ADRs before proposing changes in those areas.
+   `harness/manifest.json` controls which hooks are active; adding or
+   removing a hook file requires updating the manifest.
+6. `docs/adr/` — read the relevant ADR before changing that area:
+   - `harness/` → ADR-0004 | `pyproject.toml` / deps → ADR-0002
+   - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
+   - Module-boundary models → ADR-0006
 7. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
@@ -36,7 +40,10 @@ and ask the human.
   ADR-0004.
 - **Never bypass the `Critic` gate.** No "I'll just push and run tests
   later." Every harness edit ships through the Critic or it does not
-  ship.
+  ship. The `Critic` runs in an isolated sandbox and evaluates harness
+  edits against the full pytest suite *plus* the benchmark suite
+  (`benchmarks/tasks/`, marked `@pytest.mark.benchmark`). Regressing a
+  previously-passing benchmark blocks the gate. See ADR-0004.
 - **Never run destructive commands** (`rm -rf`, `git reset --hard`,
   force-push to a branch other than your own throwaway, dropping a
   database) without an explicit rollback path stated in the response.
@@ -44,7 +51,9 @@ and ask the human.
   `.env.example` is the template; real values live in `.env` (gitignored).
 - **Never assume a library is available** without checking
   `pyproject.toml` and `uv.lock` first. If it is not there, add it via
-  `uv add <package>` and explain why in the PR.
+  `uv add <package>` and explain why in the PR. The lockfile (`uv.lock`)
+  is committed — always run `uv sync` after adding a dependency so the
+  lockfile stays in sync with `pyproject.toml`.
 - **Never silently swallow an exception.** Log it via the project's
   `TraceLogger`, surface it, or re-raise. Bare `except: pass` is a bug.
 - **Never widen scope.** A bug fix is not a refactor. A feature is not a
@@ -65,7 +74,8 @@ This project is itself an agent harness foundry. The way we work here
 mirrors the way our product works:
 
 1. **Observe.** Read the trace (`logs/`) and the existing code before
-   proposing a change. The trace store is ground truth.
+   proposing a change. The trace store is ground truth. Note: `logs/` is
+   gitignored; it contains live SQLite/JSONL trace data from agent runs.
 2. **Digest.** Write a small failure report ("the existing approach
    breaks when X because Y").
 3. **Propose the smallest viable change.** One file if possible. One
@@ -91,6 +101,11 @@ mirrors the way our product works:
   - Single benchmark: `uv run pytest benchmarks/tasks/test_name.py -m benchmark`
   - Benchmarks live alongside unit tests in `benchmarks/tasks/` and are
     marked `@pytest.mark.benchmark` (ADR-0004, ADR-0005).
+  - Run the full benchmark suite: `uv run pytest -m benchmark`
+- **CLI tools:**
+  - `uv run foundry-x-trace` — inspect trace sessions (`--help` for flags)
+  - `uv run foundry-kpis` — compute PRD success-metric KPIs from traces
+  - `uv run fx-trace regression-report` — aggregate Critic verdicts
 - **Type discipline:** Python 3.11+ syntax. `pydantic` for all
   structured data at module boundaries (ADR-0006). No `Any` without
   a comment explaining why.
@@ -130,15 +145,12 @@ practice what we preach.
 
 ## 7. The self-reference loop
 
-This is unusual and worth stating plainly: the agent harness in this
-repo is written using tools shaped by the harness in this repo. Be
-especially disciplined about keeping the two layers separate:
+The agent harness in this repo is written using tools shaped by the harness.
+Keep the two layers strictly separate:
 
-- **`src/foundry_x/`** is the *foundry* — the Python code that wraps
-  and evolves agents.
-- **`harness/`** is the *artifact being evolved* — the agent's own DNA.
+- **`src/foundry_x/`** — the *foundry*: Python code that wraps and evolves agents.
+  When you read `src/foundry_x/execution/runner.py`, that is the code that talks to the agent.
+- **`harness/`** — the *artifact being evolved*: the agent's own DNA (system prompt, hooks, skills).
+  When you read `harness/system_prompt.txt`, that is the agent you are talking to.
 
-When you read `harness/system_prompt.txt`, that is the agent you are
-talking to. When you read `src/foundry_x/execution/runner.py`, that is
-the code that talks to the agent. Mixing them up is the most common
-mistake newcomers make.
+Mixing these up is the most common mistake newcomers make.

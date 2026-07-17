@@ -776,6 +776,114 @@ def test_prune_nonpositive_older_than_returns_nonzero(tmp_path, capsys):
     assert "positive integer" in capsys.readouterr().err
 
 
+# --- Issue #632: compact ----------------------------------------------------
+# Rewrites JSONL file removing orphaned session_end markers (session_end
+# without a corresponding session_start).
+
+
+def _write_jsonl(path: Path, lines: list[dict]) -> None:
+    """Write a list of dicts as JSONL, one JSON object per line."""
+    with path.open("w", encoding="utf-8") as fh:
+        for obj in lines:
+            fh.write(json.dumps(obj) + "\n")
+
+
+def test_compact_jsonl_no_orphans_leaves_file_unchanged(tmp_path, capsys):
+    """When no orphaned markers exist, compact is a no-op."""
+    db = tmp_path / "traces.jsonl"
+    logger = TraceLogger(db, backend="jsonl")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    original_content = db.read_text("utf-8")
+    rc = main(["compact", "--db", str(db)])
+
+    assert rc == 0
+    assert "No orphaned markers found" in capsys.readouterr().out
+    assert db.read_text("utf-8") == original_content
+
+
+def test_compact_jsonl_removes_orphaned_session_end(tmp_path, capsys):
+    """Orphaned session_end markers (no matching session_start) are removed."""
+    db = tmp_path / "traces.jsonl"
+    _write_jsonl(
+        db,
+        [
+            {"kind": "session_end", "session_id": "orphan-sid", "ended_at": "2025-01-01T00:00:00Z"},
+            {
+                "kind": "session_start",
+                "session_id": "valid-sid",
+                "started_at": "2025-01-01T00:00:00Z",
+                "harness_version": "0.1.0",
+            },
+            {
+                "event_id": "e1",
+                "session_id": "valid-sid",
+                "timestamp": "2025-01-01T00:00:01Z",
+                "kind": "tool_call",
+                "payload": {},
+            },
+        ],
+    )
+
+    rc = main(["compact", "--db", str(db)])
+
+    assert rc == 0
+    assert "Removed 1 orphaned marker" in capsys.readouterr().out
+    remaining = db.read_text("utf-8")
+    assert "orphan-sid" not in remaining
+    assert "valid-sid" in remaining
+
+
+def test_compact_jsonl_dry_run_does_not_modify_file(tmp_path, capsys):
+    """--dry-run prints what would be removed without touching the file."""
+    db = tmp_path / "traces.jsonl"
+    _write_jsonl(
+        db,
+        [
+            {"kind": "session_end", "session_id": "orphan-sid", "ended_at": "2025-01-01T00:00:00Z"},
+            {
+                "kind": "session_start",
+                "session_id": "valid-sid",
+                "started_at": "2025-01-01T00:00:00Z",
+                "harness_version": "0.1.0",
+            },
+        ],
+    )
+
+    original_content = db.read_text("utf-8")
+    rc = main(["compact", "--dry-run", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "would remove" in out
+    assert "orphan-sid" in out
+    assert "Dry run" in out
+    assert db.read_text("utf-8") == original_content
+
+
+def test_compact_sqlite_is_noop(tmp_path, capsys):
+    """compact on sqlite backend exits 0 with a message (VACUUM is automatic)."""
+    db = tmp_path / "traces.db"
+    TraceLogger(db, backend="sqlite")
+
+    rc = main(["compact", "--db", str(db)])
+
+    assert rc == 0
+    assert "jsonl backend required" in capsys.readouterr().out
+
+
+def test_compact_nonexistent_jsonl_file(tmp_path, capsys):
+    """compact on a non-existent JSONL file exits 0 gracefully."""
+    db = tmp_path / "nonexistent.jsonl"
+    assert not db.exists()
+
+    rc = main(["compact", "--db", str(db)])
+
+    assert rc == 0
+    assert "No orphaned markers found" in capsys.readouterr().out
+
+
 # --- Issue #195: seed-sample-trace -------------------------------------------
 # Offline smoke subcommand — plants a deterministic session so the Digester,
 # KPI, and regression-report CLIs have something to chew on without standing

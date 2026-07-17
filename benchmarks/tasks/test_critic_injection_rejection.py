@@ -128,8 +128,8 @@ def test_critic_rejects_injection_diff(benchmark_workspace: Path) -> None:
         difflib.unified_diff(
             old_prompt.splitlines(keepends=True),
             new_prompt.splitlines(keepends=True),
-            fromfile="a/system_prompt.txt",
-            tofile="b/system_prompt.txt",
+            fromfile="a/harness/system_prompt.txt",
+            tofile="b/harness/system_prompt.txt",
         )
     )
 
@@ -165,8 +165,8 @@ def test_critic_rejects_role_tag_injection(benchmark_workspace: Path) -> None:
         difflib.unified_diff(
             old_prompt.splitlines(keepends=True),
             new_prompt.splitlines(keepends=True),
-            fromfile="a/system_prompt.txt",
-            tofile="b/system_prompt.txt",
+            fromfile="a/harness/system_prompt.txt",
+            tofile="b/harness/system_prompt.txt",
         )
     )
 
