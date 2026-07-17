@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from foundry_x.evolution.critic import Critic, CriticVerdict
@@ -28,6 +29,11 @@ from foundry_x.trace.logger import TraceLogger
 def _infer_backend(trace_db: str) -> str:
     """Return ``"jsonl"`` for ``.jsonl`` paths, ``"sqlite"`` otherwise."""
     return "jsonl" if trace_db.endswith(".jsonl") else "sqlite"
+
+
+def _now_iso() -> str:
+    """Return a UTC ISO-8601 timestamp with offset suffix."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _render_failure_report(report: FailureReport) -> str:
@@ -98,6 +104,7 @@ def _run_loop(
     implemented. verdict is None if no proposed_edit was produced.
     Exit code 0 = approved / no failure, 1 = rejected, 2 = error.
     """
+    started_at = _now_iso()
     backend = _infer_backend(trace_db)
     logger = TraceLogger(trace_db, backend=backend)
     events = logger.load_session(session_id)
@@ -110,6 +117,9 @@ def _run_loop(
     print()
 
     if report.proposed_class == "clean":
+        completed_at = _now_iso()
+        print(f"Started: {started_at} | Completed: {completed_at}")
+        print()
         print("No failure detected — evolution loop complete.")
         return report, None, None, 0
 
@@ -117,6 +127,9 @@ def _run_loop(
     try:
         edits = evolver.propose(harness_dir=harness_dir, failure=report)
     except NotImplementedError:
+        completed_at = _now_iso()
+        print(f"Started: {started_at} | Completed: {completed_at}")
+        print()
         sys.stderr.write(
             "Evolver.propose() is not yet implemented (Phase 2). "
             "The evolution loop cannot produce a ProposedEdit yet.\n"
@@ -124,6 +137,9 @@ def _run_loop(
         return report, None, None, 2
 
     if not edits:
+        completed_at = _now_iso()
+        print(f"Started: {started_at} | Completed: {completed_at}")
+        print()
         print("Evolver returned no ProposedEdit objects.")
         return report, None, None, 0
 
@@ -134,6 +150,10 @@ def _run_loop(
     critic = Critic(harness_dir=harness_dir)
     verdict = critic.evaluate(edit.unified_diff)
     print(_render_critic_verdict(verdict))
+    print()
+
+    completed_at = _now_iso()
+    print(f"Started: {started_at} | Completed: {completed_at}")
     print()
 
     exit_code = 0 if verdict.verdict else 1
