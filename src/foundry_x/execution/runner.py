@@ -97,6 +97,12 @@ _MAX_AGENT_STEPS_ENV = "FOUNDRY_MAX_AGENT_STEPS"
 _DEFAULT_MAX_AGENT_STEPS: int = 16
 _MAX_AGENT_STEPS_DYNAMIC_ENV = "FOUNDRY_MAX_AGENT_STEPS_DYNAMIC"
 
+# Per-session event cap (issue #708). ``FOUNDRY_MAX_EVENTS_PER_SESSION`` prevents
+# a single runaway session from writing millions of events and filling the disk.
+# ``None`` means no limit (backwards-compatible). When set, the loop aborts
+# with ``task_aborted(reason="event_limit")`` before the cap is exceeded.
+_FOUNDRY_MAX_EVENTS_PER_SESSION_ENV = "FOUNDRY_MAX_EVENTS_PER_SESSION"
+
 # Per-request httpx timeout (issue #201). ``FOUNDRY_REQUEST_TIMEOUT_S`` caps a
 # single chat-completion HTTP round-trip so a stuck model endpoint cannot hang
 # the agent loop indefinitely. The wall-clock ``RunLimits`` cap guards the
@@ -419,6 +425,10 @@ class RunLimits(BaseModel):
     ``ModelResponse``: when the running token total exceeds the cap,
     the loop emits ``task_aborted(reason="token_budget")`` and terminates
     with ``outcome.status="failed"``, ``outcome.reason="token_budget"``.
+    ``max_events_per_session`` is enforced in :func:`run_task` to prevent
+    unbounded trace growth (issue #708): when the event count reaches this
+    cap, the loop emits ``task_aborted(reason="event_limit")`` and terminates
+    with ``outcome.status="failed"``, ``outcome.reason="event_limit"``.
     """
 
     task_timeout_s: float | None = Field(
@@ -432,6 +442,12 @@ class RunLimits(BaseModel):
         "running total exceeds this cap after a ModelResponse, the loop "
         "aborts with a task_aborted event.",
     )
+    max_events_per_session: int | None = Field(
+        default=None,
+        description="Maximum trace events permitted per session. None disables "
+        "the cap (backwards-compatible). When exceeded the loop emits "
+        'task_aborted(reason="event_limit") and terminates.',
+    )
 
 
 def run_limits_from_env(env: Mapping[str, str] | None = None) -> RunLimits:
@@ -442,6 +458,8 @@ def run_limits_from_env(env: Mapping[str, str] | None = None) -> RunLimits:
     - ``FOUNDRY_TASK_TIMEOUT``: seconds; ``<= 0`` disables the wall-clock cap.
     - ``FOUNDRY_TOKEN_BUDGET``: integer token cap; empty/absent leaves it
       unset (hook point only).
+    - ``FOUNDRY_MAX_EVENTS_PER_SESSION``: integer event cap; empty/absent
+      leaves it unset (no per-session event limit).
     """
     source = env if env is not None else os.environ
 
@@ -457,7 +475,15 @@ def run_limits_from_env(env: Mapping[str, str] | None = None) -> RunLimits:
     budget_raw = source.get("FOUNDRY_TOKEN_BUDGET", "")
     token_budget = None if budget_raw == "" else int(budget_raw)
 
-    return RunLimits(task_timeout_s=task_timeout_s, token_budget=token_budget)
+    max_events: int | None
+    events_raw = source.get(_FOUNDRY_MAX_EVENTS_PER_SESSION_ENV, "")
+    max_events = None if events_raw == "" else int(events_raw)
+
+    return RunLimits(
+        task_timeout_s=task_timeout_s,
+        token_budget=token_budget,
+        max_events_per_session=max_events,
+    )
 
 
 async def run_with_limits(
@@ -1429,7 +1455,7 @@ async def run_task(
     if isinstance(adapter, OpenAICompatibleAdapter):
 
         def _on_retry(event: ModelRetryEvent, _sid: str = session_id) -> None:
-            log.record(
+            _record_and_count(
                 _sid,
                 kind="model_retry",
                 payload=event.model_dump(),
@@ -1483,18 +1509,47 @@ async def run_task(
     max_steps = _resolve_max_steps()
     max_steps_dynamic = _is_max_steps_dynamic()
 
-    log.record(
+    token_budget = limits.token_budget if limits is not None else None
+    max_events = limits.max_events_per_session if limits is not None else None
+    event_count = 0
+
+    def _check_event_limit(sid: str) -> bool:
+        nonlocal event_count
+        if max_events is not None and event_count >= max_events:
+            log.record(
+                sid,
+                kind="task_aborted",
+                payload={
+                    "reason": "event_limit",
+                    "event_count": event_count,
+                    "max_events_per_session": max_events,
+                },
+            )
+            return True
+        return False
+
+    def _record_and_count(sid: str, kind: str, payload: dict[str, Any]) -> None:
+        nonlocal event_count
+        event_count += 1
+        log.record(sid, kind=kind, payload=payload)
+
+    _record_and_count(
         session_id,
         kind="user_prompt",
         payload={"content": task, "tool_count": len(tool_definitions)},
     )
+    if _check_event_limit(session_id):
+        outcome_status = "failed"
+        outcome_reason = "event_limit"
+        hit_event_limit = True
+        return
 
     outcome_status = "success"
     outcome_reason = "final_answer"
     outcome_steps = 0
     turn_ttfts: list[int] = []
     tokens_used = 0
-    token_budget = limits.token_budget if limits is not None else None
+    hit_event_limit = False
 
     step = 0
     try:
@@ -1504,7 +1559,7 @@ async def run_task(
             if step >= max_steps:
                 break
             outcome_steps = step + 1
-            log.record(
+            _record_and_count(
                 session_id,
                 kind="model_request",
                 payload={
@@ -1513,6 +1568,11 @@ async def run_task(
                     "tool_count": len(tool_definitions),
                 },
             )
+            if _check_event_limit(session_id):
+                outcome_status = "failed"
+                outcome_reason = "event_limit"
+                hit_event_limit = True
+                break
             try:
                 response, ttft_ms, chunk_count, total_stream_ms = await _consume_model_stream(
                     adapter, messages, tool_definitions, log, session_id, step
@@ -1520,7 +1580,7 @@ async def run_task(
             except Exception as exc:
                 outcome_status = "failed"
                 outcome_reason = "model_error"
-                log.record(
+                _record_and_count(
                     session_id,
                     kind="model_error",
                     payload={
@@ -1529,7 +1589,18 @@ async def run_task(
                         "message": str(exc),
                     },
                 )
+                if _check_event_limit(session_id):
+                    outcome_status = "failed"
+                    outcome_reason = "event_limit"
+                    hit_event_limit = True
                 raise
+
+            event_count += chunk_count
+            if _check_event_limit(session_id):
+                outcome_status = "failed"
+                outcome_reason = "event_limit"
+                hit_event_limit = True
+                break
 
             if ttft_ms is not None:
                 turn_ttfts.append(ttft_ms)
@@ -1537,7 +1608,7 @@ async def run_task(
             tokens_used += step_tokens
 
             if response.usage is None:
-                log.record(
+                _record_and_count(
                     session_id,
                     kind="token_usage_missing",
                     payload={
@@ -1547,7 +1618,7 @@ async def run_task(
                     },
                 )
 
-            log.record(
+            _record_and_count(
                 session_id,
                 kind="model_response",
                 payload={
@@ -1564,6 +1635,11 @@ async def run_task(
                     "tokens_used": tokens_used,
                 },
             )
+            if _check_event_limit(session_id):
+                outcome_status = "failed"
+                outcome_reason = "event_limit"
+                hit_event_limit = True
+                break
             messages.append(response.message)
 
             if token_budget is not None and tokens_used > token_budget:
@@ -1589,7 +1665,7 @@ async def run_task(
                 arguments = parsed.arguments
 
                 if parsed.error is not None:
-                    log.record(
+                    _record_and_count(
                         session_id,
                         kind="tool_argument_parse_error",
                         payload={
@@ -1600,6 +1676,11 @@ async def run_task(
                             "error": parsed.error,
                         },
                     )
+                    if _check_event_limit(session_id):
+                        outcome_status = "failed"
+                        outcome_reason = "event_limit"
+                        hit_event_limit = True
+                        break
 
                 call = hook_call_cls(name=tool_call.function.name, arguments=arguments)
                 hook_start = time.monotonic()
@@ -1609,7 +1690,7 @@ async def run_task(
                     int((time.monotonic() - hook_start) * 1000) if registry is not None else None
                 )
 
-                log.record(
+                _record_and_count(
                     session_id,
                     kind="tool_call",
                     payload={
@@ -1621,6 +1702,11 @@ async def run_task(
                         "hook_overhead_ms": hook_overhead_ms,
                     },
                 )
+                if _check_event_limit(session_id):
+                    outcome_status = "failed"
+                    outcome_reason = "event_limit"
+                    hit_event_limit = True
+                    break
                 start = time.monotonic()
                 output: Any
                 error: str | None = None
@@ -1630,7 +1716,7 @@ async def run_task(
                     output = None
                     error = f"{type(exc).__name__}: {exc}"
                 duration_ms = int((time.monotonic() - start) * 1000)
-                log.record(
+                _record_and_count(
                     session_id,
                     kind="tool_call",
                     payload={
@@ -1642,12 +1728,17 @@ async def run_task(
                         "hook_overhead_ms": hook_overhead_ms,
                     },
                 )
+                if _check_event_limit(session_id):
+                    outcome_status = "failed"
+                    outcome_reason = "event_limit"
+                    hit_event_limit = True
+                    break
                 result = hook_result_cls(name=call.name, output=output, error=error)
 
                 if registry is not None:
                     result = await registry.run_post(call, result)
 
-                log.record(
+                _record_and_count(
                     session_id,
                     kind="tool_result",
                     payload={
@@ -1659,6 +1750,11 @@ async def run_task(
                         "error": result.error,
                     },
                 )
+                if _check_event_limit(session_id):
+                    outcome_status = "failed"
+                    outcome_reason = "event_limit"
+                    hit_event_limit = True
+                    break
 
                 messages.append(
                     ModelMessage(
@@ -1668,6 +1764,9 @@ async def run_task(
                         content=_serialize_tool_result(result),
                     )
                 )
+
+            if hit_event_limit:
+                break
 
             if step + 1 >= max_steps and response.tool_calls:
                 outcome_status = "truncated"

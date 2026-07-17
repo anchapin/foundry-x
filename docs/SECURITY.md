@@ -55,7 +55,7 @@ We design against these threats:
   - Diff lines: 200/proposal
   - LLM calls: 60/hour (shared across all Evolver instances)
   - LLM cost: $5.00/day (shared across all Evolver instances)
-- **Runaway detection.** The runner enforces two resource caps per task:
+- **Runaway detection.** The runner enforces three resource caps per task:
   - ``FOUNDRY_TASK_TIMEOUT`` (wall-clock seconds, default 300): when exceeded,
     ``run_with_limits`` records ``task_aborted(reason="wall_clock")`` and
     raises ``asyncio.TimeoutError``.
@@ -63,9 +63,13 @@ We design against these threats:
     running token total (accumulated from each ``ModelResponse.usage``) exceeds
     this cap, ``run_task`` records ``task_aborted(reason="token_budget")`` and
     terminates with ``outcome.status="failed"``, ``outcome.reason="token_budget"``.
-  Both caps emit a ``task_aborted`` trace event and set the terminal
+  - ``FOUNDRY_MAX_EVENTS_PER_SESSION`` (event count, unset by default): when
+    the accumulated event count reaches this cap, ``run_task`` records
+    ``task_aborted(reason="event_limit")`` and terminates with
+    ``outcome.status="failed"``, ``outcome.reason="event_limit"``.
+  All caps emit a ``task_aborted`` trace event and set the terminal
   ``outcome`` accordingly so KPI consumers (``token_budget_abort_count``,
-  ``token_budget_hit``) can observe the abort.
+  ``token_budget_hit``, ``event_limit_hit``) can observe the abort.
 - **Sandbox.** Run benchmarks and evolution inside a Docker
   container with read-only mounts for the host filesystem (see
   `infra/`). The default local dev path runs unsandboxed but should
