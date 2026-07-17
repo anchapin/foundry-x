@@ -106,6 +106,8 @@ mirrors the way our product works:
   - `uv run foundry-x-trace` — inspect trace sessions (`--help` for flags)
   - `uv run foundry-kpis` — compute PRD success-metric KPIs from traces
   - `uv run fx-trace regression-report` — aggregate Critic verdicts
+  - `uv run foundry-evolve` — run one evolution iteration against a failure report
+  - `uv run foundry-sweep` — run a parametric sweep of harness variants
 - **Type discipline:** Python 3.11+ syntax. `pydantic` for all
   structured data at module boundaries (ADR-0006). No `Any` without
   a comment explaining why.
