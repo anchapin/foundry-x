@@ -297,6 +297,7 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "regression_rate",
         "improvement_rate",
         "timestamp",
+        "evolver_duration_ms",
     }
     assert "injection_blocks" not in payload
 

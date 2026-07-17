@@ -98,6 +98,7 @@ class TestRunEvolutionStep:
         assert result.failure_report.proposed_class == "clean"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.evolver_duration_ms is None
 
     def test_empty_edits_short_circuits(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         harness_dir = _write_harness(tmp_path)
@@ -117,6 +118,8 @@ class TestRunEvolutionStep:
         assert result.failure_report.proposed_class != "clean"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.evolver_duration_ms is not None
+        assert result.evolver_duration_ms >= 0
 
     def test_full_pipeline_runs_critic(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         harness_dir = _write_harness(tmp_path)
@@ -143,6 +146,8 @@ class TestRunEvolutionStep:
         assert result.proposed_edits == [proposed_edit]
         assert result.verdict is not None
         assert isinstance(result.verdict, CriticVerdict)
+        assert result.evolver_duration_ms is not None
+        assert result.evolver_duration_ms >= 0
 
 
 class TestEvolutionResultModel:
@@ -164,6 +169,7 @@ class TestEvolutionResultModel:
         assert result.failure_report.summary == "test failure"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.evolver_duration_ms is None
 
     def test_result_model_with_verdict(self):
         from foundry_x.evolution.digester import FailureReport
@@ -182,3 +188,21 @@ class TestEvolutionResultModel:
         )
         assert result.verdict is not None
         assert result.verdict.verdict is True
+
+    def test_result_model_with_evolver_duration(self):
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="test failure",
+            proposed_class="tool-error",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            proposed_edits=[],
+            verdict=None,
+            evolver_duration_ms=42.5,
+        )
+        assert result.evolver_duration_ms == 42.5
+        assert isinstance(result.evolver_duration_ms, float)

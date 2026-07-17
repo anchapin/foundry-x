@@ -10,6 +10,7 @@ unless the upstream stage emitted a non-clean signal.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -27,12 +28,17 @@ class EvolutionResult(BaseModel):
     present when the pipeline ran the full Digester → Evolver → Critic chain;
     it is absent when the report is clean (short-circuit) or when the
     Evolver returned no edits.
+
+    Issue #604 adds ``evolver_duration_ms``: wall-clock milliseconds spent
+    inside ``evolver.propose()``, measured via ``time.time()`` deltas. It
+    is ``None`` when the evolver is not reached (clean report or no edits).
     """
 
     session_id: str
     failure_report: FailureReport
     proposed_edits: list[ProposedEdit] = Field(default_factory=list)
     verdict: CriticVerdict | None = None
+    evolver_duration_ms: float | None = None
 
 
 def _edits_to_diff(edits: list[ProposedEdit]) -> str:
@@ -93,17 +99,21 @@ def run_evolution_step(
             failure_report=failure_report,
             proposed_edits=[],
             verdict=None,
+            evolver_duration_ms=None,
         )
 
     if evolver is None:
         evolver = Evolver()
 
+    evolver_duration_ms: float | None = None
     try:
+        t0 = time.time()
         proposed_edits = evolver.propose(
             harness_dir=harness_dir,
             failure=failure_report,
             current_diff=None,
         )
+        evolver_duration_ms = (time.time() - t0) * 1000
     except NotImplementedError:
         proposed_edits = []
 
@@ -113,6 +123,7 @@ def run_evolution_step(
             failure_report=failure_report,
             proposed_edits=[],
             verdict=None,
+            evolver_duration_ms=evolver_duration_ms,
         )
 
     if critic is None:
@@ -126,4 +137,5 @@ def run_evolution_step(
         failure_report=failure_report,
         proposed_edits=proposed_edits,
         verdict=verdict,
+        evolver_duration_ms=evolver_duration_ms,
     )

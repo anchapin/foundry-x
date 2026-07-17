@@ -76,6 +76,11 @@ class KpiSummary(BaseModel):
     with no token data (e.g. an endpoint that never reports usage) keeps
     the summary compact. Like ``injection_blocks`` this is an auxiliary
     operator signal, not one of the three PRD success-metric KPIs.
+
+    Issue #604 adds ``evolver_duration_ms``: mean wall-clock milliseconds
+    spent inside ``evolver.propose()`` per session, sourced from the
+    ``evolver_duration_ms`` field of :class:`~foundry_x.evolution.loop.EvolutionResult`.
+    ``None`` when no evolver phase was recorded for any session.
     """
 
     cycle_time_seconds: float | None = None
@@ -83,6 +88,7 @@ class KpiSummary(BaseModel):
     improvement_rate: float = 0.0
     injection_blocks: dict[str, int] = {}
     token_totals: dict[str, int] = {}
+    evolver_duration_ms: float | None = None
 
 
 class KpiComparison(BaseModel):

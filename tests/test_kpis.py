@@ -249,6 +249,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "improvement_rate",
         "injection_blocks",
         "token_totals",
+        "evolver_duration_ms",
     }
 
 
