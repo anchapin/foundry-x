@@ -56,11 +56,13 @@ class FailureReport(BaseModel):
 # separately so tests can pin the contract.
 INJECTION_BLOCKED_KIND: str = "injection_blocked"
 INJECTION_ATTEMPT_CLASS: str = "injection-attempt"
+CONTEXT_OVERFLOW_CLASS: str = "context-overflow"
 
 FAILURE_KINDS: frozenset[str] = frozenset(
     {
         "tool_error",
         "task_failed",
+        "task_aborted",
         "run_failed",
         "agent_error",
         "error",
@@ -178,6 +180,14 @@ _CLASS_CAUSE_TEMPLATES: dict[str, str] = {
         "injection markers (first block matched: {match}). Treat the agent "
         "as compromised for this session; consider tightening the firewall "
         "patterns or the upstream tool-result scrubbing policy."
+    ),
+    # Issue #576: ``outcome`` events with status=truncated / reason=max_steps
+    # signal context exhaustion. The template references the step count so the
+    # Evolver can propose a pruning hook or a tighter per-task budget.
+    "context-overflow": (
+        "Agent loop reached max_steps (steps={steps}) before producing a "
+        "final answer; the context budget was exhausted. Review the pruning "
+        "hook and the model's tendency to repeat tool calls."
     ),
 }
 
@@ -330,6 +340,54 @@ def _aggregate_injection_blocks(
     )
 
 
+def _aggregate_context_overflow(
+    session_id: str,
+    ordered: Sequence[TraceEvent],
+) -> FailureReport | None:
+    """Aggregate ``outcome`` events with status=truncated / reason=max_steps (issue #576).
+
+    Returns a fully-formed :class:`FailureReport` with
+    ``proposed_class == 'context-overflow'`` when the session ended via
+    max-steps truncation (ADR-0010 §Termination semantics). Returns
+    ``None`` when no such outcome is present, so the caller can fall through
+    to the generic first-failure walk.
+    """
+    outcome_events = [
+        (i, e)
+        for i, e in enumerate(ordered)
+        if e.kind == "outcome"
+        and e.payload.get("status") == "truncated"
+        and e.payload.get("reason") == "max_steps"
+    ]
+    if not outcome_events:
+        return None
+
+    index, event = outcome_events[0]
+    steps = event.payload.get("steps", "?")
+    causes = [
+        _CLASS_CAUSE_TEMPLATES[CONTEXT_OVERFLOW_CLASS].format(steps=steps),
+    ]
+    return FailureReport(
+        session_id=session_id,
+        summary=(
+            f"{CONTEXT_OVERFLOW_CLASS} failure: agent loop reached "
+            f"max_steps ({steps}) before producing a final answer"
+        ),
+        failed_steps=[
+            {
+                "index": index,
+                "event_id": event.event_id,
+                "kind": event.kind,
+                "timestamp": event.timestamp,
+                "signal": "outcome:truncated/max_steps",
+                "payload": event.payload,
+            }
+        ],
+        suspected_causes=causes,
+        proposed_class=CONTEXT_OVERFLOW_CLASS,
+    )
+
+
 class Digester:
     def digest(
         self,
@@ -345,12 +403,21 @@ class Digester:
         is returned with ``proposed_class == "clean"`` and empty
         ``failed_steps``.
 
+        Issue #576 short-circuits the generic walk when an ``outcome`` event
+        with ``status=truncated`` / ``reason=max_steps`` is present,
+        returning a ``context-overflow`` report so the Evolver can propose
+        pruning or budget fixes.
+
         Issue #120 short-circuits the generic walk when one or more
         ``injection_blocked`` events are present: every block is aggregated
         into a single ``injection-attempt`` report so the Evolver sees the
         full adversarial surface rather than just the first block.
         """
         ordered = sorted(events, key=lambda e: e.timestamp)
+
+        context_overflow_report = _aggregate_context_overflow(session_id, ordered)
+        if context_overflow_report is not None:
+            return context_overflow_report
 
         injection_report = _aggregate_injection_blocks(session_id, ordered)
         if injection_report is not None:

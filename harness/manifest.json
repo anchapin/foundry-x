@@ -7,6 +7,10 @@
     "context_pruning",
     "rate_limit"
   ],
+  "context_pruning": {
+    "token_threshold": 8192,
+    "event_threshold": 200
+  },
   "skills": [
     "bash.json",
     "edit_file.json",
@@ -16,5 +20,39 @@
     "read_file.json",
     "read_multiple_files.json",
     "write_file.json"
+  ],
+  "skill_inventory": [
+    {
+      "name": "bash",
+      "description": "Execute a single shell command inside the agent's workspace. Returns stdout + stderr + exit code."
+    },
+    {
+      "name": "edit_file",
+      "description": "Make a precise string replacement in a file. Use for modifying existing code or text."
+    },
+    {
+      "name": "example_skill",
+      "description": "Example skill demonstrating skill JSON schema. Not for production use."
+    },
+    {
+      "name": "grep_search",
+      "description": "Search for patterns in files using regex. Returns matching lines with context."
+    },
+    {
+      "name": "list_dir",
+      "description": "List directory contents with optional filtering. Shows files, dirs, and metadata."
+    },
+    {
+      "name": "read_file",
+      "description": "Read the contents of a file. Supports offset and limit for large files."
+    },
+    {
+      "name": "read_multiple_files",
+      "description": "Read multiple files in a single call. Efficient for gathering related code."
+    },
+    {
+      "name": "write_file",
+      "description": "Write content to a file. Creates new files or overwrites existing ones."
+    }
   ]
 }

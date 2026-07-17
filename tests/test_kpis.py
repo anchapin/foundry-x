@@ -250,6 +250,12 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "injection_blocks",
         "token_totals",
         "evolver_duration_ms",
+        "hooks_disabled_count",
+        "hooks_disabled_rate",
+        "token_budget_abort_count",
+        "token_budget_hit_rate",
+        "streaming_quality",
+        "context_pruned_count",
     }
 
 
@@ -506,7 +512,7 @@ def _seed_model_response_usage(
                 payload={
                     "step": step,
                     "finish_reason": "stop",
-                    "usage": usage,
+                    "token_usage": usage,
                     "tokens_used": running,
                 },
             )
@@ -648,3 +654,195 @@ def test_main_json_includes_token_totals(tmp_path, capsys):
 
     payload = json.loads(captured.out)
     assert payload["token_totals"] == {s1: 10}
+
+
+# ---------------------------------------------------------------------------
+# Issue #621: --cycle-time-alert-threshold exits non-zero when
+# cycle_time_seconds exceeds the configured value. The exit message names
+# the triggering KPI and value. Both thresholds can be specified
+# simultaneously (regression_rate and cycle_time).
+# Issue #626: per-session ``context_pruned_count`` is surfaced by the
+# ``foundry-kpis`` CLI when ≥1 session has ≥1 prune. A clean trace store
+# stays compact (no extra rows in the markdown table).
+# ---------------------------------------------------------------------------
+
+
+def _seed_context_pruned(
+    logger: TraceLogger,
+    harness_version: str,
+    prune_count: int = 0,
+) -> str:
+    """Create a session with ``context_pruned`` events (issue #626).
+
+    When ``prune_count`` > 0, that many ``context_pruned`` events are planted
+    so the per-session KPI counter has something to surface.
+    """
+    from foundry_x.observability.kpis import CONTEXT_PRUNED_KIND
+
+    with logger.session(harness_version=harness_version) as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+        for i in range(prune_count):
+            logger.record(
+                sid,
+                kind=CONTEXT_PRUNED_KIND,
+                payload={"dropped": i + 1, "threshold": 200},
+            )
+    return sid
+
+
+def test_context_pruned_counted_per_session(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    s1 = _seed_context_pruned(logger, "v1", prune_count=2)
+    s2 = _seed_context_pruned(logger, "v1", prune_count=1)
+    _seed_context_pruned(logger, "v1", prune_count=0)
+
+    summary = compute_kpis(logger)
+
+    assert summary.context_pruned_count == {s1: 2, s2: 1}
+    assert sum(summary.context_pruned_count.values()) == 3
+
+
+def test_context_pruned_empty_when_no_events(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=0)
+
+    summary = compute_kpis(logger)
+    assert summary.context_pruned_count == {}
+
+
+def test_context_pruned_respects_harness_version_filter(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=2)
+    _seed_context_pruned(logger, "v2", prune_count=1)
+
+    summary_v1 = compute_kpis(logger, harness_version="v1")
+    summary_v2 = compute_kpis(logger, harness_version="v2")
+
+    assert list(summary_v1.context_pruned_count.values()) == [2]
+    assert list(summary_v2.context_pruned_count.values()) == [1]
+
+
+def test_main_markdown_renders_context_pruned_section(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    s1 = _seed_context_pruned(logger, "v1", prune_count=3)
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    output = captured.out
+    assert "Context Pruned" in output
+    assert "3 prune(s) across 1 session(s)" in output
+    assert "| Session | context_pruned |" in output
+    assert s1 in output
+    assert "| 3 |" in output
+
+
+def test_main_markdown_omits_context_pruned_when_clean(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=0)
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Context Pruned" not in captured.out
+
+
+def test_main_json_includes_context_pruned_count(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    s1 = _seed_context_pruned(logger, "v1", prune_count=2)
+    s2 = _seed_context_pruned(logger, "v1", prune_count=1)
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert payload["context_pruned_count"] == {s1: 2, s2: 1}
+    assert sum(payload["context_pruned_count"].values()) == 3
+
+
+def test_main_json_format_emits_context_pruned_in_top_level_keys(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=1)
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert "context_pruned_count" in payload
+
+
+# Issue #621: --cycle-time-alert-threshold exits non-zero when
+# cycle_time_seconds exceeds the configured value. The exit message names
+# the triggering KPI and value. Both thresholds can be specified
+# simultaneously (regression_rate and cycle_time).
+# ---------------------------------------------------------------------------
+
+
+def test_cycle_time_alert_threshold_exits_nonzero_when_exceeded(tmp_path, capsys):
+    """Alert fires and main returns 1 when cycle_time exceeds threshold."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    rc = main(["--db", str(db), "--cycle-time-alert-threshold", "0.001"])
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "cycle_time_seconds" in captured.err
+    assert "exceeds threshold" in captured.err
+
+
+def test_cycle_time_alert_threshold_exits_zero_when_within_threshold(tmp_path, capsys):
+    """No alert when cycle_time is at or below the threshold."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    rc = main(["--db", str(db), "--cycle-time-alert-threshold", "3600"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ALERT" not in captured.err
+
+
+def test_cycle_time_alert_threshold_exits_zero_when_no_cycle_time_data(tmp_path, capsys):
+    """No alert is possible when cycle_time_seconds is None (no data)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # No verdicts → no critic_verdict event → no cycle time can be computed.
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+
+    rc = main(["--db", str(db), "--cycle-time-alert-threshold", "1.0"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ALERT" not in captured.err
+
+
+def test_cycle_time_alert_threshold_message_includes_values(tmp_path, capsys):
+    """Alert message names the KPI and both the actual and threshold values."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    rc = main(["--db", str(db), "--cycle-time-alert-threshold", "0.001"])
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    # Message contains cycle_time_seconds keyword and the threshold value.
+    assert "cycle_time_seconds" in captured.err
+    assert "exceeds threshold" in captured.err
+    # The actual cycle time is a positive number and the threshold was 0.001.
+    assert "0.00" in captured.err or "0.01" in captured.err

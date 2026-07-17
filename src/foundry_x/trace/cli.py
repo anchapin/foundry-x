@@ -347,6 +347,77 @@ def _prune(args: argparse.Namespace) -> int:
     return 0
 
 
+def _compact(args: argparse.Namespace) -> int:
+    """Implement ``compact`` (issue #632).
+
+    Rewrites the JSONL file removing orphaned ``session_end`` markers — those
+    whose ``session_id`` has no corresponding ``session_start`` marker.
+    This can happen after a session is deleted and a stale ``session_end``
+    marker is written afterward.
+
+    ``--dry-run`` reports what would be removed without touching the file.
+    Only works on the JSONL backend; exits 0 on sqlite with a no-op message.
+    """
+    logger = _logger_for(args.db)
+
+    if logger.backend != "jsonl":
+        sys.stdout.write("compact: jsonl backend required; sqlite VACUUM is automatic.\n")
+        return 0
+
+    if not logger.path.exists():
+        sys.stdout.write("No orphaned markers found.\n")
+        return 0
+
+    kept: list[str] = []
+    seen_starts: set[str] = set()
+    orphaned: list[str] = []
+
+    with logger.path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if not stripped:
+                kept.append(line)
+                continue
+            try:
+                record = json.loads(stripped)
+            except json.JSONDecodeError:
+                kept.append(line)
+                continue
+
+            kind = record.get("kind")
+            session_id = record.get("session_id")
+
+            if kind == "session_start":
+                if session_id not in seen_starts:
+                    seen_starts.add(session_id)
+                kept.append(line)
+            elif kind == "session_end":
+                if session_id not in seen_starts:
+                    orphaned.append(line)
+                else:
+                    kept.append(line)
+            else:
+                kept.append(line)
+
+    orphaned_count = len(orphaned)
+
+    if args.dry_run:
+        if orphaned:
+            for line in orphaned:
+                sys.stdout.write(f"  would remove: {line.strip()}\n")
+        sys.stdout.write(f"Dry run: {orphaned_count} orphaned marker(s) would be removed.\n")
+        return 0
+
+    if orphaned_count == 0:
+        sys.stdout.write("No orphaned markers found.\n")
+        return 0
+
+    with logger.path.open("w", encoding="utf-8") as fh:
+        fh.writelines(kept)
+    sys.stdout.write(f"Removed {orphaned_count} orphaned marker(s).\n")
+    return 0
+
+
 # --- Issue #195: seed-sample-trace -------------------------------------------
 # Plant a deterministic, secret-free session so the KPI / regression-report
 # CLIs have something to chew on without standing up llama-server. Mirrors
@@ -695,6 +766,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="List sessions that would be removed without deleting them.",
     )
     prune_parser.set_defaults(func=_prune)
+
+    compact_parser = sub.add_parser(
+        "compact",
+        help="Remove orphaned session_end markers from a JSONL trace file (issue #632).",
+    )
+    compact_parser.add_argument(
+        "--db",
+        default="logs/traces.jsonl",
+        help="Path to the JSONL trace file (default: logs/traces.jsonl).",
+    )
+    compact_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print orphaned markers without modifying the file.",
+    )
+    compact_parser.set_defaults(func=_compact)
 
     return parser
 

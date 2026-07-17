@@ -54,6 +54,7 @@ def test_task_B():
 
 def _write_harness(tmp_path: Path, test_source: str) -> Path:
     harness_dir = tmp_path / "harness"
+    harness_dir.mkdir(parents=True)
     tests_dir = harness_dir / "tests"
     tests_dir.mkdir(parents=True)
     (harness_dir / "system_prompt.txt").write_text("original\n")
@@ -93,7 +94,7 @@ def test_critic_rejects_when_baseline_task_regresses_post_edit(tmp_path: Path) -
     assert baseline.failed_checks == []
 
     regress_diff = _diff(
-        "tests/test_benchmarks.py",
+        "harness/tests/test_benchmarks.py",
         _BASELINE_SOURCE,
         _REGRESSED_SOURCE,
     )
@@ -107,7 +108,7 @@ def test_critic_rejects_when_baseline_task_regresses_post_edit(tmp_path: Path) -
 def test_critic_approves_when_all_baseline_tasks_still_pass(tmp_path: Path) -> None:
     harness_dir = _write_harness(tmp_path, _BASELINE_SOURCE)
 
-    benign_diff = _diff("system_prompt.txt", "original\n", "patched\n")
+    benign_diff = _diff("harness/system_prompt.txt", "original\n", "patched\n")
 
     verdict = _baseline_critic(harness_dir).evaluate(benign_diff)
 
@@ -120,7 +121,7 @@ def test_critic_surfaces_regressed_task_name_in_verdict(tmp_path: Path) -> None:
     harness_dir = _write_harness(tmp_path, _BASELINE_SOURCE)
 
     regress_diff = _diff(
-        "tests/test_benchmarks.py",
+        "harness/tests/test_benchmarks.py",
         _BASELINE_SOURCE,
         _REGRESSED_SOURCE,
     )

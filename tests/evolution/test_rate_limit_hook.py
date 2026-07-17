@@ -12,6 +12,7 @@ This module tests both:
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -56,7 +57,7 @@ class TestRateLimitHook:
     def test_pre_tool_accepts_first_call(self) -> None:
         hook = RateLimitHook()
         call = ToolCall(name="evolver_propose", arguments={})
-        result = hook.pre_tool(call)
+        result = asyncio.run(hook.pre_tool(call))
         assert result is call
         window = _get_window()
         assert len(window) == 1
@@ -67,21 +68,21 @@ class TestRateLimitHook:
         hook = RateLimitHook()
         call = ToolCall(name="evolver_propose", arguments={})
         for _ in range(DEFAULT_MAX_PROPOSALS_PER_HOUR):
-            hook.pre_tool(call)
+            asyncio.run(hook.pre_tool(call))
         with pytest.raises(RuntimeError, match="cap reached"):
-            hook.pre_tool(call)
+            asyncio.run(hook.pre_tool(call))
 
     def test_pre_tool_ignores_non_evolver_calls(self) -> None:
         hook = RateLimitHook()
         call = ToolCall(name="read_file", arguments={"path": "/tmp/x"})
-        result = hook.pre_tool(call)
+        result = asyncio.run(hook.pre_tool(call))
         assert result is call
         assert len(_get_window()) == 0
 
     def test_post_tool_decruments_pending_on_success(self) -> None:
         hook = RateLimitHook()
         call = ToolCall(name="evolver_propose", arguments={})
-        hook.pre_tool(call)
+        asyncio.run(hook.pre_tool(call))
         result = ToolResult(
             name="evolver_propose",
             output=[
@@ -92,22 +93,22 @@ class TestRateLimitHook:
                 )
             ],
         )
-        hook.post_tool(call, result)
+        asyncio.run(hook.post_tool(call, result))
         assert len(_get_window()) == 0
 
     def test_post_tool_decruments_pending_on_empty_output(self) -> None:
         hook = RateLimitHook()
         call = ToolCall(name="evolver_propose", arguments={})
-        hook.pre_tool(call)
+        asyncio.run(hook.pre_tool(call))
         result = ToolResult(name="evolver_propose", output=[])
-        hook.post_tool(call, result)
+        asyncio.run(hook.post_tool(call, result))
         assert len(_get_window()) == 0
 
     def test_post_tool_ignores_non_evolver_calls(self) -> None:
         hook = RateLimitHook()
         call = ToolCall(name="read_file", arguments={"path": "/tmp/x"})
         result = ToolResult(name="read_file", output="content")
-        hook.post_tool(call, result)
+        asyncio.run(hook.post_tool(call, result))
         assert len(_get_window()) == 0
 
     def test_register_into_returns_hook(self) -> None:

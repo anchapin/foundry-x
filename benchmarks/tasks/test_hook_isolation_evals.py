@@ -137,6 +137,47 @@ def test_post_failure_does_not_abort_chain(caplog) -> None:
 
 
 @pytest.mark.benchmark
+def test_post_failure_preserves_subsequent_hooks() -> None:
+    """A ``post_tool`` exception in slot 1 must not stop slot 2 from running.
+
+    The injection firewall sits at post_tool. If it raises, subsequent hooks
+    (e.g. audit logging, result caching) must still observe the original result.
+    """
+    slot1 = _RaisingHook()
+    slot2 = _RecordingHook("after")
+    registry = HookRegistry()
+    registry.register(slot1)
+    registry.register(slot2)
+
+    out = _run(registry.run_post(_CALL, _RESULT))
+
+    assert out is _RESULT, "run_post must return the original result by identity"
+    assert len(slot2.post_calls) == 1, "hook in slot 2 must still run after slot 1 raises"
+
+
+@pytest.mark.benchmark
+def test_post_failure_original_result_passed(caplog) -> None:
+    """A ``post_tool`` exception must not mutate the result returned to the caller.
+
+    The security-critical property of the injection firewall's post_tool slot
+    is that a raised exception leaves the original ToolResult untouched —
+    subsequent hooks and the agent runner see the original payload.
+    """
+    bad = _RaisingHook()
+    registry = HookRegistry()
+    registry.register(bad)
+
+    with caplog.at_level(logging.ERROR, logger="harness.hooks.base"):
+        out = _run(registry.run_post(_CALL, _RESULT))
+
+    assert out is _RESULT, "run_post must pass the original result through unchanged by identity"
+    assert any(
+        "RaisingHook" in record.message and "post_tool" in record.message
+        for record in caplog.records
+    ), "the failure must be logged on harness.hooks.base with slot post_tool"
+
+
+@pytest.mark.benchmark
 def test_failure_is_forwarded_to_on_error_sink() -> None:
     """A registered ``on_error`` sink observes the isolated failure.
 

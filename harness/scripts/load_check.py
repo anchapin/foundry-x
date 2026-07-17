@@ -2,7 +2,7 @@
 """Smoke-test that the harness tree is loadable. Used by the Critic (ADR-0004)
 to gate ``ProposedEdit`` proposals before they are marked active.
 
-Validates six invariants:
+Validates seven invariants:
 
 * the harness directory itself exists
 * every ``harness/skills/*.json`` parses and carries the five required keys
@@ -14,6 +14,7 @@ Validates six invariants:
 * ``harness/system_prompt.txt`` exists and is non-empty
 * ``import harness.hooks`` succeeds and the registry instantiates
 * ``harness/manifest.json`` cross-refs resolve on disk (issue #277)
+* hook execution order matches manifest declaration (issue #567)
 
 Stdlib-only by design. The script adds the parent of ``--harness-dir`` to
 ``sys.path`` so that ``import harness.hooks`` resolves the same way the
@@ -34,7 +35,9 @@ import argparse
 import importlib
 import json
 import sys
+import warnings
 from pathlib import Path
+from typing import Any
 
 
 # Required keys on every harness/skills/*.json document. Names match the
@@ -208,6 +211,124 @@ def _read_manifest_hooks(harness_dir: Path) -> list[str]:
     return [str(h) for h in hooks]
 
 
+class HookManifestValidator:
+    """Validate that hook execution order matches manifest declaration (issue #567).
+
+    Parses ``harness/manifest.json``, reads the declared ``hooks`` order, imports
+    each hook module, and inspects its ``_phase`` class attribute.  Fails with a
+    descriptive error if the actual execution order diverges from the manifest
+    declaration.  Skips with a warning if a hook does not declare a ``_phase``
+    (per ADR-0019).
+    """
+
+    _HOOK_CLASSES: dict[str, type] = {
+        "injection_firewall": None,  # filled in lazily
+        "context_pruning": None,
+        "rate_limit": None,
+    }
+
+    def __init__(self, harness_dir: Path) -> None:
+        self._harness_dir = harness_dir
+        self._parent: Path = harness_dir.resolve().parent
+        self._sys_path_inserted = False
+
+    def _ensure_in_sys_path(self) -> None:
+        parent_str = str(self._parent)
+        if parent_str not in sys.path:
+            sys.path.insert(0, parent_str)
+            self._sys_path_inserted = True
+        else:
+            self._sys_path_inserted = False
+
+    def _remove_sys_path(self) -> None:
+        if self._sys_path_inserted:
+            parent_str = str(self._parent)
+            if parent_str in sys.path:
+                sys.path.remove(parent_str)
+
+    def _load_hook_class(self, name: str) -> type | None:
+        if name == "base":
+            return None
+        module_name = f"harness.hooks.{name}"
+        try:
+            importlib.invalidate_caches()
+            module = importlib.import_module(module_name)
+        except ImportError:
+            return None
+        hook_classes = [
+            getattr(module, attr)
+            for attr in dir(module)
+            if not attr.startswith("_")
+            and isinstance(getattr(module, attr, None), type)
+            and hasattr(getattr(module, attr), "_phase")
+        ]
+        if not hook_classes:
+            return None
+        if len(hook_classes) > 1:
+            warnings.warn(
+                f"hook module {module_name!r} defines multiple classes with "
+                f"_phase: {hook_classes!r}; using first: {hook_classes[0].__name__}",
+                UserWarning,
+            )
+        return hook_classes[0]
+
+    def validate(self) -> tuple[bool, list[str]]:
+        """Validate hook order against manifest.
+
+        Returns
+        -------
+        (ok, errors_or_warnings)
+            * (True, []) if order is valid
+            * (True, [warnings]) if order is valid but some hooks were skipped
+            * (False, [errors]) if order is invalid
+        """
+        manifest = self._harness_dir / "manifest.json"
+        if not manifest.exists():
+            return True, []
+
+        try:
+            doc = json.loads(manifest.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return True, []
+
+        hooks_declared: list[str] = doc.get("hooks", [])
+        if not isinstance(hooks_declared, list):
+            return True, []
+
+        self._ensure_in_sys_path()
+        errors: list[str] = []
+        warnings_list: list[str] = []
+        try:
+            for index, name in enumerate(hooks_declared):
+                hook_class = self._load_hook_class(name)
+                if hook_class is None:
+                    if name != "base":
+                        warnings_list.append(
+                            f"hook {name!r}: no class with _phase found; "
+                            f"skipping order validation (ADR-0019)"
+                        )
+                    continue
+                actual_phase: int | Any = hook_class._phase
+                if not isinstance(actual_phase, int):
+                    warnings_list.append(
+                        f"hook {name!r}: _phase is {type(actual_phase).__name__} "
+                        f"(expected int); skipping order validation (ADR-0019)"
+                    )
+                    continue
+                if actual_phase != index:
+                    errors.append(
+                        f"hook {name!r}: declared at position {index} in manifest "
+                        f"but _phase={actual_phase}; execution order would be "
+                        f"incorrect (ADR-0019 requires manifest order == execution order)"
+                    )
+        finally:
+            self._remove_sys_path()
+
+        if errors:
+            return False, errors
+        return True, warnings_list
+
+
 def _check_hooks_importable(harness_dir: Path) -> list[str]:
     """Add the parent of ``harness_dir`` to ``sys.path`` and try to
     ``import harness.hooks``. Catches ImportError + post-import registry
@@ -269,6 +390,13 @@ def main(argv: list[str] | None = None) -> int:
     failures.extend(_check_hooks_importable(harness_dir))
     failures.extend(_check_manifest(harness_dir))
 
+    ok, validator_msgs = HookManifestValidator(harness_dir).validate()
+    if not ok:
+        failures.extend(validator_msgs)
+    else:
+        for msg in validator_msgs:
+            print(f"WARN: {msg}", file=sys.stderr)
+
     if failures:
         print(f"harness load-check FAILED: {len(failures)} issue(s)", file=sys.stderr)
         for msg in failures:
@@ -280,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"harness load-check OK: {harness_dir} "
         f"(skills OK, system_prompt.txt non-empty, registry instantiates, "
-        f"manifest cross-refs OK, hooks wired: {hooks_str})"
+        f"manifest cross-refs OK, hook-order validated, hooks wired: {hooks_str})"
     )
     return 0
 

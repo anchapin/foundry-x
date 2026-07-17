@@ -228,7 +228,7 @@ async def test_consume_model_stream_emits_chunk_events_with_monotone_index(tmp_p
     adapter = _StubAdapter(chunks)
     log = TraceLogger(db)
     with log.session(harness_version="test") as session_id:
-        response, ttft_ms, chunk_count = await _consume_model_stream(
+        response, ttft_ms, chunk_count, total_stream_ms = await _consume_model_stream(
             adapter,
             [ModelMessage(role="user", content="ping")],
             [],
@@ -296,7 +296,7 @@ async def test_consume_model_stream_assembles_tool_calls_from_indexed_deltas(tmp
     adapter = _StubAdapter(chunks)
     log = TraceLogger(db)
     with log.session(harness_version="test") as session_id:
-        response, _, chunk_count = await _consume_model_stream(
+        response, _, chunk_count, _ = await _consume_model_stream(
             adapter,
             [ModelMessage(role="user", content="ping")],
             [],
@@ -330,7 +330,7 @@ async def test_consume_model_stream_reports_ttft_on_first_payload_delta(tmp_path
     adapter = _StubAdapter(chunks)
     log = TraceLogger(db)
     with log.session(harness_version="test") as session_id:
-        _, ttft_ms, _ = await _consume_model_stream(
+        _, ttft_ms, _, _ = await _consume_model_stream(
             adapter,
             [ModelMessage(role="user", content="ping")],
             [],
@@ -352,7 +352,7 @@ async def test_consume_model_stream_returns_none_ttft_for_empty_stream(tmp_path)
     adapter = _StubAdapter([])
     log = TraceLogger(db)
     with log.session(harness_version="test") as session_id:
-        _, ttft_ms, chunk_count = await _consume_model_stream(
+        _, ttft_ms, chunk_count, _ = await _consume_model_stream(
             adapter,
             [ModelMessage(role="user", content="ping")],
             [],
