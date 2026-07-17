@@ -7,7 +7,7 @@ from pathlib import Path
 from foundry_x.evolution.digester import Digester
 from foundry_x.observability.kpis import _resolve_format
 from foundry_x.observability.regression_report import analyze_regressions
-from foundry_x.observability.render import render_failure_report
+from foundry_x.observability.render import render_failure_report, render_failure_report_json
 from foundry_x.observability.session_summary import (
     build_session_summary,
     render_session_summary,
@@ -144,6 +144,15 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Session UUID whose events should be digested and rendered.",
     )
+    failure_report.add_argument(
+        "--format",
+        default=None,
+        choices=("markdown", "json"),
+        help=(
+            "Output format (issue #735). Default: 'markdown'. ``json`` emits "
+            "the structured FailureReport (model_dump_json)."
+        ),
+    )
 
     # Issue #184: cross-session outcome roll-up. Lets an Operator read
     # a single table over every (or filtered) session before opening
@@ -277,10 +286,11 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write(f"session {args.session_id} not found or empty\n")
             return 2
         report = Digester().digest(args.session_id, events)
-        rendered = render_failure_report(report)
+        if args.format == "json":
+            rendered = render_failure_report_json(report)
+        else:
+            rendered = render_failure_report(report)
         sys.stdout.write(rendered)
-        if not rendered.endswith("\n"):
-            sys.stdout.write("\n")
         return 0
 
     if args.command == "session-summary":

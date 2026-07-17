@@ -548,3 +548,19 @@ def test_cli_failure_report_missing_session_returns_nonzero(tmp_path, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "ghost-session" in captured.err
+
+
+# Issue #735: fx-trace failure-report --format json
+def test_cli_failure_report_format_json_emits_parseable_report(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_failing_session(db)
+
+    rc = cli_main(["failure-report", "--db", str(db), "--session-id", sid, "--format", "json"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    report = FailureReport.model_validate_json(captured.out)
+    assert report.session_id == sid
+    assert report.summary != ""
+    assert report.proposed_class != ""
