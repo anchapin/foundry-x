@@ -98,6 +98,7 @@ class TestRunEvolutionStep:
         assert result.failure_report.proposed_class == "clean"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.evolver_duration_ms is None
         assert result.harness_version is not None
 
     def test_empty_edits_short_circuits(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -118,6 +119,8 @@ class TestRunEvolutionStep:
         assert result.failure_report.proposed_class != "clean"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.evolver_duration_ms is not None
+        assert result.evolver_duration_ms >= 0
         assert result.harness_version is not None
 
     def test_full_pipeline_runs_critic(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -145,6 +148,8 @@ class TestRunEvolutionStep:
         assert result.proposed_edits == [proposed_edit]
         assert result.verdict is not None
         assert isinstance(result.verdict, CriticVerdict)
+        assert result.evolver_duration_ms is not None
+        assert result.evolver_duration_ms >= 0
         assert result.harness_version is not None
 
     def test_multiple_edits_verdict_has_last_edit_index(
@@ -205,6 +210,7 @@ class TestEvolutionResultModel:
         assert result.failure_class == "tool-error"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.evolver_duration_ms is None
         assert result.started_at == "2026-07-10T12:00:00+00:00"
         assert result.completed_at == "2026-07-10T12:00:01+00:00"
 
@@ -250,6 +256,66 @@ class TestEvolutionResultModel:
         )
         assert result.failure_class == "wrong-tool"
         assert result.failure_class == result.failure_report.proposed_class
+
+    def test_result_model_with_evolver_duration(self):
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="test failure",
+            proposed_class="tool-error",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            failure_class=report.proposed_class,
+            proposed_edits=[],
+            verdict=None,
+            evolver_duration_ms=42.5,
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
+        )
+        assert result.evolver_duration_ms == 42.5
+        assert isinstance(result.evolver_duration_ms, float)
+
+    def test_result_model_with_harness_version(self):
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="test failure",
+            proposed_class="tool-error",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            failure_class=report.proposed_class,
+            proposed_edits=[],
+            verdict=None,
+            harness_version="v1.2.3",
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
+        )
+        assert result.harness_version == "v1.2.3"
+
+    def test_result_model_harness_version_defaults_to_none(self):
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="test failure",
+            proposed_class="tool-error",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            failure_class=report.proposed_class,
+            proposed_edits=[],
+            verdict=None,
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
+        )
+        assert result.harness_version is None
 
 
 class TestRunEvolutionStepAsync:

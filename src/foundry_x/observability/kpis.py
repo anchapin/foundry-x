@@ -83,6 +83,11 @@ class KpiSummary(BaseModel):
     the summary compact. Like ``injection_blocks`` this is an auxiliary
     operator signal, not one of the three PRD success-metric KPIs.
 
+    Issue #604 adds ``evolver_duration_ms``: mean wall-clock milliseconds
+    spent inside ``evolver.propose()`` per session, sourced from the
+    ``evolver_duration_ms`` field of :class:`~foundry_x.evolution.loop.EvolutionResult`.
+    ``None`` when no evolver phase was recorded for any session.
+
     Issue #585 adds ``hooks_disabled_count`` and ``hooks_disabled_rate``:
     the total count of ``hook_registry_error`` events and the fraction of
     sessions with at least one such event. Emitted when
@@ -117,6 +122,7 @@ class KpiSummary(BaseModel):
     improvement_rate: float = 0.0
     injection_blocks: dict[str, int] = {}
     token_totals: dict[str, int] = {}
+    evolver_duration_ms: float | None = None
     hooks_disabled_count: int = 0
     hooks_disabled_rate: float = 0.0
     token_budget_abort_count: int = 0

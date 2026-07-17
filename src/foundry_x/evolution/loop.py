@@ -10,6 +10,7 @@ unless the upstream stage emitted a non-clean signal.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +31,10 @@ class EvolutionResult(BaseModel):
     it is absent when the report is clean (short-circuit) or when the
     Evolver returned no edits.
 
+    Issue #604 adds ``evolver_duration_ms``: wall-clock milliseconds spent
+    inside ``evolver.propose()``, measured via ``time.time()`` deltas. It
+    is ``None`` when the evolver is not reached (clean report or no edits).
+
     Issue #609 adds ``started_at`` and ``completed_at`` ISO-8601 timestamps
     stamped around the pipeline for KPI history trend computation.
     """
@@ -41,6 +46,7 @@ class EvolutionResult(BaseModel):
     )
     proposed_edits: list[ProposedEdit] = Field(default_factory=list)
     verdict: CriticVerdict | None = None
+    evolver_duration_ms: float | None = None
     harness_version: str | None = None
     started_at: str
     completed_at: str
@@ -118,6 +124,7 @@ def run_evolution_step(
             failure_class=failure_report.proposed_class,
             proposed_edits=[],
             verdict=None,
+            evolver_duration_ms=None,
             harness_version=harness_version,
             started_at=started_at,
             completed_at=_now_iso(),
@@ -126,12 +133,15 @@ def run_evolution_step(
     if evolver is None:
         evolver = Evolver()
 
+    evolver_duration_ms: float | None = None
     try:
+        t0 = time.time()
         proposed_edits = evolver.propose(
             harness_dir=harness_dir,
             failure=failure_report,
             current_diff=None,
         )
+        evolver_duration_ms = (time.time() - t0) * 1000
     except NotImplementedError:
         proposed_edits = []
 
@@ -142,6 +152,7 @@ def run_evolution_step(
             failure_class=failure_report.proposed_class,
             proposed_edits=[],
             verdict=None,
+            evolver_duration_ms=evolver_duration_ms,
             harness_version=harness_version,
             started_at=started_at,
             completed_at=_now_iso(),
@@ -160,6 +171,7 @@ def run_evolution_step(
         failure_class=failure_report.proposed_class,
         proposed_edits=proposed_edits,
         verdict=verdict,
+        evolver_duration_ms=evolver_duration_ms,
         harness_version=harness_version,
         started_at=started_at,
         completed_at=_now_iso(),
@@ -191,6 +203,7 @@ async def run_evolution_step_async(
             failure_class=failure_report.proposed_class,
             proposed_edits=[],
             verdict=None,
+            evolver_duration_ms=None,
             harness_version=harness_version,
             started_at=started_at,
             completed_at=_now_iso(),
@@ -199,12 +212,15 @@ async def run_evolution_step_async(
     if evolver is None:
         evolver = Evolver()
 
+    evolver_duration_ms: float | None = None
     try:
+        t0 = time.time()
         proposed_edits = await evolver.propose_async(
             harness_dir=harness_dir,
             failure=failure_report,
             current_diff=None,
         )
+        evolver_duration_ms = (time.time() - t0) * 1000
     except NotImplementedError:
         proposed_edits = []
 
@@ -215,6 +231,7 @@ async def run_evolution_step_async(
             failure_class=failure_report.proposed_class,
             proposed_edits=[],
             verdict=None,
+            evolver_duration_ms=evolver_duration_ms,
             harness_version=harness_version,
             started_at=started_at,
             completed_at=_now_iso(),
@@ -232,6 +249,7 @@ async def run_evolution_step_async(
         failure_class=failure_report.proposed_class,
         proposed_edits=proposed_edits,
         verdict=verdict,
+        evolver_duration_ms=evolver_duration_ms,
         harness_version=harness_version,
         started_at=started_at,
         completed_at=_now_iso(),
