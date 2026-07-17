@@ -65,6 +65,7 @@ class CriticVerdict(BaseModel):
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
     notes: str = ""
+    edit_index: int | None = None
 
 
 class Critic:
@@ -123,7 +124,7 @@ class Critic:
             self._benchmark_tasks = load_all_tasks()
         return self._benchmark_tasks
 
-    def evaluate(self, proposed_diff: str) -> CriticVerdict:
+    def evaluate(self, proposed_diff: str, *, edit_index: int | None = None) -> CriticVerdict:
         """Apply ``proposed_diff`` to a sandbox copy of the harness and gate it.
 
         Steps (ADR-0004):
@@ -173,6 +174,7 @@ class Critic:
                         passed_checks=[],
                         failed_checks=["diff_size_cap"],
                         notes=f"diff too large: {line_count} lines (cap={self.max_diff_lines})",
+                        edit_index=edit_index,
                     )
                 # Gate 2: Injection scan (issue #333 / SECURITY.md Threat #2).
                 #    the diff payload for prompt-injection markers before the
@@ -184,6 +186,7 @@ class Critic:
                         passed_checks=[],
                         failed_checks=["injection_detected"],
                         notes=f"injection pattern(s) in diff: {', '.join(injection_markers)}",
+                        edit_index=edit_index,
                     )
                 apply_result = subprocess.run(
                     ["git", "apply", "--whitespace=nowarn"],
@@ -198,6 +201,7 @@ class Critic:
                         passed_checks=[],
                         failed_checks=["git apply"],
                         notes=_tail(apply_result.stderr or apply_result.stdout),
+                        edit_index=edit_index,
                     )
                 passed_checks.append("git apply")
 
@@ -222,6 +226,7 @@ class Critic:
                     passed_checks=passed_checks,
                     failed_checks=[*failed_checks, "load_check"],
                     notes=_tail(load_result.stderr or load_result.stdout),
+                    edit_index=edit_index,
                 )
             passed_checks.append("load_check")
 
@@ -246,6 +251,7 @@ class Critic:
                 passed_checks=passed_checks,
                 failed_checks=failed_checks,
                 notes=_tail(combined),
+                edit_index=edit_index,
             )
 
 

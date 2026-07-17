@@ -144,6 +144,40 @@ class TestRunEvolutionStep:
         assert result.verdict is not None
         assert isinstance(result.verdict, CriticVerdict)
 
+    def test_multiple_edits_verdict_has_last_edit_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """When multiple edits are proposed, verdict.edit_index is the last one (issue #606)."""
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit1 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 1",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new1\n",
+        )
+        proposed_edit2 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 2",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new2\n",
+        )
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit1, proposed_edit2]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+
+        result = run_evolution_step("sess-multi-edit", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert len(result.proposed_edits) == 2
+        assert result.verdict is not None
+        assert result.verdict.edit_index == 1
+
 
 class TestEvolutionResultModel:
     def test_result_model_fields(self):

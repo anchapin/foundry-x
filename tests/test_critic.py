@@ -250,3 +250,25 @@ def test_passed_checks_list_benchmark_tags(harness_dir: Path) -> None:
     assert "benchmark:security" in verdict.passed_checks
     assert "benchmark:smoke" in verdict.passed_checks
     assert "benchmark:math" in verdict.passed_checks
+
+
+def test_evaluate_accepts_edit_index(harness_dir: Path) -> None:
+    """evaluate() returns the edit_index passed to it (issue #606)."""
+    critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"])
+    verdict = critic.evaluate("", edit_index=3)
+    assert verdict.edit_index == 3
+
+
+def test_evaluate_edit_index_defaults_to_none(harness_dir: Path) -> None:
+    """When edit_index is not passed, it defaults to None (issue #606)."""
+    critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"])
+    verdict = critic.evaluate("")
+    assert verdict.edit_index is None
+
+
+def test_evaluate_edit_index_preserved_in_verdict(harness_dir: Path) -> None:
+    """edit_index is preserved through pydantic round-trip (issue #606)."""
+    critic = Critic(harness_dir, pytest_args=["-q", "tests/test_sanity.py"])
+    verdict = critic.evaluate("", edit_index=7)
+    assert verdict.edit_index == 7
+    assert CriticVerdict.model_validate(verdict.model_dump()).edit_index == 7
