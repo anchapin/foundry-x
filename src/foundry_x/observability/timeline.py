@@ -77,13 +77,13 @@ def _extract_summary(payload: dict[str, Any]) -> str:
     """Return a one-line human summary for an event payload.
 
     Priority: ``name`` (tool identifier) then free-text fields
-    (``prompt``, ``text``, ``message``, ``error``) truncated to
+    (``prompt``, ``text``, ``message``, ``error_type``, ``error``) truncated to
     ``_SUMMARY_LIMIT`` chars, then ``status``/``result``.
     """
     name = payload.get("name")
     if isinstance(name, str) and name:
         return _with_latency(name, payload)
-    for key in ("prompt", "text", "message", "error"):
+    for key in ("prompt", "text", "message", "error_type", "error"):
         value = payload.get(key)
         if value is None:
             continue

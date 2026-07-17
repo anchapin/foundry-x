@@ -98,6 +98,7 @@ class TestRunEvolutionStep:
         assert result.failure_report.proposed_class == "clean"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.harness_version is not None
 
     def test_empty_edits_short_circuits(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         harness_dir = _write_harness(tmp_path)
@@ -117,6 +118,7 @@ class TestRunEvolutionStep:
         assert result.failure_report.proposed_class != "clean"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.harness_version is not None
 
     def test_full_pipeline_runs_critic(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         harness_dir = _write_harness(tmp_path)
@@ -143,6 +145,7 @@ class TestRunEvolutionStep:
         assert result.proposed_edits == [proposed_edit]
         assert result.verdict is not None
         assert isinstance(result.verdict, CriticVerdict)
+        assert result.harness_version is not None
 
 
 class TestEvolutionResultModel:
@@ -159,11 +162,15 @@ class TestEvolutionResultModel:
             failure_report=report,
             proposed_edits=[],
             verdict=None,
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
         )
         assert result.session_id == "sess-test"
         assert result.failure_report.summary == "test failure"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.started_at == "2026-07-10T12:00:00+00:00"
+        assert result.completed_at == "2026-07-10T12:00:01+00:00"
 
     def test_result_model_with_verdict(self):
         from foundry_x.evolution.digester import FailureReport
@@ -179,6 +186,8 @@ class TestEvolutionResultModel:
             failure_report=report,
             proposed_edits=[],
             verdict=verdict,
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
         )
         assert result.verdict is not None
         assert result.verdict.verdict is True
@@ -248,3 +257,106 @@ class TestRunEvolutionStepAsync:
         assert result.proposed_edits == [proposed_edit]
         assert result.verdict is not None
         assert isinstance(result.verdict, CriticVerdict)
+
+    def test_result_model_with_harness_version(self):
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="test failure",
+            proposed_class="tool-error",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            proposed_edits=[],
+            verdict=None,
+            harness_version="v1.2.3",
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
+        )
+        assert result.harness_version == "v1.2.3"
+
+    def test_result_model_harness_version_defaults_to_none(self):
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="test failure",
+            proposed_class="tool-error",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            proposed_edits=[],
+            verdict=None,
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
+        )
+        assert result.harness_version is None
+
+
+class TestEvolutionResultTimestamps:
+    """Tests for issue #609 — timestamp fields on EvolutionResult."""
+
+    def test_timestamps_are_iso_format(self, tmp_path: Path):
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("outcome", 1.0, {"status": "success"}, event_id="e2"),
+        ]
+
+        result = run_evolution_step("sess-ts", events, harness_dir)
+
+        assert result.started_at is not None
+        assert result.completed_at is not None
+        datetime.fromisoformat(result.started_at)
+        datetime.fromisoformat(result.completed_at)
+
+    def test_started_before_completed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return []
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+
+        result = run_evolution_step("sess-ts-order", events, harness_dir)
+
+        t0 = datetime.fromisoformat(result.started_at)
+        t1 = datetime.fromisoformat(result.completed_at)
+        assert t0 <= t1
+
+    def test_timestamps_present_on_full_pipeline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix the failure",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+
+        result = run_evolution_step("sess-ts-full", events, harness_dir)
+
+        assert result.started_at is not None
+        assert result.completed_at is not None
+        datetime.fromisoformat(result.started_at)
+        datetime.fromisoformat(result.completed_at)

@@ -26,6 +26,14 @@ format and process.
 | [0012](./0012-manifest-json-as-evolver-target.md) | Expand Evolver target confinement to include `manifest.json` | Accepted |
 | [0013](./0013-wal-mode-and-connection-reuse.md) | WAL mode and a single reused SQLite connection | Accepted |
 | [0014](./0014-model-abstraction.md) | Model abstraction layer for model-swapping milestone | Accepted |
-| [0015](./0015-model-abstraction.md) | Model abstraction layer for model-swapping milestone | Proposed |
+| [0015](./0015-model-abstraction.md) | Model abstraction layer (merged) | Superseded |
+| [0016](./0016-phase-3-quantization-sweep.md) | Phase 3 quantization sweep | Accepted |
+| [0017](./0017-review-state-machine.md) | Review State Machine for ProposedEdits | Accepted |
+| [0018](./0018-evolver-meta-prompt-design.md) | Evolver meta-prompt design | Accepted |
+| [0019](./0019-quantization-intelligence-floor.md) | Quantization intelligence floor findings | Accepted |
+| [0020](./0020-phase-3-findings.md) | Phase 3 Intelligence Floor Findings | Accepted |
+| [0021](./0021-context-pruning-at-scale.md) | Context pruning at scale — Phase 3 findings | Accepted |
 
 When adding a new ADR, append it to this table in the same PR.
+Mark the status `Accepted` in the same PR that ships the implementation;
+see [ADR-0001 §Process](./0001-record-architecture-decisions.md#process).

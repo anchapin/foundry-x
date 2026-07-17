@@ -1,0 +1,2 @@
+-- LATIN1 CONTENT --
+'caf�\nna�ve\nr�sum�\nM�bius\n�sterreich\n'

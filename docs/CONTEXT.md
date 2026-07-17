@@ -81,6 +81,30 @@ many times per day against a benchmark suite.
   root cause; consumed by the `Evolver` as the basis for a
   `ProposedEdit`.
 
+## KPIs
+
+The FoundryX KPIs are the project's definition of progress (PRD §5).
+Canonical implementations live in `src/foundry_x/observability/kpis.py`.
+
+The three PRD KPIs cannot move until the Runner and Critic are in place
+(ADR-0010).
+
+- **Cycle Time** — mean wall-clock time from the first `task_received`
+  event to the first `critic_verdict` event per session.
+- **Regression Rate** — fraction of sessions with a `critic_verdict` in which
+  a task previously seen in `passed_checks` later appears in `failed_checks`.
+- **Improvement Rate** — fraction of `critic_verdict` events whose
+  persisted payload has `approved: true`.
+
+A fourth tracked metric is also exposed via `foundry-kpis` alongside the
+three PRD KPIs:
+
+- **Token Budget Hit Rate** — fraction of sessions that recorded at least
+  one `task_aborted(reason="token_budget")` event. Signals whether the
+  context-pruning hook is aggressive enough, or whether the model-context
+  window is being misspent. The raw session count
+  (`token_budget_abort_count`) is retained as an auxiliary signal.
+
 ## Event kinds
 
 The vocabulary of `kind` values persisted by the `TraceLogger` onto
@@ -115,9 +139,9 @@ The "Failure-signalling subset" subsection below cross-references the
 | --- | --- | --- | --- |
 | **`user_prompt`** | `Runner.run_task` (issue #89, ADR-0010) | `{"content": str, "tool_count": int}` — the task as fed into the model plus the size of the tool surface the agent sees. | no |
 | **`model_request`** | `Runner.run_task` (one per round-trip) | `{"step": int, "message_count": int, "tool_count": int}` — loop index, conversation length, and tool-surface size at request time. | no |
-| **`model_response`** | `Runner.run_task` (one per round-trip) | `{"step": int, "finish_reason": str, "message": dict, "tool_calls": list[dict]}` — the assistant message plus any tool calls the model emitted. | no |
+| **`model_response`** | `Runner.run_task` (one per round-trip) | `{"step": int, "finish_reason": str | null, "message": dict, "tool_calls": list[dict], "time_to_first_token_ms": int | null, "chunk_count": int, "total_stream_ms": int, "token_usage": dict | null, "tokens_used": int}` — the assistant message plus any tool calls the model emitted, plus streaming timing fields (issue #580). | no |
 | **`model_error`** | `Runner.run_task` (on `adapter.complete` exception) | `{"step": int, "error_type": str, "message": str}` — loop index plus exception class name and `str(exc)`. Paired with a `task_failed` terminal marker. | **yes** |
-| **`tool_call`** | `Runner.run_task` (one per emitted tool call) | `{"step": int, "call_id": str, "name": str, "arguments": dict, "duration_ms": int}` — added in issue #173; per-tool-call latency for KPI slicing. | no |
+| **`tool_call`** | `Runner.run_task` (two per emitted tool call: pre-execution with `duration_ms`=0, then post-execution with real duration) | `{"step": int, "call_id": str, "name": str, "arguments": dict, "duration_ms": int}` — added in issue #173; per-tool-call latency for KPI slicing. | no |
 | **`tool_result`** | `Runner.run_task` (one per tool execution) | `{"step": int, "call_id": str, "name": str, "duration_ms": int, "output": Any \| null, "error": str \| null}` — non-null `error` flips the event onto the Digester's failure path via `FAILURE_PAYLOAD_KEYS`. | when `error` is non-null |
 | **`outcome`** | `Runner.run_task` (always emitted in `finally`) | `{"status": "success" \| "truncated" \| "failed", "reason": "final_answer" \| "model_error" \| "max_steps", "steps": int}` — terminal status the Digester attributes to the session. | when `status == "failed"` |
 | **`hook_registry_error`** | `Runner.run_task` via `_resolve_hook_registry` (issue #260) | `{"error_type": str, "message": str}` — emitted when `harness.hooks.get_registry()` raises after a successful lazy import. The session continues in degraded mode (`registry is None`, so no hook fan-out including the `InjectionFirewallHook`), but the event records that the firewall layer is off so the Digester and operator have a signal (AGENTS.md §2). | **yes** (security-critical hooks disabled) |
@@ -127,7 +151,7 @@ The "Failure-signalling subset" subsection below cross-references the
 | Kind | Producer | Payload contract | Failure signal? |
 | --- | --- | --- | --- |
 | **`injection_blocked`** | `InjectionFirewallHook` (`harness/hooks/injection_firewall.py`, one per block) | `{"markers": list[str], "tool": str, "preview": str}` — sorted unique marker names, originating tool name, and the first 120 characters of the suppressed text with newlines folded to spaces (safe to persist; never re-injected into a prompt). The Digester aggregates every block in a session into one `FailureReport` with `proposed_class == 'injection-attempt'` and one entry per block in `failed_steps` so the Evolver sees the full adversarial surface. See issue #120. | **yes** (adversarial) |
-| **`context_pruned`** | `ContextPruningHook` (`harness/hooks/context_pruning.py`, opt-in via `harness/manifest.json`) | `{"dropped": int, "threshold": int}` — number of older events the pruner dropped to bring the session back under the per-session cap, plus the threshold in effect. See issue #106. | no |
+| **`context_pruned`** | `ContextPruningHook` (`harness/hooks/context_pruning.py`, opt-in via `harness/manifest.json`) | `{"dropped": int, "threshold": int, "token_threshold": int}` — number of older events the pruner dropped to bring the session back under the per-session event cap (`threshold`), plus the token threshold in effect (`token_threshold`, configurable via `harness/manifest.json` `context_pruning.token_threshold`, default 8192). See issue #106, issue #491. | no |
 
 ### Critic pipeline
 
@@ -144,13 +168,16 @@ set the Digester considers structural failure markers; treat it as a
 subset of the broader kind vocabulary above.
 
 - **`FAILURE_KINDS`** (constant in
-  `src/foundry_x/evolution/digester.py:60-68`): `tool_error`,
-  `task_failed`, `run_failed`, `agent_error`, `error`. Of these,
-  `task_failed` is the only kind currently emitted by the production
-  Runner; the remaining four are reserved vocabulary recognized by
-  the Digester for compatibility with legacy producers and tests.
-  Adding a new value here is a vocabulary change and must ship with
-  both a producer and a regression test (ADR-0004).
+  `src/foundry_x/evolution/digester.py:60-69`): `tool_error`,
+  `task_failed`, `task_aborted`, `run_failed`, `agent_error`, `error`.
+  `task_failed` and `task_aborted` are emitted by the production Runner:
+  `task_failed` when the agent loop raises an exception, and
+  `task_aborted` when the wall-clock cap fires (reason=`wall_clock`)
+  or the token budget is exceeded (reason=`token_budget`). The remaining
+  four are reserved vocabulary recognized by the Digester for
+  compatibility with legacy producers and tests. Adding a new value
+  here is a vocabulary change and must ship with both a producer and
+  a regression test (ADR-0004).
 - **`FAILURE_PAYLOAD_KEYS`** (constant in
   `src/foundry_x/evolution/digester.py:70-76`): `error`, `traceback`,
   `exception`. A `tool_result` whose payload has any of these keys is
@@ -164,9 +191,15 @@ subset of the broader kind vocabulary above.
   constant `INJECTION_BLOCKED_KIND` so tests can pin the contract.
 
 - **`model_response`** — emitted by `run_task` for every chat-completion
-  round-trip the runner performs. Payload contract (issue #191):
+  round-trip the runner performs. Payload contract (issue #191, issue #580):
   `{"step": int, "finish_reason": str | null, "message": <serialized
-  ModelMessage>, "tool_calls": list[dict], "token_usage": dict | null}`.
+  ModelMessage>, "tool_calls": list[dict], "time_to_first_token_ms": int | null,
+  "chunk_count": int, "total_stream_ms": int, "token_usage": dict | null,
+  "tokens_used": int}`.
+  The `time_to_first_token_ms` field is the wall-clock milliseconds from
+  stream start to the first content delta; `null` when the stream produced
+  no payload. `chunk_count` is the number of SSE deltas received.
+  `total_stream_ms` is the wall-clock duration of the entire stream.
   The `token_usage` field carries `{"prompt_tokens": int,
   "completion_tokens": int, "total_tokens": int}` when the
   `OpenAICompatibleAdapter` surfaces the wire-level `usage` object on
@@ -175,8 +208,10 @@ subset of the broader kind vocabulary above.
   observable in operator logs without crashing the loop. The Phase 3
   `Digester` reads `token_usage` to compute per-step token deltas, and
   the PRD "Improvement Rate" KPI uses the same field to attribute the
-  cost of a harness edit. Consumers MUST treat `null` as missing data,
-  not as a zero reading.
+  cost of a harness edit. The timing fields (`time_to_first_token_ms`,
+  `total_stream_ms`, `chunk_count`) enable the KPI's Improvement Rate to
+  attribute slow responses to network latency vs. model generation time.
+  Consumers MUST treat `null` as missing data, not as a zero reading.
 
 ## Artifacts on disk
 
@@ -190,7 +225,7 @@ subset of the broader kind vocabulary above.
 - `benchmarks/` — pytest-marked tasks the Critic uses to gate harness
   changes.
 - `docs/adr/` — recorded architecture decisions, numbered sequentially.
-- `docs/ideas/` — design ideas not yet accepted into the project.
+- `docs/ideas/` — retired (issue #645). Was: design ideas not yet accepted.
 
 ## Roles
 

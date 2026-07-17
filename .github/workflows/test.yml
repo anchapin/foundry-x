@@ -42,3 +42,27 @@ jobs:
 
       - name: Pytest (benchmark only)
         run: uv run pytest -m benchmark
+
+  test-real-model:
+    name: pytest (real model integration)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install uv (hash-verified)
+        uses: ./.github/actions/install-uv
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Pytest (real model integration)
+        env:
+          TEST_MODEL_MODE: real
+          OPENCODE_SERVER_URL: ${{ secrets.OPENCODE_SERVER_URL }}
+          FOUNDRY_MODEL_API_KEY: ${{ secrets.FOUNDRY_MODEL_API_KEY }}
+        run: uv run pytest -m "not benchmark"
