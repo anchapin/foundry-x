@@ -36,6 +36,9 @@ class EvolutionResult(BaseModel):
 
     session_id: str
     failure_report: FailureReport
+    failure_class: str = Field(
+        description="Copied from failure_report.proposed_class for KPI attribution"
+    )
     proposed_edits: list[ProposedEdit] = Field(default_factory=list)
     verdict: CriticVerdict | None = None
     harness_version: str | None = None
@@ -112,6 +115,7 @@ def run_evolution_step(
         return EvolutionResult(
             session_id=session_id,
             failure_report=failure_report,
+            failure_class=failure_report.proposed_class,
             proposed_edits=[],
             verdict=None,
             harness_version=harness_version,
@@ -135,6 +139,7 @@ def run_evolution_step(
         return EvolutionResult(
             session_id=session_id,
             failure_report=failure_report,
+            failure_class=failure_report.proposed_class,
             proposed_edits=[],
             verdict=None,
             harness_version=harness_version,
@@ -152,6 +157,7 @@ def run_evolution_step(
     return EvolutionResult(
         session_id=session_id,
         failure_report=failure_report,
+        failure_class=failure_report.proposed_class,
         proposed_edits=proposed_edits,
         verdict=verdict,
         harness_version=harness_version,
@@ -182,6 +188,7 @@ async def run_evolution_step_async(
         return EvolutionResult(
             session_id=session_id,
             failure_report=failure_report,
+            failure_class=failure_report.proposed_class,
             proposed_edits=[],
             verdict=None,
             harness_version=harness_version,
@@ -205,6 +212,7 @@ async def run_evolution_step_async(
         return EvolutionResult(
             session_id=session_id,
             failure_report=failure_report,
+            failure_class=failure_report.proposed_class,
             proposed_edits=[],
             verdict=None,
             harness_version=harness_version,
@@ -221,6 +229,7 @@ async def run_evolution_step_async(
     return EvolutionResult(
         session_id=session_id,
         failure_report=failure_report,
+        failure_class=failure_report.proposed_class,
         proposed_edits=proposed_edits,
         verdict=verdict,
         harness_version=harness_version,

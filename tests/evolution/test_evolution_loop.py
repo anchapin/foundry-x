@@ -194,6 +194,7 @@ class TestEvolutionResultModel:
         result = EvolutionResult(
             session_id="sess-test",
             failure_report=report,
+            failure_class="tool-error",
             proposed_edits=[],
             verdict=None,
             started_at="2026-07-10T12:00:00+00:00",
@@ -201,6 +202,7 @@ class TestEvolutionResultModel:
         )
         assert result.session_id == "sess-test"
         assert result.failure_report.summary == "test failure"
+        assert result.failure_class == "tool-error"
         assert result.proposed_edits == []
         assert result.verdict is None
         assert result.started_at == "2026-07-10T12:00:00+00:00"
@@ -218,6 +220,7 @@ class TestEvolutionResultModel:
         result = EvolutionResult(
             session_id="sess-test",
             failure_report=report,
+            failure_class="tool-error",
             proposed_edits=[],
             verdict=verdict,
             started_at="2026-07-10T12:00:00+00:00",
@@ -225,6 +228,28 @@ class TestEvolutionResultModel:
         )
         assert result.verdict is not None
         assert result.verdict.verdict is True
+        assert result.failure_class == "tool-error"
+
+    def test_failure_class_copied_from_report(self):
+        """failure_class is copied from failure_report.proposed_class (issue #605)."""
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="wrong-tool failure",
+            proposed_class="wrong-tool",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            failure_class=report.proposed_class,
+            proposed_edits=[],
+            verdict=None,
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
+        )
+        assert result.failure_class == "wrong-tool"
+        assert result.failure_class == result.failure_report.proposed_class
 
 
 class TestRunEvolutionStepAsync:
@@ -303,6 +328,7 @@ class TestRunEvolutionStepAsync:
         result = EvolutionResult(
             session_id="sess-test",
             failure_report=report,
+            failure_class=report.proposed_class,
             proposed_edits=[],
             verdict=None,
             harness_version="v1.2.3",
@@ -322,6 +348,7 @@ class TestRunEvolutionStepAsync:
         result = EvolutionResult(
             session_id="sess-test",
             failure_report=report,
+            failure_class=report.proposed_class,
             proposed_edits=[],
             verdict=None,
             started_at="2026-07-10T12:00:00+00:00",
