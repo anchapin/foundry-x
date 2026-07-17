@@ -73,6 +73,9 @@ _FOUNDRY_MODEL_API_KEY_ENV = "FOUNDRY_MODEL_API_KEY"
 _OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
 _FALLBACK_REQUEST_MODEL = "foundry-local"
 
+# Env-var for quantization label (issue #494).
+_QUANTIZATION_ENV = "FOUNDRY_QUANTIZATION"
+
 # Trace-backend selection (issue #13). ``.env.example`` documents
 # ``FOUNDRY_TRACE_BACKEND`` as the way to switch the trace store between the
 # default SQLite database and the JSONL export format (ADR-0003). Keeping the
@@ -92,6 +95,7 @@ _DEFAULT_TRACE_BACKEND: str = "sqlite"
 # attributable rather than open-ended.
 _MAX_AGENT_STEPS_ENV = "FOUNDRY_MAX_AGENT_STEPS"
 _DEFAULT_MAX_AGENT_STEPS: int = 16
+_MAX_AGENT_STEPS_DYNAMIC_ENV = "FOUNDRY_MAX_AGENT_STEPS_DYNAMIC"
 
 # Per-request httpx timeout (issue #201). ``FOUNDRY_REQUEST_TIMEOUT_S`` caps a
 # single chat-completion HTTP round-trip so a stuck model endpoint cannot hang
@@ -300,6 +304,70 @@ def build_model_adapter(env: Mapping[str, str] | None = None) -> OpenAICompatibl
     )
 
 
+def build_model_adapter_with_overrides(
+    model_id: str | None,
+    quantization: str | None,
+    path_or_endpoint: str | None,
+    env: Mapping[str, str] | None = None,
+) -> OpenAICompatibleAdapter:
+    """Build a model adapter with explicit overrides (issue #494).
+
+    When *path_or_endpoint* is a URL it is used as the OpenAI-compatible
+    endpoint directly. When it is a local GGUF path, ``llama-server`` is
+    assumed to be running at ``LLAMACPP_HOST`` (default ``127.0.0.1:8080``)
+    and the path is passed via ``FOUNDRY_MODEL_PATH``.
+
+    *quantization* is stored in ``FOUNDRY_QUANTIZATION`` for traceability but
+    does not affect adapter construction (quantization is a path-level
+    concern for llama.cpp, not an API-level parameter).
+
+    When all overrides are ``None`` this function is equivalent to
+    :func:`build_model_adapter` called with the same *env*.
+    """
+    source = env if env is not None else os.environ
+
+    if path_or_endpoint is not None:
+        path_str = str(path_or_endpoint).strip()
+        if path_str.startswith(("http://", "https://")):
+            base_url = path_str.rstrip("/")
+        else:
+            base_url = source.get(_LLAMACPP_HOST_ENV, "").strip() or "http://127.0.0.1:8080"
+    else:
+        base_url = (
+            source.get(_OPENCODE_SERVER_URL_ENV, "").strip()
+            or source.get(_LLAMACPP_HOST_ENV, "").strip()
+        )
+
+    if not base_url:
+        raise ValueError(
+            "Set OPENCODE_SERVER_URL or LLAMACPP_HOST to an OpenAI-compatible endpoint"
+        )
+
+    resolved_model_id: str
+    if model_id is not None and model_id.strip():
+        resolved_model_id = model_id.strip()
+    else:
+        resolved_model_id = _resolve_model_request_name(source)
+
+    if quantization is not None and quantization.strip():
+        quant_env: dict[str, str] = dict(source)
+        quant_env[_QUANTIZATION_ENV] = quantization.strip()
+        source = quant_env
+
+    api_key = (
+        source.get(_FOUNDRY_MODEL_API_KEY_ENV, "").strip()
+        or source.get(_OPENAI_API_KEY_ENV, "").strip()
+    )
+
+    return OpenAICompatibleAdapter(
+        base_url=base_url,
+        model=resolved_model_id,
+        api_key=api_key or None,
+        timeout=_resolve_request_timeout(source),
+        max_retries=resolve_adapter_max_retries(source),
+    )
+
+
 def resolve_harness_version(harness_dir: Path) -> str:
     """Return the version of the harness rooted at ``harness_dir``.
 
@@ -346,10 +414,11 @@ def resolve_harness_version(harness_dir: Path) -> str:
 class RunLimits(BaseModel):
     """Configurable caps guarding against resource exhaustion (SECURITY.md).
 
-    ``task_timeout_s`` is enforced today via :func:`run_with_limits`.
-    ``token_budget`` is a hook point that ``run_task`` will consult once the
-    model client is wired (a prerequisite for ADR-0004); it is **not** counted
-    yet, only plumbed through so the budget is observable in abort events.
+    ``task_timeout_s`` is enforced via :func:`run_with_limits`.
+    ``token_budget`` is enforced in :func:`run_task` after each
+    ``ModelResponse``: when the running token total exceeds the cap,
+    the loop emits ``task_aborted(reason="token_budget")`` and terminates
+    with ``outcome.status="failed"``, ``outcome.reason="token_budget"``.
     """
 
     task_timeout_s: float | None = Field(
@@ -359,8 +428,9 @@ class RunLimits(BaseModel):
     )
     token_budget: int | None = Field(
         default=None,
-        description="Total tokens permitted per evolution cycle (hook point; "
-        "enforced when the model client lands).",
+        description="Total tokens permitted per task (issue #197). When the "
+        "running total exceeds this cap after a ModelResponse, the loop "
+        "aborts with a task_aborted event.",
     )
 
 
@@ -438,6 +508,19 @@ def _resolve_max_steps(env: Mapping[str, str] | None = None) -> int:
     return value if value > 0 else _DEFAULT_MAX_AGENT_STEPS
 
 
+def _is_max_steps_dynamic(env: Mapping[str, str] | None = None) -> bool:
+    """Check whether max_steps should be re-read from env on each loop iteration.
+
+    When ``FOUNDRY_MAX_AGENT_STEPS_DYNAMIC=1``, the step cap is re-evaluated
+    on every loop iteration so operators can adjust the bound mid-session without
+    restarting the process (useful for integration tests that verify the
+    max_steps boundary).
+    """
+    source = env if env is not None else os.environ
+    raw = source.get(_MAX_AGENT_STEPS_DYNAMIC_ENV, "").strip()
+    return raw in ("1", "true", "True")
+
+
 def _resolve_request_timeout(env: Mapping[str, str] | None = None) -> float:
     """Resolve the per-request httpx timeout in seconds (issue #201).
 
@@ -505,6 +588,40 @@ def _load_tool_definitions(skills_dir: Path) -> list[ToolDefinition]:
             )
         )
     return definitions
+
+
+def _inject_skill_list(harness_dir: Path, system_prompt: str) -> str:
+    """Replace ``{{ SKILL_LIST }}`` in ``system_prompt`` with current skill inventory.
+
+    Reads ``harness/manifest.json`` and extracts the ``skill_inventory`` field.
+    If the field is absent or empty, falls back to computing skill names from
+    the ``skills`` filename list in the manifest (stripping the ``.json`` suffix).
+    If no manifest exists, returns the prompt unchanged.
+
+    Issue #582: skill list must be runtime-injected, not hard-coded in
+    ``system_prompt.txt``.
+    """
+    manifest_path = harness_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return system_prompt
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return system_prompt
+
+    skill_inventory: list[dict[str, str]] | None = manifest.get("skill_inventory")
+    if not skill_inventory:
+        skills: list[str] = manifest.get("skills", [])
+        skill_names = sorted({s[:-5] if s.endswith(".json") else s for s in skills})
+        if not skill_names:
+            return system_prompt.replace("{{ SKILL_LIST }}", "")
+        bullet_list = "\n".join(f"- {name}" for name in skill_names)
+        return system_prompt.replace("{{ SKILL_LIST }}", bullet_list)
+
+    sorted_inventory = sorted(skill_inventory, key=lambda e: e.get("name", ""))
+    bullet_list = "\n".join(f"- {entry['name']}" for entry in sorted_inventory)
+    return system_prompt.replace("{{ SKILL_LIST }}", bullet_list)
 
 
 def _resolve_hook_registry(log: TraceLogger, session_id: str) -> Any | None:
@@ -1152,7 +1269,7 @@ async def _consume_model_stream(
     log: TraceLogger,
     session_id: str,
     step: int,
-) -> tuple[ModelResponse, int | None, int]:
+) -> tuple[ModelResponse, int | None, int, int]:
     """Consume ``adapter.stream()``, emit per-chunk trace events (issue #199).
 
     For every SSE delta a ``model_response_chunk`` trace event is recorded
@@ -1160,10 +1277,11 @@ async def _consume_model_stream(
     so a KPI consumer can observe model latency as it happens rather than
     only at the terminal ``model_response``.
 
-    Returns ``(assembled_response, time_to_first_token_ms, chunk_count)``.
+    Returns ``(assembled_response, time_to_first_token_ms, chunk_count, total_stream_ms)``.
     ``time_to_first_token_ms`` is measured from stream start to the first
     delta carrying content or a tool-call fragment; it is ``None`` when the
     stream produced no payload deltas.
+    ``total_stream_ms`` is the wall-clock duration of the entire stream.
     """
     stream_start = time.monotonic()
     content_parts: list[str] = []
@@ -1217,7 +1335,8 @@ async def _consume_model_stream(
         delta_index += 1
 
     response = _assemble_streamed_response(content_parts, tool_call_acc, finish_reason, usage)
-    return response, ttft_ms, delta_index
+    total_stream_ms = int((time.monotonic() - stream_start) * 1000)
+    return response, ttft_ms, delta_index, total_stream_ms
 
 
 async def run_task(
@@ -1290,11 +1409,19 @@ async def run_task(
     system_prompt = system_prompt_path.read_text(encoding="utf-8")
     tool_definitions = _load_tool_definitions(harness_dir / "skills")
 
+    system_prompt = _inject_skill_list(harness_dir, system_prompt)
+
     messages: list[ModelMessage] = [
         ModelMessage(role="system", content=system_prompt),
         ModelMessage(role="user", content=task),
     ]
     created_adapter = model_adapter is None
+    if model_adapter is not None:
+        if not isinstance(model_adapter, ModelAdapter):
+            raise TypeError(
+                f"model_adapter must implement the ModelAdapter protocol; "
+                f"got {type(model_adapter).__name__!r}"
+            )
     adapter = model_adapter or build_model_adapter()
 
     # Wire retry trace events (issue #200). Only `OpenAICompatibleAdapter`
@@ -1313,6 +1440,31 @@ async def run_task(
     registry = _resolve_hook_registry(log, session_id)
     hook_call_cls, hook_result_cls = _import_hook_types()
 
+    # Token-aware pruning (issue #465): when FOUNDRY_CONTEXT_TOKENS is set,
+    # register TokenAwarePruningHook so the runner's accumulated tokens_used
+    # drives pruning decisions instead of raw event count. The get_tokens
+    # closure captures tokens_used by reference so the hook reads the current
+    # value on every pre_tool call.
+    context_tokens_threshold = os.environ.get("FOUNDRY_CONTEXT_TOKENS", "").strip()
+    if context_tokens_threshold:
+        _token_threshold = int(context_tokens_threshold)
+        from harness.hooks.context_pruning import (
+            _sqlite_pruner,
+            register_token_aware_into,
+        )
+
+        def _tracer(sid: str, kind: str, payload: dict[str, object]) -> None:
+            log.record(sid, kind=kind, payload=payload)
+
+        register_token_aware_into(
+            registry,
+            session_id=session_id,
+            token_threshold=_token_threshold,
+            pruner=_sqlite_pruner(log.path),
+            tracer=_tracer,
+            get_tokens=lambda sid: tokens_used,
+        )
+
     resolved_workspace_root = (
         workspace_root if workspace_root is not None else _resolve_workspace_root()
     )
@@ -1329,17 +1481,7 @@ async def run_task(
         return await _default_skill_executor(name, arguments)
 
     max_steps = _resolve_max_steps()
-
-    async def _execute_skill(name: str, arguments: dict[str, Any]) -> Any:
-        if skill_executor is not None:
-            return await skill_executor(name, arguments)
-        if name == "bash":
-            return await _bash_skill_executor(name, arguments, workspace_dir=workspace_root)
-        if name in ("list_dir", "grep_search", "edit_file", "write_file"):
-            return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
-        return await _default_skill_executor(name, arguments)
-
-    max_steps = _resolve_max_steps()
+    max_steps_dynamic = _is_max_steps_dynamic()
 
     log.record(
         session_id,
@@ -1354,8 +1496,13 @@ async def run_task(
     tokens_used = 0
     token_budget = limits.token_budget if limits is not None else None
 
+    step = 0
     try:
-        for step in range(max_steps):
+        while True:
+            if max_steps_dynamic:
+                max_steps = _resolve_max_steps()
+            if step >= max_steps:
+                break
             outcome_steps = step + 1
             log.record(
                 session_id,
@@ -1367,7 +1514,7 @@ async def run_task(
                 },
             )
             try:
-                response, ttft_ms, chunk_count = await _consume_model_stream(
+                response, ttft_ms, chunk_count, total_stream_ms = await _consume_model_stream(
                     adapter, messages, tool_definitions, log, session_id, step
                 )
             except Exception as exc:
@@ -1389,6 +1536,17 @@ async def run_task(
             step_tokens = response.usage.total_tokens if response.usage is not None else 0
             tokens_used += step_tokens
 
+            if response.usage is None:
+                log.record(
+                    session_id,
+                    kind="token_usage_missing",
+                    payload={
+                        "step": step,
+                        "message": "endpoint did not report token usage; "
+                        "counting zero tokens for this step",
+                    },
+                )
+
             log.record(
                 session_id,
                 kind="model_response",
@@ -1399,7 +1557,8 @@ async def run_task(
                     "tool_calls": [call.model_dump(mode="json") for call in response.tool_calls],
                     "time_to_first_token_ms": ttft_ms,
                     "chunk_count": chunk_count,
-                    "usage": response.usage.model_dump(mode="json")
+                    "total_stream_ms": total_stream_ms,
+                    "token_usage": response.usage.model_dump(mode="json")
                     if response.usage is not None
                     else None,
                     "tokens_used": tokens_used,
@@ -1508,6 +1667,8 @@ async def run_task(
                 outcome_status = "truncated"
                 outcome_reason = "max_steps"
                 break
+
+            step += 1
     finally:
         if created_adapter and isinstance(adapter, OpenAICompatibleAdapter):
             await adapter.aclose()
@@ -1568,6 +1729,20 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         help="Model identifier (e.g. Q5_K_M). Overrides FOUNDRY_MODEL_ID env var. "
         "Stored in the trace session for quantization-level KPI attribution (issue #361).",
     )
+    parser.add_argument(
+        "--quantization",
+        default=None,
+        help="Quantization label (e.g. Q5_K_M). Stored in FOUNDRY_QUANTIZATION "
+        "for traceability in trace sessions (issue #494).",
+    )
+    parser.add_argument(
+        "--path-or-endpoint",
+        default=None,
+        help="Local GGUF path or OpenAI-compatible endpoint URL. "
+        "When a URL, used directly as the endpoint. When a local path, "
+        "LLAMACPP_HOST is used (default http://127.0.0.1:8080). "
+        "Issue #494.",
+    )
     args = parser.parse_args()
 
     harness_dir = Path(args.harness_dir).resolve()
@@ -1587,17 +1762,27 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
 
     logger = TraceLogger(args.trace_path, backend=resolve_trace_backend())
     harness_version = resolve_harness_version(harness_dir)
-    model_id = args.model_id if args.model_id is not None else resolve_model_id()
+    model_id_override = args.model_id if args.model_id is not None else None
+    quantization_override = args.quantization if args.quantization is not None else None
+    path_or_endpoint_override = args.path_or_endpoint if args.path_or_endpoint is not None else None
+    model_id = model_id_override if model_id_override is not None else resolve_model_id()
     limits = run_limits_from_env()
+
+    model_adapter: ModelAdapter | None = None
+    if (
+        model_id_override is not None
+        or quantization_override is not None
+        or path_or_endpoint_override is not None
+    ):
+        model_adapter = build_model_adapter_with_overrides(
+            model_id=model_id_override,
+            quantization=quantization_override,
+            path_or_endpoint=path_or_endpoint_override,
+        )
 
     with logger.session(harness_version=harness_version, model_id=model_id) as session_id:
         logger.record(session_id, kind="task_received", payload={"prompt": args.task})
         start = time.monotonic()
-        # ``run_task`` accepts the ``limits`` kwarg so it can enforce the
-        # ``FOUNDRY_TOKEN_BUDGET`` cap (issue #197); injected ``run_task_fn``
-        # stubs in the test suite keep the older four-positional-arg
-        # signature for clarity, so the kwarg is only passed when we are
-        # calling the module-level :func:`run_task`.
         if run_task_fn is not None:
             task_coro = task(args.task, harness_dir, logger, session_id)
         else:
@@ -1606,6 +1791,7 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
                 harness_dir,
                 logger,
                 session_id,
+                model_adapter=model_adapter,
                 limits=limits,
                 workspace_root=workspace_root,
             )

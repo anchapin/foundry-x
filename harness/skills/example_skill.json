@@ -1,5 +1,5 @@
 {
-  "name": "read_file",
+  "name": "example_skill",
   "version": "0.2.0",
   "description": "Read the contents of a file from the agent's workspace. The output is bounded by `max_bytes` (default 32 KiB) and an optional `max_lines` cap so that a single read cannot blow the local-model context window (SECURITY.md threat #5, PRD §4, PHILOSOPHY.md §5).",
   "input_schema": {

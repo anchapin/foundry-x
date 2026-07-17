@@ -164,6 +164,78 @@ def test_image_size_baseline_file_is_well_formed() -> None:
     assert _ceiling_bytes(baseline) > baseline["baseline_bytes"]
 
 
+# ---------------------------------------------------------------------------
+# BuildKit cache mount regression guard (issue #640)
+# ---------------------------------------------------------------------------
+
+
+def _builder_stage_lines() -> list[str]:
+    """Return lines belonging to the builder stage, excluding the runtime stage."""
+    lines = DOCKERFILE.read_text(encoding="utf-8").splitlines()
+    builder_lines: list[str] = []
+    in_builder = False
+    for line in lines:
+        if line.startswith("# ---- Stage 1: builder"):
+            in_builder = True
+            continue
+        if line.startswith("# ---- Stage 2: runtime"):
+            break
+        if in_builder:
+            builder_lines.append(line)
+    return builder_lines
+
+
+def test_buildkit_cache_mount_present_in_builder_stage() -> None:
+    """The builder stage declares a BuildKit cache mount for uv's resolver state.
+
+    Issue #640: the Dockerfile comment (lines 78-82) and the acceptance
+    criteria from issue #116 require that a second consecutive ``docker build``
+    reuses uv's resolver state via a BuildKit cache mount rather than
+    re-resolving the lockfile on every rebuild. This test asserts the
+    ``--mount=type=cache,target=/root/.cache/uv`` syntax is present in the
+    builder stage so a future Dockerfile edit cannot accidentally drop it.
+    """
+    builder_lines = _builder_stage_lines()
+    cache_mount_lines = [
+        line.strip()
+        for line in builder_lines
+        if "--mount=type=cache" in line and "target=/root/.cache/uv" in line
+    ]
+    assert cache_mount_lines, (
+        "No BuildKit cache mount targeting /root/.cache/uv found in the "
+        "builder stage of infra/docker/Dockerfile. Issue #640 requires this "
+        "mount to persist uv's resolver state across rebuilds. Add:\n"
+        "  RUN --mount=type=cache,target=/root/.cache/uv \\\n"
+        "      uv sync --frozen --no-dev\n"
+        "to the builder stage."
+    )
+
+
+def test_uv_sync_uses_frozen_flag() -> None:
+    """The uv sync invocation in the builder stage uses --frozen.
+
+    Issue #640: the Dockerfile comment (line 82) and the acceptance criteria
+    from issue #116 require that ``uv sync`` runs with ``--frozen`` so the
+    resolved package set cannot drift between rebuilds. This test asserts
+    the flag is present in the builder stage so a future edit cannot silently
+    remove it and reintroduce the reproducibility hole.
+    """
+    builder_lines = _builder_stage_lines()
+    sync_lines = [line.strip() for line in builder_lines if "uv sync" in line]
+    assert sync_lines, (
+        "No 'uv sync' invocation found in the builder stage of "
+        "infra/docker/Dockerfile. The builder stage must run 'uv sync' to "
+        "install dependencies."
+    )
+    frozen_lines = [line for line in sync_lines if "--frozen" in line]
+    assert frozen_lines, (
+        "The 'uv sync' invocation in the builder stage of "
+        "infra/docker/Dockerfile does not use --frozen. Issue #640 requires "
+        "--frozen to pin the resolved package set and prevent silent drift "
+        "between rebuilds. Add --frozen to the 'uv sync' command."
+    )
+
+
 def test_runtime_image_size_within_baseline() -> None:
     """foundryx:latest must stay under baseline + documented margin.
 

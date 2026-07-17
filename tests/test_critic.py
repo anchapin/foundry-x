@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -81,7 +82,7 @@ def test_noop_diff_on_clean_harness_approves(harness_dir: Path) -> None:
 
 def test_diff_that_breaks_test_is_rejected(harness_dir: Path) -> None:
     breaking = _make_diff(
-        "tests/test_sanity.py",
+        "harness/tests/test_sanity.py",
         _SANITY_TEST,
         _SANITY_TEST.replace("assert True", "assert False"),
     )
@@ -94,7 +95,7 @@ def test_diff_that_breaks_test_is_rejected(harness_dir: Path) -> None:
 
 def test_live_harness_is_byte_identical_after_evaluate(harness_dir: Path) -> None:
     breaking = _make_diff(
-        "tests/test_sanity.py",
+        "harness/tests/test_sanity.py",
         _SANITY_TEST,
         _SANITY_TEST.replace("assert True", "assert False"),
     )
@@ -106,7 +107,7 @@ def test_live_harness_is_byte_identical_after_evaluate(harness_dir: Path) -> Non
 
 def test_patch_that_does_not_apply_is_rejected(harness_dir: Path) -> None:
     bad_diff = _make_diff(
-        "tests/test_sanity.py",
+        "harness/tests/test_sanity.py",
         "this content does not exist\n",
         "replacement\n",
     )
@@ -119,7 +120,7 @@ def test_patch_that_does_not_apply_is_rejected(harness_dir: Path) -> None:
 
 def test_clean_diff_that_passes_is_approved(harness_dir: Path) -> None:
     clean_diff = _make_diff(
-        "system_prompt.txt",
+        "harness/system_prompt.txt",
         _SYSTEM_PROMPT,
         "You are an excellent agent.\n",
     )
@@ -272,3 +273,87 @@ def test_evaluate_edit_index_preserved_in_verdict(harness_dir: Path) -> None:
     verdict = critic.evaluate("", edit_index=7)
     assert verdict.edit_index == 7
     assert CriticVerdict.model_validate(verdict.model_dump()).edit_index == 7
+
+
+def test_token_budget_passed_to_pytest_subprocess(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FOUNDRY_TOKEN_BUDGET is passed to the pytest subprocess when a task has token_budget set (issue #548)."""
+    from benchmarks.models import BenchmarkTask
+
+    captured_env: dict[str, str] = {}
+    original_run = subprocess.run
+
+    def capture_run(*args: object, **kwargs: object) -> object:
+        if args and "pytest" in str(args[0]):
+            captured_env.update(kwargs.get("env", {}))
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", capture_run)
+
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "tests/test_sanity.py"],
+        benchmark_tasks=[
+            BenchmarkTask(name="t1", description="d", token_budget=5000),
+        ],
+    )
+    critic.evaluate("")
+    assert "FOUNDRY_TOKEN_BUDGET" in captured_env
+    assert captured_env["FOUNDRY_TOKEN_BUDGET"] == "5000"
+
+
+def test_no_token_budget_env_var_when_not_set(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FOUNDRY_TOKEN_BUDGET is NOT set when no task has token_budget (issue #548)."""
+    from benchmarks.models import BenchmarkTask
+
+    captured_env: dict[str, str] = {}
+    original_run = subprocess.run
+
+    def capture_run(*args: object, **kwargs: object) -> object:
+        if args and "pytest" in str(args[0]):
+            captured_env.update(kwargs.get("env", {}))
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", capture_run)
+
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "tests/test_sanity.py"],
+        benchmark_tasks=[
+            BenchmarkTask(name="t1", description="d"),  # no token_budget
+        ],
+    )
+    critic.evaluate("")
+    assert "FOUNDRY_TOKEN_BUDGET" not in captured_env
+
+
+def test_minimum_token_budget_used_when_multiple_tasks(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When multiple tasks have different token_budgets, the minimum is used (issue #548)."""
+    from benchmarks.models import BenchmarkTask
+
+    captured_env: dict[str, str] = {}
+    original_run = subprocess.run
+
+    def capture_run(*args: object, **kwargs: object) -> object:
+        if args and "pytest" in str(args[0]):
+            captured_env.update(kwargs.get("env", {}))
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", capture_run)
+
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "tests/test_sanity.py"],
+        benchmark_tasks=[
+            BenchmarkTask(name="t1", description="d", token_budget=10000),
+            BenchmarkTask(name="t2", description="d", token_budget=3000),
+            BenchmarkTask(name="t3", description="d", token_budget=7000),
+        ],
+    )
+    critic.evaluate("")
+    assert captured_env.get("FOUNDRY_TOKEN_BUDGET") == "3000"

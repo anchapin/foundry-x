@@ -30,8 +30,11 @@ Each ADR follows this lightweight template:
 Lightweight MADR-style. We do not use `adr-tools` or a generator —
 files are plain Markdown and reviewable in any diff.
 
-## Consequences
+## Process
 
+- **Proposed→Accepted**: mark `Accepted` in the same PR that ships the
+  implementation. An ADR MUST NOT remain `Proposed` after its change
+  lands.
 - New ADRs land in the same PR as the change they justify when
   practical. Otherwise the ADR precedes the change.
 - Superseded ADRs are not deleted; their `Status` is updated and a

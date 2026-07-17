@@ -59,17 +59,6 @@ def _make_fixture_harness(
 
 
 @pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
-@pytest.mark.xfail(
-    reason=(
-        "Issue #278: harness/skills/example_skill.json declares name='read_file', "
-        "which violates the new filename-to-name invariant enforced by load_check. "
-        "Renaming the skill file is a harness DNA edit (AGENTS.md \u00a72) and must "
-        "go through the Evolver -> Critic loop (ADR-0004). This strict xfail tracks "
-        "that Evolver target: once the rename lands, the test xpasses and the strict "
-        "marker flips it red to remind us to remove the marker."
-    ),
-    strict=True,
-)
 def test_load_check_passes_against_real_harness_dir() -> None:
     """Against the canonical ``harness/`` directory the script must exit 0."""
     proc = subprocess.run(
@@ -306,3 +295,189 @@ def test_load_check_fails_when_manifest_references_missing_hook(tmp_path: Path) 
     assert "phantom" in proc.stderr, (
         f"stderr must name the missing hook (issue #277); got {proc.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Hook-order validation tests (issue #567)
+# ---------------------------------------------------------------------------
+
+
+def _make_fixture_harness_with_hooks(
+    tmp_path: Path,
+    skills: dict[str, dict | str],
+    manifest: dict,
+    hook_modules: dict[str, str],
+    system_prompt: str = "persona directive line 1\n",
+) -> Path:
+    """Build a temporary harness tree with custom hook modules.
+
+    ``hook_modules`` maps filename to module body text. Each module can define
+    a class with ``_phase = <int>`` to declare its execution order.
+    """
+    harness = tmp_path / "harness"
+    skills_dir = harness / "skills"
+    skills_dir.mkdir(parents=True)
+    for fname, payload in skills.items():
+        body = json.dumps(payload) if isinstance(payload, dict) else payload
+        (skills_dir / fname).write_text(body, encoding="utf-8")
+    (harness / "system_prompt.txt").write_text(system_prompt, encoding="utf-8")
+
+    hooks_dir = harness / "hooks"
+    hooks_dir.mkdir()
+    (hooks_dir / "__init__.py").write_text(
+        "from .base import HookRegistry, get_registry, register_hook\n"
+        "__all__ = ['HookRegistry', 'get_registry', 'register_hook']\n",
+        encoding="utf-8",
+    )
+    (hooks_dir / "base.py").write_text(
+        textwrap.dedent(
+            """\
+            class HookRegistry:
+                def __init__(self) -> None:
+                    self._hooks = []
+                def register(self, hook: object) -> None:
+                    self._hooks.append(hook)
+            def get_registry() -> HookRegistry:
+                return HookRegistry()
+            def register_hook(hook: object) -> None:
+                pass
+            """
+        ),
+        encoding="utf-8",
+    )
+    for fname, body in hook_modules.items():
+        (hooks_dir / fname).write_text(body, encoding="utf-8")
+    (harness / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return harness
+
+
+@pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
+def test_hook_order_validation_passes_when_order_matches(tmp_path: Path) -> None:
+    """When manifest order and _phase values agree, validation succeeds (issue #567)."""
+    harness = _make_fixture_harness_with_hooks(
+        tmp_path,
+        skills={"real.json": _VALID_SKILL},
+        manifest={
+            "version": "0.1.0",
+            "model_target": "test/model",
+            "hooks": ["injection_firewall", "context_pruning", "rate_limit"],
+            "skills": ["real.json"],
+        },
+        hook_modules={
+            "injection_firewall.py": textwrap.dedent(
+                """\
+                class InjectionFirewallHook:
+                    _phase = 0
+                """
+            ),
+            "context_pruning.py": textwrap.dedent(
+                """\
+                class ContextPruningHook:
+                    _phase = 1
+                """
+            ),
+            "rate_limit.py": textwrap.dedent(
+                """\
+                class RateLimitHook:
+                    _phase = 2
+                """
+            ),
+        },
+    )
+    proc = subprocess.run(
+        [sys.executable, str(LOAD_CHECK), "--harness-dir", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+    )
+    assert proc.returncode == 0, (
+        f"load_check should pass when hook order matches; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "hook-order validated" in proc.stdout
+
+
+@pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
+def test_hook_order_validation_fails_when_order_mismatches(tmp_path: Path) -> None:
+    """When manifest order disagrees with _phase values, validation fails (issue #567)."""
+    harness = _make_fixture_harness_with_hooks(
+        tmp_path,
+        skills={"real.json": _VALID_SKILL},
+        manifest={
+            "version": "0.1.0",
+            "model_target": "test/model",
+            "hooks": ["injection_firewall", "context_pruning"],
+            "skills": ["real.json"],
+        },
+        hook_modules={
+            "injection_firewall.py": textwrap.dedent(
+                """\
+                class InjectionFirewallHook:
+                    _phase = 1
+                """
+            ),
+            "context_pruning.py": textwrap.dedent(
+                """\
+                class ContextPruningHook:
+                    _phase = 0
+                """
+            ),
+        },
+    )
+    proc = subprocess.run(
+        [sys.executable, str(LOAD_CHECK), "--harness-dir", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+    )
+    assert proc.returncode != 0, (
+        f"load_check should fail when hook order mismatches; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "injection_firewall" in proc.stderr
+    assert "_phase=1" in proc.stderr
+
+
+@pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
+def test_hook_order_validation_skips_without_phase(tmp_path: Path) -> None:
+    """When a hook has no _phase, validation skips with a warning (ADR-0019)."""
+    harness = _make_fixture_harness_with_hooks(
+        tmp_path,
+        skills={"real.json": _VALID_SKILL},
+        manifest={
+            "version": "0.1.0",
+            "model_target": "test/model",
+            "hooks": ["injection_firewall", "rate_limit"],
+            "skills": ["real.json"],
+        },
+        hook_modules={
+            "injection_firewall.py": textwrap.dedent(
+                """\
+                class InjectionFirewallHook:
+                    _phase = 0
+                """
+            ),
+            "rate_limit.py": textwrap.dedent(
+                """\
+                class RateLimitHook:
+                    pass
+                """
+            ),
+        },
+    )
+    proc = subprocess.run(
+        [sys.executable, str(LOAD_CHECK), "--harness-dir", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+    )
+    assert proc.returncode == 0, (
+        f"load_check should pass (skip) when hook has no _phase; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "WARN" in proc.stderr
+    assert "rate_limit" in proc.stderr
+    assert "skipping order validation" in proc.stderr
