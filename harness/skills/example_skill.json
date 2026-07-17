@@ -1,7 +1,7 @@
 {
   "name": "example_skill",
   "version": "0.1.0",
-  "description": "Example skill demonstrating skill JSON schema. Not for production use. This toy skill accepts a name and returns a personalised greeting, serving as a minimal template for skill authors.",
+  "description": "Example skill demonstrating the skill JSON schema. Not for production use. Stub implementation with a minimal input/output schema that returns empty values.",
   "input_schema": {
     "type": "object",
     "properties": {
