@@ -442,9 +442,7 @@ def test_cli_timeline_harness_version_json_format(tmp_path, capsys):
     with logger.session(harness_version="v1.0.0") as sid:
         logger.record(sid, "user_prompt", {"prompt": "test prompt"})
 
-    rc = cli_main(
-        ["timeline", "--db", str(db), "--harness-version", "v1.0.0", "--format", "json"]
-    )
+    rc = cli_main(["timeline", "--db", str(db), "--harness-version", "v1.0.0", "--format", "json"])
 
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
