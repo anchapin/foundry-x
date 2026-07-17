@@ -394,6 +394,33 @@ if [[ $healthy -ne 1 ]]; then
     smoke_fail "timed out waiting for /health"
 fi
 
+_check_gpu_active() {
+    if [[ "$SMOKE_NGL" -le 0 ]]; then
+        return 0
+    fi
+    if grep -iqE 'roc m|amdgpu|gfx[0-9]' "$SERVER_LOG" 2>/dev/null; then
+        return 0
+    fi
+    if [[ -n "${LLAMACPP_GPU_MARKER_FILE:-}" ]] && \
+       grep -iqE 'roc m|amdgpu|gfx[0-9]' "$LLAMACPP_GPU_MARKER_FILE" 2>/dev/null; then
+        return 0
+    fi
+    echo "error: LLAMACPP_SMOKE_NGL=${SMOKE_NGL} but no ROCm GPU agent found in server log." >&2
+    cat >&2 <<'HINT'
+
+       The server started but appears to have fallen back to CPU inference.
+       See infra/llama-cpp/README.md "ROCm pitfalls":
+         * HSA_OVERRIDE_GFX_VERSION=10.3.0 may be required on older kernels.
+         * --n-gpu-layers requires 8 GB VRAM; free it if near capacity.
+HINT
+    exit 1
+}
+
+if ! _check_gpu_active; then
+    rm -f "$SERVER_LOG"
+    exit 1
+fi
+
 # Assert a completion actually returns non-empty content.
 completion="$(curl -fsS -X POST "${SMOKE_BASE}/completion" \
     -H 'Content-Type: application/json' \
