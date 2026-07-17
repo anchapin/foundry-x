@@ -1416,6 +1416,12 @@ async def run_task(
         ModelMessage(role="user", content=task),
     ]
     created_adapter = model_adapter is None
+    if model_adapter is not None:
+        if not isinstance(model_adapter, ModelAdapter):
+            raise TypeError(
+                f"model_adapter must implement the ModelAdapter protocol; "
+                f"got {type(model_adapter).__name__!r}"
+            )
     adapter = model_adapter or build_model_adapter()
 
     # Wire retry trace events (issue #200). Only `OpenAICompatibleAdapter`

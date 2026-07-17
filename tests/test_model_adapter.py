@@ -147,6 +147,33 @@ async def test_run_task_calls_injected_adapter_and_records_trace(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_run_task_raises_TypeError_for_non_protocol_model_adapter(tmp_path):
+    (tmp_path / "system_prompt.txt").write_text("system rules", encoding="utf-8")
+    logger = TraceLogger(tmp_path / "traces.db")
+
+    class NotAnAdapter:
+        pass
+
+    with logger.session(harness_version="test-0.0") as session_id:
+        with pytest.raises(TypeError, match="ModelAdapter"):
+            await run_task(
+                "do the task", tmp_path, logger, session_id, model_adapter=NotAnAdapter()
+            )
+
+
+@pytest.mark.asyncio
+async def test_run_task_raises_TypeError_for_dict_model_adapter(tmp_path):
+    (tmp_path / "system_prompt.txt").write_text("system rules", encoding="utf-8")
+    logger = TraceLogger(tmp_path / "traces.db")
+
+    with logger.session(harness_version="test-0.0") as session_id:
+        with pytest.raises(TypeError, match="ModelAdapter"):
+            await run_task(
+                "do the task", tmp_path, logger, session_id, model_adapter={"wrong": "keys"}
+            )
+
+
+@pytest.mark.asyncio
 async def test_openai_adapter_conforms_to_protocol():
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda request: httpx.Response(200))
