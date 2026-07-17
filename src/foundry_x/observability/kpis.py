@@ -130,6 +130,7 @@ class KpiSummary(BaseModel):
     streaming_quality: dict[str, "StreamingQualityData"] = {}
     context_pruned_count: dict[str, int] = {}
     wall_clock_abort_count: int = 0
+    failure_class_distribution: dict[str, int] = {}
 
 
 class StreamingQualityData(BaseModel):
@@ -191,6 +192,27 @@ class KpiHistoryEntry(BaseModel):
     hooks_disabled_count: int = 0
     hooks_disabled_rate: float = 0.0
     wall_clock_abort_count: int = 0
+    failure_class_distribution: dict[str, int] = {}
+
+
+def _failure_class_distribution(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> dict[str, int]:
+    """Aggregate ``failure_class`` counts from persisted Critic verdicts (issue #705).
+
+    Returns a ``failure_class -> count`` map across every ``critic_verdict``
+    event matching *harness_version*. Verdicts without a ``failure_class``
+    (e.g. from older stores or clean sessions that short-circuit before the
+    Critic runs) are ignored so the map only includes sessions that ran the
+    full pipeline.
+    """
+    distribution: dict[str, int] = {}
+    for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
+        record = VerdictRecord(**event.payload)
+        if record.failure_class is not None:
+            distribution[record.failure_class] = distribution.get(record.failure_class, 0) + 1
+    return distribution
 
 
 def compute_kpis(
@@ -227,6 +249,9 @@ def compute_kpis(
     streaming_quality = _streaming_quality(logger, harness_version=harness_version)
     context_pruned_count = _context_pruned(logger, harness_version=harness_version)
     wall_clock_abort_count = _wall_clock_abort_count(logger, harness_version=harness_version)
+    failure_class_distribution = _failure_class_distribution(
+        logger, harness_version=harness_version
+    )
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -241,6 +266,7 @@ def compute_kpis(
         streaming_quality=streaming_quality,
         context_pruned_count=context_pruned_count,
         wall_clock_abort_count=wall_clock_abort_count,
+        failure_class_distribution=failure_class_distribution,
     )
 
 
@@ -738,6 +764,18 @@ def _render_markdown(summary: KpiSummary) -> str:
             f"Wall-Clock Aborts: {summary.wall_clock_abort_count} session(s) "
             "were aborted by FOUNDRY_TASK_TIMEOUT."
         )
+    if summary.failure_class_distribution:
+        total = sum(summary.failure_class_distribution.values())
+        lines.append("")
+        lines.append(
+            f"Failure Class Distribution: {total} verdict(s) across "
+            f"{len(summary.failure_class_distribution)} class(es)."
+        )
+        lines.append("")
+        lines.append("| Failure Class | Count |")
+        lines.append("| --- | --- |")
+        for cls, count in sorted(summary.failure_class_distribution.items()):
+            lines.append(f"| {cls} | {count} |")
     return "\n".join(lines)
 
 
@@ -816,13 +854,15 @@ def append_kpi_history(
 
     Each run produces exactly one line. The three PRD-KPI fields are
     emitted via :meth:`KpiSummary.model_dump` with ``injection_blocks``,
-    ``token_totals``, and ``streaming_quality`` excluded (the "minus
-    per-session maps" half of the round-trip contract).
+    ``token_totals``, ``streaming_quality``, and ``wall_clock_abort_count``
+    excluded (the "minus per-session maps" half of the round-trip contract).
     ``hooks_disabled_count``, ``hooks_disabled_rate``,
     ``token_budget_abort_count``, and ``token_budget_hit_rate`` are scalar
     fields and are included. Then ``timestamp`` and the optional
     ``harness_version`` are added. Parent directories are created on
     demand so the operator does not have to ``mkdir`` before the first run.
+    ``failure_class_distribution`` is included so the trend table can show
+    per-class deltas (issue #705).
 
     The file is opened in append mode and a single ``\\n``-terminated
     line is written per call, so concurrent appends from independent
@@ -914,6 +954,11 @@ def render_history_markdown(
     An empty history renders a single placeholder line so CI summary
     cells that template-embed the table are never completely blank.
 
+    Plotting (matplotlib, ASCII sparklines) is explicitly out of
+    scope per the issue; a pure table is the contract.
+
+    Issue #705: a Failure Class Distribution section is appended when
+    at least one entry carries a non-empty ``failure_class_distribution``.
     """
     if not entries:
         return "_No KPI history entries yet._"
@@ -944,6 +989,21 @@ def render_history_markdown(
             si = sparkline_imp[idx] if sparkline_imp else " "
             row += f" {sc} | {sr} | {si} |"
         lines.append(row)
+    if any(entry.failure_class_distribution for entry in entries):
+        lines.append("")
+        lines.append("### Failure Class Distribution")
+        lines.append("")
+        lines.append(
+            "| Failure Class | " + " | ".join(f"{e.timestamp[:10]}" for e in entries) + " |"
+        )
+        lines.append("| --- | " + " | ".join("---" for _ in entries) + " |")
+        all_classes = sorted({cls for entry in entries for cls in entry.failure_class_distribution})
+        for cls in all_classes:
+            row = [f"| {cls} |"]
+            for entry in entries:
+                count = entry.failure_class_distribution.get(cls, 0)
+                row.append(f" {count} |")
+            lines.append("".join(row))
     return "\n".join(lines)
 
 
