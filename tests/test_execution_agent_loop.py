@@ -330,6 +330,72 @@ def test_agent_loop_terminates_with_truncated_outcome_on_max_steps(tmp_path, mon
     )
 
 
+def test_agent_loop_dynamic_max_steps_re_reads_env_on_each_iteration(tmp_path, monkeypatch):
+    """When FOUNDRY_MAX_AGENT_STEPS_DYNAMIC=1, the step cap is re-evaluated
+    on each loop iteration so operators can adjust the bound mid-session without
+    restarting the process (useful for integration tests that verify the
+    max_steps boundary).
+    """
+    db = tmp_path / "traces.db"
+
+    def _tool_response(call_id: str) -> ModelResponse:
+        return ModelResponse(
+            message=ModelMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ModelToolCall(
+                        id=call_id,
+                        type="function",
+                        function=ToolCallFunction(
+                            name="bash",
+                            arguments='{"command": "echo loop"}',
+                        ),
+                    )
+                ],
+            ),
+            tool_calls=[
+                ModelToolCall(
+                    id=call_id,
+                    type="function",
+                    function=ToolCallFunction(
+                        name="bash",
+                        arguments='{"command": "echo loop"}',
+                    ),
+                )
+            ],
+            finish_reason="tool_calls",
+        )
+
+    responses = [_tool_response(f"call_step_{i}") for i in range(10)]
+    adapter = _ScriptedAdapter(responses)
+    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
+    monkeypatch.setattr(sys, "argv", _argv("runaway", db, REPO_HARNESS_DIR))
+    monkeypatch.setenv("FOUNDRY_MAX_AGENT_STEPS", "10")
+    monkeypatch.setenv("FOUNDRY_MAX_AGENT_STEPS_DYNAMIC", "1")
+
+    call_count = {"n": 0}
+    original_resolve_max_steps = runner_mod._resolve_max_steps
+
+    def _counting_resolve_max_steps(env=None):
+        call_count["n"] += 1
+        return original_resolve_max_steps(env)
+
+    monkeypatch.setattr(runner_mod, "_resolve_max_steps", _counting_resolve_max_steps)
+
+    main()
+
+    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
+    outcome_event = next(event for event in events if event.kind == "outcome")
+    assert outcome_event.payload["status"] == "truncated"
+    assert outcome_event.payload["reason"] == "max_steps"
+    assert outcome_event.payload["steps"] == 10
+
+    assert call_count["n"] >= 10, (
+        "with dynamic mode, _resolve_max_steps must be called at least once per iteration"
+    )
+
+
 def test_agent_loop_executor_errors_surface_as_failed_tool_results(tmp_path, monkeypatch):
     """A skill executor that raises still records a ``tool_result`` event
     with ``error`` populated (AGENTS.md §2 — never silently swallow). The
