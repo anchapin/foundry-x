@@ -18,7 +18,7 @@ from foundry_x.observability.tool_latency import (
     render_tool_latency_json,
     render_tool_latency_markdown,
 )
-from foundry_x.trace.logger import TraceLogger
+from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 
 def _infer_backend(path: str | Path) -> str:
@@ -111,6 +111,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--out",
         default=None,
         help="Write the timeline to this path instead of stdout.",
+    )
+    timeline.add_argument(
+        "--kind",
+        "-k",
+        default=None,
+        help=(
+            "Comma-separated list of event kinds to include "
+            "(e.g. tool_call,tool_result). When omitted, all events are shown."
+        ),
     )
 
     # Issue #268: human-readable failure analysis for a single session.
@@ -205,7 +214,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "timeline":
         backend = _infer_backend(args.db)
         logger = TraceLogger(args.db, backend=backend)
-        events = logger.load_session(args.session_id)
+        if args.kind is not None:
+            kinds = [k.strip() for k in args.kind.split(",") if k.strip()]
+            if not kinds:
+                kinds = [None]
+            # iter_events with kind=None returns all events; with a single kind
+            # it filters to that kind. For multiple kinds we collect from each
+            # kind and merge (maintaining timestamp order).
+            if len(kinds) == 1 and kinds[0] is not None:
+                events = list(logger.iter_events(args.session_id, kind=kinds[0]))
+            elif len(kinds) > 1:
+                events: list[TraceEvent] = []
+                for k in kinds:
+                    events.extend(logger.iter_events(args.session_id, kind=k))
+                events.sort(key=lambda e: e.timestamp)
+            else:
+                events = list(logger.iter_events(args.session_id))
+        else:
+            events = list(logger.iter_events(args.session_id))
         if not events:
             sys.stderr.write(f"session {args.session_id} not found or empty\n")
             return 2
