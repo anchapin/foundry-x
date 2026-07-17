@@ -34,6 +34,7 @@ from foundry_x.evolution.evolver import Evolver, ProposedEdit
 from foundry_x.evolution.loop import run_evolution_step_async
 from foundry_x.execution.runner import resolve_harness_version
 from foundry_x.evolution.store import ProposedEditStore, TrackedProposedEdit, ProposedEditStatus
+from foundry_x.observability.regression_report import record_verdict
 from foundry_x.trace.logger import TraceLogger
 
 
@@ -211,6 +212,14 @@ def _run_loop(
 
     critic = Critic(harness_dir=harness_dir)
     verdict = critic.evaluate(edit.unified_diff)
+    verdict_with_class = CriticVerdict(
+        verdict=verdict.verdict,
+        passed_checks=list(verdict.passed_checks),
+        failed_checks=list(verdict.failed_checks),
+        notes=verdict.notes,
+        failure_class=report.proposed_class,
+    )
+    record_verdict(logger, session_id, verdict_with_class)
     print(_render_critic_verdict(verdict))
     print()
 

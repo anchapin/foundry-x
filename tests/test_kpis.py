@@ -35,6 +35,7 @@ def _seed_session(
     passed_checks: list[str] | None = None,
     failed_checks: list[str] | None = None,
     injection_block_count: int = 0,
+    failure_class: str | None = None,
 ) -> str:
     """Create a session with task_received + optional persisted critic_verdict.
 
@@ -45,6 +46,10 @@ def _seed_session(
     Issue #120 adds the optional ``injection_block_count`` parameter: when
     >0, that many ``injection_blocked`` events are planted so the per-
     session KPI counter has something to surface.
+
+    Issue #705 adds the optional ``failure_class`` parameter: when provided,
+    it is stored in the ``CriticVerdict`` so the KPI aggregation can
+    compute ``failure_class_distribution``.
     """
     with logger.session(harness_version=harness_version) as sid:
         logger.record(sid, kind="task_received", payload={"prompt": "do work"})
@@ -58,6 +63,7 @@ def _seed_session(
                     verdict=verdict,
                     passed_checks=passed_checks or [],
                     failed_checks=failed_checks or [],
+                    failure_class=failure_class,
                 ),
             )
         for i in range(injection_block_count):
@@ -225,6 +231,101 @@ def test_main_omits_injection_block_section_when_clean(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# Issue #705: per-entry ``failure_class_distribution`` aggregated from
+# ``critic_verdict`` events that carry a ``failure_class``.  The
+# distribution is surfaced in both the default markdown/JSON output and in
+# the ``--from-history`` trend table.
+# ---------------------------------------------------------------------------
+
+
+def test_failure_class_distribution_aggregates_across_sessions(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, failure_class="tool-error")
+    _seed_session(logger, "v1", verdict=False, failure_class="tool-error")
+    _seed_session(logger, "v1", verdict=True, failure_class="bad-prompt")
+
+    summary = compute_kpis(logger)
+
+    assert summary.failure_class_distribution == {
+        "tool-error": 2,
+        "bad-prompt": 1,
+    }
+
+
+def test_failure_class_distribution_empty_when_no_verdicts(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    summary = compute_kpis(logger)
+    assert summary.failure_class_distribution == {}
+
+
+def test_failure_class_distribution_respects_harness_version_filter(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, failure_class="tool-error")
+    _seed_session(logger, "v2", verdict=True, failure_class="bad-prompt")
+
+    v1_summary = compute_kpis(logger, harness_version="v1")
+    v2_summary = compute_kpis(logger, harness_version="v2")
+
+    assert v1_summary.failure_class_distribution == {"tool-error": 1}
+    assert v2_summary.failure_class_distribution == {"bad-prompt": 1}
+
+
+def test_failure_class_distribution_omits_none_values(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, failure_class=None)
+
+    summary = compute_kpis(logger)
+    assert summary.failure_class_distribution == {}
+
+
+def test_main_renders_failure_class_distribution_in_markdown(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, failure_class="tool-error")
+    _seed_session(logger, "v1", verdict=True, failure_class="wrong-tool")
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    output = captured.out
+    assert "Failure Class Distribution" in output
+    assert "tool-error" in output
+    assert "wrong-tool" in output
+    assert "2 verdict(s) across 2 class(es)" in output
+
+
+def test_main_omits_failure_class_distribution_when_empty(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)  # no failure_class
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Failure Class Distribution" not in captured.out
+
+
+def test_main_json_includes_failure_class_distribution(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, failure_class="state-leak")
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert payload["failure_class_distribution"] == {"state-leak": 1}
+
+
+# ---------------------------------------------------------------------------
 # Issue #101: machine-readable JSON snapshot of the KPI summary.  The top-
 # level key set is the stable contract CI / dashboards depend on; the
 # pydantic round-trip guarantees the JSON shape matches KpiSummary.
@@ -257,6 +358,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "streaming_quality",
         "context_pruned_count",
         "wall_clock_abort_count",
+        "failure_class_distribution",
     }
 
 
