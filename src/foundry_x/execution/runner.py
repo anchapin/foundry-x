@@ -95,6 +95,7 @@ _DEFAULT_TRACE_BACKEND: str = "sqlite"
 # attributable rather than open-ended.
 _MAX_AGENT_STEPS_ENV = "FOUNDRY_MAX_AGENT_STEPS"
 _DEFAULT_MAX_AGENT_STEPS: int = 16
+_MAX_AGENT_STEPS_DYNAMIC_ENV = "FOUNDRY_MAX_AGENT_STEPS_DYNAMIC"
 
 # Per-request httpx timeout (issue #201). ``FOUNDRY_REQUEST_TIMEOUT_S`` caps a
 # single chat-completion HTTP round-trip so a stuck model endpoint cannot hang
@@ -505,6 +506,19 @@ def _resolve_max_steps(env: Mapping[str, str] | None = None) -> int:
         return _DEFAULT_MAX_AGENT_STEPS
     value = int(raw)
     return value if value > 0 else _DEFAULT_MAX_AGENT_STEPS
+
+
+def _is_max_steps_dynamic(env: Mapping[str, str] | None = None) -> bool:
+    """Check whether max_steps should be re-read from env on each loop iteration.
+
+    When ``FOUNDRY_MAX_AGENT_STEPS_DYNAMIC=1``, the step cap is re-evaluated
+    on every loop iteration so operators can adjust the bound mid-session without
+    restarting the process (useful for integration tests that verify the
+    max_steps boundary).
+    """
+    source = env if env is not None else os.environ
+    raw = source.get(_MAX_AGENT_STEPS_DYNAMIC_ENV, "").strip()
+    return raw in ("1", "true", "True")
 
 
 def _resolve_request_timeout(env: Mapping[str, str] | None = None) -> float:
@@ -1461,17 +1475,7 @@ async def run_task(
         return await _default_skill_executor(name, arguments)
 
     max_steps = _resolve_max_steps()
-
-    async def _execute_skill(name: str, arguments: dict[str, Any]) -> Any:
-        if skill_executor is not None:
-            return await skill_executor(name, arguments)
-        if name == "bash":
-            return await _bash_skill_executor(name, arguments, workspace_dir=workspace_root)
-        if name in ("list_dir", "grep_search", "edit_file", "write_file"):
-            return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
-        return await _default_skill_executor(name, arguments)
-
-    max_steps = _resolve_max_steps()
+    max_steps_dynamic = _is_max_steps_dynamic()
 
     log.record(
         session_id,
@@ -1486,8 +1490,13 @@ async def run_task(
     tokens_used = 0
     token_budget = limits.token_budget if limits is not None else None
 
+    step = 0
     try:
-        for step in range(max_steps):
+        while True:
+            if max_steps_dynamic:
+                max_steps = _resolve_max_steps()
+            if step >= max_steps:
+                break
             outcome_steps = step + 1
             log.record(
                 session_id,
@@ -1652,6 +1661,8 @@ async def run_task(
                 outcome_status = "truncated"
                 outcome_reason = "max_steps"
                 break
+
+            step += 1
     finally:
         if created_adapter and isinstance(adapter, OpenAICompatibleAdapter):
             await adapter.aclose()
