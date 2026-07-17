@@ -714,6 +714,58 @@ class TraceLogger:
             self._delete_session_sqlite(session_id)
         return True
 
+    def prune_sessions(self, to_delete: Sequence[str]) -> int:
+        """Remove every event and the session row for each ``session_id`` in *to_delete*.
+
+        This is a bulk operation: all sessions in *to_delete* are deleted in a single
+        file rewrite (jsonl) or batch DELETE (sqlite), making it O(1) file I/O
+        instead of O(n) for n sessions. Returns the number of sessions deleted.
+        Issue #752.
+        """
+        if not to_delete:
+            return 0
+        if self.backend == "jsonl":
+            return self._prune_jsonl(to_delete)
+        return self._prune_sqlite(to_delete)
+
+    def _prune_sqlite(self, to_delete: Sequence[str]) -> int:
+        assert self._conn is not None  # backend == "sqlite"
+        with self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM events WHERE session_id IN (" + ",".join("?" * len(to_delete)) + ")",
+                list(to_delete),
+            )
+            cur = self._conn.execute(
+                "DELETE FROM sessions WHERE session_id IN (" + ",".join("?" * len(to_delete)) + ")",
+                list(to_delete),
+            )
+        return cur.rowcount
+
+    def _prune_jsonl(self, to_delete: Sequence[str]) -> int:
+        if not self.path.exists():
+            return 0
+        delete_set = set(to_delete)
+        kept: list[str] = []
+        removed_sessions: set[str] = set()
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    kept.append(line)
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except json.JSONDecodeError:
+                    kept.append(line)
+                    continue
+                if record.get("session_id") in delete_set:
+                    removed_sessions.add(record.get("session_id"))
+                    continue
+                kept.append(line)
+        with self.path.open("w", encoding="utf-8") as fh:
+            fh.writelines(kept)
+        return len(removed_sessions)
+
     def _delete_session_sqlite(self, session_id: str) -> None:
         assert self._conn is not None  # backend == "sqlite"
         with self._conn:
