@@ -268,6 +268,7 @@ class TestEvolutionResultModel:
         result = EvolutionResult(
             session_id="sess-test",
             failure_report=report,
+            failure_class=report.proposed_class,
             proposed_edits=[],
             verdict=None,
             evolver_duration_ms=42.5,
