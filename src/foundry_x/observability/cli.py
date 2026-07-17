@@ -72,6 +72,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     regression.add_argument(
+        "--harness-version",
+        default=None,
+        help="Only include verdicts from sessions recorded with this harness version.",
+    )
+    regression.add_argument(
         "--format",
         default=None,
         choices=("markdown", "json"),
@@ -202,7 +207,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "regression-report":
         logger = TraceLogger(args.db)
-        analysis = analyze_regressions(logger, since=args.since, task=args.task)
+        analysis = analyze_regressions(
+            logger, since=args.since, task=args.task, harness_version=args.harness_version
+        )
         fmt = _resolve_format(args.format, args.out)
         if fmt == "json":
             rendered = analysis.model_dump_json(indent=2) + "\n"
