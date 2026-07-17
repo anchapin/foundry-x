@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from foundry_x.evolution.critic import Critic, CriticVerdict
 from foundry_x.evolution.digester import Digester, FailureReport
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
+from foundry_x.execution.runner import resolve_harness_version
 from foundry_x.trace.logger import TraceEvent
 
 
@@ -33,6 +34,7 @@ class EvolutionResult(BaseModel):
     failure_report: FailureReport
     proposed_edits: list[ProposedEdit] = Field(default_factory=list)
     verdict: CriticVerdict | None = None
+    harness_version: str | None = None
 
 
 def _edits_to_diff(edits: list[ProposedEdit]) -> str:
@@ -85,6 +87,7 @@ def run_evolution_step(
         A pydantic model containing the failure report, proposed edits (if any),
         and the critic verdict (if the full chain ran).
     """
+    harness_version = resolve_harness_version(harness_dir)
     failure_report = Digester().digest(session_id, events)
 
     if failure_report.proposed_class == "clean":
@@ -93,6 +96,7 @@ def run_evolution_step(
             failure_report=failure_report,
             proposed_edits=[],
             verdict=None,
+            harness_version=harness_version,
         )
 
     if evolver is None:
@@ -113,6 +117,7 @@ def run_evolution_step(
             failure_report=failure_report,
             proposed_edits=[],
             verdict=None,
+            harness_version=harness_version,
         )
 
     if critic is None:
@@ -126,4 +131,5 @@ def run_evolution_step(
         failure_report=failure_report,
         proposed_edits=proposed_edits,
         verdict=verdict,
+        harness_version=harness_version,
     )

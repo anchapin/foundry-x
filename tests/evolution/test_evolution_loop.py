@@ -98,6 +98,7 @@ class TestRunEvolutionStep:
         assert result.failure_report.proposed_class == "clean"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.harness_version is not None
 
     def test_empty_edits_short_circuits(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         harness_dir = _write_harness(tmp_path)
@@ -117,6 +118,7 @@ class TestRunEvolutionStep:
         assert result.failure_report.proposed_class != "clean"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.harness_version is not None
 
     def test_full_pipeline_runs_critic(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         harness_dir = _write_harness(tmp_path)
@@ -143,6 +145,7 @@ class TestRunEvolutionStep:
         assert result.proposed_edits == [proposed_edit]
         assert result.verdict is not None
         assert isinstance(result.verdict, CriticVerdict)
+        assert result.harness_version is not None
 
 
 class TestEvolutionResultModel:
@@ -182,3 +185,36 @@ class TestEvolutionResultModel:
         )
         assert result.verdict is not None
         assert result.verdict.verdict is True
+
+    def test_result_model_with_harness_version(self):
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="test failure",
+            proposed_class="tool-error",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            proposed_edits=[],
+            verdict=None,
+            harness_version="v1.2.3",
+        )
+        assert result.harness_version == "v1.2.3"
+
+    def test_result_model_harness_version_defaults_to_none(self):
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="test failure",
+            proposed_class="tool-error",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            proposed_edits=[],
+            verdict=None,
+        )
+        assert result.harness_version is None
