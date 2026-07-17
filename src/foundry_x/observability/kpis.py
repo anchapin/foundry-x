@@ -11,8 +11,10 @@ The PRD (``docs/PRD.md`` §5) defines:
 This module derives approximations of those metrics from the events already
 recorded by :class:`~foundry_x.trace.logger.TraceLogger`:
 
-* ``cycle_time_seconds`` — mean wall-clock time from the first
-  ``task_received`` event to the first ``critic_verdict`` event per session.
+* ``cycle_time_seconds`` — the operational proxy: mean wall-clock time from
+  the first ``task_received`` event to the first ``critic_verdict`` event
+  per session (the closest measurable proxy for the business-level "Agent
+  Failure" → "Harness Edit Proposal" definition above).
 * ``regression_rate`` — fraction of sessions with a ``critic_verdict`` in which
   a task previously seen in ``passed_checks`` later appears in ``failed_checks``
   (the persisted :class:`~foundry_x.observability.regression_report.VerdictRecord`

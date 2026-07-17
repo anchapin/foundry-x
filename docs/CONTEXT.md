@@ -89,8 +89,9 @@ Canonical implementations live in `src/foundry_x/observability/kpis.py`.
 The three PRD KPIs cannot move until the Runner and Critic are in place
 (ADR-0010).
 
-- **Cycle Time** — mean wall-clock time from the first `task_received`
-  event to the first `critic_verdict` event per session.
+- **Cycle Time** — time from "Agent Failure" to "Harness Edit Proposal"
+  (the operational proxy implemented in ``kpis.py`` measures
+  ``task_received`` → ``critic_verdict``).
 - **Regression Rate** — fraction of sessions with a `critic_verdict` in which
   a task previously seen in `passed_checks` later appears in `failed_checks`.
 - **Improvement Rate** — fraction of `critic_verdict` events whose
