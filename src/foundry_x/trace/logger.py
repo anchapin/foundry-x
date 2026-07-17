@@ -135,7 +135,9 @@ class TraceLoggerAttributes(BaseModel):
     """
 
     event_id: str | None = Field(default=None, description="UUID4 event identifier (primary key)")
-    session_id: str | None = Field(default=None, description="UUID4 session identifier (foreign key)")
+    session_id: str | None = Field(
+        default=None, description="UUID4 session identifier (foreign key)"
+    )
     timestamp: str | None = Field(default=None, description="ISO-8601 UTC timestamp")
     kind: str | None = Field(default=None, description="Closed event-kind vocabulary string")
     payload: dict | None = Field(default=None, description="Kind-specific free-form payload dict")
@@ -150,33 +152,69 @@ class TraceLoggerAttributes(BaseModel):
     hardware: str | None = Field(default=None, description="Hardware accelerator used")
 
     content: str | None = Field(default=None, description="Task prompt text (user_prompt)")
-    tool_count: int | None = Field(default=None, description="Number of tools available (user_prompt)")
-    step: int | None = Field(default=None, description="Zero-based agent-loop index (model_*, tool_*)")
-    message_count: int | None = Field(default=None, description="Messages in conversation (model_request)")
-    finish_reason: str | None = Field(default=None, description="Model stop reason (model_response)")
-    message: dict | None = Field(default=None, description="Serialized ModelMessage (model_response)")
+    tool_count: int | None = Field(
+        default=None, description="Number of tools available (user_prompt)"
+    )
+    step: int | None = Field(
+        default=None, description="Zero-based agent-loop index (model_*, tool_*)"
+    )
+    message_count: int | None = Field(
+        default=None, description="Messages in conversation (model_request)"
+    )
+    finish_reason: str | None = Field(
+        default=None, description="Model stop reason (model_response)"
+    )
+    message: dict | None = Field(
+        default=None, description="Serialized ModelMessage (model_response)"
+    )
     tool_calls: list | None = Field(default=None, description="Tool call objects (model_response)")
     token_usage: dict | None = Field(default=None, description="Token usage dict (model_response)")
     call_id: str | None = Field(default=None, description="Tool call ID (tool_call, tool_result)")
     name: str | None = Field(default=None, description="Tool name (tool_call, tool_result)")
     arguments: dict | None = Field(default=None, description="Tool input arguments (tool_call)")
-    duration_ms: int | None = Field(default=None, description="Wall-clock ms (tool_call, tool_result, task_*)")
+    duration_ms: int | None = Field(
+        default=None, description="Wall-clock ms (tool_call, tool_result, task_*)"
+    )
     output: dict | None = Field(default=None, description="Tool return value (tool_result)")
     error: str | None = Field(default=None, description="Error message on failure (tool_result)")
-    status: str | None = Field(default=None, description="Outcome status: success|truncated|failed (outcome)")
-    reason: str | None = Field(default=None, description="Outcome or abort reason (outcome, task_aborted)")
+    status: str | None = Field(
+        default=None, description="Outcome status: success|truncated|failed (outcome)"
+    )
+    reason: str | None = Field(
+        default=None, description="Outcome or abort reason (outcome, task_aborted)"
+    )
     steps: int | None = Field(default=None, description="Total agent-loop iterations (outcome)")
-    error_type: str | None = Field(default=None, description="Exception class name (task_*, model_error, hook_*)")
+    error_type: str | None = Field(
+        default=None, description="Exception class name (task_*, model_error, hook_*)"
+    )
     prompt: str | None = Field(default=None, description="Raw --task argument (task_received)")
-    timeout_s: float | None = Field(default=None, description="Wall-clock timeout seconds (task_aborted)")
-    token_budget: int | None = Field(default=None, description="Active token budget at abort (task_aborted)")
-    markers: list | None = Field(default=None, description="Sorted unique marker names (injection_blocked)")
-    preview: str | None = Field(default=None, description="First 120 chars of blocked text (injection_blocked)")
-    dropped: int | None = Field(default=None, description="Events dropped to fit cap (context_pruned)")
-    threshold: int | None = Field(default=None, description="Per-session event cap (context_pruned)")
-    approved: bool | None = Field(default=None, description="True if no regressions (critic_verdict)")
-    passed_checks: list | None = Field(default=None, description="Checks that passed (critic_verdict)")
-    failed_checks: list | None = Field(default=None, description="Checks that failed (critic_verdict)")
+    timeout_s: float | None = Field(
+        default=None, description="Wall-clock timeout seconds (task_aborted)"
+    )
+    token_budget: int | None = Field(
+        default=None, description="Active token budget at abort (task_aborted)"
+    )
+    markers: list | None = Field(
+        default=None, description="Sorted unique marker names (injection_blocked)"
+    )
+    preview: str | None = Field(
+        default=None, description="First 120 chars of blocked text (injection_blocked)"
+    )
+    dropped: int | None = Field(
+        default=None, description="Events dropped to fit cap (context_pruned)"
+    )
+    threshold: int | None = Field(
+        default=None, description="Per-session event cap (context_pruned)"
+    )
+    approved: bool | None = Field(
+        default=None, description="True if no regressions (critic_verdict)"
+    )
+    passed_checks: list | None = Field(
+        default=None, description="Checks that passed (critic_verdict)"
+    )
+    failed_checks: list | None = Field(
+        default=None, description="Checks that failed (critic_verdict)"
+    )
     notes: str | None = Field(default=None, description="Free-text critic notes (critic_verdict)")
 
 
