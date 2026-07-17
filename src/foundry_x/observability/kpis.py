@@ -129,6 +129,7 @@ class KpiSummary(BaseModel):
     token_budget_hit_rate: float = 0.0
     streaming_quality: dict[str, "StreamingQualityData"] = {}
     context_pruned_count: dict[str, int] = {}
+    wall_clock_abort_count: int = 0
 
 
 class StreamingQualityData(BaseModel):
@@ -189,6 +190,7 @@ class KpiHistoryEntry(BaseModel):
     injection_blocks: dict[str, int] = {}
     hooks_disabled_count: int = 0
     hooks_disabled_rate: float = 0.0
+    wall_clock_abort_count: int = 0
 
 
 def compute_kpis(
@@ -224,6 +226,7 @@ def compute_kpis(
     token_budget_hit_rate = _token_budget_hit_rate(logger, harness_version=harness_version)
     streaming_quality = _streaming_quality(logger, harness_version=harness_version)
     context_pruned_count = _context_pruned(logger, harness_version=harness_version)
+    wall_clock_abort_count = _wall_clock_abort_count(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -237,6 +240,7 @@ def compute_kpis(
         token_budget_hit_rate=token_budget_hit_rate,
         streaming_quality=streaming_quality,
         context_pruned_count=context_pruned_count,
+        wall_clock_abort_count=wall_clock_abort_count,
     )
 
 
@@ -601,6 +605,27 @@ def _context_pruned(
     return counts
 
 
+def _wall_clock_abort_count(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> int:
+    """Count sessions aborted by the FOUNDRY_TASK_TIMEOUT wall-clock cap (issue #711).
+
+    Counts every ``task_aborted`` event whose ``reason`` is ``"wall_clock"``,
+    fired by :func:`foundry_x.execution.runner.run_with_limits` when
+    ``asyncio.wait_for`` raises :class:`asyncio.TimeoutError`. Each session
+    contributes at most one such event (the runner records it once per abort).
+    """
+    count = 0
+    for event in logger.query_events(
+        kind="task_aborted",
+        harness_version=harness_version,
+    ):
+        if event.payload.get("reason") == "wall_clock":
+            count += 1
+    return count
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -704,6 +729,15 @@ def _render_markdown(summary: KpiSummary) -> str:
         lines.append("| --- | --- |")
         for sid, count in sorted(summary.context_pruned_count.items()):
             lines.append(f"| {sid} | {count} |")
+    # Issue #711: surface wall-clock abort count as an auxiliary operator
+    # signal. Zero means the timeout cap is not firing (expected for healthy
+    # runs); non-zero means a session was aborted by FOUNDRY_TASK_TIMEOUT.
+    if summary.wall_clock_abort_count > 0:
+        lines.append("")
+        lines.append(
+            f"Wall-Clock Aborts: {summary.wall_clock_abort_count} session(s) "
+            "were aborted by FOUNDRY_TASK_TIMEOUT."
+        )
     return "\n".join(lines)
 
 
@@ -799,7 +833,7 @@ def append_kpi_history(
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = summary.model_dump(
         mode="json",
-        exclude={"injection_blocks", "token_totals", "streaming_quality"},
+        exclude={"injection_blocks", "token_totals", "streaming_quality", "wall_clock_abort_count"},
     )
     payload["timestamp"] = _now_iso()
     if harness_version is not None:
