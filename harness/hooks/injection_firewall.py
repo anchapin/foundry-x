@@ -339,7 +339,7 @@ class InjectionFirewallHook:
     def __init__(
         self,
         policy: Literal["block", "warn"] = "block",
-        tracer: Callable[[dict[str, Any]], None] | None = None,
+        tracer: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         if policy not in ("block", "warn"):
             raise ValueError(f"injection_firewall: unknown policy {policy!r}")
@@ -412,28 +412,73 @@ class InjectionFirewallHook:
     ) -> None:
         """Forward one block decision to the injected ``tracer`` sink.
 
+        Emits two events on every block (issue #823):
+
+        1. ``injection_blocked`` (issue #120) — the canonical block payload
+           with ``markers``, ``tool``, ``preview``.
+        2. ``firewall_exception`` (issue #823) — structured warning with
+           ``hook_name``, ``pattern_matched``, and ``risk_score`` so the
+           trace store carries a queryable firewall-audit log independent of
+           the ``injection_blocked`` aggregation path.
+
         Kept tiny and synchronous so the hook contract stays an ``async``
-        boundary at the hook level. The payload shape is the contract with
-        the :mod:`src.foundry_x` TraceLogger (issue #120); see the
-        constructor docstring for the schema. A misbehaving tracer is
-        logged at exception level and swallowed — the firewall never
-        aborts the agent run on a sink failure (the same isolation
-        contract the hook registry applies to its own hook exceptions;
-        see ``harness/hooks/base.py::_isolate_failure``).
+        boundary at the hook level. A misbehaving tracer is logged at
+        exception level and swallowed — the firewall never aborts the agent
+        run on a sink failure (the same isolation contract the hook registry
+        applies to its own hook exceptions; see
+        ``harness/hooks/base.py::_isolate_failure``).
         """
         assert self._tracer is not None
-        payload: dict[str, Any] = {
+
+        # Issue #120: injection_blocked event (unchanged contract).
+        injection_payload: dict[str, Any] = {
             "markers": sorted({m.name for m in matches}),
             "tool": tool_name,
             "preview": preview,
         }
+
+        # Issue #823: firewall_exception event.
+        names = ",".join(sorted({m.name for m in matches}))
+        risk_score = self._compute_risk_score(matches)
+        firewall_payload: dict[str, Any] = {
+            "hook_name": "InjectionFirewallHook",
+            "pattern_matched": names,
+            "risk_score": risk_score,
+        }
+
         try:
-            self._tracer(payload)
+            self._tracer("injection_blocked", injection_payload)
         except Exception:
             _log.exception(
-                "injection_firewall: tracer raised on block of tool %r; isolating and continuing",
+                "injection_firewall: tracer raised injection_payload on block of tool %r; isolating and continuing",
                 tool_name,
             )
+        try:
+            self._tracer("firewall_exception", firewall_payload)
+        except Exception:
+            _log.exception(
+                "injection_firewall: tracer raised firewall_payload on block of tool %r; isolating and continuing",
+                tool_name,
+            )
+
+    def _compute_risk_score(self, matches: tuple[InjectionMatch, ...]) -> int:
+        """Compute a risk score from the detected injection markers.
+
+        Higher scores indicate greater severity. The weighting is based on
+        the attack class: role-tag injection (which can hijack the prompt
+        context) scores higher than bare instruction-override phrases.
+        """
+        if not matches:
+            return 0
+        score = 0
+        for match in matches:
+            if match.name in ("role_tag_colon", "chatml_tag", "role_tag_json_escaped"):
+                score += 2
+            elif match.name in ("unicode_confusable", "base64_payload"):
+                score += 2
+            else:
+                score += 1
+        return score
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +496,7 @@ class InjectionFirewallHook:
 def register_into(
     registry: HookRegistry,
     *,
-    tracer: Callable[[dict[str, Any]], None] | None = None,
+    tracer: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> InjectionFirewallHook:
     """Install a fresh :class:`InjectionFirewallHook` into ``registry``.
 
@@ -462,8 +507,9 @@ def register_into(
 
     Passing ``tracer=`` wires the new hook's block path to the supplied
     sink (typically a closure over ``TraceLogger.record``) so the runner
-    or sandbox emits the ``injection_blocked`` trace event (issue #120)
-    without coupling the harness package to ``foundry_x``.
+    or sandbox emits the ``injection_blocked`` and ``firewall_exception``
+    trace events (issue #120, issue #823) without coupling the harness
+    package to ``foundry_x``.
     """
     hook = InjectionFirewallHook(tracer=tracer)
     registry.register(hook)

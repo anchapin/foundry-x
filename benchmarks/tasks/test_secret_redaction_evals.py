@@ -88,7 +88,10 @@ def test_value_level_redaction_scrubs_each_token_class() -> None:
     assert _redact_value(_SLACK_TOKEN) == "[REDACTED:slack-token]"
     assert _redact_value(_BEARER) == "[REDACTED:bearer]"
     assert _redact_value(_GCP_SA_EMAIL) == "[REDACTED:gcp-service-account]"
-    assert _redact_value(f"GCP_PROJECT_ID={_GCP_PROJECT_ID}") == "GCP_PROJECT_ID=[REDACTED:gcp-project-id]"
+    assert (
+        _redact_value(f"GCP_PROJECT_ID={_GCP_PROJECT_ID}")
+        == "GCP_PROJECT_ID=[REDACTED:gcp-project-id]"
+    )
     assert ".config/gcloud" not in _redact_value(f"HOME={_GCP_ADC_PATH}")
     assert "[REDACTED:gcp-adc-path]" in _redact_value(f"HOME={_GCP_ADC_PATH}")
 

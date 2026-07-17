@@ -1477,8 +1477,8 @@ async def run_task(
     if registry is not None and hasattr(registry, "_hooks"):
         from harness.hooks.injection_firewall import InjectionFirewallHook
 
-        def _inject_tracer(payload: dict[str, object]) -> None:
-            log.record(session_id, kind="injection_blocked", payload=payload)
+        def _inject_tracer(kind: str, payload: dict[str, object]) -> None:
+            log.record(session_id, kind=kind, payload=payload)
 
         for hook in registry._hooks:
             if isinstance(hook, InjectionFirewallHook) and hook._tracer is None:

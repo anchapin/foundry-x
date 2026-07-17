@@ -46,7 +46,10 @@ We design against these threats:
 - **Prompt-input firewall.** Tool-call results that will be
   re-injected into a prompt must be checked for injection markers
   (`ignore previous instructions`, role-tag injection, etc.) and
-  either truncated or flagged for human review.
+  either truncated or flagged for human review. Every block emits a
+  ``firewall_exception`` trace event (issue #823) carrying
+  ``hook_name``, ``pattern_matched``, and ``risk_score`` so firewall
+  events are queryable via ``foundry-x-trace``.
 - **Rate limits.** The `Evolver` is rate-limited: max N proposals per
   hour, max M lines of harness diff per proposal, max LLM calls per hour,
   and max cost per day. Defaults live in
