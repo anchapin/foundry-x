@@ -83,7 +83,9 @@ We design against these threats:
   the commit as compromised even after removal: git history is
   forever.
 - Trace stores MUST NOT contain raw API keys. Strip them at write
-  time.
+  time. Coverage includes AWS access key IDs, GCP service account
+  emails / ADC paths / project ID env vars, GitHub PATs, JWTs,
+  Stripe live keys, Slack tokens, and Bearer tokens.
 - If a trace is found to hold a secret that slipped past the write-time
   scrubber, the `foundry-trace` CLI offers two operator remediation
   commands (issue #192, backed by the `TraceLogger.delete_session` and

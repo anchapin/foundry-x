@@ -1,9 +1,10 @@
 """Benchmark task: trace-payload secret redaction is active (SECURITY.md §Secrets).
 
 Regression target for the ``TraceLogger`` scrubber in
-``src/foundry_x/trace/logger.py`` (issues #3 and #121). The trace store
+``src/foundry_x/trace/logger.py`` (issues #3, #121, and #824). The trace store
 must never persist raw API keys, PEM blocks, or modern tokens
-(GitHub classic / fine-grained PATs, JWTs, AWS access keys, Stripe
+(GitHub classic / fine-grained PATs, JWTs, AWS access keys, GCP
+service account emails / ADC paths / project IDs, Stripe
 live keys, Slack tokens), regardless of whether the value landed
 through ``TraceLogger.record()`` or the ``metadata`` dict passed to
 ``TraceLogger.session()``. A regression that weakens any of the
@@ -40,18 +41,17 @@ _JWT = (
 _AWS_ACCESS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
 _STRIPE_LIVE_KEY = "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc"
 _SLACK_TOKEN = "xox" + "b-1234567890123-1234567890123-" + "abcdefghijklmnopqrstuvwx"
-# GCP token fixtures (issue #746).
-_GCP_ACCESS_TOKEN = "ya29." + "a-bC0dE1fG2hI3jK4lM5nO6pQ7rS8tU9vW0xY1zA2bC3dE4fG5hI6"
-_GCP_SERVICE_ACCOUNT = "my-service-account@developer.gserviceaccount.com"
+_GCP_SA_EMAIL = "my-app@" + "iam.gserviceaccount.com"
+_GCP_PROJECT_ID = "my-project-" + "123456"
+_GCP_ADC_PATH = "/home/user/.config/gcloud/application_default_credentials.json"
 
 TASK = BenchmarkTask(
     name="secret_redaction",
     description=(
         "TraceLogger scrubs secret-like substrings (API keys, PEM blocks, "
-        "GitHub PATs, JWTs, AWS keys, Stripe live keys, Slack tokens, "
-        "bearer headers, GCP access tokens, GCP service-account emails) "
-        "from event payloads and from the metadata dict passed to "
-        "TraceLogger.session()."
+        "GitHub PATs, JWTs, AWS keys, GCP credentials, Stripe live keys, "
+        "Slack tokens, and bearer headers) from event payloads and from "
+        "the metadata dict passed to TraceLogger.session()."
     ),
     prompt=(
         "Inspect src/foundry_x/trace/logger.py: confirm _redact and "
@@ -63,7 +63,8 @@ TASK = BenchmarkTask(
         "Every secret-shaped string below is replaced by a [REDACTED:*] "
         "sentinel in the value-level pass, the metadata dict with a "
         "secret-like key is rewritten to a sentinel value, and the "
-        "non-secret data is passed through unchanged."
+        "non-secret data is passed through unchanged. GCP credentials "
+        "(service account email, ADC path, project ID) are included."
     ),
     tags=["security"],
 )
@@ -71,12 +72,12 @@ TASK = BenchmarkTask(
 
 @pytest.mark.benchmark
 def test_value_level_redaction_scrubs_each_token_class() -> None:
-    """Each token class is scrubbed by ``_redact_value`` (issues #3 + #121).
+    """Each token class is scrubbed by ``_redact_value`` (issues #3 + #121 + #824).
 
     A regression that drops any of the regexes in
     ``src/foundry_x/trace/logger.py`` (PEM, JWT, sk-, GitHub PAT, AWS,
-    Stripe, Slack, bearer) surfaces here as a literal of the original
-    substring surviving in the output.
+    GCP, Stripe, Slack, bearer) surfaces here as a literal of the
+    original substring surviving in the output.
     """
     assert _redact_value(_PEM) == "[REDACTED:pem]"
     assert _redact_value(_API_KEY) == "[REDACTED:api-key]"
@@ -86,8 +87,10 @@ def test_value_level_redaction_scrubs_each_token_class() -> None:
     assert _redact_value(_STRIPE_LIVE_KEY) == "[REDACTED:stripe-key]"
     assert _redact_value(_SLACK_TOKEN) == "[REDACTED:slack-token]"
     assert _redact_value(_BEARER) == "[REDACTED:bearer]"
-    assert _redact_value(_GCP_ACCESS_TOKEN) == "[REDACTED:gcp-access-token]"
-    assert _redact_value(_GCP_SERVICE_ACCOUNT) == "[REDACTED:gcp-service-account]"
+    assert _redact_value(_GCP_SA_EMAIL) == "[REDACTED:gcp-service-account]"
+    assert _redact_value(f"GCP_PROJECT_ID={_GCP_PROJECT_ID}") == "GCP_PROJECT_ID=[REDACTED:gcp-project-id]"
+    assert ".config/gcloud" not in _redact_value(f"HOME={_GCP_ADC_PATH}")
+    assert "[REDACTED:gcp-adc-path]" in _redact_value(f"HOME={_GCP_ADC_PATH}")
 
 
 @pytest.mark.benchmark

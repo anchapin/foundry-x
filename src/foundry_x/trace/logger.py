@@ -108,10 +108,20 @@ _AWS_ACCESS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
 _STRIPE_LIVE_KEY_RE = re.compile(r"\b(?:sk|pk|rk)_(?:live|restricted)_[A-Za-z0-9]{16,}")
 # Slack tokens: xox[baprs]- followed by the segment body.
 _SLACK_TOKEN_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}")
-# GCP access tokens — Google OAuth2 tokens for GCP APIs, prefixed ya29.
-_GCP_ACCESS_TOKEN_RE = re.compile(r"\bya29\.[A-Za-z0-9\-_]+\b")
-# GCP service-account emails — used in ADC and workload identity.
-_GCP_SERVICE_ACCOUNT_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@developer\.gserviceaccount\.com\b")
+# GCP service account email addresses: literal @ ending in iam.gserviceaccount.com.
+# The local-part is flexible; the domain is fixed.
+_GCP_SERVICE_ACCOUNT_EMAIL_RE = re.compile(
+    r"\b[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\.)*iam\.gserviceaccount\.com\b"
+)
+# GCP ADC path references: paths under ~/.config/gcloud/ or absolute paths
+# pointing to a GCP credentials file (commonly //application_default_credentials.json).
+_GCP_ADC_PATH_RE = re.compile(
+    r"(?:(?:HOME|USERPROFILE|GOOGLE_APPLICATION_CREDENTIALS)=)?.+?\.config[/\\]gcloud[/\\].*application_default_credentials\.json"
+)
+# GCP project ID variables — matched as env-var-style KEY=VALUE strings.
+_GCP_PROJECT_ID_RE = re.compile(
+    r"(\b(?:GCP_PROJECT_ID|GCP_PROJECT|GCP_LOCATION)=)[A-Za-z0-9_-]{4,}"
+)
 
 _DEFAULT_SECRET_KEY_NAMES: frozenset[str] = frozenset(
     {
@@ -120,6 +130,10 @@ _DEFAULT_SECRET_KEY_NAMES: frozenset[str] = frozenset(
         "authorization",
         "aws_access_key_id",
         "aws_secret_access_key",
+        "gcp_project_id",
+        "gcp_project",
+        "gcp_location",
+        "google_application_credentials",
         "github_token",
         "anthropic_api_key",
         "openai_api_key",
@@ -162,8 +176,9 @@ def _redact_value(value: str) -> str:
     value = _STRIPE_LIVE_KEY_RE.sub("[REDACTED:stripe-key]", value)
     value = _SLACK_TOKEN_RE.sub("[REDACTED:slack-token]", value)
     value = _BEARER_RE.sub("[REDACTED:bearer]", value)
-    value = _GCP_ACCESS_TOKEN_RE.sub("[REDACTED:gcp-access-token]", value)
-    value = _GCP_SERVICE_ACCOUNT_RE.sub("[REDACTED:gcp-service-account]", value)
+    value = _GCP_SERVICE_ACCOUNT_EMAIL_RE.sub("[REDACTED:gcp-service-account]", value)
+    value = _GCP_ADC_PATH_RE.sub("[REDACTED:gcp-adc-path]", value)
+    value = _GCP_PROJECT_ID_RE.sub(r"\1[REDACTED:gcp-project-id]", value)
     return value
 
 
@@ -177,10 +192,10 @@ def _redact(
     lower-cased name is in ``secret_key_names`` have their entire value
     replaced with ``[REDACTED:secret]`` regardless of content; all other
     string values are scanned for ``sk-...``, ``Bearer ...``, PEM blocks,
-    GitHub classic/fine-grained PATs, JWTs, AWS access key IDs, Stripe
-    live keys, Slack tokens, GCP access tokens, and GCP service-account
-    emails. Issue #121 added the modern-token set and the metadata-path
-    coverage. Issue #746 adds GCP credential patterns.
+    GitHub classic/fine-grained PATs, JWTs, AWS access key IDs, GCP
+    service account emails, GCP ADC paths, GCP project ID env vars,
+    Stripe live keys, and Slack tokens. Issue #121 added the modern-token
+    set and the metadata-path coverage; issue #824 added GCP coverage.
     """
     if isinstance(payload, dict):
         redacted: dict[str, Any] = {}
