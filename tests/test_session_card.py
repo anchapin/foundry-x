@@ -55,7 +55,11 @@ def _sample_events() -> list[TraceEvent]:
         _event("tool_call", timedelta(seconds=0.3), {"name": "read_file"}),
         _event("tool_result", timedelta(seconds=0.8), {"name": "read_file", "status": "ok"}),
         _event("error", timedelta(seconds=1.2), {"message": "permission denied"}),
-        _event("outcome", timedelta(seconds=2.0), {"status": "failed", "reason": "task_failed", "steps": 3}),
+        _event(
+            "outcome",
+            timedelta(seconds=2.0),
+            {"status": "failed", "reason": "task_failed", "steps": 3},
+        ),
     ]
 
 
@@ -98,9 +102,7 @@ def test_format_session_card_golden_output():
     assert lines[3] == _format_line("started_at", "2026-07-10T12:00:00+00:00")
     assert lines[4] == _format_line("ended_at", "2026-07-10T12:00:05+00:00")
     assert lines[5] == _format_line("duration", "0:00:05")
-    assert lines[6] == _format_line(
-        "outcome", "status=failed reason=task_failed steps=3"
-    )
+    assert lines[6] == _format_line("outcome", "status=failed reason=task_failed steps=3")
     assert lines[7] == _format_line("event_count", "5")
     assert lines[8] == _format_line("tool_calls", "read_file=1")
     assert lines[9] == _format_line("errors_by_kind", "error=1")
@@ -131,7 +133,9 @@ def test_format_session_card_no_errors_shows_none():
     events = [
         _event("user_prompt", timedelta(seconds=0.0), {"prompt": "Hello"}),
         _event("tool_call", timedelta(seconds=0.1), {"name": "read_file"}),
-        _event("outcome", timedelta(seconds=0.2), {"status": "success", "reason": "done", "steps": 1}),
+        _event(
+            "outcome", timedelta(seconds=0.2), {"status": "success", "reason": "done", "steps": 1}
+        ),
     ]
     output = format_session_card(session, events)
 
@@ -144,7 +148,9 @@ def test_format_session_card_no_tool_calls_shows_none():
     events = [
         _event("user_prompt", timedelta(seconds=0.0), {"prompt": "Hello"}),
         _event("error", timedelta(seconds=0.1), {"message": "oops"}),
-        _event("outcome", timedelta(seconds=0.2), {"status": "failed", "reason": "error", "steps": 1}),
+        _event(
+            "outcome", timedelta(seconds=0.2), {"status": "failed", "reason": "error", "steps": 1}
+        ),
     ]
     output = format_session_card(session, events)
 
