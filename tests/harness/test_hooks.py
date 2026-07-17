@@ -1,13 +1,11 @@
-"""Tests for ``harness/hooks/__init__.py`` (issue #712).
+"""Tests for ``harness/hooks/__init__.py`` (issue #712 / #634).
 
 Verifies that every hook listed in ``harness/manifest.json`` is importable
 from the ``harness.hooks`` public interface, matching the manifest
-declarations.
-
-Issue #634 identified that ``context_pruning`` and ``rate_limit`` were not
-exported from ``harness/hooks/__init__.py`` even though ``manifest.json``
-declared them. This caused ``load_check.py`` to pass while the hooks were
-not actually importable at runtime.
+declarations. Issue #634 identified that ``context_pruning`` and ``rate_limit``
+were not exported from ``harness/hooks/__init__.py`` even though
+``manifest.json`` declared them. This caused ``load_check.py`` to pass while
+the hooks were not actually importable at runtime.
 """
 
 from __future__ import annotations
@@ -33,6 +31,42 @@ def manifest_hooks(manifest: dict) -> list[str]:
     hooks = manifest.get("hooks", [])
     assert isinstance(hooks, list), "manifest.hooks must be a list"
     return hooks
+
+
+def test_context_pruning_imports() -> None:
+    from harness.hooks import (
+        ContextPruningHook,
+        DEFAULT_THRESHOLD,
+        Pruner,
+        Tracer,
+        register_into,
+    )
+
+    assert ContextPruningHook is not None
+    assert isinstance(DEFAULT_THRESHOLD, int)
+    assert callable(Pruner)
+    assert callable(Tracer)
+    assert callable(register_into)
+
+
+def test_rate_limit_imports() -> None:
+    from harness.hooks import (
+        RateLimitHook,
+        DEFAULT_MAX_DIFF_LINES,
+        DEFAULT_MAX_PROPOSALS_PER_HOUR,
+        DEFAULT_RATE_WINDOW_HOURS,
+        get_default_max_diff_lines,
+        get_default_max_proposals,
+        get_default_rate_window_hours,
+    )
+
+    assert RateLimitHook is not None
+    assert isinstance(DEFAULT_MAX_DIFF_LINES, int)
+    assert isinstance(DEFAULT_MAX_PROPOSALS_PER_HOUR, int)
+    assert isinstance(DEFAULT_RATE_WINDOW_HOURS, int)
+    assert callable(get_default_max_diff_lines)
+    assert callable(get_default_max_proposals)
+    assert callable(get_default_rate_window_hours)
 
 
 def test_manifest_imports(manifest_hooks: list[str]) -> None:
