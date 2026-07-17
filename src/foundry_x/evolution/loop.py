@@ -173,6 +173,8 @@ async def run_evolution_step_async(
     The Critic is still invoked synchronously because the subprocess call is
     inherently blocking (ADR-0010).
     """
+    harness_version = resolve_harness_version(harness_dir)
+    started_at = _now_iso()
     failure_report = Digester().digest(session_id, events)
 
     if failure_report.proposed_class == "clean":
@@ -181,6 +183,9 @@ async def run_evolution_step_async(
             failure_report=failure_report,
             proposed_edits=[],
             verdict=None,
+            harness_version=harness_version,
+            started_at=started_at,
+            completed_at=_now_iso(),
         )
 
     if evolver is None:
@@ -201,6 +206,9 @@ async def run_evolution_step_async(
             failure_report=failure_report,
             proposed_edits=[],
             verdict=None,
+            harness_version=harness_version,
+            started_at=started_at,
+            completed_at=_now_iso(),
         )
 
     if critic is None:
@@ -214,4 +222,7 @@ async def run_evolution_step_async(
         failure_report=failure_report,
         proposed_edits=proposed_edits,
         verdict=verdict,
+        harness_version=harness_version,
+        started_at=started_at,
+        completed_at=_now_iso(),
     )
