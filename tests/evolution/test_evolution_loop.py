@@ -157,11 +157,13 @@ class TestEvolutionResultModel:
         result = EvolutionResult(
             session_id="sess-test",
             failure_report=report,
+            failure_class="tool-error",
             proposed_edits=[],
             verdict=None,
         )
         assert result.session_id == "sess-test"
         assert result.failure_report.summary == "test failure"
+        assert result.failure_class == "tool-error"
         assert result.proposed_edits == []
         assert result.verdict is None
 
@@ -177,8 +179,29 @@ class TestEvolutionResultModel:
         result = EvolutionResult(
             session_id="sess-test",
             failure_report=report,
+            failure_class="tool-error",
             proposed_edits=[],
             verdict=verdict,
         )
         assert result.verdict is not None
         assert result.verdict.verdict is True
+        assert result.failure_class == "tool-error"
+
+    def test_failure_class_copied_from_report(self):
+        """failure_class is copied from failure_report.proposed_class (issue #605)."""
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="wrong-tool failure",
+            proposed_class="wrong-tool",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            failure_class=report.proposed_class,
+            proposed_edits=[],
+            verdict=None,
+        )
+        assert result.failure_class == "wrong-tool"
+        assert result.failure_class == result.failure_report.proposed_class
