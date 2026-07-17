@@ -47,3 +47,8 @@ norecursedirs = ["benchmarks/fixtures"]
 markers = [
     "benchmark: deterministic gatekeeping benchmark task (ADR-0004, ADR-0005)",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
