@@ -198,3 +198,28 @@ def test_runtime_image_size_within_baseline() -> None:
         f"{IMAGE_SIZE_BASELINE.relative_to(ROOT)} in THIS PR with that "
         f"evidence."
     )
+
+
+def test_runtime_stage_has_healthcheck() -> None:
+    """Runtime stage must carry a HEALTHCHECK instruction (issue #813).
+
+    The runtime container should self-test so orchestrators can distinguish a
+    genuine startup failure from a process that reports ready prematurely.
+    """
+    dockerfile_text = DOCKERFILE.read_text(encoding="utf-8")
+
+    lines = dockerfile_text.splitlines()
+    runtime_start = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("FROM python") and "AS runtime" in stripped:
+            runtime_start = i
+            break
+
+    assert runtime_start is not None, "runtime stage (FROM ... AS runtime) not found in Dockerfile"
+
+    runtime_section = "\n".join(lines[runtime_start:])
+    assert "HEALTHCHECK" in runtime_section, (
+        "HEALTHCHECK not found in runtime stage. "
+        "Add HEALTHCHECK to the runtime stage of infra/docker/Dockerfile (issue #813)."
+    )
