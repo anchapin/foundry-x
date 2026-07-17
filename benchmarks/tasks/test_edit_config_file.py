@@ -53,7 +53,7 @@ TASK = BenchmarkTask(
     prompt=(
         "The file config.json contains a broken value for the key "
         '"port" under the "server" section. The port must be an integer '
-        "(e.g., 8080), not a string (e.g., \"8080\"). Fix ONLY the "
+        '(e.g., 8080), not a string (e.g., "8080"). Fix ONLY the '
         "broken port value; do not rewrite the whole file and do not "
         "modify any other keys. After the fix, validation must pass "
         "(python validate_config.py exits 0)."
@@ -127,8 +127,7 @@ def test_edit_config_file(benchmark_workspace: Path) -> None:
         f"got rc={bad.returncode} stdout={bad.stdout!r} stderr={bad.stderr!r}"
     )
     assert "port must be an integer" in bad.stderr, (
-        f"task {TASK.name}: expected 'port must be an integer' in stderr; "
-        f"got stderr={bad.stderr!r}"
+        f"task {TASK.name}: expected 'port must be an integer' in stderr; got stderr={bad.stderr!r}"
     )
 
     occurrences = broken_config_text.count(BROKEN_KEY_STR)
@@ -149,8 +148,7 @@ def test_edit_config_file(benchmark_workspace: Path) -> None:
         f"got rc={good.returncode} stdout={good.stdout!r} stderr={good.stderr!r}"
     )
     assert "Config valid:" in good.stdout, (
-        f"task {TASK.name}: expected 'Config valid:' in stdout; "
-        f"got stdout={good.stdout!r}"
+        f"task {TASK.name}: expected 'Config valid:' in stdout; got stdout={good.stdout!r}"
     )
 
     broken_data_cmp = dict(broken_data)
