@@ -129,8 +129,13 @@ under `benchmarks/tasks/`:
 - `test_evolver_guardrail_evals.py` — `ProposedEdit` confines edits
   to `harness/{system_prompt.txt,hooks/,skills/}` and the `Evolver`
   enforces the §"Rate limits" cap.
+- `test_foundation_token_budget.py` — token-budget mechanism is
+  resilient to prompt-injection attempts embedded in task fixtures;
+  the agent must not exfiltrate or manipulate the `FOUNDRY_TOKEN_BUDGET`
+  value when an adversarial input is present in the task description
+  (issue #822).
 
-A regression in any of the four flips the Critic red before the
+A regression in any of the five flips the Critic red before the
 proposed harness edit ships. The Critic additionally persists a
 regression baseline at `logs/critic_baseline.json` (ADR-0004 step 3,
 issue #186): once a benchmark task is recorded as passing, any
