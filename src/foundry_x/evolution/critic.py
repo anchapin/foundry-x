@@ -126,6 +126,7 @@ class CriticVerdict(BaseModel):
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
     notes: str = ""
+    edit_index: int | None = None
 
 
 class TaskResult(BaseModel):
@@ -530,7 +531,40 @@ class Critic:
         avg_cycle_time_s = sum(cycle_times) / len(cycle_times) if cycle_times else None
         return total_tokens, avg_cycle_time_s
 
-    def evaluate(self, proposed_diff: str) -> CriticVerdict:
+    def evaluate(self, proposed_diff: str, *, edit_index: int | None = None) -> CriticVerdict:
+        """Apply ``proposed_diff`` to a sandbox copy of the harness and gate it.
+
+        Steps (ADR-0004):
+
+        1. Copy ``harness_dir`` into a fresh ``TemporaryDirectory``.
+        2. Enforce the diff-size cap (``max_diff_lines``). An oversized diff
+           is rejected immediately (``failed_checks=["diff_size_cap"]``).
+        3. Scan the diff for prompt-injection markers (SECURITY.md Threat #2).
+           A diff carrying ``ignore previous instructions``-style phrases or
+           role-tag sequences is rejected immediately
+           (``failed_checks=["injection_detected"]``).
+        4. Apply ``proposed_diff`` via ``git apply``. A patch that does not
+           apply cleanly is rejected immediately (``failed_checks=["git apply"]``).
+        5. Run ``harness/scripts/load_check.py`` against the sandbox copy
+           (issue #187). A harness that fails to load -- broken
+           ``skills/*.json``, an unimportable hook, an empty system prompt
+           -- is rejected *before* pytest is spawned, so the verdict names
+           the precondition (``failed_checks=["load_check"]``) rather than
+           a confusing downstream pytest error.
+        6. Run pytest with ``self.pytest_args`` in the sandbox.
+
+        Every subprocess inside this method is bounded by
+        ``self.gate_timeout_s`` (issue #188). On
+        :class:`subprocess.TimeoutExpired` the verdict is
+        ``approved=False`` with ``failed_checks`` carrying the offending check
+        name suffixed ``":timeout"`` (e.g. ``"pytest:timeout"``), and
+        ``notes`` holds the trailing window of any partial output the
+        process managed to write before being killed — or a wall-clock-cap
+        message when no partial output was captured.
+
+        The verdict's ``approved`` flag is ``True`` only when every check that
+        runs succeeds. All filesystem mutations are confined to the temp copy.
+        """
         """Apply ``proposed_diff`` to a sandbox copy of the harness and gate it.
 
         Steps (ADR-0004):
@@ -580,6 +614,7 @@ class Critic:
                         passed_checks=[],
                         failed_checks=["diff_size_cap"],
                         notes=f"diff too large: {line_count} lines (cap={self.max_diff_lines})",
+                        edit_index=edit_index,
                     )
                 # Gate 2: Injection scan (issue #333 / SECURITY.md Threat #2).
                 #    the diff payload for prompt-injection markers before the
@@ -591,6 +626,7 @@ class Critic:
                         passed_checks=[],
                         failed_checks=["injection_detected"],
                         notes=f"injection pattern(s) in diff: {', '.join(injection_markers)}",
+                        edit_index=edit_index,
                     )
                 apply_result = subprocess.run(
                     ["git", "apply", "--whitespace=nowarn"],
@@ -605,6 +641,7 @@ class Critic:
                         passed_checks=[],
                         failed_checks=["git apply"],
                         notes=_tail(apply_result.stderr or apply_result.stdout),
+                        edit_index=edit_index,
                     )
                 passed_checks.append("git apply")
 
@@ -629,6 +666,7 @@ class Critic:
                     passed_checks=passed_checks,
                     failed_checks=[*failed_checks, "load_check"],
                     notes=_tail(load_result.stderr or load_result.stdout),
+                    edit_index=edit_index,
                 )
             passed_checks.append("load_check")
 
@@ -664,6 +702,7 @@ class Critic:
                 passed_checks=passed_checks,
                 failed_checks=failed_checks,
                 notes=_tail(combined),
+                edit_index=edit_index,
             )
 
 

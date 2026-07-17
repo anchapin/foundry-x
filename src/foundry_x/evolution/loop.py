@@ -145,8 +145,9 @@ def run_evolution_step(
     if critic is None:
         critic = Critic(harness_dir=harness_dir)
 
-    proposed_diff = _edits_to_diff(proposed_edits)
-    verdict = critic.evaluate(proposed_diff)
+    verdict = None
+    for idx, edit in enumerate(proposed_edits):
+        verdict = critic.evaluate(edit.unified_diff, edit_index=idx)
 
     return EvolutionResult(
         session_id=session_id,
