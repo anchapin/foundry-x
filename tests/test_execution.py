@@ -585,6 +585,8 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
     hook_delay_ms = 50
 
     class MockRegistryOneHook:
+        _hooks: list = []
+
         async def run_pre(self, call):
             await asyncio.sleep(hook_delay_ms / 1000.0)
             return call
@@ -628,6 +630,8 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
     hook2_delay_ms = 40
 
     class MockRegistryTwoHooks:
+        _hooks: list = []
+
         async def run_pre(self, call):
             await asyncio.sleep(hook1_delay_ms / 1000.0)
             await asyncio.sleep(hook2_delay_ms / 1000.0)
