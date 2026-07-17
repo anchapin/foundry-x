@@ -42,18 +42,18 @@ def test_pass():
 
 
 def _make_llm_response(target_file: str, rationale: str, unified_diff: str) -> str:
-    """Build a valid LLM JSON response with one proposed edit."""
+    """Build a valid LLM JSON response with one proposed edit (direct array format)."""
     edit = {
         "target_file": target_file,
         "rationale": rationale,
         "unified_diff": unified_diff,
     }
-    return json.dumps({"proposed_edits": [edit]})
+    return json.dumps([edit])
 
 
 def _make_llm_response_multi(edits: list[dict]) -> str:
-    """Build a valid LLM JSON response with multiple proposed edits."""
-    return json.dumps({"proposed_edits": edits})
+    """Build a valid LLM JSON response with multiple proposed edits (direct array format)."""
+    return json.dumps(edits)
 
 
 def _system_prompt_diff(new_content: str) -> str:
