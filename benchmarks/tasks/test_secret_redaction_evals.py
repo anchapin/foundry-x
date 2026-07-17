@@ -42,9 +42,7 @@ _STRIPE_LIVE_KEY = "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc"
 _SLACK_TOKEN = "xox" + "b-1234567890123-1234567890123-" + "abcdefghijklmnopqrstuvwx"
 # GCP token fixtures (issue #746).
 _GCP_ACCESS_TOKEN = "ya29." + "a-bC0dE1fG2hI3jK4lM5nO6pQ7rS8tU9vW0xY1zA2bC3dE4fG5hI6"
-_GCP_SERVICE_ACCOUNT = (
-    "my-service-account@developer.gserviceaccount.com"
-)
+_GCP_SERVICE_ACCOUNT = "my-service-account@developer.gserviceaccount.com"
 
 TASK = BenchmarkTask(
     name="secret_redaction",

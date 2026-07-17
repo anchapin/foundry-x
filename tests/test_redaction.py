@@ -50,9 +50,7 @@ _SLACK_TOKEN = "xox" + "b-1234567890123-1234567890123-" + "abcdefghijklmnopqrstu
 # does not flag the literal at commit time; the assembled value still
 # matches the redaction regex at runtime.
 _GCP_ACCESS_TOKEN = "ya29." + "a-bC0dE1fG2hI3jK4lM5nO6pQ7rS8tU9vW0xY1zA2bC3dE4fG5hI6"
-_GCP_SERVICE_ACCOUNT = (
-    "my-service-account@developer.gserviceaccount.com"
-)
+_GCP_SERVICE_ACCOUNT = "my-service-account@developer.gserviceaccount.com"
 
 _BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
 
