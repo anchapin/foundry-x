@@ -948,7 +948,7 @@ class Evolver:
         failure: FailureReport,
         max_retries: int = 2,
     ) -> list[ProposedEdit]:
-        """Generate ProposedEdit objects via an LLM call (issue #477).
+        """>Generate ProposedEdit objects via an LLM call (issue #477).
 
         Calls ``adapter.complete()`` with a prompt built from the FailureReport,
         parses the JSON response into ProposedEdit objects, validates each edit

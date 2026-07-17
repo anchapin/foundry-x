@@ -16,7 +16,9 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,11 +31,10 @@ from foundry_x.evolution.critic import (
 )
 from foundry_x.evolution.digester import Digester, FailureReport
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
+from foundry_x.evolution.loop import run_evolution_step_async
 from foundry_x.execution.runner import resolve_harness_version
 from foundry_x.evolution.store import ProposedEditStore, TrackedProposedEdit, ProposedEditStatus
 from foundry_x.trace.logger import TraceLogger
-
-import subprocess
 
 
 def _infer_backend(trace_db: str) -> str:
@@ -221,6 +222,53 @@ def _run_loop(
     return report, edit, verdict, exit_code, harness_version
 
 
+async def _run_loop_async(
+    session_id: str,
+    trace_db: str,
+    harness_dir: Path,
+    verbose: bool = False,
+) -> tuple[FailureReport, ProposedEdit | None, CriticVerdict | None, int]:
+    """Async variant of _run_loop.
+
+    Phase 1: awaits run_evolution_step_async (no-op, Critic is still sync).
+    """
+    backend = _infer_backend(trace_db)
+    logger = TraceLogger(trace_db, backend=backend)
+    events = logger.load_session(session_id)
+    if not events:
+        sys.stderr.write(f"No events found for session {session_id}.\n")
+        return None, None, None, 2
+
+    result = await run_evolution_step_async(
+        session_id=session_id,
+        events=events,
+        harness_dir=harness_dir,
+    )
+
+    report = result.failure_report
+    print(_render_failure_report(report))
+    print()
+
+    if report.proposed_class == "clean":
+        print("No failure detected — evolution loop complete.")
+        return report, None, None, 0
+
+    if not result.proposed_edits:
+        print("Evolver returned no ProposedEdit objects.")
+        return report, None, None, 0
+
+    edit = result.proposed_edits[0]
+    print(_render_proposed_edit(edit, verbose=verbose))
+    print()
+
+    if result.verdict is not None:
+        print(_render_critic_verdict(result.verdict))
+        print()
+
+    exit_code = 0 if (result.verdict and result.verdict.verdict) else 1
+    return report, edit, result.verdict, exit_code
+
+
 def _list_pending(args: argparse.Namespace) -> int:
     """Implement ``foundry-evolve list-pending`` (issue #498)."""
     store = ProposedEditStore(args.store)
@@ -334,6 +382,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="Print the full unified_diff of each ProposedEdit.",
+    )
+    parser.add_argument(
+        "--async",
+        dest="use_async",
+        action="store_true",
+        help="Run the evolution loop asynchronously (Phase 1: no-op, awaits the call).",
     )
     return parser
 
@@ -592,13 +646,22 @@ def _main_evolve(args: argparse.Namespace) -> int:
 def _main_evolve_legacy(argv: list[str] | None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    _report, _edit, _verdict, exit_code, harness_version = _run_loop(
-        session_id=args.session_id,
-        trace_db=args.trace_db,
-        harness_dir=args.harness_dir,
-        verbose=args.verbose,
-    )
-    print(f"Harness version: {harness_version}")
+    if args.use_async:
+        _report, _edit, _verdict, exit_code = asyncio.run(
+            _run_loop_async(
+                session_id=args.session_id,
+                trace_db=args.trace_db,
+                harness_dir=args.harness_dir,
+                verbose=args.verbose,
+            )
+        )
+    else:
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
+            session_id=args.session_id,
+            trace_db=args.trace_db,
+            harness_dir=args.harness_dir,
+            verbose=args.verbose,
+        )
     return exit_code
 
 
