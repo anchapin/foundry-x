@@ -1502,6 +1502,7 @@ async def run_task(
             return await _bash_skill_executor(name, arguments, workspace_dir=workspace_root)
         if name in ("list_dir", "grep_search", "edit_file", "write_file"):
             return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
+<<<<<<< HEAD
         if name in ("read_file", "read_multiple_files"):
             return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
         return await _default_skill_executor(name, arguments)
