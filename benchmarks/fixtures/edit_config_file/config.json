@@ -1,0 +1,16 @@
+{
+  "app_name": "my_app",
+  "version": "1.0.0",
+  "server": {
+    "host": "127.0.0.1",
+    "port": "8080"
+  },
+  "database": {
+    "pool_size": 10,
+    "timeout": 30.0
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(levelname)s - %(message)s"
+  }
+}
