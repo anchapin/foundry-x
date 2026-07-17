@@ -732,15 +732,11 @@ class TraceLogger:
         assert self._conn is not None  # backend == "sqlite"
         with self._conn:
             cur = self._conn.execute(
-                "DELETE FROM events WHERE session_id IN ("
-                + ",".join("?" * len(to_delete))
-                + ")",
+                "DELETE FROM events WHERE session_id IN (" + ",".join("?" * len(to_delete)) + ")",
                 list(to_delete),
             )
             cur = self._conn.execute(
-                "DELETE FROM sessions WHERE session_id IN ("
-                + ",".join("?" * len(to_delete))
-                + ")",
+                "DELETE FROM sessions WHERE session_id IN (" + ",".join("?" * len(to_delete)) + ")",
                 list(to_delete),
             )
         return cur.rowcount
