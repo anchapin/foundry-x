@@ -537,7 +537,10 @@ def test_fail_closed_when_coercion_raises():
     result = ToolResult(name="test_tool", output=uncoerceable)
     out = asyncio.run(hook.post_tool(_CALL, result))
 
-    assert out.output == "[injection_firewall] output suppressed: injection scan failed. Treating as potentially unsafe."
+    assert (
+        out.output
+        == "[injection_firewall] output suppressed: injection scan failed. Treating as potentially unsafe."
+    )
     assert out.error == "injection_scan_error:coercion_or_scan_failed"
 
 
