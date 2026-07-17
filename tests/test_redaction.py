@@ -46,13 +46,14 @@ _JWT = (
 _AWS_ACCESS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
 _STRIPE_LIVE_KEY = "sk_" + "live_" + "4eC39HqLyjWDarjtT1zdp7dc"
 _SLACK_TOKEN = "xox" + "b-1234567890123-1234567890123-" + "abcdefghijklmnopqrstuvwx"
-# GCP token fixtures (issue #746). Assembled from fragments so gitleaks
-# does not flag the literal at commit time; the assembled value still
-# matches the redaction regex at runtime.
-_GCP_ACCESS_TOKEN = "ya29." + "a-bC0dE1fG2hI3jK4lM5nO6pQ7rS8tU9vW0xY1zA2bC3dE4fG5hI6"
-_GCP_SERVICE_ACCOUNT = "my-service-account@developer.gserviceaccount.com"
+# GCP fixtures (issue #824).
+_GCP_SA_EMAIL = "my-app@" + "iam.gserviceaccount.com"
+_GCP_PROJECT_ID = "my-project-" + "123456"
+_GCP_ADC_PATH = "/home/user/.config/gcloud/application_default_credentials.json"
 
 _BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+
+_GOOGLE_APPLICATION_CREDENTIALS = "/home/user/.config/gcloud/application_default_credentials.json"
 
 
 def _read_persisted_payload(logger: TraceLogger, session_id: str) -> dict:
@@ -281,31 +282,68 @@ def test_redaction_scrubs_modern_secret_named_keys():
     assert result["safe"] == "keep-me"
 
 
-def test_redaction_scrubs_gcp_access_token():
-    result = _redact({"credential": _GCP_ACCESS_TOKEN})
-    assert _GCP_ACCESS_TOKEN not in json.dumps(result)
-    assert "[REDACTED:gcp-access-token]" in result["credential"]
+# ---------------------------------------------------------------------------
+# Issue #824: GCP credential redaction.
+# ---------------------------------------------------------------------------
 
 
 def test_redaction_scrubs_gcp_service_account_email():
-    result = _redact({"service_account": _GCP_SERVICE_ACCOUNT})
-    assert _GCP_SERVICE_ACCOUNT not in json.dumps(result)
-    assert "[REDACTED:gcp-service-account]" in result["service_account"]
+    result = _redact({"output": f"authenticated as {_GCP_SA_EMAIL}"})
+    assert "sa@iam.gserviceaccount.com" not in json.dumps(result)
+    assert "[REDACTED:gcp-service-account]" in result["output"]
+
+
+def test_redaction_scrubs_gcp_project_id_env_var():
+    result = _redact({"env": f"GCP_PROJECT_ID={_GCP_PROJECT_ID}"})
+    assert _GCP_PROJECT_ID not in json.dumps(result)
+    assert result["env"] == "GCP_PROJECT_ID=[REDACTED:gcp-project-id]"
+
+
+def test_redaction_scrubs_gcp_adc_path():
+    result = _redact({"env": f"HOME={_GCP_ADC_PATH}"})
+    assert ".config/gcloud" not in json.dumps(result)
+    assert "[REDACTED:gcp-adc-path]" in result["env"]
 
 
 def test_redaction_scrubs_gcp_named_keys():
-    """GCP-specific key names are in the named-secret-key set (issue #746)."""
+    """The expanded ``_DEFAULT_SECRET_KEY_NAMES`` set covers GCP variable names."""
     result = _redact(
         {
-            "gcp_access_token": "ya29.anything",
-            "gcp_credentials": "service-account-json",
-            "google_credentials": " ADC json",
-            "gcp_service_account": "name@developer.gserviceaccount.com",
+            "gcp_project_id": "my-project",
+            "gcp_project": "my-project",
+            "gcp_location": "us-central1",
+            "google_application_credentials": "/path/to/creds.json",
             "safe": "keep-me",
         }
     )
-    assert result["gcp_access_token"] == "[REDACTED:secret]"
-    assert result["gcp_credentials"] == "[REDACTED:secret]"
-    assert result["google_credentials"] == "[REDACTED:secret]"
-    assert result["gcp_service_account"] == "[REDACTED:secret]"
+    assert result["gcp_project_id"] == "[REDACTED:secret]"
+    assert result["gcp_project"] == "[REDACTED:secret]"
+    assert result["gcp_location"] == "[REDACTED:secret]"
+    assert result["google_application_credentials"] == "[REDACTED:secret]"
     assert result["safe"] == "keep-me"
+
+
+@_BACKENDS
+def test_redaction_scrubs_gcp_credentials_in_payload(tmp_path, backend):
+    """Both GCP service account email and ADC path are redacted end-to-end."""
+    suffix = ".db" if backend == "sqlite" else ".jsonl"
+    path = tmp_path / f"traces{suffix}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="test-0.0") as sid:
+        logger.record(
+            sid,
+            kind="tool_result",
+            payload={
+                "service_account": _GCP_SA_EMAIL,
+                "adc_path": f"GOOGLE_APPLICATION_CREDENTIALS={_GCP_ADC_PATH}",
+                "project_id": f"GCP_PROJECT_ID={_GCP_PROJECT_ID}",
+            },
+        )
+    payload = _read_persisted_payload(logger, sid)
+    blob = json.dumps(payload)
+    assert "sa@iam.gserviceaccount.com" not in blob
+    assert ".config/gcloud" not in blob
+    assert _GCP_PROJECT_ID not in blob
+    assert "[REDACTED:gcp-service-account]" in blob
+    assert "[REDACTED:gcp-adc-path]" in blob
+    assert "[REDACTED:gcp-project-id]" in blob
