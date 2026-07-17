@@ -1700,8 +1700,8 @@ async def run_task(
                     payload={
                         "step": step,
                         "call_id": tool_call.id,
-                        "name": tool_call.function.name,
-                        "arguments": arguments,
+                        "name": call.name,
+                        "arguments": call.arguments,
                         "duration_ms": 0,
                         "hook_overhead_ms": hook_overhead_ms,
                     },
