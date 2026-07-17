@@ -675,4 +675,3 @@ def test_firewall_exception_risk_score_accumulates():
     fw = captured[1]
     # ignore_previous (1) + role_tag_colon (2) = 3 minimum.
     assert fw["risk_score"] >= 3
->>>>>>> 51fe075 (feat(trace): resolve #823 — emit firewall_exception event on every blocked hook call)
