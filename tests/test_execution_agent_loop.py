@@ -716,6 +716,80 @@ def test_parse_tool_arguments_unit():
     assert "expected JSON object" in (non_dict.error or "")
 
 
+def test_agent_loop_records_two_tool_results_for_parallel_tool_calls(tmp_path, monkeypatch):
+    """Issue #611 acceptance: when a single ModelResponse carries two
+    ``tool_calls``, the loop records two distinct ``tool_result`` events
+    with different ``call_id`` values, then terminates with
+    ``outcome.status='success'`` and ``outcome.reason='final_answer'``
+    after processing both.
+
+    This guards against a regression that drops or reorders parallel tool
+    results — the most common real-world agent turn shape (e.g. "read file
+    X then edit file Y").
+    """
+    db = tmp_path / "traces.db"
+
+    tool_call_a = ModelToolCall(
+        id="call_read_1",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments=json.dumps({"command": "echo read", "cwd": str(tmp_path)}),
+        ),
+    )
+    tool_call_b = ModelToolCall(
+        id="call_edit_2",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments=json.dumps({"command": "echo edit", "cwd": str(tmp_path)}),
+        ),
+    )
+    responses = [
+        ModelResponse(
+            message=ModelMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[tool_call_a, tool_call_b],
+            ),
+            tool_calls=[tool_call_a, tool_call_b],
+            finish_reason="tool_calls",
+        ),
+        ModelResponse(
+            message=ModelMessage(role="assistant", content="done"),
+            finish_reason="stop",
+        ),
+    ]
+    adapter = _ScriptedAdapter(responses)
+    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
+    monkeypatch.setattr(sys, "argv", _argv("parallel-tools", db, REPO_HARNESS_DIR))
+
+    main()
+
+    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
+    tool_result_events = [e for e in events if e.kind == "tool_result"]
+
+    assert len(tool_result_events) == 2, (
+        f"expected exactly two tool_result events, got {len(tool_result_events)}: "
+        f"{[(e.payload.get('call_id'), e.payload.get('name')) for e in tool_result_events]!r}"
+    )
+
+    call_ids = {e.payload["call_id"] for e in tool_result_events}
+    assert call_ids == {"call_read_1", "call_edit_2"}, (
+        f"expected distinct call_ids {{'call_read_1', 'call_edit_2'}}, got {call_ids!r}"
+    )
+
+    for tr in tool_result_events:
+        assert tr.payload["error"] is None, (
+            f"unexpected error for {tr.payload['call_id']}: {tr.payload['error']}"
+        )
+
+    outcome_event = next(event for event in events if event.kind == "outcome")
+    assert outcome_event.payload["status"] == "success", outcome_event.payload
+    assert outcome_event.payload["reason"] == "final_answer", outcome_event.payload
+    assert outcome_event.payload["steps"] == 2
+
+
 def test_agent_loop_emits_hook_registry_error_when_get_registry_raises(tmp_path, monkeypatch):
     """Issue #260: when ``harness.hooks.get_registry()`` raises after a
     successful lazy import, ``run_task`` must record a
