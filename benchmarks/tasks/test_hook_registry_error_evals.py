@@ -1,24 +1,16 @@
-"""Benchmark task: hook_registry_error is emitted when get_registry() raises (issue #647).
+"""Benchmark task: hook_registry_error is emitted when get_registry() raises (issue #619).
 
-Regression target for ``src/foundry_x/execution/runner._resolve_hook_registry``
-(issue #260). When ``harness.hooks.get_registry()`` raises after a successful
-lazy import, the runner must:
-
-1. Record exactly one ``hook_registry_error`` trace event (with
-   ``error_type`` and ``message``) so the Digester and operator observe
-   that the security-critical injection firewall is off.
-2. Return ``None`` so the session continues in degraded mode (no hooks
-   fan-out), rather than crashing or silently swallowing the exception
-   (AGENTS.md §2 — never silently swallow an exception).
-
-A regression that removes the event, emits it more than once, or raises
-instead of returning ``None`` surfaces here as a failing benchmark and
-blocks the harness edit at PR review (ADR-0004).
-
-SECURITY.md §"Prompt-input firewall" names ``InjectionFirewallHook`` as
-security-critical. When the hook registry is unavailable, that entire
-layer is disabled for the session. The ``hook_registry_error`` event is
-the operator's only signal that this has happened.
+Regression target for the ``_resolve_hook_registry`` failure path in
+``src/foundry_x/execution/runner.py`` (issue #260). When the harness IS
+importable but ``get_registry()`` raises, every security-critical hook —
+including the ``InjectionFirewallHook`` mandated by ``SECURITY.md`` —
+would be silently disabled for the entire session (AGENTS.md §2 — never
+silently swallow an exception). The ``hook_registry_error`` trace event
+records that the firewall layer is off so the Digester and operator can
+observe the degraded mode. A regression that removes the try/except around
+the ``get_registry()`` call, that drops the ``hook_registry_error`` record,
+or that raises before the trace signal surfaces here as a failing
+benchmark and blocks the harness edit at PR review (ADR-0004).
 """
 
 from __future__ import annotations
@@ -36,7 +28,7 @@ from foundry_x.execution.model_adapter import (
     ModelToolCallChunk,
     ToolCallFunctionChunk,
 )
-from foundry_x.execution.runner import main
+from foundry_x.execution.runner import _resolve_hook_registry, main
 from foundry_x.trace.logger import TraceLogger
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -94,23 +86,22 @@ def _argv(task: str, db_path: Path, harness_dir: Path) -> list[str]:
 TASK = BenchmarkTask(
     name="hook_registry_error",
     description=(
-        "When get_registry() raises, the runner records exactly one "
-        "hook_registry_error trace event and completes the session in "
-        "degraded mode (no hooks, including the security-critical "
-        "InjectionFirewallHook)."
+        "_resolve_hook_registry emits a hook_registry_error trace event "
+        "when harness.hooks.get_registry() raises, and returns None so the "
+        "session continues in degraded mode (no hook fan-out)."
     ),
     prompt=(
         "Inspect src/foundry_x/execution/runner.py: confirm "
-        "_resolve_hook_registry still catches Exception from "
-        "get_registry(), records hook_registry_error with error_type "
-        "and message, and returns None so the session continues in "
-        "degraded mode."
+        "_resolve_hook_registry still wraps the get_registry() call in a "
+        "try/except, records a hook_registry_error event with error_type "
+        "and message payload when it catches, and returns None so the "
+        "session survives in degraded mode."
     ),
     difficulty_tier="medium",
     expected_outcome=(
-        "When get_registry() raises: exactly one hook_registry_error "
-        "event is emitted with error_type and message payload; the "
-        "session outcome is 'success' (degraded mode, not task_failed)."
+        "hook_registry_error is recorded with error_type and message "
+        "payload; _resolve_hook_registry returns None; no exception "
+        "propagates to the caller."
     ),
     tags=["security"],
 )
@@ -212,3 +203,60 @@ def test_hook_registry_error_captures_any_exception_type(tmp_path, monkeypatch) 
 
     outcome_event = next(event for event in events if event.kind == "outcome")
     assert outcome_event.payload["status"] == "success"
+
+
+@pytest.mark.benchmark
+def test_hook_registry_error_is_recorded_and_returns_none(
+    tmp_trace_logger: TraceLogger,
+) -> None:
+    """When get_registry() raises, hook_registry_error is recorded and None is returned.
+
+    The test patches ``harness.hooks.get_registry`` to raise a
+    ``RuntimeError``, calls ``_resolve_hook_registry``, and asserts:
+    1. The function returns ``None`` (degraded mode).
+    2. A ``hook_registry_error`` event is recorded with the correct payload.
+    3. No exception propagates to the caller.
+
+    A regression that drops the try/except, swallows the event, or raises
+    before the record call fails one of the assertions.
+    """
+    import unittest.mock
+    import harness.hooks
+
+    def _failing_get_registry() -> object:
+        raise RuntimeError("registry unavailable: disk full")
+
+    with tmp_trace_logger.session(harness_version="test") as session_id:
+        with unittest.mock.patch.object(
+            harness.hooks,
+            "get_registry",
+            side_effect=_failing_get_registry,
+        ):
+            result = _resolve_hook_registry(tmp_trace_logger, session_id)
+
+    assert result is None, (
+        "_resolve_hook_registry must return None when get_registry() raises "
+        f"so the session continues in degraded mode; got {result!r}"
+    )
+
+    events = tmp_trace_logger.load_session(session_id)
+    hook_error_events = [e for e in events if e.kind == "hook_registry_error"]
+    assert len(hook_error_events) == 1, (
+        f"exactly one hook_registry_error event must be recorded; got {len(hook_error_events)}"
+    )
+    payload = hook_error_events[0].payload
+    assert payload.get("error_type") == "RuntimeError", (
+        f"error_type must be RuntimeError; got {payload.get('error_type')!r}"
+    )
+    assert "disk full" in payload.get("message", ""), (
+        f"message must contain the exception text; got {payload.get('message')!r}"
+    )
+
+
+@pytest.fixture
+def tmp_trace_logger(tmp_path: Path) -> TraceLogger:
+    """Provide a TraceLogger backed by a temporary JSONL file."""
+    db_path = tmp_path / "trace.jsonl"
+    logger = TraceLogger(db_path, backend="jsonl")
+    yield logger
+    logger.close()
