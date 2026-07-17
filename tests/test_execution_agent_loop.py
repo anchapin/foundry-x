@@ -129,9 +129,12 @@ def _reset_default_registry() -> None:
     """
     try:
         from harness.hooks.base import reset_default_registry
+        from harness.hooks.injection_firewall import InjectionFirewallHook
+        from harness.hooks import register_hook
     except ImportError:
         return
     reset_default_registry()
+    register_hook(InjectionFirewallHook())
 
 
 @pytest.fixture(autouse=True)
