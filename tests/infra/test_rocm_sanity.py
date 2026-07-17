@@ -374,46 +374,59 @@ class _FakeLlamaServer:
         self.server_dir.mkdir(parents=True, exist_ok=True)
         _subprocess.run(
             ["git", "init", "-q", str(self.server_dir)],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         _subprocess.run(
             ["git", "config", "user.email", "test@test.test"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
             cwd=str(self.server_dir),
         )
         _subprocess.run(
             ["git", "config", "user.name", "test"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
             cwd=str(self.server_dir),
         )
         readme = self.server_dir / "README"
         readme.write_text("mock", encoding="utf-8")
         _subprocess.run(
             ["git", "add", "README"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
             cwd=str(self.server_dir),
         )
         _subprocess.run(
             ["git", "commit", "-q", "-m", "init"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
             cwd=str(self.server_dir),
         )
         _subprocess.run(
             ["git", "tag", "b9957", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
             cwd=str(self.server_dir),
         )
         _subprocess.run(
             ["git", "remote", "add", "origin", str(self.server_dir)],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
             cwd=str(self.server_dir),
         )
 
         self.build_dir.mkdir(parents=True, exist_ok=True)
         cmakeLists = self.server_dir / "CMakeLists.txt"
         cmakeLists.write_text(
-            "cmake_minimum_required(VERSION 3.16)\n"
-            "add_custom_target(llama-server ALL DEPENDS)\n",
+            "cmake_minimum_required(VERSION 3.16)\nadd_custom_target(llama-server ALL DEPENDS)\n",
             encoding="utf-8",
         )
         self.build_dir.joinpath("bin").mkdir(parents=True, exist_ok=True)
@@ -466,9 +479,7 @@ if __name__ == "__main__":
     time.sleep(30)
 """
         (self.build_dir / "llama-server").write_text(content, encoding="utf-8")
-        (self.build_dir / "llama-server").chmod(
-            self.build_dir.stat().st_mode | stat.S_IXUSR
-        )
+        (self.build_dir / "llama-server").chmod(self.build_dir.stat().st_mode | stat.S_IXUSR)
 
     def env_from_fake(self, fake: FakeRocm, **extra: str) -> dict[str, str]:
         marker_file = self.root / ".gpu_marker"
