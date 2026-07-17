@@ -157,10 +157,8 @@ def _run_with_mock_curl(
 
         try:
             return _run_script(
-                "--task",
-                "test task",
-                "--model",
-                "/srv/models/test-model.Q5_K_M.gguf",
+                "--task", "test task",
+                "--model", "/srv/models/test-model.Q5_K_M.gguf",
                 *extra_args,
                 env=run_env,
             )
