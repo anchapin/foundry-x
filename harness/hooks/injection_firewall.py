@@ -339,7 +339,7 @@ class InjectionFirewallHook:
     def __init__(
         self,
         policy: Literal["block", "warn"] = "block",
-        tracer: Callable[[dict[str, Any]], None] | None = None,
+        tracer: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         if policy not in ("block", "warn"):
             raise ValueError(f"injection_firewall: unknown policy {policy!r}")
@@ -447,14 +447,14 @@ class InjectionFirewallHook:
         }
 
         try:
-            self._tracer(injection_payload)
+            self._tracer("injection_blocked", injection_payload)
         except Exception:
             _log.exception(
                 "injection_firewall: tracer raised injection_payload on block of tool %r; isolating and continuing",
                 tool_name,
             )
         try:
-            self._tracer(firewall_payload)
+            self._tracer("firewall_exception", firewall_payload)
         except Exception:
             _log.exception(
                 "injection_firewall: tracer raised firewall_payload on block of tool %r; isolating and continuing",
@@ -496,7 +496,7 @@ class InjectionFirewallHook:
 def register_into(
     registry: HookRegistry,
     *,
-    tracer: Callable[[dict[str, Any]], None] | None = None,
+    tracer: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> InjectionFirewallHook:
     """Install a fresh :class:`InjectionFirewallHook` into ``registry``.
 
@@ -507,8 +507,9 @@ def register_into(
 
     Passing ``tracer=`` wires the new hook's block path to the supplied
     sink (typically a closure over ``TraceLogger.record``) so the runner
-    or sandbox emits the ``injection_blocked`` trace event (issue #120)
-    without coupling the harness package to ``foundry_x``.
+    or sandbox emits the ``injection_blocked`` and ``firewall_exception``
+    trace events (issue #120, issue #823) without coupling the harness
+    package to ``foundry_x``.
     """
     hook = InjectionFirewallHook(tracer=tracer)
     registry.register(hook)
