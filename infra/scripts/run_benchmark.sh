@@ -28,11 +28,12 @@
 #   --dry-run             Print the resolved docker compose invocation and exit.
 #
 # Env vars (all optional):
-#   LLAMACPP_HOST          Host for /health probe (default http://127.0.0.1:8080)
-#   LLAMACPP_SERVER_BIN    Path to llama-server binary (default: LLAMACPP_DIR/build/bin/llama-server)
-#   LLAMACPP_DIR           llama.cpp checkout (default $HOME/llama.cpp)
-#   LLAMACPP_NGL           GPU layers to offload (default 0)
+#   LLAMACPP_HOST            Host for /health probe (default http://127.0.0.1:8080)
+#   LLAMACPP_SERVER_BIN      Path to llama-server binary (default: LLAMACPP_DIR/build/bin/llama-server)
+#   LLAMACPP_DIR             llama.cpp checkout (default $HOME/llama.cpp)
+#   LLAMACPP_NGL             GPU layers to offload (default 0)
 #   LLAMACPP_HEALTH_TIMEOUT  /health deadline in seconds (default 60)
+#   LLAMACPP_MODEL_OVERRIDE  Allow override when running model differs from --model (for sweeps)
 #
 set -euo pipefail
 
@@ -70,7 +71,7 @@ Optional:
   --dry-run                  Print the resolved docker compose argv and exit.
 
 Env: LLAMACPP_HOST, LLAMACPP_SERVER_BIN, LLAMACPP_DIR, LLAMACPP_NGL,
-     LLAMACPP_HEALTH_TIMEOUT
+     LLAMACPP_HEALTH_TIMEOUT, LLAMACPP_MODEL_OVERRIDE
 USAGE
 }
 
@@ -132,6 +133,12 @@ llamacpp_is_healthy() {
     local resp
     resp="$(curl -fsS "${LLAMACPP_HOST_URL}/health" 2>/dev/null || true)"
     [[ "$resp" == *'"ok"'* ]]
+}
+
+get_running_model() {
+    curl -fsS "${LLAMACPP_HOST_URL}/v1/models" 2>/dev/null \
+        | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | head -n1 || true
 }
 
 wait_for_health() {
@@ -201,6 +208,27 @@ if ! llamacpp_is_healthy; then
         >"$SERVER_LOG" 2>&1 &
     SERVER_PID=$!
     SERVER_LAUNCHED=1
+elif [[ -n "$MODEL" ]]; then
+    running_model="$(get_running_model)"
+    if [[ -z "$running_model" ]]; then
+        echo "error: could not determine model name from running server at ${LLAMACPP_HOST_URL}" >&2
+        echo "       The /v1/models endpoint did not return a model id." >&2
+        exit 1
+    fi
+    expected_model="$(basename "$MODEL")"
+    if [[ "$running_model" != "$expected_model" ]]; then
+        if [[ "${LLAMACPP_MODEL_OVERRIDE:-0}" != "1" ]]; then
+            echo "error: running server is serving '${running_model}' but benchmark targets '${expected_model}'" >&2
+            echo "       Either stop the other server or set LLAMACPP_MODEL_OVERRIDE=1 to override." >&2
+            exit 1
+        else
+            echo "==> WARNING: LLAMACPP_MODEL_OVERRIDE is set; proceeding despite model mismatch" >&2
+            echo "    running: ${running_model}" >&2
+            echo "    expected: ${expected_model}" >&2
+        fi
+    else
+        echo "==> Verified running server is serving model: ${running_model}"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
