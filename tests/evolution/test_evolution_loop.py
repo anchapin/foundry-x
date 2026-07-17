@@ -206,6 +206,8 @@ class TestEvolutionResultModel:
             proposed_edits=[],
             verdict=None,
             harness_version="v1.2.3",
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
         )
         assert result.harness_version == "v1.2.3"
 
@@ -222,6 +224,8 @@ class TestEvolutionResultModel:
             failure_report=report,
             proposed_edits=[],
             verdict=None,
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
         )
         assert result.harness_version is None
 
