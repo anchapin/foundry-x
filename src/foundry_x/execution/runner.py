@@ -1602,8 +1602,12 @@ async def run_task(
                     )
 
                 call = hook_call_cls(name=tool_call.function.name, arguments=arguments)
+                hook_start = time.monotonic()
                 if registry is not None:
                     call = await registry.run_pre(call)
+                hook_overhead_ms: int | None = (
+                    int((time.monotonic() - hook_start) * 1000) if registry is not None else None
+                )
 
                 log.record(
                     session_id,
@@ -1614,6 +1618,7 @@ async def run_task(
                         "name": tool_call.function.name,
                         "arguments": arguments,
                         "duration_ms": 0,
+                        "hook_overhead_ms": hook_overhead_ms,
                     },
                 )
                 start = time.monotonic()
@@ -1634,6 +1639,7 @@ async def run_task(
                         "name": tool_call.function.name,
                         "arguments": arguments,
                         "duration_ms": duration_ms,
+                        "hook_overhead_ms": hook_overhead_ms,
                     },
                 )
                 result = hook_result_cls(name=call.name, output=output, error=error)
