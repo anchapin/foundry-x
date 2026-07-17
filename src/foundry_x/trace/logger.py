@@ -108,6 +108,10 @@ _AWS_ACCESS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
 _STRIPE_LIVE_KEY_RE = re.compile(r"\b(?:sk|pk|rk)_(?:live|restricted)_[A-Za-z0-9]{16,}")
 # Slack tokens: xox[baprs]- followed by the segment body.
 _SLACK_TOKEN_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}")
+# GCP access tokens — Google OAuth2 tokens for GCP APIs, prefixed ya29.
+_GCP_ACCESS_TOKEN_RE = re.compile(r"\bya29\.[A-Za-z0-9\-_]+\b")
+# GCP service-account emails — used in ADC and workload identity.
+_GCP_SERVICE_ACCOUNT_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@developer\.gserviceaccount\.com\b")
 
 _DEFAULT_SECRET_KEY_NAMES: frozenset[str] = frozenset(
     {
@@ -130,6 +134,10 @@ _DEFAULT_SECRET_KEY_NAMES: frozenset[str] = frozenset(
         "slack_token",
         "stripe_key",
         "token",
+        "gcp_access_token",
+        "gcp_credentials",
+        "google_credentials",
+        "gcp_service_account",
     }
 )
 
@@ -140,6 +148,10 @@ def _redact_value(value: str) -> str:
     Order matters only for readability: PEM blocks (which can contain
     ``-----BEGIN`` and ``sk-``-like substrings) are scrubbed first, then
     the remaining content-patterns. Token order is fixed across calls.
+
+    Covers: PEM blocks, JWTs, sk- API keys, GitHub classic/fine-grained
+    PATs, AWS access key IDs, Stripe live keys, Slack tokens, Bearer
+    headers, GCP access tokens (ya29...), and GCP service-account emails.
     """
     value = _PEM_RE.sub("[REDACTED:pem]", value)
     value = _JWT_RE.sub("[REDACTED:jwt]", value)
@@ -150,6 +162,8 @@ def _redact_value(value: str) -> str:
     value = _STRIPE_LIVE_KEY_RE.sub("[REDACTED:stripe-key]", value)
     value = _SLACK_TOKEN_RE.sub("[REDACTED:slack-token]", value)
     value = _BEARER_RE.sub("[REDACTED:bearer]", value)
+    value = _GCP_ACCESS_TOKEN_RE.sub("[REDACTED:gcp-access-token]", value)
+    value = _GCP_SERVICE_ACCOUNT_RE.sub("[REDACTED:gcp-service-account]", value)
     return value
 
 
@@ -164,8 +178,9 @@ def _redact(
     replaced with ``[REDACTED:secret]`` regardless of content; all other
     string values are scanned for ``sk-...``, ``Bearer ...``, PEM blocks,
     GitHub classic/fine-grained PATs, JWTs, AWS access key IDs, Stripe
-    live keys, and Slack tokens. Issue #121 added the modern-token set
-    and the metadata-path coverage.
+    live keys, Slack tokens, GCP access tokens, and GCP service-account
+    emails. Issue #121 added the modern-token set and the metadata-path
+    coverage. Issue #746 adds GCP credential patterns.
     """
     if isinstance(payload, dict):
         redacted: dict[str, Any] = {}
