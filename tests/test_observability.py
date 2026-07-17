@@ -417,6 +417,95 @@ def test_cli_timeline_default_format_is_markdown(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# Issue #710: fx-trace timeline --kind / -k filter by event kind.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_timeline_kind_filter_single_kind(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+
+    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid, "--kind", "tool_call"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tool_call" in out
+    assert "user_prompt" not in out
+    # Only the tool_call event should appear.
+    step_lines = [ln for ln in out.splitlines() if re.search(r"#\d+", ln)]
+    assert len(step_lines) == 1
+
+
+def test_cli_timeline_kind_filter_short_form(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+
+    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid, "-k", "tool_result"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tool_result" in out
+    assert "tool_call" not in out
+    step_lines = [ln for ln in out.splitlines() if re.search(r"#\d+", ln)]
+    assert len(step_lines) == 1
+
+
+def test_cli_timeline_kind_filter_multiple_kinds(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+
+    rc = cli_main(
+        ["timeline", "--db", str(db), "--session-id", sid, "--kind", "tool_call,tool_result"]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tool_call" in out
+    assert "tool_result" in out
+    assert "user_prompt" not in out
+    # Two step lines: tool_call and tool_result.
+    step_lines = [ln for ln in out.splitlines() if re.search(r"#\d+", ln)]
+    assert len(step_lines) == 2
+
+
+def test_cli_timeline_kind_filter_json_format(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+
+    rc = cli_main(
+        [
+            "timeline",
+            "--db",
+            str(db),
+            "--session-id",
+            sid,
+            "--kind",
+            "tool_call",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 1
+    assert payload[0]["kind"] == "tool_call"
+
+
+def test_cli_timeline_kind_filter_no_match_returns_empty(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+
+    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid, "--kind", "model_response"])
+
+    # When the kind filter yields no events, the CLI reports "not found or empty".
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "not found or empty" in captured.err
+
+
+# ---------------------------------------------------------------------------
 # Issue #268: fx-trace failure-report subcommand.
 # ---------------------------------------------------------------------------
 
@@ -459,3 +548,19 @@ def test_cli_failure_report_missing_session_returns_nonzero(tmp_path, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "ghost-session" in captured.err
+
+
+# Issue #735: fx-trace failure-report --format json
+def test_cli_failure_report_format_json_emits_parseable_report(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_failing_session(db)
+
+    rc = cli_main(["failure-report", "--db", str(db), "--session-id", sid, "--format", "json"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    report = FailureReport.model_validate_json(captured.out)
+    assert report.session_id == sid
+    assert report.summary != ""
+    assert report.proposed_class != ""

@@ -7,8 +7,10 @@ from pathlib import Path
 from foundry_x.evolution.digester import Digester
 from foundry_x.observability.kpis import _resolve_format
 from foundry_x.observability.regression_report import analyze_regressions
-from foundry_x.observability.render import render_failure_report
+from foundry_x.observability.render import render_failure_report, render_failure_report_json
 from foundry_x.observability.session_summary import (
+    SessionSummaryReport,
+    _failure_class_distribution,
     build_session_summary,
     render_session_summary,
 )
@@ -18,7 +20,7 @@ from foundry_x.observability.tool_latency import (
     render_tool_latency_json,
     render_tool_latency_markdown,
 )
-from foundry_x.trace.logger import TraceLogger
+from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 
 def _infer_backend(path: str | Path) -> str:
@@ -72,6 +74,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     regression.add_argument(
+        "--harness-version",
+        default=None,
+        help="Only include verdicts from sessions recorded with this harness version.",
+    )
+    regression.add_argument(
         "--format",
         default=None,
         choices=("markdown", "json"),
@@ -112,6 +119,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write the timeline to this path instead of stdout.",
     )
+    timeline.add_argument(
+        "--kind",
+        "-k",
+        default=None,
+        help=(
+            "Comma-separated list of event kinds to include "
+            "(e.g. tool_call,tool_result). When omitted, all events are shown."
+        ),
+    )
 
     # Issue #268: human-readable failure analysis for a single session.
     # Calls Digester.digest() then render_failure_report() so a developer
@@ -129,6 +145,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--session-id",
         required=True,
         help="Session UUID whose events should be digested and rendered.",
+    )
+    failure_report.add_argument(
+        "--format",
+        default=None,
+        choices=("markdown", "json"),
+        help=(
+            "Output format (issue #735). Default: 'markdown'. ``json`` emits "
+            "the structured FailureReport (model_dump_json)."
+        ),
     )
 
     # Issue #184: cross-session outcome roll-up. Lets an Operator read
@@ -202,7 +227,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "regression-report":
         logger = TraceLogger(args.db)
-        analysis = analyze_regressions(logger, since=args.since, task=args.task)
+        analysis = analyze_regressions(
+            logger, since=args.since, task=args.task, harness_version=args.harness_version
+        )
         fmt = _resolve_format(args.format, args.out)
         if fmt == "json":
             rendered = analysis.model_dump_json(indent=2) + "\n"
@@ -219,7 +246,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "timeline":
         backend = _infer_backend(args.db)
         logger = TraceLogger(args.db, backend=backend)
-        events = logger.load_session(args.session_id)
+        if args.kind is not None:
+            kinds = [k.strip() for k in args.kind.split(",") if k.strip()]
+            if not kinds:
+                kinds = [None]
+            # iter_events with kind=None returns all events; with a single kind
+            # it filters to that kind. For multiple kinds we collect from each
+            # kind and merge (maintaining timestamp order).
+            if len(kinds) == 1 and kinds[0] is not None:
+                events = list(logger.iter_events(args.session_id, kind=kinds[0]))
+            elif len(kinds) > 1:
+                events: list[TraceEvent] = []
+                for k in kinds:
+                    events.extend(logger.iter_events(args.session_id, kind=k))
+                events.sort(key=lambda e: e.timestamp)
+            else:
+                events = list(logger.iter_events(args.session_id))
+        else:
+            events = list(logger.iter_events(args.session_id))
         if not events:
             sys.stderr.write(f"session {args.session_id} not found or empty\n")
             return 2
@@ -244,23 +288,32 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write(f"session {args.session_id} not found or empty\n")
             return 2
         report = Digester().digest(args.session_id, events)
-        rendered = render_failure_report(report)
+        if args.format == "json":
+            rendered = render_failure_report_json(report)
+        else:
+            rendered = render_failure_report(report)
         sys.stdout.write(rendered)
-        if not rendered.endswith("\n"):
-            sys.stdout.write("\n")
         return 0
 
     if args.command == "session-summary":
         backend = _infer_backend(args.db)
         logger = TraceLogger(args.db, backend=backend)
         rows = build_session_summary(logger, harness_version=args.harness_version)
-        fmt = _resolve_format(args.format, args.out)
+        failure_class_distribution = _failure_class_distribution(rows)
         if args.limit is not None:
             rows = rows[: args.limit]
+        fmt = _resolve_format(args.format, args.out)
         if fmt == "json":
-            rendered = "\n".join(row.model_dump_json() for row in rows) + "\n"
+            report = SessionSummaryReport(
+                failure_class_distribution=failure_class_distribution,
+                rows=list(rows),
+            )
+            rendered = report.model_dump_json(indent=2) + "\n"
         else:
-            rendered = render_session_summary(rows) + "\n"
+            rendered = (
+                render_session_summary(rows, failure_class_distribution=failure_class_distribution)
+                + "\n"
+            )
         if args.out:
             Path(args.out).write_text(rendered, encoding="utf-8")
         else:
@@ -280,17 +333,6 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(rendered)
             if not rendered.endswith("\n"):
                 sys.stdout.write("\n")
-        return 0
-
-    if args.command == "timeline":
-        backend = _infer_backend(args.db)
-        logger = TraceLogger(args.db, backend=backend)
-        events = logger.load_session(args.session_id)
-        if not events:
-            sys.stderr.write(f"session {args.session_id} not found or empty\n")
-            return 2
-        sys.stdout.write(format_timeline(events))
-        sys.stdout.write("\n")
         return 0
 
     return 1

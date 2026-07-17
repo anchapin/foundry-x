@@ -11,8 +11,10 @@ The PRD (``docs/PRD.md`` §5) defines:
 This module derives approximations of those metrics from the events already
 recorded by :class:`~foundry_x.trace.logger.TraceLogger`:
 
-* ``cycle_time_seconds`` — mean wall-clock time from the first
-  ``task_received`` event to the first ``critic_verdict`` event per session.
+* ``cycle_time_seconds`` — the operational proxy: mean wall-clock time from
+  the first ``task_received`` event to the first ``critic_verdict`` event
+  per session (the closest measurable proxy for the business-level "Agent
+  Failure" → "Harness Edit Proposal" definition above).
 * ``regression_rate`` — fraction of sessions with a ``critic_verdict`` in which
   a task previously seen in ``passed_checks`` later appears in ``failed_checks``
   (the persisted :class:`~foundry_x.observability.regression_report.VerdictRecord`
@@ -83,6 +85,11 @@ class KpiSummary(BaseModel):
     the summary compact. Like ``injection_blocks`` this is an auxiliary
     operator signal, not one of the three PRD success-metric KPIs.
 
+    Issue #604 adds ``evolver_duration_ms``: mean wall-clock milliseconds
+    spent inside ``evolver.propose()`` per session, sourced from the
+    ``evolver_duration_ms`` field of :class:`~foundry_x.evolution.loop.EvolutionResult`.
+    ``None`` when no evolver phase was recorded for any session.
+
     Issue #585 adds ``hooks_disabled_count`` and ``hooks_disabled_rate``:
     the total count of ``hook_registry_error`` events and the fraction of
     sessions with at least one such event. Emitted when
@@ -117,12 +124,15 @@ class KpiSummary(BaseModel):
     improvement_rate: float = 0.0
     injection_blocks: dict[str, int] = {}
     token_totals: dict[str, int] = {}
+    evolver_duration_ms: float | None = None
     hooks_disabled_count: int = 0
     hooks_disabled_rate: float = 0.0
     token_budget_abort_count: int = 0
     token_budget_hit_rate: float = 0.0
     streaming_quality: dict[str, "StreamingQualityData"] = {}
     context_pruned_count: dict[str, int] = {}
+    wall_clock_abort_count: int = 0
+    failure_class_distribution: dict[str, int] = {}
 
 
 class StreamingQualityData(BaseModel):
@@ -146,11 +156,18 @@ class KpiComparison(BaseModel):
     cycle-time down are good. ``injection_blocks`` is intentionally
     excluded from the comparison because it is an auxiliary signal, not
     one of the three PRD success-metric KPIs.
+
+    Issue #736 adds ``baseline_session_count`` and ``candidate_session_count``
+    so that callers can distinguish "no change" (deltas near 0.0 with real
+    sessions) from "no data" (deltas are 0.0 because one version has zero
+    sessions in the trace store).
     """
 
     baseline: KpiSummary
     candidate: KpiSummary
     deltas: dict[str, float | None]
+    baseline_session_count: int = 0
+    candidate_session_count: int = 0
 
 
 class KpiHistoryEntry(BaseModel):
@@ -183,6 +200,28 @@ class KpiHistoryEntry(BaseModel):
     injection_blocks: dict[str, int] = {}
     hooks_disabled_count: int = 0
     hooks_disabled_rate: float = 0.0
+    wall_clock_abort_count: int = 0
+    failure_class_distribution: dict[str, int] = {}
+
+
+def _failure_class_distribution(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> dict[str, int]:
+    """Aggregate ``failure_class`` counts from persisted Critic verdicts (issue #705).
+
+    Returns a ``failure_class -> count`` map across every ``critic_verdict``
+    event matching *harness_version*. Verdicts without a ``failure_class``
+    (e.g. from older stores or clean sessions that short-circuit before the
+    Critic runs) are ignored so the map only includes sessions that ran the
+    full pipeline.
+    """
+    distribution: dict[str, int] = {}
+    for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
+        record = VerdictRecord(**event.payload)
+        if record.failure_class is not None:
+            distribution[record.failure_class] = distribution.get(record.failure_class, 0) + 1
+    return distribution
 
 
 def compute_kpis(
@@ -218,6 +257,10 @@ def compute_kpis(
     token_budget_hit_rate = _token_budget_hit_rate(logger, harness_version=harness_version)
     streaming_quality = _streaming_quality(logger, harness_version=harness_version)
     context_pruned_count = _context_pruned(logger, harness_version=harness_version)
+    wall_clock_abort_count = _wall_clock_abort_count(logger, harness_version=harness_version)
+    failure_class_distribution = _failure_class_distribution(
+        logger, harness_version=harness_version
+    )
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -231,6 +274,8 @@ def compute_kpis(
         token_budget_hit_rate=token_budget_hit_rate,
         streaming_quality=streaming_quality,
         context_pruned_count=context_pruned_count,
+        wall_clock_abort_count=wall_clock_abort_count,
+        failure_class_distribution=failure_class_distribution,
     )
 
 
@@ -246,13 +291,21 @@ def compare_kpis(
     derived for the three PRD KPIs. The sign convention (which direction
     is "good") is applied at render time, not here, so the structured
     ``deltas`` stay sign-agnostic for JSON consumers.
+
+    Issue #736: session counts are included so callers can distinguish
+    "no change" (deltas near 0.0 with real sessions) from "no data"
+    (deltas are 0.0 because one version has zero sessions).
     """
     baseline = compute_kpis(logger, harness_version=baseline_version)
     candidate = compute_kpis(logger, harness_version=candidate_version)
+    baseline_session_count = len(logger.list_sessions(harness_version=baseline_version))
+    candidate_session_count = len(logger.list_sessions(harness_version=candidate_version))
     return KpiComparison(
         baseline=baseline,
         candidate=candidate,
         deltas=_compute_deltas(baseline, candidate),
+        baseline_session_count=baseline_session_count,
+        candidate_session_count=candidate_session_count,
     )
 
 
@@ -595,6 +648,27 @@ def _context_pruned(
     return counts
 
 
+def _wall_clock_abort_count(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> int:
+    """Count sessions aborted by the FOUNDRY_TASK_TIMEOUT wall-clock cap (issue #711).
+
+    Counts every ``task_aborted`` event whose ``reason`` is ``"wall_clock"``,
+    fired by :func:`foundry_x.execution.runner.run_with_limits` when
+    ``asyncio.wait_for`` raises :class:`asyncio.TimeoutError`. Each session
+    contributes at most one such event (the runner records it once per abort).
+    """
+    count = 0
+    for event in logger.query_events(
+        kind="task_aborted",
+        harness_version=harness_version,
+    ):
+        if event.payload.get("reason") == "wall_clock":
+            count += 1
+    return count
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -698,6 +772,27 @@ def _render_markdown(summary: KpiSummary) -> str:
         lines.append("| --- | --- |")
         for sid, count in sorted(summary.context_pruned_count.items()):
             lines.append(f"| {sid} | {count} |")
+    # Issue #711: surface wall-clock abort count as an auxiliary operator
+    # signal. Zero means the timeout cap is not firing (expected for healthy
+    # runs); non-zero means a session was aborted by FOUNDRY_TASK_TIMEOUT.
+    if summary.wall_clock_abort_count > 0:
+        lines.append("")
+        lines.append(
+            f"Wall-Clock Aborts: {summary.wall_clock_abort_count} session(s) "
+            "were aborted by FOUNDRY_TASK_TIMEOUT."
+        )
+    if summary.failure_class_distribution:
+        total = sum(summary.failure_class_distribution.values())
+        lines.append("")
+        lines.append(
+            f"Failure Class Distribution: {total} verdict(s) across "
+            f"{len(summary.failure_class_distribution)} class(es)."
+        )
+        lines.append("")
+        lines.append("| Failure Class | Count |")
+        lines.append("| --- | --- |")
+        for cls, count in sorted(summary.failure_class_distribution.items()):
+            lines.append(f"| {cls} | {count} |")
     return "\n".join(lines)
 
 
@@ -776,13 +871,15 @@ def append_kpi_history(
 
     Each run produces exactly one line. The three PRD-KPI fields are
     emitted via :meth:`KpiSummary.model_dump` with ``injection_blocks``,
-    ``token_totals``, and ``streaming_quality`` excluded (the "minus
-    per-session maps" half of the round-trip contract).
+    ``token_totals``, ``streaming_quality``, and ``wall_clock_abort_count``
+    excluded (the "minus per-session maps" half of the round-trip contract).
     ``hooks_disabled_count``, ``hooks_disabled_rate``,
     ``token_budget_abort_count``, and ``token_budget_hit_rate`` are scalar
     fields and are included. Then ``timestamp`` and the optional
     ``harness_version`` are added. Parent directories are created on
     demand so the operator does not have to ``mkdir`` before the first run.
+    ``failure_class_distribution`` is included so the trend table can show
+    per-class deltas (issue #705).
 
     The file is opened in append mode and a single ``\\n``-terminated
     line is written per call, so concurrent appends from independent
@@ -793,7 +890,7 @@ def append_kpi_history(
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = summary.model_dump(
         mode="json",
-        exclude={"injection_blocks", "token_totals", "streaming_quality"},
+        exclude={"injection_blocks", "token_totals", "streaming_quality", "wall_clock_abort_count"},
     )
     payload["timestamp"] = _now_iso()
     if harness_version is not None:
@@ -874,6 +971,11 @@ def render_history_markdown(
     An empty history renders a single placeholder line so CI summary
     cells that template-embed the table are never completely blank.
 
+    Plotting (matplotlib, ASCII sparklines) is explicitly out of
+    scope per the issue; a pure table is the contract.
+
+    Issue #705: a Failure Class Distribution section is appended when
+    at least one entry carries a non-empty ``failure_class_distribution``.
     """
     if not entries:
         return "_No KPI history entries yet._"
@@ -904,6 +1006,21 @@ def render_history_markdown(
             si = sparkline_imp[idx] if sparkline_imp else " "
             row += f" {sc} | {sr} | {si} |"
         lines.append(row)
+    if any(entry.failure_class_distribution for entry in entries):
+        lines.append("")
+        lines.append("### Failure Class Distribution")
+        lines.append("")
+        lines.append(
+            "| Failure Class | " + " | ".join(f"{e.timestamp[:10]}" for e in entries) + " |"
+        )
+        lines.append("| --- | " + " | ".join("---" for _ in entries) + " |")
+        all_classes = sorted({cls for entry in entries for cls in entry.failure_class_distribution})
+        for cls in all_classes:
+            row = [f"| {cls} |"]
+            for entry in entries:
+                count = entry.failure_class_distribution.get(cls, 0)
+                row.append(f" {count} |")
+            lines.append("".join(row))
     return "\n".join(lines)
 
 

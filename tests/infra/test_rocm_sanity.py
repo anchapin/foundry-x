@@ -280,3 +280,66 @@ def test_check_rocm_prints_hint_on_failure(tmp_path: Path) -> None:
     assert result.returncode == 1, result.stdout
     assert "hint:" in result.stderr
     assert "ROCm pitfalls" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Issue #754 acceptance: GPU responsiveness is checked (5th precondition).
+# ---------------------------------------------------------------------------
+
+
+def test_check_rocm_includes_gpu_responsive_check_in_output(tmp_path: Path) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-rocm"], fake.env(GPU_RESPONSIVE_PROBE="echo ok"))
+
+    out = result.stdout
+    assert "GPU responsive:" in out, f"Expected 'GPU responsive:' in output: {out}"
+
+
+def test_check_rocm_passes_when_gpu_responsive(tmp_path: Path) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-rocm"], fake.env(GPU_RESPONSIVE_PROBE="echo ok"))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "GPU responsive:" in result.stdout and "OK" in result.stdout
+
+
+def test_check_rocm_fails_when_gpu_not_responsive(tmp_path: Path) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-rocm"], fake.env(GPU_RESPONSIVE_PROBE="false"))
+
+    assert result.returncode == 1, result.stdout
+    assert "GPU responsive:" in result.stdout and "FAIL" in result.stdout
+
+
+def test_check_rocm_fails_when_responsive_probe_times_out(tmp_path: Path) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-rocm"], fake.env(GPU_RESPONSIVE_PROBE="timeout 1 sleep 10"))
+
+    assert result.returncode == 1, result.stdout
+    assert "GPU responsive:" in result.stdout and "FAIL" in result.stdout
+
+
+def test_check_gpu_responsive_flag_passes_when_responsive(tmp_path: Path) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-gpu-responsive"], fake.env(GPU_RESPONSIVE_PROBE="echo ok"))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "GPU responsive: OK" in result.stdout
+
+
+def test_check_gpu_responsive_flag_fails_when_not_responsive(tmp_path: Path) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-gpu-responsive"], fake.env(GPU_RESPONSIVE_PROBE="false"))
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "GPU responsive: FAIL" in result.stderr
+
+
+def test_check_rocm_uses_rocminfo_when_gpu_responsive_probe_not_set(
+    tmp_path: Path,
+) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-rocm"], fake.env(GPU_RESPONSIVE_PROBE=""))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "GPU responsive:" in result.stdout and "OK" in result.stdout

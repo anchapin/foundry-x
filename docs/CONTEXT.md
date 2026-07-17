@@ -89,8 +89,9 @@ Canonical implementations live in `src/foundry_x/observability/kpis.py`.
 The three PRD KPIs cannot move until the Runner and Critic are in place
 (ADR-0010).
 
-- **Cycle Time** — mean wall-clock time from the first `task_received`
-  event to the first `critic_verdict` event per session.
+- **Cycle Time** — time from "Agent Failure" to "Harness Edit Proposal"
+  (the operational proxy implemented in ``kpis.py`` measures
+  ``task_received`` → ``critic_verdict``).
 - **Regression Rate** — fraction of sessions with a `critic_verdict` in which
   a task previously seen in `passed_checks` later appears in `failed_checks`.
 - **Improvement Rate** — fraction of `critic_verdict` events whose
@@ -131,7 +132,7 @@ The "Failure-signalling subset" subsection below cross-references the
 | **`task_received`** | `Runner.main` (`src/foundry_x/execution/runner.py`) | `{"prompt": str}` — the raw `--task` argument before the agent loop is opened. | no |
 | **`task_completed`** | `Runner.main` (terminal, success path) | `{"duration_ms": int}` — wall-clock time of the entire `run_task` awaitable. | no |
 | **`task_failed`** | `Runner.main` (terminal, exception path) | `{"error_type": str, "message": str, "duration_ms": int}` — exception class name, `str(exc)`, and wall-clock duration; stack frames are deliberately omitted to keep traces compact (ADR-0007). | **yes** (terminal) |
-| **`task_aborted`** | `Runner.run_with_limits` (wall-clock cap, SECURITY.md "Runaway detection") | `{"reason": "wall_clock", "timeout_s": float \| null, "token_budget": int \| null}` — the cap that fired plus the active token budget at abort time. | **yes** (terminal) |
+| **`task_aborted`** | `Runner.run_with_limits` (wall-clock cap, SECURITY.md "Runaway detection") | `{"reason": "wall_clock", "timeout_s": float \| null, "token_budget": int \| null}` — the cap that fired plus the active token budget at abort time. When `reason="token_budget"` the event contributes to the `token_budget_hit_rate` and `token_budget_abort_count` KPIs surfaced in the default `foundry-kpis` summary (issue #704). | **yes** (terminal) |
 
 ### Agent loop
 
@@ -141,7 +142,7 @@ The "Failure-signalling subset" subsection below cross-references the
 | **`model_request`** | `Runner.run_task` (one per round-trip) | `{"step": int, "message_count": int, "tool_count": int}` — loop index, conversation length, and tool-surface size at request time. | no |
 | **`model_response`** | `Runner.run_task` (one per round-trip) | `{"step": int, "finish_reason": str | null, "message": dict, "tool_calls": list[dict], "time_to_first_token_ms": int | null, "chunk_count": int, "total_stream_ms": int, "token_usage": dict | null, "tokens_used": int}` — the assistant message plus any tool calls the model emitted, plus streaming timing fields (issue #580). | no |
 | **`model_error`** | `Runner.run_task` (on `adapter.complete` exception) | `{"step": int, "error_type": str, "message": str}` — loop index plus exception class name and `str(exc)`. Paired with a `task_failed` terminal marker. | **yes** |
-| **`tool_call`** | `Runner.run_task` (one per emitted tool call) | `{"step": int, "call_id": str, "name": str, "arguments": dict, "duration_ms": int}` — added in issue #173; per-tool-call latency for KPI slicing. | no |
+| **`tool_call`** | `Runner.run_task` (one per emitted tool call) | `{"step": int, "call_id": str, "name": str, "arguments": dict, "duration_ms": int, "hook_overhead_ms": int | null}` — added in issue #173; per-tool-call latency for KPI slicing. `hook_overhead_ms` (issue #709) is wall-clock milliseconds spent in `HookRegistry.run_pre` before the tool executes; `null` when no hooks are registered. | no |
 | **`tool_result`** | `Runner.run_task` (one per tool execution) | `{"step": int, "call_id": str, "name": str, "duration_ms": int, "output": Any \| null, "error": str \| null}` — non-null `error` flips the event onto the Digester's failure path via `FAILURE_PAYLOAD_KEYS`. | when `error` is non-null |
 | **`outcome`** | `Runner.run_task` (always emitted in `finally`) | `{"status": "success" \| "truncated" \| "failed", "reason": "final_answer" \| "model_error" \| "max_steps", "steps": int}` — terminal status the Digester attributes to the session. | when `status == "failed"` |
 | **`hook_registry_error`** | `Runner.run_task` via `_resolve_hook_registry` (issue #260) | `{"error_type": str, "message": str}` — emitted when `harness.hooks.get_registry()` raises after a successful lazy import. The session continues in degraded mode (`registry is None`, so no hook fan-out including the `InjectionFirewallHook`), but the event records that the firewall layer is off so the Digester and operator have a signal (AGENTS.md §2). | **yes** (security-critical hooks disabled) |

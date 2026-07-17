@@ -128,10 +128,13 @@ def _reset_default_registry() -> None:
     registry.
     """
     try:
-        from harness.hooks import reset_default_registry
+        from harness.hooks.base import reset_default_registry
+        from harness.hooks.injection_firewall import InjectionFirewallHook
+        from harness.hooks import register_hook
     except ImportError:
         return
     reset_default_registry()
+    register_hook(InjectionFirewallHook())
 
 
 @pytest.fixture(autouse=True)
@@ -330,6 +333,72 @@ def test_agent_loop_terminates_with_truncated_outcome_on_max_steps(tmp_path, mon
     )
 
 
+def test_agent_loop_dynamic_max_steps_re_reads_env_on_each_iteration(tmp_path, monkeypatch):
+    """When FOUNDRY_MAX_AGENT_STEPS_DYNAMIC=1, the step cap is re-evaluated
+    on each loop iteration so operators can adjust the bound mid-session without
+    restarting the process (useful for integration tests that verify the
+    max_steps boundary).
+    """
+    db = tmp_path / "traces.db"
+
+    def _tool_response(call_id: str) -> ModelResponse:
+        return ModelResponse(
+            message=ModelMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ModelToolCall(
+                        id=call_id,
+                        type="function",
+                        function=ToolCallFunction(
+                            name="bash",
+                            arguments='{"command": "echo loop"}',
+                        ),
+                    )
+                ],
+            ),
+            tool_calls=[
+                ModelToolCall(
+                    id=call_id,
+                    type="function",
+                    function=ToolCallFunction(
+                        name="bash",
+                        arguments='{"command": "echo loop"}',
+                    ),
+                )
+            ],
+            finish_reason="tool_calls",
+        )
+
+    responses = [_tool_response(f"call_step_{i}") for i in range(10)]
+    adapter = _ScriptedAdapter(responses)
+    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
+    monkeypatch.setattr(sys, "argv", _argv("runaway", db, REPO_HARNESS_DIR))
+    monkeypatch.setenv("FOUNDRY_MAX_AGENT_STEPS", "10")
+    monkeypatch.setenv("FOUNDRY_MAX_AGENT_STEPS_DYNAMIC", "1")
+
+    call_count = {"n": 0}
+    original_resolve_max_steps = runner_mod._resolve_max_steps
+
+    def _counting_resolve_max_steps(env=None):
+        call_count["n"] += 1
+        return original_resolve_max_steps(env)
+
+    monkeypatch.setattr(runner_mod, "_resolve_max_steps", _counting_resolve_max_steps)
+
+    main()
+
+    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
+    outcome_event = next(event for event in events if event.kind == "outcome")
+    assert outcome_event.payload["status"] == "truncated"
+    assert outcome_event.payload["reason"] == "max_steps"
+    assert outcome_event.payload["steps"] == 10
+
+    assert call_count["n"] >= 10, (
+        "with dynamic mode, _resolve_max_steps must be called at least once per iteration"
+    )
+
+
 def test_agent_loop_executor_errors_surface_as_failed_tool_results(tmp_path, monkeypatch):
     """A skill executor that raises still records a ``tool_result`` event
     with ``error`` populated (AGENTS.md §2 — never silently swallow). The
@@ -506,6 +575,182 @@ def test_agent_loop_records_parse_error_for_non_dict_arguments(tmp_path, monkeyp
     assert tool_call_event.payload["arguments"] == {}
 
 
+def test_agent_loop_run_pre_argument_mutation(tmp_path, monkeypatch):
+    """Issue #615: a pre-tool hook that mutates ``call.arguments`` must have
+    the mutated value reach the skill executor. ``run_task`` calls
+    ``registry.run_pre(call)`` and then passes the returned (possibly
+    modified) call to ``_execute_skill`` — no test exercised this contract
+    until now.
+
+    Issue #739: the ``tool_call`` trace event must also record the mutated
+    ``call.arguments`` so KPI pipelines that consume the trace see the actual
+    arguments the skill received (not the raw model output).
+    """
+    from harness.hooks.base import ToolCall
+
+    db = tmp_path / "traces.db"
+    received_arguments: dict = {}
+
+    async def capturing_executor(name, arguments):
+        received_arguments[name] = arguments
+        return {"stdout": "", "stderr": "", "exit_code": 0, "truncated": False}
+
+    class DoublerHook:
+        async def pre_tool(self, call: ToolCall) -> ToolCall:
+            if "x" in call.arguments and isinstance(call.arguments["x"], (int, float)):
+                call.arguments["x"] = call.arguments["x"] * 2
+            return call
+
+        async def post_tool(self, call, result):
+            return result
+
+    tool_call = ModelToolCall(
+        id="call_dbl",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments='{"command": "echo test", "x": 21}',
+        ),
+    )
+    responses = [
+        ModelResponse(
+            message=ModelMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[tool_call],
+            ),
+            tool_calls=[tool_call],
+            finish_reason="tool_calls",
+        ),
+        ModelResponse(
+            message=ModelMessage(role="assistant", content="done"),
+            finish_reason="stop",
+        ),
+    ]
+    adapter = _ScriptedAdapter(responses)
+    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
+    monkeypatch.setattr(sys, "argv", _argv("mutate-loop", db, REPO_HARNESS_DIR))
+
+    from harness.hooks import register_hook
+
+    hook = DoublerHook()
+    register_hook(hook)
+
+    async def _run_with_executor(task, harness_dir, log, session_id, **kwargs):
+        await runner_mod.run_task(
+            task,
+            harness_dir,
+            log,
+            session_id,
+            model_adapter=adapter,
+            skill_executor=capturing_executor,
+        )
+
+    try:
+        main(run_task_fn=_run_with_executor)
+
+        assert "bash" in received_arguments
+        assert received_arguments["bash"]["x"] == 42, (
+            "pre-tool hook must double the x argument before executor receives it"
+        )
+
+        events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
+        tool_call_event = next(event for event in events if event.kind == "tool_call")
+        assert tool_call_event.payload["arguments"]["x"] == 42, (
+            "pre-tool hook must double the x argument before trace event is recorded (#739)"
+        )
+    finally:
+        _reset_default_registry()
+
+
+def test_agent_loop_run_pre_argument_reassignment_in_trace(tmp_path, monkeypatch):
+    """Issue #739: when a pre-tool hook REASSIGNS ``call.arguments`` entirely
+    (not just mutates it in-place), both the skill executor and the
+    ``tool_call`` trace event must see the new dict.
+
+    Regression: runner.py used the pre-hook ``arguments`` local variable instead
+    of ``call.arguments``, so a hook that does ``call.arguments = {...}``
+    (reassignment) would leave the trace event recording the original dict
+    while the executor received the new one.
+    """
+    from harness.hooks.base import ToolCall
+
+    db = tmp_path / "traces.db"
+    received_arguments: dict = {}
+
+    async def capturing_executor(name, arguments):
+        received_arguments[name] = arguments
+        return {"stdout": "", "stderr": "", "exit_code": 0, "truncated": False}
+
+    class ReassignerHook:
+        async def pre_tool(self, call: ToolCall) -> ToolCall:
+            call.arguments = {"command": "echo reassigned", "x": 99}
+            return call
+
+        async def post_tool(self, call, result):
+            return result
+
+    tool_call = ModelToolCall(
+        id="call_reassign",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments='{"command": "echo original", "x": 21}',
+        ),
+    )
+    responses = [
+        ModelResponse(
+            message=ModelMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[tool_call],
+            ),
+            tool_calls=[tool_call],
+            finish_reason="tool_calls",
+        ),
+        ModelResponse(
+            message=ModelMessage(role="assistant", content="done"),
+            finish_reason="stop",
+        ),
+    ]
+    adapter = _ScriptedAdapter(responses)
+    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
+    monkeypatch.setattr(sys, "argv", _argv("reassign-loop", db, REPO_HARNESS_DIR))
+
+    from harness.hooks import register_hook
+
+    hook = ReassignerHook()
+    register_hook(hook)
+
+    async def _run_with_executor(task, harness_dir, log, session_id, **kwargs):
+        await runner_mod.run_task(
+            task,
+            harness_dir,
+            log,
+            session_id,
+            model_adapter=adapter,
+            skill_executor=capturing_executor,
+        )
+
+    try:
+        main(run_task_fn=_run_with_executor)
+
+        assert "bash" in received_arguments
+        assert received_arguments["bash"]["x"] == 99, (
+            "pre-tool hook must replace arguments before executor receives them"
+        )
+        assert received_arguments["bash"]["command"] == "echo reassigned"
+
+        events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
+        tool_call_event = next(event for event in events if event.kind == "tool_call")
+        assert tool_call_event.payload["arguments"]["x"] == 99, (
+            "pre-tool hook must replace arguments before trace event is recorded (#739)"
+        )
+        assert tool_call_event.payload["arguments"]["command"] == "echo reassigned"
+    finally:
+        _reset_default_registry()
+
+
 def test_agent_loop_emits_no_parse_error_for_valid_arguments(tmp_path, monkeypatch):
     """Issue #261 acceptance: when arguments parse successfully, no
     ``tool_argument_parse_error`` event is emitted — the event is purely a
@@ -572,6 +817,80 @@ def test_parse_tool_arguments_unit():
     assert "expected JSON object" in (non_dict.error or "")
 
 
+def test_agent_loop_records_two_tool_results_for_parallel_tool_calls(tmp_path, monkeypatch):
+    """Issue #611 acceptance: when a single ModelResponse carries two
+    ``tool_calls``, the loop records two distinct ``tool_result`` events
+    with different ``call_id`` values, then terminates with
+    ``outcome.status='success'`` and ``outcome.reason='final_answer'``
+    after processing both.
+
+    This guards against a regression that drops or reorders parallel tool
+    results — the most common real-world agent turn shape (e.g. "read file
+    X then edit file Y").
+    """
+    db = tmp_path / "traces.db"
+
+    tool_call_a = ModelToolCall(
+        id="call_read_1",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments=json.dumps({"command": "echo read", "cwd": str(tmp_path)}),
+        ),
+    )
+    tool_call_b = ModelToolCall(
+        id="call_edit_2",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments=json.dumps({"command": "echo edit", "cwd": str(tmp_path)}),
+        ),
+    )
+    responses = [
+        ModelResponse(
+            message=ModelMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[tool_call_a, tool_call_b],
+            ),
+            tool_calls=[tool_call_a, tool_call_b],
+            finish_reason="tool_calls",
+        ),
+        ModelResponse(
+            message=ModelMessage(role="assistant", content="done"),
+            finish_reason="stop",
+        ),
+    ]
+    adapter = _ScriptedAdapter(responses)
+    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
+    monkeypatch.setattr(sys, "argv", _argv("parallel-tools", db, REPO_HARNESS_DIR))
+
+    main()
+
+    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
+    tool_result_events = [e for e in events if e.kind == "tool_result"]
+
+    assert len(tool_result_events) == 2, (
+        f"expected exactly two tool_result events, got {len(tool_result_events)}: "
+        f"{[(e.payload.get('call_id'), e.payload.get('name')) for e in tool_result_events]!r}"
+    )
+
+    call_ids = {e.payload["call_id"] for e in tool_result_events}
+    assert call_ids == {"call_read_1", "call_edit_2"}, (
+        f"expected distinct call_ids {{'call_read_1', 'call_edit_2'}}, got {call_ids!r}"
+    )
+
+    for tr in tool_result_events:
+        assert tr.payload["error"] is None, (
+            f"unexpected error for {tr.payload['call_id']}: {tr.payload['error']}"
+        )
+
+    outcome_event = next(event for event in events if event.kind == "outcome")
+    assert outcome_event.payload["status"] == "success", outcome_event.payload
+    assert outcome_event.payload["reason"] == "final_answer", outcome_event.payload
+    assert outcome_event.payload["steps"] == 2
+
+
 def test_agent_loop_emits_hook_registry_error_when_get_registry_raises(tmp_path, monkeypatch):
     """Issue #260: when ``harness.hooks.get_registry()`` raises after a
     successful lazy import, ``run_task`` must record a
@@ -618,3 +937,31 @@ def test_agent_loop_emits_hook_registry_error_when_get_registry_raises(tmp_path,
     # Degraded mode: the session still completes successfully.
     outcome_event = next(event for event in events if event.kind == "outcome")
     assert outcome_event.payload["status"] == "success"
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter"])
+def test_agent_loop_truncates_on_non_stop_finish_reason_without_tool_calls(
+    tmp_path, monkeypatch, finish_reason
+):
+    """Issue #750: when the model returns no tool_calls and finish_reason is
+    not 'stop' (e.g., 'length' for context limit, 'content_filter'), the runner
+    must emit outcome.status='truncated' and outcome.reason=<finish_reason>,
+    not outcome.status='success' with outcome.reason='final_answer'.
+    """
+    db = tmp_path / "traces.db"
+    responses = [
+        ModelResponse(
+            message=ModelMessage(role="assistant", content="partial answer before cutoff"),
+            finish_reason=finish_reason,
+        ),
+    ]
+    adapter = _ScriptedAdapter(responses)
+    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
+    monkeypatch.setattr(sys, "argv", _argv("simple-task", db, REPO_HARNESS_DIR))
+
+    main()
+
+    events = TraceLogger(db).load_session(TraceLogger(db).list_sessions()[0].session_id)
+    outcome_event = next(event for event in events if event.kind == "outcome")
+    assert outcome_event.payload["status"] == "truncated", outcome_event.payload
+    assert outcome_event.payload["reason"] == finish_reason, outcome_event.payload

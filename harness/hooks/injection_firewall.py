@@ -350,8 +350,26 @@ class InjectionFirewallHook:
         return call
 
     async def post_tool(self, call: ToolCall, result: ToolResult) -> ToolResult:
-        text = _coerce_text(result.output)
-        scan = scan_for_injection(text)
+        try:
+            text = _coerce_text(result.output)
+            scan = scan_for_injection(text)
+        except Exception as exc:
+            _log.exception(
+                "injection_firewall: scan of tool %r failed; treating result as "
+                "potentially unsafe (fail-closed): %r",
+                result.name,
+                exc,
+            )
+            safe_output = (
+                "[injection_firewall] output suppressed: injection scan failed. "
+                "Treating as potentially unsafe."
+            )
+            return ToolResult(
+                name=result.name,
+                output=safe_output,
+                error="injection_scan_error:coercion_or_scan_failed",
+            )
+
         if not scan.blocked:
             return result
 

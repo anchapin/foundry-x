@@ -19,6 +19,7 @@ class VerdictRecord(BaseModel):
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
     notes: str = ""
+    failure_class: str | None = Field(default=None)
 
 
 @dataclass
@@ -86,6 +87,7 @@ def record_verdict(logger: TraceLogger, session_id: str, verdict: CriticVerdict)
         passed_checks=list(verdict.passed_checks),
         failed_checks=list(verdict.failed_checks),
         notes=verdict.notes,
+        failure_class=verdict.failure_class,
     )
     logger.record(session_id=session_id, kind=VERDICT_KIND, payload=record.model_dump())
 
@@ -93,6 +95,7 @@ def record_verdict(logger: TraceLogger, session_id: str, verdict: CriticVerdict)
 def _load_verdict_events(
     logger: TraceLogger,
     since: str | None,
+    harness_version: str | None = None,
 ) -> list[tuple[str, str, VerdictRecord]]:
     """Stream every ``critic_verdict`` event through :class:`TraceLogger`.
 
@@ -105,7 +108,7 @@ def _load_verdict_events(
     filter — keeping the surface narrow).
     """
     events: list[tuple[str, str, VerdictRecord]] = []
-    for event in logger.query_events(kind=VERDICT_KIND):
+    for event in logger.query_events(kind=VERDICT_KIND, harness_version=harness_version):
         if since is not None and event.timestamp < since:
             continue
         events.append(
@@ -165,6 +168,7 @@ def generate_regression_report(
     logger: TraceLogger,
     since: str | None = None,
     task: str | None = None,
+    harness_version: str | None = None,
 ) -> str:
     """Produce a Markdown regression report over all persisted Critic verdicts.
 
@@ -175,13 +179,16 @@ def generate_regression_report(
     analysis pass. If the task filter eliminates every row, the rendered
     report collapses to a single ``no rows for task <name>`` line.
     """
-    return analyze_regressions(logger, since=since, task=task).report
+    return analyze_regressions(
+        logger, since=since, task=task, harness_version=harness_version
+    ).report
 
 
 def analyze_regressions(
     logger: TraceLogger,
     since: str | None = None,
     task: str | None = None,
+    harness_version: str | None = None,
 ) -> RegressionAnalysis:
     """Run the regression analysis and return both the Markdown report and the
     structured rows.
@@ -199,7 +206,7 @@ def analyze_regressions(
     reported separately from task regressions because it is a task-sizing
     problem, not a harness defect.
     """
-    events = _load_verdict_events(logger, since)
+    events = _load_verdict_events(logger, since, harness_version=harness_version)
     total = len(events)
     approvals = sum(1 for _sid, _ts, v in events if v.verdict)
     rejections = total - approvals

@@ -9,7 +9,7 @@ import pytest
 
 from foundry_x.evolution.critic import CriticVerdict
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
-from foundry_x.evolution.loop import EvolutionResult, run_evolution_step
+from foundry_x.evolution.loop import EvolutionResult, run_evolution_step, run_evolution_step_async
 from foundry_x.trace.logger import TraceEvent
 from tests._harness_fixture import install_load_check_prerequisites
 
@@ -98,6 +98,8 @@ class TestRunEvolutionStep:
         assert result.failure_report.proposed_class == "clean"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.evolver_duration_ms is None
+        assert result.harness_version is not None
 
     def test_empty_edits_short_circuits(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         harness_dir = _write_harness(tmp_path)
@@ -117,6 +119,9 @@ class TestRunEvolutionStep:
         assert result.failure_report.proposed_class != "clean"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.evolver_duration_ms is not None
+        assert result.evolver_duration_ms >= 0
+        assert result.harness_version is not None
 
     def test_full_pipeline_runs_critic(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         harness_dir = _write_harness(tmp_path)
@@ -143,6 +148,43 @@ class TestRunEvolutionStep:
         assert result.proposed_edits == [proposed_edit]
         assert result.verdict is not None
         assert isinstance(result.verdict, CriticVerdict)
+        assert result.evolver_duration_ms is not None
+        assert result.evolver_duration_ms >= 0
+        assert result.harness_version is not None
+
+    def test_multiple_edits_verdict_has_last_edit_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """When multiple edits are proposed, verdict.edit_index is the last one (issue #606)."""
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit1 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 1",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new1\n",
+        )
+        proposed_edit2 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 2",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new2\n",
+        )
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit1, proposed_edit2]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+
+        result = run_evolution_step("sess-multi-edit", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert len(result.proposed_edits) == 2
+        assert result.verdict is not None
+        assert result.verdict.edit_index == 1
 
 
 class TestEvolutionResultModel:
@@ -157,13 +199,20 @@ class TestEvolutionResultModel:
         result = EvolutionResult(
             session_id="sess-test",
             failure_report=report,
+            failure_class="tool-error",
             proposed_edits=[],
             verdict=None,
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
         )
         assert result.session_id == "sess-test"
         assert result.failure_report.summary == "test failure"
+        assert result.failure_class == "tool-error"
         assert result.proposed_edits == []
         assert result.verdict is None
+        assert result.evolver_duration_ms is None
+        assert result.started_at == "2026-07-10T12:00:00+00:00"
+        assert result.completed_at == "2026-07-10T12:00:01+00:00"
 
     def test_result_model_with_verdict(self):
         from foundry_x.evolution.digester import FailureReport
@@ -177,8 +226,299 @@ class TestEvolutionResultModel:
         result = EvolutionResult(
             session_id="sess-test",
             failure_report=report,
+            failure_class="tool-error",
             proposed_edits=[],
             verdict=verdict,
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
         )
         assert result.verdict is not None
         assert result.verdict.verdict is True
+        assert result.failure_class == "tool-error"
+
+    def test_failure_class_copied_from_report(self):
+        """failure_class is copied from failure_report.proposed_class (issue #605)."""
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="wrong-tool failure",
+            proposed_class="wrong-tool",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            failure_class=report.proposed_class,
+            proposed_edits=[],
+            verdict=None,
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
+        )
+        assert result.failure_class == "wrong-tool"
+        assert result.failure_class == result.failure_report.proposed_class
+
+    def test_result_model_with_evolver_duration(self):
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="test failure",
+            proposed_class="tool-error",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            failure_class=report.proposed_class,
+            proposed_edits=[],
+            verdict=None,
+            evolver_duration_ms=42.5,
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
+        )
+        assert result.evolver_duration_ms == 42.5
+        assert isinstance(result.evolver_duration_ms, float)
+
+    def test_result_model_with_harness_version(self):
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="test failure",
+            proposed_class="tool-error",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            failure_class=report.proposed_class,
+            proposed_edits=[],
+            verdict=None,
+            harness_version="v1.2.3",
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
+        )
+        assert result.harness_version == "v1.2.3"
+
+    def test_result_model_harness_version_defaults_to_none(self):
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="test failure",
+            proposed_class="tool-error",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            failure_class=report.proposed_class,
+            proposed_edits=[],
+            verdict=None,
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
+        )
+        assert result.harness_version is None
+
+
+class TestRunEvolutionStepAsync:
+    @pytest.mark.asyncio
+    async def test_clean_report_short_circuits(self, tmp_path: Path):
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("outcome", 1.0, {"status": "success"}, event_id="e2"),
+        ]
+
+        result = await run_evolution_step_async("sess-clean", events, harness_dir)
+
+        assert result.failure_report.proposed_class == "clean"
+        assert result.proposed_edits == []
+        assert result.verdict is None
+
+    @pytest.mark.asyncio
+    async def test_empty_edits_short_circuits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        async def mock_propose_async(self, harness_dir, failure, current_diff=None):
+            return []
+
+        monkeypatch.setattr(Evolver, "propose_async", mock_propose_async)
+
+        result = await run_evolution_step_async("sess-no-edits", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert result.proposed_edits == []
+        assert result.verdict is None
+
+    @pytest.mark.asyncio
+    async def test_full_pipeline_runs_critic(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix the failure",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+
+        async def mock_propose_async(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit]
+
+        monkeypatch.setattr(Evolver, "propose_async", mock_propose_async)
+
+        result = await run_evolution_step_async("sess-full-pipeline", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert result.proposed_edits == [proposed_edit]
+        assert result.verdict is not None
+        assert isinstance(result.verdict, CriticVerdict)
+
+    @pytest.mark.asyncio
+    async def test_multiple_edits_verdict_has_last_edit_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """When multiple edits are proposed, verdict.edit_index is the last one (issue #743)."""
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit1 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 1",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new1\n",
+        )
+        proposed_edit2 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 2",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new2\n",
+        )
+
+        async def mock_propose_async(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit1, proposed_edit2]
+
+        monkeypatch.setattr(Evolver, "propose_async", mock_propose_async)
+
+        result = await run_evolution_step_async("sess-multi-edit", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert len(result.proposed_edits) == 2
+        assert result.verdict is not None
+        assert result.verdict.edit_index == 1
+
+    def test_result_model_with_harness_version(self):
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="test failure",
+            proposed_class="tool-error",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            failure_class=report.proposed_class,
+            proposed_edits=[],
+            verdict=None,
+            harness_version="v1.2.3",
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
+        )
+        assert result.harness_version == "v1.2.3"
+
+    def test_result_model_harness_version_defaults_to_none(self):
+        from foundry_x.evolution.digester import FailureReport
+
+        report = FailureReport(
+            session_id="sess-test",
+            summary="test failure",
+            proposed_class="tool-error",
+        )
+        result = EvolutionResult(
+            session_id="sess-test",
+            failure_report=report,
+            failure_class=report.proposed_class,
+            proposed_edits=[],
+            verdict=None,
+            started_at="2026-07-10T12:00:00+00:00",
+            completed_at="2026-07-10T12:00:01+00:00",
+        )
+        assert result.harness_version is None
+
+
+class TestEvolutionResultTimestamps:
+    """Tests for issue #609 — timestamp fields on EvolutionResult."""
+
+    def test_timestamps_are_iso_format(self, tmp_path: Path):
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("outcome", 1.0, {"status": "success"}, event_id="e2"),
+        ]
+
+        result = run_evolution_step("sess-ts", events, harness_dir)
+
+        assert result.started_at is not None
+        assert result.completed_at is not None
+        datetime.fromisoformat(result.started_at)
+        datetime.fromisoformat(result.completed_at)
+
+    def test_started_before_completed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return []
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+
+        result = run_evolution_step("sess-ts-order", events, harness_dir)
+
+        t0 = datetime.fromisoformat(result.started_at)
+        t1 = datetime.fromisoformat(result.completed_at)
+        assert t0 <= t1
+
+    def test_timestamps_present_on_full_pipeline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix the failure",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+
+        result = run_evolution_step("sess-ts-full", events, harness_dir)
+
+        assert result.started_at is not None
+        assert result.completed_at is not None
+        datetime.fromisoformat(result.started_at)
+        datetime.fromisoformat(result.completed_at)

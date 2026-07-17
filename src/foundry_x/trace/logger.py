@@ -47,6 +47,19 @@ class TraceSession(BaseModel):
     ended_at: str | None = None
 
 
+class ModelConfig(BaseModel):
+    """Model configuration for trace attribution (issue #361).
+
+    Records the model identity and hardware configuration so the improvement
+    rate KPI can attribute benchmark outcomes to specific quantizations.
+    """
+
+    model_id: str | None = Field(default=None, description="Model identifier or quantization name")
+    quantization: str | None = Field(default=None, description="Quantization scheme (e.g. Q5_K_M)")
+    context_window: int | None = Field(default=None, description="Context window size in tokens")
+    hardware: str | None = Field(default=None, description="Hardware accelerator used")
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
@@ -95,6 +108,10 @@ _AWS_ACCESS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
 _STRIPE_LIVE_KEY_RE = re.compile(r"\b(?:sk|pk|rk)_(?:live|restricted)_[A-Za-z0-9]{16,}")
 # Slack tokens: xox[baprs]- followed by the segment body.
 _SLACK_TOKEN_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}")
+# GCP access tokens — Google OAuth2 tokens for GCP APIs, prefixed ya29.
+_GCP_ACCESS_TOKEN_RE = re.compile(r"\bya29\.[A-Za-z0-9\-_]+\b")
+# GCP service-account emails — used in ADC and workload identity.
+_GCP_SERVICE_ACCOUNT_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@developer\.gserviceaccount\.com\b")
 
 _DEFAULT_SECRET_KEY_NAMES: frozenset[str] = frozenset(
     {
@@ -117,6 +134,10 @@ _DEFAULT_SECRET_KEY_NAMES: frozenset[str] = frozenset(
         "slack_token",
         "stripe_key",
         "token",
+        "gcp_access_token",
+        "gcp_credentials",
+        "google_credentials",
+        "gcp_service_account",
     }
 )
 
@@ -127,6 +148,10 @@ def _redact_value(value: str) -> str:
     Order matters only for readability: PEM blocks (which can contain
     ``-----BEGIN`` and ``sk-``-like substrings) are scrubbed first, then
     the remaining content-patterns. Token order is fixed across calls.
+
+    Covers: PEM blocks, JWTs, sk- API keys, GitHub classic/fine-grained
+    PATs, AWS access key IDs, Stripe live keys, Slack tokens, Bearer
+    headers, GCP access tokens (ya29...), and GCP service-account emails.
     """
     value = _PEM_RE.sub("[REDACTED:pem]", value)
     value = _JWT_RE.sub("[REDACTED:jwt]", value)
@@ -137,6 +162,8 @@ def _redact_value(value: str) -> str:
     value = _STRIPE_LIVE_KEY_RE.sub("[REDACTED:stripe-key]", value)
     value = _SLACK_TOKEN_RE.sub("[REDACTED:slack-token]", value)
     value = _BEARER_RE.sub("[REDACTED:bearer]", value)
+    value = _GCP_ACCESS_TOKEN_RE.sub("[REDACTED:gcp-access-token]", value)
+    value = _GCP_SERVICE_ACCOUNT_RE.sub("[REDACTED:gcp-service-account]", value)
     return value
 
 
@@ -151,8 +178,9 @@ def _redact(
     replaced with ``[REDACTED:secret]`` regardless of content; all other
     string values are scanned for ``sk-...``, ``Bearer ...``, PEM blocks,
     GitHub classic/fine-grained PATs, JWTs, AWS access key IDs, Stripe
-    live keys, and Slack tokens. Issue #121 added the modern-token set
-    and the metadata-path coverage.
+    live keys, Slack tokens, GCP access tokens, and GCP service-account
+    emails. Issue #121 added the modern-token set and the metadata-path
+    coverage. Issue #746 adds GCP credential patterns.
     """
     if isinstance(payload, dict):
         redacted: dict[str, Any] = {}
@@ -235,6 +263,7 @@ class TraceLogger:
         harness_version: str,
         model_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        model_config: Any = None,
     ) -> Iterator[str]:
         # Issue #121: scrub the metadata dict before either backend writes it.
         # The original ``record()`` path already redacts its payload; the
@@ -622,6 +651,44 @@ class TraceLogger:
                 }
             )
 
+    def _query_events_sqlite(
+        self,
+        kind: str | None = None,
+        harness_version: str | None = None,
+    ) -> Iterator[TraceEvent]:
+        # Issue #273 — one streaming cursor across all matching sessions.
+        # The optional ``harness_version`` filter is implemented as a JOIN
+        # against the sessions table rather than a Python-side filter so
+        # the database prunes non-matching sessions before rows cross the
+        # process boundary. ``ORDER BY timestamp`` preserves the promise
+        # ``iter_events`` makes within a single session, extended to the
+        # cross-session stream.
+        query = "SELECT e.event_id, e.session_id, e.timestamp, e.kind, e.payload FROM events e"
+        params: list[Any] = []
+        conditions: list[str] = []
+        if harness_version is not None:
+            query += " JOIN sessions s ON e.session_id = s.session_id"
+            conditions.append("s.harness_version = ?")
+            params.append(harness_version)
+        if kind is not None:
+            conditions.append("e.kind = ?")
+            params.append(kind)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY e.timestamp"
+        assert self._conn is not None  # backend == "sqlite"
+        cursor = self._conn.execute(query, params)
+        for event_id, sid, ts, k, payload in cursor:
+            yield TraceEvent.model_validate(
+                {
+                    "event_id": event_id,
+                    "session_id": sid,
+                    "timestamp": ts,
+                    "kind": k,
+                    "payload": json.loads(payload),
+                }
+            )
+
     def _load_session_jsonl(self, session_id: str) -> list[TraceEvent]:
         """Replay events for a session from a JSONL trace file.
 
@@ -662,6 +729,58 @@ class TraceLogger:
             self._delete_session_sqlite(session_id)
         return True
 
+    def prune_sessions(self, to_delete: Sequence[str]) -> int:
+        """Remove every event and the session row for each ``session_id`` in *to_delete*.
+
+        This is a bulk operation: all sessions in *to_delete* are deleted in a single
+        file rewrite (jsonl) or batch DELETE (sqlite), making it O(1) file I/O
+        instead of O(n) for n sessions. Returns the number of sessions deleted.
+        Issue #752.
+        """
+        if not to_delete:
+            return 0
+        if self.backend == "jsonl":
+            return self._prune_jsonl(to_delete)
+        return self._prune_sqlite(to_delete)
+
+    def _prune_sqlite(self, to_delete: Sequence[str]) -> int:
+        assert self._conn is not None  # backend == "sqlite"
+        with self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM events WHERE session_id IN (" + ",".join("?" * len(to_delete)) + ")",
+                list(to_delete),
+            )
+            cur = self._conn.execute(
+                "DELETE FROM sessions WHERE session_id IN (" + ",".join("?" * len(to_delete)) + ")",
+                list(to_delete),
+            )
+        return cur.rowcount
+
+    def _prune_jsonl(self, to_delete: Sequence[str]) -> int:
+        if not self.path.exists():
+            return 0
+        delete_set = set(to_delete)
+        kept: list[str] = []
+        removed_sessions: set[str] = set()
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    kept.append(line)
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except json.JSONDecodeError:
+                    kept.append(line)
+                    continue
+                if record.get("session_id") in delete_set:
+                    removed_sessions.add(record.get("session_id"))
+                    continue
+                kept.append(line)
+        with self.path.open("w", encoding="utf-8") as fh:
+            fh.writelines(kept)
+        return len(removed_sessions)
+
     def _delete_session_sqlite(self, session_id: str) -> None:
         assert self._conn is not None  # backend == "sqlite"
         with self._conn:
@@ -688,6 +807,60 @@ class TraceLogger:
                 kept.append(line)
         with self.path.open("w", encoding="utf-8") as fh:
             fh.writelines(kept)
+
+    def compact(self) -> int:
+        """Rewrite the JSONL file removing orphaned session markers.
+
+        An orphaned ``session_end`` marker is one where the ``session_id`` has
+        no corresponding ``session_start`` marker in the file. This can happen
+        if a session was deleted and then a stale ``session_end`` marker was
+        written afterward.
+
+        Returns the number of orphaned ``session_end`` markers removed.
+        Only works on the JSONL backend; SQLite VACUUM is handled automatically
+        by the database engine (per issue #632 out-of-scope).
+        """
+        if self.backend != "jsonl":
+            return 0
+        if not self.path.exists():
+            return 0
+
+        kept: list[str] = []
+        seen_starts: set[str] = set()
+        orphaned: list[str] = []
+
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    kept.append(line)
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except json.JSONDecodeError:
+                    kept.append(line)
+                    continue
+
+                kind = record.get("kind")
+                session_id = record.get("session_id")
+
+                if kind == "session_start":
+                    if session_id not in seen_starts:
+                        seen_starts.add(session_id)
+                    kept.append(line)
+                elif kind == "session_end":
+                    if session_id not in seen_starts:
+                        orphaned.append(line)
+                    else:
+                        kept.append(line)
+                else:
+                    kept.append(line)
+
+        orphaned_count = len(orphaned)
+        with self.path.open("w", encoding="utf-8") as fh:
+            fh.writelines(kept)
+
+        return orphaned_count
 
     def redact_event(
         self,

@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from foundry_x.evolution.digester import Digester
-from foundry_x.evolution.evolver import PROPOSED_EDIT_KIND
 from foundry_x.observability.render import render_failure_report
 from foundry_x.observability.timeline import format_timeline
 from foundry_x.trace.logger import TraceEvent, TraceLogger, TraceSession
@@ -48,46 +47,6 @@ def _sessions(args: argparse.Namespace) -> int:
     sys.stdout.write("session_id  started_at  harness_version  model_id\n")
     for session in sessions:
         sys.stdout.write(_format_session_row(session) + "\n")
-    return 0
-
-
-def _session_stats(args: argparse.Namespace) -> int:
-    """Print per-session event_count and total_tokens (issue #629).
-
-    Exit codes: 0 on success (including empty store), 1 on invalid db path.
-    """
-    try:
-        logger = TraceLogger(args.db)
-    except Exception as exc:
-        sys.stderr.write(f"Invalid db path: {exc}\n")
-        return 1
-
-    sessions = logger.list_sessions()
-    if not sessions:
-        sys.stdout.write("No sessions found.\n")
-        return 0
-
-    event_counts: dict[str, int] = {s.session_id: 0 for s in sessions}
-    token_totals: dict[str, int] = {s.session_id: 0 for s in sessions}
-
-    for event in logger.query_events():
-        event_counts[event.session_id] = event_counts.get(event.session_id, 0) + 1
-        if event.kind == "model_response":
-            usage = event.payload.get("usage")
-            if isinstance(usage, dict):
-                step_total = usage.get("total_tokens", 0)
-                if isinstance(step_total, int):
-                    token_totals[event.session_id] = (
-                        token_totals.get(event.session_id, 0) + step_total
-                    )
-
-    sys.stdout.write("session_id  event_count  total_tokens\n")
-    for session in sessions:
-        sys.stdout.write(
-            f"{session.session_id}  "
-            f"{event_counts[session.session_id]}  "
-            f"{token_totals[session.session_id]}\n"
-        )
     return 0
 
 
@@ -382,9 +341,79 @@ def _prune(args: argparse.Namespace) -> int:
         sys.stdout.write(f"Dry run: {count} session(s) would be deleted.\n")
         return 0
 
-    for session in to_delete:
-        logger.delete_session(session.session_id)
+    logger.prune_sessions([session.session_id for session in to_delete])
     sys.stdout.write(f"Deleted {count} session(s).\n")
+    return 0
+
+
+def _compact(args: argparse.Namespace) -> int:
+    """Implement ``compact`` (issue #632).
+
+    Rewrites the JSONL file removing orphaned ``session_end`` markers — those
+    whose ``session_id`` has no corresponding ``session_start`` marker.
+    This can happen after a session is deleted and a stale ``session_end``
+    marker is written afterward.
+
+    ``--dry-run`` reports what would be removed without touching the file.
+    Only works on the JSONL backend; exits 0 on sqlite with a no-op message.
+    """
+    logger = _logger_for(args.db)
+
+    if logger.backend != "jsonl":
+        sys.stdout.write("compact: jsonl backend required; sqlite VACUUM is automatic.\n")
+        return 0
+
+    if not logger.path.exists():
+        sys.stdout.write("No orphaned markers found.\n")
+        return 0
+
+    kept: list[str] = []
+    seen_starts: set[str] = set()
+    orphaned: list[str] = []
+
+    with logger.path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if not stripped:
+                kept.append(line)
+                continue
+            try:
+                record = json.loads(stripped)
+            except json.JSONDecodeError:
+                kept.append(line)
+                continue
+
+            kind = record.get("kind")
+            session_id = record.get("session_id")
+
+            if kind == "session_start":
+                if session_id not in seen_starts:
+                    seen_starts.add(session_id)
+                kept.append(line)
+            elif kind == "session_end":
+                if session_id not in seen_starts:
+                    orphaned.append(line)
+                else:
+                    kept.append(line)
+            else:
+                kept.append(line)
+
+    orphaned_count = len(orphaned)
+
+    if args.dry_run:
+        if orphaned:
+            for line in orphaned:
+                sys.stdout.write(f"  would remove: {line.strip()}\n")
+        sys.stdout.write(f"Dry run: {orphaned_count} orphaned marker(s) would be removed.\n")
+        return 0
+
+    if orphaned_count == 0:
+        sys.stdout.write("No orphaned markers found.\n")
+        return 0
+
+    with logger.path.open("w", encoding="utf-8") as fh:
+        fh.writelines(kept)
+    sys.stdout.write(f"Removed {orphaned_count} orphaned marker(s).\n")
     return 0
 
 
@@ -477,7 +506,7 @@ def _seed_sample_trace(args: argparse.Namespace) -> int:
                 ],
                 # Issue #271: token-usage accounting so the KPI summary and
                 # timeline renderers have a token surface to exercise.
-                "token_usage": _SEED_USAGE,
+                "usage": _SEED_USAGE,
                 "tokens_used": _SEED_USAGE["total_tokens"],
             },
         )
@@ -511,156 +540,6 @@ def _seed_sample_trace(args: argparse.Namespace) -> int:
         )
 
     sys.stdout.write(f"seeded session_id={session_id}\n")
-    return 0
-
-
-# --- Issue #499: proposed-edits / show-edit / edit-history -------------------
-
-
-def _render_proposed_edit_summary(event: TraceEvent) -> str:
-    """Render a ProposedEdit trace event as a one-line summary."""
-    payload = event.payload
-    target = payload.get("target_file", "unknown")
-    rationale = payload.get("rationale", "")[:60]
-    if len(payload.get("rationale", "")) > 60:
-        rationale += "..."
-    return f"{event.event_id}  {event.session_id}  {event.timestamp}  {target}  {rationale}"
-
-
-def _render_proposed_edit_full(event: TraceEvent, verbose: bool = False) -> str:
-    """Render a ProposedEdit trace event with full details."""
-    payload = event.payload
-    lines = [
-        f"Event ID: {event.event_id}",
-        f"Session: {event.session_id}",
-        f"Timestamp: {event.timestamp}",
-        f"Target: {payload.get('target_file', 'unknown')}",
-        f"Rationale: {payload.get('rationale', 'unknown')}",
-    ]
-    if verbose:
-        lines.append(f"Unified diff:\n{payload.get('unified_diff', '')}")
-    else:
-        diff = payload.get("unified_diff", "")
-        diff_lines = diff.splitlines()
-        lines.append(f"Unified diff: {len(diff_lines)} line(s) (use --verbose to print full diff)")
-    return "\n".join(lines)
-
-
-def _proposed_edits(args: argparse.Namespace) -> int:
-    """Implement ``proposed-edits`` (issue #499).
-
-    Lists all ProposedEdit events across all sessions, ordered by timestamp.
-    Each row shows: event_id, session_id, timestamp, target_file, rationale (truncated).
-    """
-    logger = _logger_for(args.db)
-    events = list(logger.query_events(kind=PROPOSED_EDIT_KIND))
-
-    if args.json:
-        output = [
-            {
-                "event_id": e.event_id,
-                "session_id": e.session_id,
-                "timestamp": e.timestamp,
-                "target_file": e.payload.get("target_file"),
-                "rationale": e.payload.get("rationale"),
-                "unified_diff": e.payload.get("unified_diff"),
-            }
-            for e in events
-        ]
-        sys.stdout.write(json.dumps(output, indent=2) + "\n")
-        return 0
-
-    if not events:
-        sys.stdout.write("No ProposedEdit events found.\n")
-        return 0
-
-    sys.stdout.write("event_id  session_id  timestamp  target_file  rationale\n")
-    for event in events:
-        sys.stdout.write(_render_proposed_edit_summary(event) + "\n")
-    return 0
-
-
-def _show_edit(args: argparse.Namespace) -> int:
-    """Implement ``show-edit`` (issue #499).
-
-    Shows full details and rationale of a specific ProposedEdit by event_id.
-    """
-    logger = _logger_for(args.db)
-    event_id = args.event_id
-
-    for event in logger.query_events(kind=PROPOSED_EDIT_KIND):
-        if event.event_id == event_id:
-            if args.json:
-                output = {
-                    "event_id": event.event_id,
-                    "session_id": event.session_id,
-                    "timestamp": event.timestamp,
-                    "target_file": event.payload.get("target_file"),
-                    "rationale": event.payload.get("rationale"),
-                    "unified_diff": event.payload.get("unified_diff"),
-                }
-                sys.stdout.write(json.dumps(output, indent=2) + "\n")
-            else:
-                sys.stdout.write(_render_proposed_edit_full(event, verbose=True) + "\n")
-            return 0
-
-    sys.stderr.write(f"No ProposedEdit found with event_id={event_id}.\n")
-    return 1
-
-
-def _edit_history(args: argparse.Namespace) -> int:
-    """Implement ``edit-history`` (issue #499).
-
-    Shows edit status history by pairing ProposedEdit events with their
-    corresponding CriticVerdict events within the same session.
-    """
-    logger = _logger_for(args.db)
-    proposed_edit_events = list(logger.query_events(kind=PROPOSED_EDIT_KIND))
-    verdict_events = {e.session_id: e for e in logger.query_events(kind="critic_verdict")}
-
-    if args.json:
-        history: list[dict[str, object]] = []
-        for edit_event in proposed_edit_events:
-            verdict_event = verdict_events.get(edit_event.session_id)
-            entry: dict[str, object] = {
-                "event_id": edit_event.event_id,
-                "session_id": edit_event.session_id,
-                "timestamp": edit_event.timestamp,
-                "target_file": edit_event.payload.get("target_file", ""),
-                "rationale": edit_event.payload.get("rationale", ""),
-                "verdict": None,
-                "passed_checks": [],
-                "failed_checks": [],
-            }
-            if verdict_event:
-                entry["verdict"] = verdict_event.payload.get("verdict")
-                entry["passed_checks"] = verdict_event.payload.get("passed_checks", [])
-                entry["failed_checks"] = verdict_event.payload.get("failed_checks", [])
-            history.append(entry)
-        sys.stdout.write(json.dumps(history, indent=2) + "\n")
-        return 0
-
-    if not proposed_edit_events:
-        sys.stdout.write("No edit history found.\n")
-        return 0
-
-    sys.stdout.write("event_id  session_id  timestamp  target_file  verdict  passed  failed\n")
-    for edit_event in proposed_edit_events:
-        verdict_event = verdict_events.get(edit_event.session_id)
-        target = edit_event.payload.get("target_file", "unknown")
-        if verdict_event:
-            v_payload = verdict_event.payload
-            verdict_str = "APPROVED" if v_payload.get("verdict") else "REJECTED"
-            passed_str = str(len(v_payload.get("passed_checks", [])))
-            failed_str = str(len(v_payload.get("failed_checks", [])))
-        else:
-            verdict_str = "PENDING"
-            passed_str = "-"
-            failed_str = "-"
-        sys.stdout.write(
-            f"{edit_event.event_id}  {edit_event.session_id}  "
-            f"{edit_event.timestamp}  {target}  {verdict_str}  {passed_str}  {failed_str}\n"
-        )
     return 0
 
 
@@ -698,17 +577,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to the trace SQLite database (default: logs/traces.db).",
     )
     sessions_parser.set_defaults(func=_sessions)
-
-    session_stats_parser = sub.add_parser(
-        "session-stats",
-        help="Print per-session event_count and total_tokens (issue #629).",
-    )
-    session_stats_parser.add_argument(
-        "--db",
-        default="logs/traces.db",
-        help="Path to the trace SQLite database (default: logs/traces.db).",
-    )
-    session_stats_parser.set_defaults(func=_session_stats)
 
     show_parser = sub.add_parser(
         "show",
@@ -898,55 +766,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     prune_parser.set_defaults(func=_prune)
 
-    # Issue #499: proposed-edits / show-edit / edit-history
-    proposed_edits_parser = sub.add_parser(
-        "proposed-edits",
-        help="List all ProposedEdit events across all sessions.",
+    compact_parser = sub.add_parser(
+        "compact",
+        help="Remove orphaned session_end markers from a JSONL trace file (issue #632).",
     )
-    proposed_edits_parser.add_argument(
+    compact_parser.add_argument(
         "--db",
-        default="logs/traces.db",
-        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+        default="logs/traces.jsonl",
+        help="Path to the JSONL trace file (default: logs/traces.jsonl).",
     )
-    proposed_edits_parser.add_argument(
-        "--json",
+    compact_parser.add_argument(
+        "--dry-run",
         action="store_true",
-        help="Output machine-readable JSON instead of human-readable text.",
+        help="Print orphaned markers without modifying the file.",
     )
-    proposed_edits_parser.set_defaults(func=_proposed_edits)
-
-    show_edit_parser = sub.add_parser(
-        "show-edit",
-        help="Show details and rationale of a specific ProposedEdit.",
-    )
-    show_edit_parser.add_argument("event_id", help="Event ID of the ProposedEdit to display.")
-    show_edit_parser.add_argument(
-        "--db",
-        default="logs/traces.db",
-        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
-    )
-    show_edit_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Output machine-readable JSON instead of human-readable text.",
-    )
-    show_edit_parser.set_defaults(func=_show_edit)
-
-    edit_history_parser = sub.add_parser(
-        "edit-history",
-        help="Show edit status history (ProposedEdit + CriticVerdict pairs).",
-    )
-    edit_history_parser.add_argument(
-        "--db",
-        default="logs/traces.db",
-        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
-    )
-    edit_history_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Output machine-readable JSON instead of human-readable text.",
-    )
-    edit_history_parser.set_defaults(func=_edit_history)
+    compact_parser.set_defaults(func=_compact)
 
     return parser
 

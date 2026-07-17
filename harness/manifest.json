@@ -5,7 +5,8 @@
     "base",
     "injection_firewall",
     "context_pruning",
-    "rate_limit"
+    "rate_limit",
+    "token_aware_pruning"
   ],
   "context_pruning": {
     "token_threshold": 8192,

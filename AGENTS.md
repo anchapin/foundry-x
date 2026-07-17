@@ -21,7 +21,7 @@ Before you write code in this repo, read in this order:
 6. `docs/adr/` — read the relevant ADR before changing that area:
    - `harness/` → ADR-0004 | `pyproject.toml` / deps → ADR-0002
    - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
-   - Module-boundary models → ADR-0006
+   - Module-boundary models → ADR-0006 | `src/foundry_x/execution/` → ADR-0010
 7. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
@@ -95,17 +95,20 @@ mirrors the way our product works:
   include ruff, ruff-format, gitleaks (secret scan), and standard
   hygiene checks. See `.pre-commit-config.yaml`.
 - **Lint:** `uv run ruff check .` — must pass before commit (and is
-  also enforced by pre-commit). Run before test to catch issues early.
-- **Test:** `uv run pytest` — must pass before commit.
+  also enforced by pre-commit). Always run before pytest.
+- **Test:** `uv run pytest` — must pass before commit. Run after lint.
   - Single test: `uv run pytest tests/path/to_test.py::test_name`
   - Single benchmark: `uv run pytest benchmarks/tasks/test_name.py -m benchmark`
   - Benchmarks live alongside unit tests in `benchmarks/tasks/` and are
     marked `@pytest.mark.benchmark` (ADR-0004, ADR-0005).
   - Run the full benchmark suite: `uv run pytest -m benchmark`
 - **CLI tools:**
+  - `uv run fx-runner --task "..."` — run a single agent task session
   - `uv run foundry-x-trace` — inspect trace sessions (`--help` for flags)
   - `uv run foundry-kpis` — compute PRD success-metric KPIs from traces
   - `uv run fx-trace regression-report` — aggregate Critic verdicts
+  - `uv run foundry-evolve` — run one evolution iteration against a failure report
+  - `uv run foundry-sweep` — run a parametric sweep of harness variants
 - **Type discipline:** Python 3.11+ syntax. `pydantic` for all
   structured data at module boundaries (ADR-0006). No `Any` without
   a comment explaining why.

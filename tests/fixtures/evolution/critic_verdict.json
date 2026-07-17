@@ -1,5 +1,7 @@
 {
+  "edit_index": null,
   "failed_checks": [],
+  "failure_class": null,
   "notes": "all checks passed (truncated tail)",
   "passed_checks": [
     "git apply",

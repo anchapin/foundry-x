@@ -545,3 +545,95 @@ def test_cli_regression_report_json_includes_token_budget_abort_count(tmp_path, 
 
     payload = json.loads(captured.out)
     assert payload["token_budget_abort_count"] == 2
+
+
+def _mixed_harness_versions(logger: TraceLogger) -> tuple[str, str, str, str, str]:
+    """Create 5 sessions across two harness versions with a regression in v2.
+
+    Returns ``(sid_v1_a, sid_v1_b, sid_v2_c, sid_v2_d, sid_v1_e)``.
+
+    - v1 session A: passes task-A (baseline)
+    - v1 session B: passes task-A (still passing)
+    - v2 session C: fails task-A (regression in v2)
+    - v2 session D: passes task-A (recovery in v2)
+    - v1 session E: passes task-A (unaffected by v2 regression)
+    """
+    with logger.session(harness_version="v1") as sid:
+        sid_v1_a = sid
+    with logger.session(harness_version="v1") as sid:
+        sid_v1_b = sid
+    with logger.session(harness_version="v2") as sid:
+        sid_v2_c = sid
+    with logger.session(harness_version="v2") as sid:
+        sid_v2_d = sid
+    with logger.session(harness_version="v1") as sid:
+        sid_v1_e = sid
+
+    record_verdict(logger, sid_v1_a, CriticVerdict(verdict=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_v1_b, CriticVerdict(verdict=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_v2_c, CriticVerdict(verdict=False, failed_checks=["task-A"]))
+    record_verdict(logger, sid_v2_d, CriticVerdict(verdict=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_v1_e, CriticVerdict(verdict=True, passed_checks=["task-A"]))
+    return sid_v1_a, sid_v1_b, sid_v2_c, sid_v2_d, sid_v1_e
+
+
+def test_analyze_regressions_filters_by_harness_version(tmp_path):
+    logger = TraceLogger(tmp_path / "traces.db")
+    sid_v1_a, sid_v1_b, sid_v2_c, sid_v2_d, sid_v1_e = _mixed_harness_versions(logger)
+
+    full = analyze_regressions(logger)
+    assert {r.task for r in full.regressions} == {"task-A"}
+    assert {p.task for p in full.new_passes} == {"task-A"}
+    assert full.total == 5
+
+    only_v1 = analyze_regressions(logger, harness_version="v1")
+    assert {r.task for r in only_v1.regressions} == set()
+    assert {p.task for p in only_v1.new_passes} == set()
+    assert only_v1.total == 3
+
+    only_v2 = analyze_regressions(logger, harness_version="v2")
+    assert {r.task for r in only_v2.regressions} == set()
+    assert {p.task for p in only_v2.new_passes} == {"task-A"}
+    assert only_v2.total == 2
+
+
+def test_generate_regression_report_filters_by_harness_version(tmp_path):
+    logger = TraceLogger(tmp_path / "traces.db")
+    _mixed_harness_versions(logger)
+
+    full = generate_regression_report(logger)
+    assert "task-A" in _section(full, "Regressed Tasks")
+
+    v1_report = generate_regression_report(logger, harness_version="v1")
+    assert "_None._" in _section(v1_report, "Regressed Tasks")
+    assert "_None._" in _section(v1_report, "New Passes")
+
+    v2_report = generate_regression_report(logger, harness_version="v2")
+    assert "_None._" in _section(v2_report, "Regressed Tasks")
+    assert "task-A" in _section(v2_report, "New Passes")
+
+
+def test_cli_regression_report_harness_version_filter(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    sid_v1_a, sid_v1_b, sid_v2_c, sid_v2_d, sid_v1_e = _mixed_harness_versions(logger)
+
+    rc = cli_main(["regression-report", "--db", str(db), "--harness-version", "v2"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "task-A" in captured.out
+    assert "## Regressed Tasks" in captured.out
+    assert "## New Passes" in captured.out
+    assert "Total verdicts: 2" in captured.out
+
+
+def test_cli_regression_report_harness_version_no_match(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _mixed_harness_versions(logger)
+
+    rc = cli_main(["regression-report", "--db", str(db), "--harness-version", "v99"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Total verdicts: 0" in captured.out
+    assert "_None._" in captured.out
