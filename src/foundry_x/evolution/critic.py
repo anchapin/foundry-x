@@ -127,6 +127,7 @@ class CriticVerdict(BaseModel):
     failed_checks: list[str] = Field(default_factory=list)
     notes: str = ""
     edit_index: int | None = None
+    failure_class: str | None = None
 
 
 class TaskResult(BaseModel):

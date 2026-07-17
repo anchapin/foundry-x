@@ -854,8 +854,8 @@ def append_kpi_history(
 
     Each run produces exactly one line. The three PRD-KPI fields are
     emitted via :meth:`KpiSummary.model_dump` with ``injection_blocks``,
-    ``token_totals``, and ``streaming_quality`` excluded (the "minus
-    per-session maps" half of the round-trip contract).
+    ``token_totals``, ``streaming_quality``, and ``wall_clock_abort_count``
+    excluded (the "minus per-session maps" half of the round-trip contract).
     ``hooks_disabled_count``, ``hooks_disabled_rate``,
     ``token_budget_abort_count``, and ``token_budget_hit_rate`` are scalar
     fields and are included. Then ``timestamp`` and the optional
@@ -873,7 +873,7 @@ def append_kpi_history(
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = summary.model_dump(
         mode="json",
-        exclude={"injection_blocks", "token_totals"},
+        exclude={"injection_blocks", "token_totals", "streaming_quality", "wall_clock_abort_count"},
     )
     payload["timestamp"] = _now_iso()
     if harness_version is not None:
