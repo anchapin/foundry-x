@@ -367,7 +367,7 @@ def _aggregate_context_overflow(
                         "event_id": event.event_id,
                         "kind": event.kind,
                         "timestamp": event.timestamp,
-                        "signal": "kind:outcome/truncated/max_steps",
+                        "signal": "outcome:truncated/max_steps",
                         "payload": event.payload,
                     }
                 ]
