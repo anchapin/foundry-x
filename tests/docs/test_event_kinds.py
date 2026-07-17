@@ -59,12 +59,14 @@ CONTEXT_MD = REPO_ROOT / "docs" / "CONTEXT.md"
 #     ``model_error``, ``tool_call``, ``tool_result``, ``outcome``,
 #     ``hook_registry_error`` (issue #260: get_registry() raised)
 #   - InjectionFirewallHook: ``injection_blocked`` (via ``tracer`` callback)
+#   - InjectionFirewallHook: ``firewall_exception`` (via ``tracer`` callback, issue #823)
 #   - ContextPruningHook: ``context_pruned`` (via ``tracer`` callback)
 #   - record_verdict: ``critic_verdict`` (constant ``VERDICT_KIND``)
 KNOWN_KINDS: frozenset[str] = frozenset(
     {
         "context_pruned",
         "critic_verdict",
+        "firewall_exception",
         "hook_registry_error",
         "injection_blocked",
         "model_error",
