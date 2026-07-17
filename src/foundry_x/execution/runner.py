@@ -1466,6 +1466,24 @@ async def run_task(
     registry = _resolve_hook_registry(log, session_id)
     hook_call_cls, hook_result_cls = _import_hook_types()
 
+    # Wire injection firewall tracer (issue #733): the default registry's
+    # InjectionFirewallHook was registered with tracer=None. Walk the hook
+    # list and wire the first such instance we find so that blocked tool
+    # results emit ``injection_blocked`` events to the TraceLogger.
+    # The tracer signature for InjectionFirewallHook is Callable[[dict], None]
+    # (one argument: the payload dict); the hook internally calls
+    # tracer(payload) and the tracer forwards to log.record with the
+    # session_id and kind wired in from the outer scope.
+    if registry is not None and hasattr(registry, "_hooks"):
+        from harness.hooks.injection_firewall import InjectionFirewallHook
+
+        def _inject_tracer(payload: dict[str, object]) -> None:
+            log.record(session_id, kind="injection_blocked", payload=payload)
+
+        for hook in registry._hooks:
+            if isinstance(hook, InjectionFirewallHook) and hook._tracer is None:
+                hook._tracer = _inject_tracer  # type: ignore[attr-defined]
+
     # Token-aware pruning (issue #465): when FOUNDRY_CONTEXT_TOKENS is set,
     # register TokenAwarePruningHook so the runner's accumulated tokens_used
     # drives pruning decisions instead of raw event count. The get_tokens

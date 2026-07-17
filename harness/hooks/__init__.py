@@ -11,6 +11,7 @@ from .context_pruning import (
     register_token_aware_into,
     resolve_context_tokens_threshold,
 )
+from . import token_aware_pruning
 from .injection_firewall import InjectionFirewallHook, INJECTION_PATTERNS
 from .rate_limit import (
     RateLimitHook,
@@ -44,6 +45,7 @@ __all__ = [
     "register_into",
     "register_token_aware_into",
     "resolve_context_tokens_threshold",
+    "token_aware_pruning",
     "InjectionFirewallHook",
     "INJECTION_PATTERNS",
     "RateLimitHook",
