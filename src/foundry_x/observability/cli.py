@@ -9,6 +9,8 @@ from foundry_x.observability.kpis import _resolve_format
 from foundry_x.observability.regression_report import analyze_regressions
 from foundry_x.observability.render import render_failure_report
 from foundry_x.observability.session_summary import (
+    SessionSummaryReport,
+    _failure_class_distribution,
     build_session_summary,
     render_session_summary,
 )
@@ -287,13 +289,21 @@ def main(argv: list[str] | None = None) -> int:
         backend = _infer_backend(args.db)
         logger = TraceLogger(args.db, backend=backend)
         rows = build_session_summary(logger, harness_version=args.harness_version)
-        fmt = _resolve_format(args.format, args.out)
+        failure_class_distribution = _failure_class_distribution(rows)
         if args.limit is not None:
             rows = rows[: args.limit]
+        fmt = _resolve_format(args.format, args.out)
         if fmt == "json":
-            rendered = "\n".join(row.model_dump_json() for row in rows) + "\n"
+            report = SessionSummaryReport(
+                failure_class_distribution=failure_class_distribution,
+                rows=list(rows),
+            )
+            rendered = report.model_dump_json(indent=2) + "\n"
         else:
-            rendered = render_session_summary(rows) + "\n"
+            rendered = (
+                render_session_summary(rows, failure_class_distribution=failure_class_distribution)
+                + "\n"
+            )
         if args.out:
             Path(args.out).write_text(rendered, encoding="utf-8")
         else:
