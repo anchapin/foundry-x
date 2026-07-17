@@ -61,7 +61,7 @@ def test_patch_is_visible_to_pytest():
     verdict = Critic(
         harness_dir=harness_dir,
         pytest_args=["-q", "tests/test_gate.py"],
-    ).evaluate(_diff("system_prompt.txt", "original\n", "patched\n"))
+    ).evaluate(_diff("harness/system_prompt.txt", "original\n", "patched\n"))
 
     assert verdict.verdict is True
     assert "pytest" in verdict.passed_checks
@@ -83,7 +83,7 @@ def test_marker_stays_safe():
     verdict = Critic(
         harness_dir=harness_dir,
         pytest_args=["-q", "tests/test_gate.py"],
-    ).evaluate(_diff("marker.txt", "safe\n", "broken\n"))
+    ).evaluate(_diff("harness/marker.txt", "safe\n", "broken\n"))
 
     assert verdict.verdict is False
     assert "git apply" in verdict.passed_checks
@@ -101,11 +101,10 @@ def test_clean_gate_passes():
     assert True
 """.lstrip(),
     )
-    relative_target = Path(proposed_edit.target_file).relative_to("harness").as_posix()
     edit = ProposedEdit(
         target_file=proposed_edit.target_file,
         rationale=proposed_edit.rationale,
-        unified_diff=_diff(relative_target, "original\n", "clean\n"),
+        unified_diff=_diff(proposed_edit.target_file, "original\n", "clean\n"),
     )
 
     verdict = Critic(

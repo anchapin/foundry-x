@@ -58,8 +58,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_TARGET}.tar.gz
 # record `sha256sum` output, update UV_SHA256, and re-run
 # `uv sync --frozen` to confirm reproducibility.
-ARG UV_VERSION=0.9.30
-ARG UV_SHA256=8b3762374972daa7a74bbc6896cc73229ca69a07403dd9f9ea3805a51ffd7582
+ARG UV_VERSION=0.11.29
+ARG UV_SHA256=04f8b82f5d47f0512dcd32c67a4a6f16a0ea27c81537c338fd0ad6b23cebe829
 ARG UV_TARGET=uv-x86_64-unknown-linux-gnu
 
 RUN set -eux; \

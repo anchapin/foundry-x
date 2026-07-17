@@ -45,7 +45,7 @@ _MINIMAL_HOOKS_INIT = (
 # ``skills`` arrays satisfy the cross-ref validation because the fixture's
 # ``skills/`` dir and ``hooks/`` package have no entries to resolve. No
 # ``VERSION`` file is seeded, so the version cross-check is skipped.
-_MINIMAL_MANIFEST = '{"version": "0.0.0", "model_target": "test", "hooks": [], "skills": []}'
+_MINIMAL_MANIFEST = '{"version": "0.0.0", "model_target": "test", "hooks": [], "skills": []}\n'
 
 
 def install_load_check_prerequisites(harness_dir: Path) -> None:

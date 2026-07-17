@@ -246,7 +246,7 @@ class ModelAdapter(Protocol):
     ) -> ModelResponse:
         """Return one full response for the provided chat messages."""
 
-    def stream(
+    async def stream(
         self,
         messages: Sequence[MessageInput],
         tools: Sequence[ToolInput] | None = None,

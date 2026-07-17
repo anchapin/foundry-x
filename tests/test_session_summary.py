@@ -19,6 +19,7 @@ import inspect
 
 from foundry_x.observability.cli import main as cli_main
 from foundry_x.observability.session_summary import (
+    CONTEXT_PRUNED_KIND,
     OUTCOME_KIND,
     SessionSummaryRow,
     build_session_summary,
@@ -178,11 +179,10 @@ def test_render_session_summary_includes_recorded_outcome_fields(tmp_path):
     new_line = next(ln for ln in rendered.splitlines() if "sess-0004-new" in ln)
     assert "failed" in new_line
     assert "model_error" in new_line
-    # ``steps`` lives in the right-most column with width 5; the integer
-    # is right-justified, so we check the row contains "    4" (3 spaces
-    # + "4") rather than checking for the bare number which would also
-    # match against the ISO-8601 second field.
-    assert new_line.rstrip().endswith("4")
+    # ``steps`` is no longer the right-most column (token_budget_hit is);
+    # we check that "4" appears in the correct position by looking for it
+    # in the context of the steps column.
+    assert "    4  false" in new_line
 
 
 def test_render_session_summary_respects_limit(tmp_path):
@@ -224,10 +224,11 @@ def test_render_session_summary_long_outcome_is_truncated(tmp_path):
     )
     rendered = render_session_summary(rows)
     long_line = next(ln for ln in rendered.splitlines() if "sess-0099-long" in ln)
-    # Each fixed-width cell is separated by two spaces. The rightmost
-    # ``steps`` column ("    1") stays at the end regardless of
-    # truncation of the reason cell.
-    assert long_line.rstrip().endswith("    1")
+    # Each fixed-width cell is separated by two spaces. The right-most
+    # ``token_budget_hit`` column ("_" for this row) stays at the end
+    # regardless of truncation of the reason cell; the ``steps`` column
+    # ("    1") is now second-to-last.
+    assert "    1      _" in long_line
 
 
 # --- CLI integration ---
@@ -309,3 +310,179 @@ def test_cli_session_summary_does_not_import_digester_or_critic():
             branch = branch[:idx]
     assert "Digester" not in branch
     assert "Critic" not in branch
+
+
+# ---------------------------------------------------------------------------
+# Issue #626: per-session ``context_pruned`` count is surfaced in
+# ``SessionSummaryRow`` and rendered in the session summary table.
+# ---------------------------------------------------------------------------
+
+
+def _plant_context_pruned_events(db_path, session_id, count):
+    """Plant *count* ``context_pruned`` events for *session_id* (issue #626)."""
+    import json
+    import sqlite3
+    import uuid
+
+    with sqlite3.connect(db_path) as conn:
+        for i in range(count):
+            conn.execute(
+                "INSERT INTO events (event_id, session_id, timestamp, kind, payload) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    session_id,
+                    "2026-07-10T10:00:00+00:00",
+                    CONTEXT_PRUNED_KIND,
+                    json.dumps({"dropped": i + 1, "threshold": 200}),
+                ),
+            )
+
+
+def test_build_session_summary_context_pruned_is_none_when_no_prunes(tmp_path):
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rows = build_session_summary(TraceLogger(db))
+
+    for row in rows:
+        assert row.context_pruned is None
+
+
+def test_build_session_summary_context_pruned_count_populated(tmp_path):
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    _plant_context_pruned_events(db, "sess-0001-old", 3)
+    _plant_context_pruned_events(db, "sess-0002-mid", 1)
+
+    rows = build_session_summary(TraceLogger(db))
+
+    row_map = {row.session_id: row for row in rows}
+    assert row_map["sess-0001-old"].context_pruned == 3
+    assert row_map["sess-0002-mid"].context_pruned == 1
+    assert row_map["sess-0003-no-outcome"].context_pruned is None
+    assert row_map["sess-0004-new"].context_pruned is None
+
+
+def test_build_session_summary_context_pruned_respects_harness_version_filter(tmp_path):
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    _plant_context_pruned_events(db, "sess-0001-old", 2)
+    _plant_context_pruned_events(db, "sess-0002-mid", 1)
+    _plant_context_pruned_events(db, "sess-0004-new", 5)
+
+    rows = build_session_summary(TraceLogger(db), harness_version="0.1.0")
+
+    assert len(rows) == 3
+    row_map = {row.session_id: row for row in rows}
+    assert row_map["sess-0001-old"].context_pruned == 2
+    assert row_map["sess-0002-mid"].context_pruned == 1
+
+
+def test_render_session_summary_context_pruned_not_in_text_table(tmp_path):
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    _plant_context_pruned_events(db, "sess-0001-old", 2)
+
+    rows = build_session_summary(TraceLogger(db))
+    rendered = render_session_summary(rows)
+
+    lines = rendered.splitlines()
+    header = lines[0]
+    assert "context_pruned" not in header
+
+
+# --- Issue #624: --format json and --out ---------------------------------------
+
+
+def test_cli_session_summary_format_json_emits_json_array(tmp_path, capsys):
+    """Issue #624: --format json emits a JSON array of SessionSummaryRow objects."""
+    import json
+
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rc = cli_main(["session-summary", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Each line is a JSON object (model_dump_json per row).
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 4
+    for line in lines:
+        parsed = json.loads(line)
+        assert "session_id" in parsed
+        assert "started_at" in parsed
+        assert "duration_seconds" in parsed
+        assert "outcome_status" in parsed
+        assert "outcome_reason" in parsed
+        assert "steps" in parsed
+
+
+def test_cli_session_summary_out_writes_to_file(tmp_path, capsys):
+    """Issue #624: --out writes to file; stdout is empty."""
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    out_file = tmp_path / "summary.json"
+
+    rc = cli_main(["session-summary", "--db", str(db), "--format", "json", "--out", str(out_file)])
+
+    assert rc == 0
+    # stdout is empty (no table printed).
+    stdout = capsys.readouterr().out
+    assert stdout == ""
+    # File contains JSON lines.
+    content = out_file.read_text(encoding="utf-8")
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == 4
+
+
+def test_cli_session_summary_format_json_infers_from_out_extension(tmp_path, capsys):
+    """Issue #624: when --out ends in .json, json format is selected automatically."""
+    import json
+
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    out_file = tmp_path / "summary.json"
+
+    rc = cli_main(["session-summary", "--db", str(db), "--out", str(out_file)])
+
+    assert rc == 0
+    content = out_file.read_text(encoding="utf-8")
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == 4
+    # Verify it's valid JSON by parsing.
+    for line in lines:
+        json.loads(line)
+
+
+def test_cli_session_summary_format_json_with_limit(tmp_path, capsys):
+    """Issue #624: --limit applies to JSON output (newest-first ordering)."""
+    import json
+
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    out_file = tmp_path / "summary.json"
+
+    rc = cli_main(
+        [
+            "session-summary",
+            "--db",
+            str(db),
+            "--format",
+            "json",
+            "--limit",
+            "2",
+            "--out",
+            str(out_file),
+        ]
+    )
+
+    assert rc == 0
+    content = out_file.read_text(encoding="utf-8")
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == 2
+    # Verify rows are valid JSON and newest-first.
+    parsed_lines = [json.loads(ln) for ln in lines]
+    assert parsed_lines[0]["session_id"] == "sess-0004-new"

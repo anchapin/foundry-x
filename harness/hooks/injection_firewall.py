@@ -75,6 +75,27 @@ INJECTION_PATTERNS: tuple[tuple[str, str], ...] = (
         "ignore_spanish",
         r"ignora\s+(?:las\s+)?instrucciones\s+anteriores",
     ),
+    # Issue #584: additional non-Spanish language evasion coverage.
+    # French: "ignorer les instructions" / "oublier les consignes"
+    (
+        "ignore_french",
+        r"(?:ignorer\s+(?:les\s+)?instructions|oublier\s+(?:les\s+)?consignes)",
+    ),
+    # German: "ignoriere vorherige Anweisungen" / "ignoriere die Anweisungen"
+    (
+        "ignore_german",
+        r"ignoriere\s+(?:vorherige\s+)?(?:die\s+)?Anweisungen",
+    ),
+    # Portuguese: "ignore as instruções anteriores"
+    (
+        "ignore_portuguese",
+        r"ignore\s+(?:as\s+)?instruções\s+anteriores",
+    ),
+    # Italian: "ignora le istruzioni precedenti"
+    (
+        "ignore_italian",
+        r"ignora\s+(?:le\s+)?istruzioni\s+precedenti",
+    ),
     # JSON-escaped role-tag form, e.g. {\"role\":\"system\",\"content\":...}.
     # The legitimate ``role_tag_colon`` regex above requires a literal
     # ``system:`` preceded by start-of-line; an attacker wrapping the role
@@ -268,6 +289,8 @@ def scan_for_injection(text: str) -> ScanResult:
 
 
 class InjectionFirewallHook:
+    _phase: int = 1
+
     """Hook that truncates/flags tool results containing injection markers.
 
     Implements the :class:`~harness.hooks.base.Hook` Protocol. ``pre_tool``

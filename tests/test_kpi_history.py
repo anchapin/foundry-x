@@ -26,7 +26,9 @@ import pytest
 from foundry_x.observability.kpis import (
     KpiHistoryEntry,
     KpiSummary,
+    _sparkline,
     append_kpi_history,
+    export_prometheus,
     main,
     read_kpi_history,
     render_history_markdown,
@@ -291,14 +293,21 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     payload = json.loads(text.strip())
     # The persisted line is the KpiSummary minus per-session map plus
     # the timestamp; harness_version is absent because --harness-version
-    # was not supplied.
+    # was not supplied. hooks_disabled_count and hooks_disabled_rate are
+    # scalar fields and are included (issue #585).
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
         "improvement_rate",
+        "token_budget_abort_count",
+        "token_budget_hit_rate",
         "timestamp",
+        "hooks_disabled_count",
+        "hooks_disabled_rate",
+        "context_pruned_count",
     }
     assert "injection_blocks" not in payload
+    assert "token_totals" not in payload
 
 
 def test_main_log_to_persists_harness_version_when_filtered(tmp_path):
@@ -395,6 +404,132 @@ def test_main_from_history_writes_to_out_path(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Issue #622: --from-history --trend appends ASCII sparkline columns.
+# ---------------------------------------------------------------------------
+
+
+def test_sparkline_renders_increasing_sequence():
+    """An increasing sequence maps to progressively taller block characters."""
+    result = _sparkline([0.0, 0.25, 0.5, 0.75, 1.0])
+    assert len(result) == 5
+    assert result[0] == "▁"
+    assert result[-1] == "█"
+
+
+def test_sparkline_renders_decreasing_sequence():
+    """A decreasing sequence maps to progressively shorter block characters."""
+    result = _sparkline([1.0, 0.75, 0.5, 0.25, 0.0])
+    assert len(result) == 5
+    assert result[0] == "█"
+    assert result[-1] == "▁"
+
+
+def test_sparkline_flat_line():
+    """A constant value fills all cells with the tallest block."""
+    result = _sparkline([0.5, 0.5, 0.5])
+    assert len(result) == 3
+    assert all(c == "█" for c in result)
+
+
+def test_sparkline_handles_none():
+    """None values render as '·' and are excluded from the scale."""
+    result = _sparkline([0.0, None, 1.0])
+    assert len(result) == 3
+    assert result[0] == "▁"
+    assert result[1] == "·"
+    assert result[2] == "█"
+
+
+def test_sparkline_all_none_returns_n_a():
+    """A sequence of only Nones returns 'N/A'."""
+    assert _sparkline([None, None]) == "N/A"
+
+
+def test_render_history_markdown_trend_true_adds_sparkline_columns():
+    """trend=True appends three sparkline columns to every row."""
+    entries = [
+        KpiHistoryEntry(
+            timestamp="2026-07-11T00:00:00+00:00",
+            cycle_time_seconds=1.0,
+            regression_rate=0.2,
+            improvement_rate=0.5,
+        ),
+        KpiHistoryEntry(
+            timestamp="2026-07-11T01:00:00+00:00",
+            cycle_time_seconds=1.5,
+            regression_rate=0.15,
+            improvement_rate=0.55,
+        ),
+        KpiHistoryEntry(
+            timestamp="2026-07-11T02:00:00+00:00",
+            cycle_time_seconds=2.0,
+            regression_rate=0.1,
+            improvement_rate=0.6,
+        ),
+    ]
+    table = render_history_markdown(entries, trend=True)
+    lines = table.splitlines()
+
+    # Header has 7 columns (timestamp + 3 KPIs + 3 sparklines).
+    header_cols = lines[0].split("|")
+    assert len(header_cols) == 9  # leading/trailing empty from split
+
+    # Data rows carry the same sparkline string in each row's sparkline cells.
+    assert "▁" in lines[2]
+    assert "█" in lines[2]
+
+
+def test_render_history_markdown_trend_false_has_no_sparkline_columns():
+    """trend=False (default) produces the original 4-column table."""
+    entries = [
+        KpiHistoryEntry(
+            timestamp="2026-07-11T00:00:00+00:00",
+            cycle_time_seconds=1.0,
+            regression_rate=0.1,
+            improvement_rate=0.5,
+        ),
+    ]
+    table = render_history_markdown(entries, trend=False)
+    lines = table.splitlines()
+    # Header + separator + 1 data row.
+    assert len(lines) == 3
+    # No sparkline characters in the data row.
+    assert "▁" not in lines[2]
+    assert "█" not in lines[2]
+
+
+def test_main_trend_without_from_history_exits_with_error(tmp_path, capsys):
+    """--trend without --from-history exits with a helpful error."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--db", str(db), "--trend"])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert "--trend requires --from-history" in captured.err
+
+
+def test_main_from_history_trend_appends_sparklines(tmp_path, capsys):
+    """--from-history --trend renders sparkline columns in the output."""
+    log = tmp_path / "kpi-history.jsonl"
+    append_kpi_history(log, KpiSummary(cycle_time_seconds=1.0, improvement_rate=0.2))
+    append_kpi_history(log, KpiSummary(cycle_time_seconds=2.0, improvement_rate=0.8))
+
+    rc = main(["--from-history", str(log), "--trend"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    out = captured.out
+    # Sparkline characters appear in the output.
+    assert "▁" in out or "█" in out
+    # Both history rows are present.
+    assert "0.20" in out
+    assert "0.80" in out
+
+
+# ---------------------------------------------------------------------------
 # Static guard: the history file is gitignored. A future contributor who
 # wipes ``logs/*.jsonl`` from ``.gitignore`` would silently start
 # committing KPI history to the repo; this test fails loudly so the
@@ -417,3 +552,242 @@ def test_kpi_history_file_is_gitignored():
         "Issue #183 requires the append-only KPI history log to be "
         "gitignored so it never gets committed."
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #565: ASCII sparklines.
+# ---------------------------------------------------------------------------
+
+
+def test_sparkline_five_values():
+    """Five values spanning a range produce five block characters."""
+    values = [0.0, 0.25, 0.5, 0.75, 1.0]
+    line = _sparkline(values)
+    assert len(line) == 5
+    assert all(c in "▁▂▃▄▅▆▇█" for c in line)
+
+
+def test_sparkline_renders_none_as_space():
+    values = [0.0, None, 1.0]
+    line = _sparkline(values)
+    assert len(line) == 3
+    assert line[1] == "·"
+
+
+def test_sparkline_empty_list():
+    assert _sparkline([]) == "N/A"
+
+
+def test_sparkline_single_value():
+    assert _sparkline([0.5]) == "█"
+
+
+def test_render_history_markdown_trend_adds_sparkline_columns(tmp_path):
+    """With trend=True, three extra columns show Unicode sparklines."""
+    path = tmp_path / "kpi-history.jsonl"
+    for rate in [0.1, 0.4, 0.7]:
+        append_kpi_history(path, KpiSummary(improvement_rate=rate))
+
+    entries = read_kpi_history(path)
+    table = render_history_markdown(entries, trend=True)
+    lines = table.splitlines()
+
+    header = lines[0]
+    assert "Cycle Time |" in header
+    assert "Reg. Rate |" in header
+    assert "Impr. Rate |" in header
+
+    assert lines[1] == "| --- | --- | --- | --- | --- | --- | --- |"
+    assert len(lines) == 5  # header + separator + 3 data rows
+
+    for idx, rate in enumerate([0.1, 0.4, 0.7], start=2):
+        row = lines[idx]
+        assert f"| {rate:.2f} |" in row
+
+
+def test_render_history_markdown_trend_empty_history():
+    """trend=True with empty entries still renders placeholder."""
+    table = render_history_markdown([], trend=True)
+    assert "No KPI history" in table
+
+
+def test_render_history_markdown_trend_preserves_none_cycle_time(tmp_path):
+    """None cycle times render as a space in the sparkline column."""
+    entries = [
+        KpiHistoryEntry(
+            timestamp="2026-07-11T00:00:00+00:00",
+            cycle_time_seconds=None,
+            regression_rate=0.0,
+            improvement_rate=0.5,
+        ),
+        KpiHistoryEntry(
+            timestamp="2026-07-11T00:01:00+00:00",
+            cycle_time_seconds=2.0,
+            regression_rate=0.0,
+            improvement_rate=0.5,
+        ),
+    ]
+    table = render_history_markdown(entries, trend=True)
+    assert "N/A" in table
+    assert "█" in table or "░" in table or "▒" in table or "▓" in table or " " in table
+
+
+# ---------------------------------------------------------------------------
+# Issue #565: Prometheus export.
+# ---------------------------------------------------------------------------
+
+
+def test_export_prometheus_emits_one_sample_per_entry_per_kpi(tmp_path):
+    """Each history entry yields three samples (cycle_time, reg, impr)."""
+    path = tmp_path / "kpi-history.jsonl"
+    append_kpi_history(
+        path,
+        KpiSummary(
+            cycle_time_seconds=1.5,
+            regression_rate=0.1,
+            improvement_rate=0.9,
+        ),
+        harness_version="v1",
+    )
+
+    entries = read_kpi_history(path)
+    output = export_prometheus(entries)
+
+    assert "foundryx_kpi_entry" in output
+    assert 'kpi="cycle_time_seconds"' in output
+    assert 'kpi="regression_rate"' in output
+    assert 'kpi="improvement_rate"' in output
+    assert 'harness_version="v1"' in output
+    assert "# TYPE foundryx_kpi_entry gauge" in output
+    assert "# HELP foundryx_kpi_entry FoundryX KPI" in output
+
+
+def test_export_prometheus_empty_history_emits_comment():
+    output = export_prometheus([])
+    assert "No KPI history entries" in output
+    assert "foundryx_kpi_entry" in output
+
+
+def test_export_prometheus_unknown_harness_version(tmp_path):
+    path = tmp_path / "kpi-history.jsonl"
+    append_kpi_history(path, KpiSummary(regression_rate=0.05))
+    entries = read_kpi_history(path)
+    output = export_prometheus(entries)
+    assert 'harness_version="unknown"' in output
+
+
+def test_export_prometheus_cycle_time_none_emits_nan(tmp_path):
+    path = tmp_path / "kpi-history.jsonl"
+    append_kpi_history(
+        path,
+        KpiSummary(cycle_time_seconds=None, regression_rate=0.0, improvement_rate=0.5),
+    )
+    entries = read_kpi_history(path)
+    output = export_prometheus(entries)
+    assert "NaN" in output
+
+
+# ---------------------------------------------------------------------------
+# Issue #565: --trend CLI flag.
+# ---------------------------------------------------------------------------
+
+
+def test_main_from_history_trend_flag_renders_sparklines(tmp_path, capsys):
+    log = tmp_path / "kpi-history.jsonl"
+    append_kpi_history(log, KpiSummary(improvement_rate=0.2))
+    append_kpi_history(log, KpiSummary(improvement_rate=0.8))
+
+    rc = main(["--from-history", str(log), "--trend"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "Reg. Rate |" in captured.out
+    assert "Impr. Rate |" in captured.out
+
+
+def test_main_from_history_trend_requires_from_history(tmp_path, capsys):
+    """--trend without --from-history exits with error."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--db", str(db), "--trend"])
+    assert exc_info.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #565: --export-prometheus CLI flag.
+# ---------------------------------------------------------------------------
+
+
+def test_main_from_history_export_prometheus_emits_prom_format(tmp_path, capsys):
+    log = tmp_path / "kpi-history.jsonl"
+    append_kpi_history(log, KpiSummary(regression_rate=0.15))
+    append_kpi_history(log, KpiSummary(regression_rate=0.05))
+
+    rc = main(["--from-history", str(log), "--export-prometheus"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    out = captured.out
+    assert 'kpi="regression_rate"' in out
+    assert "foundryx_kpi_entry" in out
+    assert "# TYPE foundryx_kpi_entry gauge" in out
+
+
+def test_main_from_history_export_prometheus_writes_to_out(tmp_path):
+    log = tmp_path / "kpi-history.jsonl"
+    append_kpi_history(log, KpiSummary(regression_rate=0.1))
+    out = tmp_path / "metrics.prom"
+
+    rc = main(["--from-history", str(log), "--export-prometheus", "--out", str(out)])
+
+    assert rc == 0
+    text = out.read_text(encoding="utf-8")
+    assert "foundryx_kpi_entry" in text
+
+
+# ---------------------------------------------------------------------------
+# Issue #565: --alert-threshold CLI flag.
+# ---------------------------------------------------------------------------
+
+
+def test_main_alert_threshold_zero_exit_when_regression_above(tmp_path, capsys):
+    """Regression rate > threshold causes non-zero exit with an alert to stderr."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["x"])
+    _seed_session(logger, "v1", verdict=False, failed_checks=["x"])
+
+    rc = main(["--db", str(db), "--alert-threshold", "0.05"])
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "[ALERT]" in captured.err
+    assert "regression_rate" in captured.err
+
+
+def test_main_alert_threshold_zero_exit_when_regression_below(tmp_path, capsys):
+    """Regression rate <= threshold exits zero (no alert)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)  # no regression
+
+    rc = main(["--db", str(db), "--alert-threshold", "0.5"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "[ALERT]" not in captured.err
+
+
+def test_main_alert_threshold_from_history_is_not_supported(tmp_path, capsys):
+    """--from-history short-circuits before KPI computation; alert is not checked."""
+    log = tmp_path / "kpi-history.jsonl"
+    append_kpi_history(log, KpiSummary(regression_rate=99.0))
+
+    rc = main(["--from-history", str(log), "--alert-threshold", "0.01"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "[ALERT]" not in captured.err

@@ -469,3 +469,171 @@ def test_cli_regression_report_format_json_with_fail_on_regression_gates(tmp_pat
     captured = capsys.readouterr()
     assert rc == 1
     assert json.loads(captured.out)["regressions"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #466: token budget aborts in regression report.
+# The report surfaces token budget aborts as a distinct failure category
+# separate from task regressions.
+# ---------------------------------------------------------------------------
+
+
+def _plant_task_aborted(logger, session_id, reason):
+    """Plant a ``task_aborted`` event for a session."""
+    import time
+
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+        time.sleep(0.01)
+        logger.record(
+            sid,
+            kind="task_aborted",
+            payload={"reason": reason, "tokens_used": 8000, "token_budget": 5000},
+        )
+
+
+def test_analyze_regressions_includes_token_budget_abort_count(tmp_path):
+    """``token_budget_abort_count`` is counted in the regression analysis."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _plant_task_aborted(logger, "sess-1", "token_budget")
+    _plant_task_aborted(logger, "sess-2", "token_budget")
+    _plant_task_aborted(logger, "sess-3", "wall_clock")
+
+    result = analyze_regressions(logger)
+
+    assert result.token_budget_abort_count == 2
+
+
+def test_analyze_regressions_token_budget_abort_zero_when_no_aborts(tmp_path):
+    """``token_budget_abort_count`` is 0 when no session hit the token budget."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _plant_task_aborted(logger, "sess-1", "wall_clock")
+
+    result = analyze_regressions(logger)
+
+    assert result.token_budget_abort_count == 0
+
+
+def test_generate_regression_report_shows_token_budget_aborts_section(tmp_path):
+    """Regression report includes a Token Budget Aborts section."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _plant_task_aborted(logger, "sess-1", "token_budget")
+
+    report = generate_regression_report(logger)
+
+    assert "## Token Budget Aborts" in report
+    assert "1 session(s)" in report
+
+
+def test_cli_regression_report_json_includes_token_budget_abort_count(tmp_path, capsys):
+    """JSON output includes token_budget_abort_count."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _plant_task_aborted(logger, "sess-1", "token_budget")
+    _plant_task_aborted(logger, "sess-2", "token_budget")
+
+    rc = cli_main(["regression-report", "--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert payload["token_budget_abort_count"] == 2
+
+
+def _mixed_harness_versions(logger: TraceLogger) -> tuple[str, str, str, str, str]:
+    """Create 5 sessions across two harness versions with a regression in v2.
+
+    Returns ``(sid_v1_a, sid_v1_b, sid_v2_c, sid_v2_d, sid_v1_e)``.
+
+    - v1 session A: passes task-A (baseline)
+    - v1 session B: passes task-A (still passing)
+    - v2 session C: fails task-A (regression in v2)
+    - v2 session D: passes task-A (recovery in v2)
+    - v1 session E: passes task-A (unaffected by v2 regression)
+    """
+    with logger.session(harness_version="v1") as sid:
+        sid_v1_a = sid
+    with logger.session(harness_version="v1") as sid:
+        sid_v1_b = sid
+    with logger.session(harness_version="v2") as sid:
+        sid_v2_c = sid
+    with logger.session(harness_version="v2") as sid:
+        sid_v2_d = sid
+    with logger.session(harness_version="v1") as sid:
+        sid_v1_e = sid
+
+    record_verdict(logger, sid_v1_a, CriticVerdict(verdict=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_v1_b, CriticVerdict(verdict=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_v2_c, CriticVerdict(verdict=False, failed_checks=["task-A"]))
+    record_verdict(logger, sid_v2_d, CriticVerdict(verdict=True, passed_checks=["task-A"]))
+    record_verdict(logger, sid_v1_e, CriticVerdict(verdict=True, passed_checks=["task-A"]))
+    return sid_v1_a, sid_v1_b, sid_v2_c, sid_v2_d, sid_v1_e
+
+
+def test_analyze_regressions_filters_by_harness_version(tmp_path):
+    logger = TraceLogger(tmp_path / "traces.db")
+    sid_v1_a, sid_v1_b, sid_v2_c, sid_v2_d, sid_v1_e = _mixed_harness_versions(logger)
+
+    full = analyze_regressions(logger)
+    assert {r.task for r in full.regressions} == {"task-A"}
+    assert {p.task for p in full.new_passes} == {"task-A"}
+    assert full.total == 5
+
+    only_v1 = analyze_regressions(logger, harness_version="v1")
+    assert {r.task for r in only_v1.regressions} == set()
+    assert {p.task for p in only_v1.new_passes} == set()
+    assert only_v1.total == 3
+
+    only_v2 = analyze_regressions(logger, harness_version="v2")
+    assert {r.task for r in only_v2.regressions} == set()
+    assert {p.task for p in only_v2.new_passes} == {"task-A"}
+    assert only_v2.total == 2
+
+
+def test_generate_regression_report_filters_by_harness_version(tmp_path):
+    logger = TraceLogger(tmp_path / "traces.db")
+    _mixed_harness_versions(logger)
+
+    full = generate_regression_report(logger)
+    assert "task-A" in _section(full, "Regressed Tasks")
+
+    v1_report = generate_regression_report(logger, harness_version="v1")
+    assert "_None._" in _section(v1_report, "Regressed Tasks")
+    assert "_None._" in _section(v1_report, "New Passes")
+
+    v2_report = generate_regression_report(logger, harness_version="v2")
+    assert "_None._" in _section(v2_report, "Regressed Tasks")
+    assert "task-A" in _section(v2_report, "New Passes")
+
+
+def test_cli_regression_report_harness_version_filter(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    sid_v1_a, sid_v1_b, sid_v2_c, sid_v2_d, sid_v1_e = _mixed_harness_versions(logger)
+
+    rc = cli_main(["regression-report", "--db", str(db), "--harness-version", "v2"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "task-A" in captured.out
+    assert "## Regressed Tasks" in captured.out
+    assert "## New Passes" in captured.out
+    assert "Total verdicts: 2" in captured.out
+
+
+def test_cli_regression_report_harness_version_no_match(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _mixed_harness_versions(logger)
+
+    rc = cli_main(["regression-report", "--db", str(db), "--harness-version", "v99"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Total verdicts: 0" in captured.out
+    assert "_None._" in captured.out

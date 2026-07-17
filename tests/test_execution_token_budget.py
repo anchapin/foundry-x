@@ -215,14 +215,14 @@ async def test_run_task_records_usage_and_running_total_on_model_response(tmp_pa
     assert len(model_responses) == 2
 
     first, second = model_responses
-    assert first.payload["usage"] == {
+    assert first.payload["token_usage"] == {
         "prompt_tokens": 10,
         "completion_tokens": 20,
         "total_tokens": 30,
     }
     assert first.payload["tokens_used"] == 30
 
-    assert second.payload["usage"] == {
+    assert second.payload["token_usage"] == {
         "prompt_tokens": 40,
         "completion_tokens": 60,
         "total_tokens": 100,
@@ -368,6 +368,73 @@ async def test_run_task_within_budget_completes_normally(tmp_path):
     assert outcome.payload["status"] == "success"
     assert outcome.payload["reason"] == "final_answer"
     assert outcome.payload["tokens_total"] == 20
+
+
+@pytest.mark.asyncio
+async def test_run_task_warns_and_zero_tokens_when_usage_missing(tmp_path):
+    """Issue #486 acceptance: when the endpoint omits usage data, the runner
+    emits a ``token_usage_missing`` warning event so the operator can observe
+    that token accounting is incomplete, and counts zero tokens for that step
+    so the loop proceeds without crashing.
+    """
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+    db = tmp_path / "traces.db"
+
+    tool_call = ModelToolCall(
+        id="call_1",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments=json.dumps({"command": "true"}),
+        ),
+    )
+    responses = [
+        ModelResponse(
+            message=ModelMessage(role="assistant", content=None, tool_calls=[tool_call]),
+            tool_calls=[tool_call],
+            finish_reason="tool_calls",
+            usage=None,
+        ),
+        ModelResponse(
+            message=ModelMessage(role="assistant", content="done"),
+            finish_reason="stop",
+            usage=None,
+        ),
+    ]
+    adapter = _ScriptedAdapter(responses)
+
+    async def noop_executor(name, arguments):  # noqa: ANN001, ARG001
+        return {"status": "ok"}
+
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as session_id:
+        await run_task(
+            "missing-usage",
+            harness_dir,
+            logger,
+            session_id,
+            model_adapter=adapter,
+            skill_executor=noop_executor,
+            limits=None,
+        )
+
+    events = logger.load_session(session_id)
+
+    warning_events = [event for event in events if event.kind == "token_usage_missing"]
+    assert len(warning_events) == 2
+    for warning in warning_events:
+        assert "endpoint did not report token usage" in warning.payload["message"]
+
+    model_responses = [event for event in events if event.kind == "model_response"]
+    assert len(model_responses) == 2
+    for event in model_responses:
+        assert event.payload["token_usage"] is None
+        assert event.payload["tokens_used"] == 0
+
+    outcome = next(event for event in events if event.kind == "outcome")
+    assert outcome.payload["status"] == "success"
+    assert outcome.payload["tokens_total"] == 0
 
 
 @pytest.mark.asyncio
