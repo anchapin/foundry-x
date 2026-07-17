@@ -506,6 +506,84 @@ def test_agent_loop_records_parse_error_for_non_dict_arguments(tmp_path, monkeyp
     assert tool_call_event.payload["arguments"] == {}
 
 
+def test_agent_loop_run_pre_argument_mutation(tmp_path, monkeypatch):
+    """Issue #615: a pre-tool hook that mutates ``call.arguments`` must have
+    the mutated value reach the skill executor. ``run_task`` calls
+    ``registry.run_pre(call)`` and then passes the returned (possibly
+    modified) call to ``_execute_skill`` — no test exercised this contract
+    until now.
+    """
+    from harness.hooks.base import ToolCall
+
+    db = tmp_path / "traces.db"
+    received_arguments: dict = {}
+
+    async def capturing_executor(name, arguments):
+        received_arguments[name] = arguments
+        return {"stdout": "", "stderr": "", "exit_code": 0, "truncated": False}
+
+    class DoublerHook:
+        async def pre_tool(self, call: ToolCall) -> ToolCall:
+            if "x" in call.arguments and isinstance(call.arguments["x"], (int, float)):
+                call.arguments["x"] = call.arguments["x"] * 2
+            return call
+
+        async def post_tool(self, call, result):
+            return result
+
+    tool_call = ModelToolCall(
+        id="call_dbl",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments='{"command": "echo test", "x": 21}',
+        ),
+    )
+    responses = [
+        ModelResponse(
+            message=ModelMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[tool_call],
+            ),
+            tool_calls=[tool_call],
+            finish_reason="tool_calls",
+        ),
+        ModelResponse(
+            message=ModelMessage(role="assistant", content="done"),
+            finish_reason="stop",
+        ),
+    ]
+    adapter = _ScriptedAdapter(responses)
+    monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
+    monkeypatch.setattr(sys, "argv", _argv("mutate-loop", db, REPO_HARNESS_DIR))
+
+    from harness.hooks import register_hook
+
+    hook = DoublerHook()
+    register_hook(hook)
+
+    async def _run_with_executor(task, harness_dir, log, session_id, **kwargs):
+        await runner_mod.run_task(
+            task,
+            harness_dir,
+            log,
+            session_id,
+            model_adapter=adapter,
+            skill_executor=capturing_executor,
+        )
+
+    try:
+        main(run_task_fn=_run_with_executor)
+
+        assert "bash" in received_arguments
+        assert received_arguments["bash"]["x"] == 42, (
+            "pre-tool hook must double the x argument before executor receives it"
+        )
+    finally:
+        _reset_default_registry()
+
+
 def test_agent_loop_emits_no_parse_error_for_valid_arguments(tmp_path, monkeypatch):
     """Issue #261 acceptance: when arguments parse successfully, no
     ``tool_argument_parse_error`` event is emitted — the event is purely a
