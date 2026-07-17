@@ -1,65 +1,33 @@
 {
   "name": "example_skill",
-  "version": "0.2.0",
-  "description": "Read the contents of a file from the agent's workspace. The output is bounded by `max_bytes` (default 32 KiB) and an optional `max_lines` cap so that a single read cannot blow the local-model context window (SECURITY.md threat #5, PRD §4, PHILOSOPHY.md §5).",
+  "version": "0.1.0",
+  "description": "Example skill demonstrating skill JSON schema. Not for production use. This toy skill accepts a name and returns a personalised greeting, serving as a minimal template for skill authors.",
   "input_schema": {
     "type": "object",
     "properties": {
-      "path": {
+      "name": {
         "type": "string",
-        "description": "Absolute or harness-relative path to the file."
+        "description": "The name of the person to greet."
       },
-      "max_bytes": {
+      "enthusiasm": {
         "type": "integer",
         "minimum": 1,
-        "default": 32768,
-        "description": "Maximum number of UTF-8 bytes to include in the returned `content`. If the file (or the slice from `offset`) is larger than this, the read is truncated and `truncated` is set to true. Defaults to 32768 (32 KiB), which keeps a single read well under the 4K-32K context window of typical local 7B-70B models. Honored before `max_lines` is applied; the effective cap is min(max_bytes, max_lines * average_line_length)."
-      },
-      "max_lines": {
-        "type": "integer",
-        "minimum": 1,
-        "description": "Optional cap on the number of lines returned. If the file has more lines than this (counted from `offset`), the read is truncated and `truncated` is set to true. Useful when byte count is a poor proxy (e.g. minified JSON, generated code with very long lines)."
-      },
-      "offset": {
-        "type": "integer",
-        "minimum": 0,
-        "default": 0,
-        "description": "Byte offset (must lie on a UTF-8 character boundary) at which to begin reading. Use together with `max_bytes` to page through a large file across multiple read_file calls."
+        "maximum": 5,
+        "default": 3,
+        "description": "Enthusiasm level from 1 (muted) to 5 (maximum). Controls the number of exclamation marks in the greeting."
       }
     },
-    "required": ["path"],
+    "required": ["name"],
     "additionalProperties": false
   },
   "output_schema": {
     "type": "object",
     "properties": {
-      "content": {
+      "greeting": {
         "type": "string",
-        "description": "File contents, capped at min(max_bytes, bytes_remaining_from_offset). Empty if `offset >= bytes_total`. Length in bytes is always `<= max_bytes` when `truncated` is true."
-      },
-      "sha256": {
-        "type": "string",
-        "description": "Hex SHA-256 of the bytes actually returned in `content` (not the full file). Lets the caller detect changes between calls and confirm page alignment."
-      },
-      "truncated": {
-        "type": "boolean",
-        "description": "true iff the returned `content` does not include the full file (or the remaining file from `offset`). Set by the contract when (a) the byte slice from `offset` exceeds `max_bytes`, OR (b) the line count from `offset` exceeds `max_lines`. The agent MUST branch on this value: re-read with a larger `max_bytes`, re-read from a different `offset`, or stop. Never ignore a true value."
-      },
-      "bytes_returned": {
-        "type": "integer",
-        "description": "Number of UTF-8 bytes in `content`. Always `<= max_bytes` when `truncated` is true."
-      },
-      "bytes_total": {
-        "type": "integer",
-        "description": "Total size of the file on disk in bytes, independent of `offset` and `max_bytes`. Useful for sizing follow-up reads."
+        "description": "The personalised greeting string."
       }
     },
-    "required": ["content", "sha256", "truncated"]
-  },
-  "truncation_policy": {
-    "default_max_bytes": 32768,
-    "rationale": "32 KiB of UTF-8 text is roughly 8K-16K tokens depending on the tokenizer. This keeps one read_file call well below the 4K-32K context window of typical local 7B-70B models (PRD §4) and bounds a single bad read so it cannot exhaust context (SECURITY.md threat #5). Phase 3 will add historical-log pruning; this per-call safety bound is the Phase 1 minimum.",
-    "truncation_strategy": "byte_cap_aligned_to_line_break",
-    "behavior_when_truncated": "Cut at the largest byte position `<= max_bytes` that ends on a '\\n' boundary; emit sha256 over the returned slice; set truncated=true; populate bytes_returned and bytes_total. When max_lines is set and is the binding constraint, cut after that many lines regardless of byte position."
+    "required": ["greeting"]
   }
 }
