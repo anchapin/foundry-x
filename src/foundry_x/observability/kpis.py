@@ -156,11 +156,18 @@ class KpiComparison(BaseModel):
     cycle-time down are good. ``injection_blocks`` is intentionally
     excluded from the comparison because it is an auxiliary signal, not
     one of the three PRD success-metric KPIs.
+
+    Issue #736 adds ``baseline_session_count`` and ``candidate_session_count``
+    so that callers can distinguish "no change" (deltas near 0.0 with real
+    sessions) from "no data" (deltas are 0.0 because one version has zero
+    sessions in the trace store).
     """
 
     baseline: KpiSummary
     candidate: KpiSummary
     deltas: dict[str, float | None]
+    baseline_session_count: int = 0
+    candidate_session_count: int = 0
 
 
 class KpiHistoryEntry(BaseModel):
@@ -284,13 +291,21 @@ def compare_kpis(
     derived for the three PRD KPIs. The sign convention (which direction
     is "good") is applied at render time, not here, so the structured
     ``deltas`` stay sign-agnostic for JSON consumers.
+
+    Issue #736: session counts are included so callers can distinguish
+    "no change" (deltas near 0.0 with real sessions) from "no data"
+    (deltas are 0.0 because one version has zero sessions).
     """
     baseline = compute_kpis(logger, harness_version=baseline_version)
     candidate = compute_kpis(logger, harness_version=candidate_version)
+    baseline_session_count = len(logger.list_sessions(harness_version=baseline_version))
+    candidate_session_count = len(logger.list_sessions(harness_version=candidate_version))
     return KpiComparison(
         baseline=baseline,
         candidate=candidate,
         deltas=_compute_deltas(baseline, candidate),
+        baseline_session_count=baseline_session_count,
+        candidate_session_count=candidate_session_count,
     )
 
 

@@ -397,7 +397,7 @@ def test_render_session_summary_context_pruned_not_in_text_table(tmp_path):
 
 
 def test_cli_session_summary_format_json_emits_json_array(tmp_path, capsys):
-    """Issue #624: --format json emits a JSON array of SessionSummaryRow objects."""
+    """Issue #624 / #737: --format json emits a JSON object with failure_class_distribution and rows."""
     import json
 
     db = tmp_path / "traces.db"
@@ -407,21 +407,23 @@ def test_cli_session_summary_format_json_emits_json_array(tmp_path, capsys):
 
     assert rc == 0
     out = capsys.readouterr().out
-    # Each line is a JSON object (model_dump_json per row).
-    lines = [ln for ln in out.splitlines() if ln.strip()]
-    assert len(lines) == 4
-    for line in lines:
-        parsed = json.loads(line)
-        assert "session_id" in parsed
-        assert "started_at" in parsed
-        assert "duration_seconds" in parsed
-        assert "outcome_status" in parsed
-        assert "outcome_reason" in parsed
-        assert "steps" in parsed
+    parsed = json.loads(out)
+    assert "failure_class_distribution" in parsed
+    assert "rows" in parsed
+    assert len(parsed["rows"]) == 4
+    for row in parsed["rows"]:
+        assert "session_id" in row
+        assert "started_at" in row
+        assert "duration_seconds" in row
+        assert "outcome_status" in row
+        assert "outcome_reason" in row
+        assert "steps" in row
 
 
 def test_cli_session_summary_out_writes_to_file(tmp_path, capsys):
-    """Issue #624: --out writes to file; stdout is empty."""
+    """Issue #624 / #737: --out writes to file; stdout is empty."""
+    import json
+
     db = tmp_path / "traces.db"
     _plant_four_sessions(db)
     out_file = tmp_path / "summary.json"
@@ -432,14 +434,16 @@ def test_cli_session_summary_out_writes_to_file(tmp_path, capsys):
     # stdout is empty (no table printed).
     stdout = capsys.readouterr().out
     assert stdout == ""
-    # File contains JSON lines.
+    # File contains a single JSON object.
     content = out_file.read_text(encoding="utf-8")
-    lines = [ln for ln in content.splitlines() if ln.strip()]
-    assert len(lines) == 4
+    parsed = json.loads(content)
+    assert "failure_class_distribution" in parsed
+    assert "rows" in parsed
+    assert len(parsed["rows"]) == 4
 
 
 def test_cli_session_summary_format_json_infers_from_out_extension(tmp_path, capsys):
-    """Issue #624: when --out ends in .json, json format is selected automatically."""
+    """Issue #624 / #737: when --out ends in .json, json format is selected automatically."""
     import json
 
     db = tmp_path / "traces.db"
@@ -450,15 +454,15 @@ def test_cli_session_summary_format_json_infers_from_out_extension(tmp_path, cap
 
     assert rc == 0
     content = out_file.read_text(encoding="utf-8")
-    lines = [ln for ln in content.splitlines() if ln.strip()]
-    assert len(lines) == 4
     # Verify it's valid JSON by parsing.
-    for line in lines:
-        json.loads(line)
+    parsed = json.loads(content)
+    assert "failure_class_distribution" in parsed
+    assert "rows" in parsed
+    assert len(parsed["rows"]) == 4
 
 
 def test_cli_session_summary_format_json_with_limit(tmp_path, capsys):
-    """Issue #624: --limit applies to JSON output (newest-first ordering)."""
+    """Issue #624 / #737: --limit applies to JSON output (newest-first ordering)."""
     import json
 
     db = tmp_path / "traces.db"
@@ -481,8 +485,139 @@ def test_cli_session_summary_format_json_with_limit(tmp_path, capsys):
 
     assert rc == 0
     content = out_file.read_text(encoding="utf-8")
-    lines = [ln for ln in content.splitlines() if ln.strip()]
-    assert len(lines) == 2
-    # Verify rows are valid JSON and newest-first.
-    parsed_lines = [json.loads(ln) for ln in lines]
-    assert parsed_lines[0]["session_id"] == "sess-0004-new"
+    parsed = json.loads(content)
+    # Verify rows are newest-first.
+    assert len(parsed["rows"]) == 2
+    assert parsed["rows"][0]["session_id"] == "sess-0004-new"
+
+
+# --- Issue #737: failure_class_distribution in session-summary --------------------
+
+
+def _plant_sessions_with_verdicts(db_path):
+    """Plant sessions with critic_verdict events that have failure_class."""
+    import uuid
+
+    from foundry_x.observability.regression_report import VERDICT_KIND
+
+    TraceLogger(db_path)
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        sessions = [
+            (
+                "sess-fail-001",
+                "0.1.0",
+                "2026-07-15T10:00:00+00:00",
+                "2026-07-15T10:00:10+00:00",
+                {"status": "failed", "reason": "bad-prompt", "steps": 3},
+                "bad-prompt",
+            ),
+            (
+                "sess-fail-002",
+                "0.1.0",
+                "2026-07-15T11:00:00+00:00",
+                "2026-07-15T11:00:15+00:00",
+                {"status": "failed", "reason": "bad-prompt", "steps": 5},
+                "bad-prompt",
+            ),
+            (
+                "sess-fail-003",
+                "0.1.0",
+                "2026-07-15T12:00:00+00:00",
+                "2026-07-15T12:00:08+00:00",
+                {"status": "failed", "reason": "tool-error", "steps": 2},
+                "tool-error",
+            ),
+        ]
+        for sid, harness_version, started_at, ended_at, outcome_payload, failure_class in sessions:
+            conn.execute(
+                "INSERT INTO sessions "
+                "(session_id, started_at, harness_version, model_id, metadata, ended_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, started_at, harness_version, None, "{}", ended_at),
+            )
+            conn.execute(
+                "INSERT INTO events (event_id, session_id, timestamp, kind, payload) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    sid,
+                    started_at,
+                    OUTCOME_KIND,
+                    __import__("json").dumps(outcome_payload),
+                ),
+            )
+            verdict_payload = {
+                "verdict": False,
+                "passed_checks": [],
+                "failed_checks": ["check1"],
+                "notes": "",
+                "failure_class": failure_class,
+            }
+            conn.execute(
+                "INSERT INTO events (event_id, session_id, timestamp, kind, payload) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    sid,
+                    started_at,
+                    VERDICT_KIND,
+                    __import__("json").dumps(verdict_payload),
+                ),
+            )
+
+
+def test_build_session_summary_includes_failure_class(tmp_path):
+    """Issue #737: build_session_summary populates failure_class from verdict records."""
+    db = tmp_path / "traces.db"
+    _plant_sessions_with_verdicts(db)
+
+    rows = build_session_summary(TraceLogger(db))
+
+    assert len(rows) == 3
+    failure_classes = {row.failure_class for row in rows}
+    assert failure_classes == {"bad-prompt", "tool-error"}
+
+
+def test_failure_class_distribution_computed_from_rows(tmp_path):
+    """Issue #737: _failure_class_distribution aggregates failure classes from rows."""
+    from foundry_x.observability.session_summary import _failure_class_distribution
+
+    db = tmp_path / "traces.db"
+    _plant_sessions_with_verdicts(db)
+
+    rows = build_session_summary(TraceLogger(db))
+    distribution = _failure_class_distribution(rows)
+
+    assert distribution == {"bad-prompt": 2, "tool-error": 1}
+
+
+def test_cli_session_summary_json_includes_failure_class_distribution(tmp_path, capsys):
+    """Issue #737: --format json output includes failure_class_distribution."""
+    import json
+
+    db = tmp_path / "traces.db"
+    _plant_sessions_with_verdicts(db)
+
+    rc = cli_main(["session-summary", "--db", str(db), "--format", "json"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert "failure_class_distribution" in parsed
+    assert parsed["failure_class_distribution"] == {"bad-prompt": 2, "tool-error": 1}
+
+
+def test_cli_session_summary_markdown_includes_failure_class_distribution(tmp_path, capsys):
+    """Issue #737: markdown output includes failure class breakdown."""
+    db = tmp_path / "traces.db"
+    _plant_sessions_with_verdicts(db)
+
+    rc = cli_main(["session-summary", "--db", str(db)])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "Failure Class Distribution" in out
+    assert "bad-prompt" in out
+    assert "tool-error" in out

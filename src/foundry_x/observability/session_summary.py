@@ -23,9 +23,12 @@ from pydantic import BaseModel
 
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
+from foundry_x.observability.regression_report import VERDICT_KIND, VerdictRecord
+
 OUTCOME_KIND = "outcome"
 TASK_ABORTED_KIND = "task_aborted"
 TOKEN_BUDGET_REASON = "token_budget"
+CRITIC_VERDICT_KIND = VERDICT_KIND
 
 # The kind string persisted on terminal ``outcome`` events by
 # ``src/foundry_x/execution/runner.py`` at lines 644-648. Each event's
@@ -67,6 +70,9 @@ class SessionSummaryRow(BaseModel):
     Issue #626 adds ``context_pruned``: the number of ``context_pruned``
     events recorded for this session by the pruning hook. ``None`` when
     no pruning occurred for this session.
+
+    Issue #737 adds ``failure_class``: the failure class from the
+    session's ``critic_verdict`` event, if any.
     """
 
     session_id: str
@@ -77,6 +83,7 @@ class SessionSummaryRow(BaseModel):
     steps: int | None
     token_budget_hit: bool | None = None
     context_pruned: int | None = None
+    failure_class: str | None = None
 
 
 def _truncate(value: str, width: int) -> str:
@@ -147,6 +154,47 @@ def _count_context_pruned_events(
     return count
 
 
+def _get_session_failure_class(logger: TraceLogger, session_id: str) -> str | None:
+    """Return the failure class from the session's ``critic_verdict`` event (issue #737).
+
+    Returns the ``failure_class`` field from the most recent ``critic_verdict``
+    event for *session_id*, or ``None`` if no verdict or no failure_class
+    is recorded.
+    """
+    for event in logger.iter_events(session_id, kind=CRITIC_VERDICT_KIND):
+        record = VerdictRecord(**event.payload)
+        if record.failure_class is not None:
+            return record.failure_class
+    return None
+
+
+class SessionSummaryReport(BaseModel):
+    """Report containing session summary rows and failure class distribution (issue #737).
+
+    The ``failure_class_distribution`` field holds an aggregate count of verdicts
+    grouped by failure class across all sessions. The ``rows`` field contains the
+    per-session summary data.
+    """
+
+    failure_class_distribution: dict[str, int] = {}
+    rows: list[SessionSummaryRow] = []
+
+
+def _failure_class_distribution(
+    rows: Sequence[SessionSummaryRow],
+) -> dict[str, int]:
+    """Compute ``failure_class_distribution`` from session summary rows (issue #737).
+
+    Aggregates the ``failure_class`` values from *rows* into a
+    ``failure_class -> count`` map.
+    """
+    distribution: dict[str, int] = {}
+    for row in rows:
+        if row.failure_class is not None:
+            distribution[row.failure_class] = distribution.get(row.failure_class, 0) + 1
+    return distribution
+
+
 def build_session_summary(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -177,6 +225,7 @@ def build_session_summary(
         context_pruned_value: int | None = (
             context_pruned_count if context_pruned_count > 0 else None
         )
+        failure_class = _get_session_failure_class(logger, session.session_id)
         rows.append(
             SessionSummaryRow(
                 session_id=session.session_id,
@@ -187,6 +236,7 @@ def build_session_summary(
                 steps=steps_value,
                 token_budget_hit=token_budget_hit,
                 context_pruned=context_pruned_value,
+                failure_class=failure_class,
             )
         )
     rows.sort(key=lambda row: row.started_at, reverse=True)
@@ -230,6 +280,7 @@ _TOKEN_BUDGET_HIT_WIDTH = 5
 def render_session_summary(
     rows: Sequence[SessionSummaryRow],
     limit: int | None = None,
+    failure_class_distribution: dict[str, int] | None = None,
 ) -> str:
     """Render *rows* as the cross-session roll-up table (issue #184).
 
@@ -242,6 +293,9 @@ def render_session_summary(
     *after* newest-first sorting so a small ``--limit N`` always shows
     the most recent N sessions, matching the issue's command-line
     promise.
+
+    *failure_class_distribution* (issue #737), when provided, is
+    rendered as a breakdown table after the main table.
     """
     if not rows:
         return "no sessions"
@@ -294,4 +348,18 @@ def render_session_summary(
                 ]
             )
         )
+
+    if failure_class_distribution:
+        total = sum(failure_class_distribution.values())
+        lines.append("")
+        lines.append(
+            f"Failure Class Distribution: {total} verdict(s) across "
+            f"{len(failure_class_distribution)} class(es)."
+        )
+        lines.append("")
+        lines.append("| Failure Class | Count |")
+        lines.append("| --- | --- |")
+        for cls, count in sorted(failure_class_distribution.items()):
+            lines.append(f"| {cls} | {count} |")
+
     return "\n".join(lines)

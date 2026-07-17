@@ -470,6 +470,36 @@ def test_compare_kpis_returns_candidate_minus_baseline_deltas(tmp_path):
     assert comparison.deltas["regression_rate"] == pytest.approx(0.5)
     # Both versions have verdicts, so cycle-time deltas are real numbers.
     assert comparison.deltas["cycle_time_seconds"] is not None
+    # Session counts are correctly populated.
+    assert comparison.baseline_session_count == 2
+    assert comparison.candidate_session_count == 2
+
+
+def test_compare_kpis_zero_session_version_no_false_green(tmp_path):
+    """Issue #736: when a version has no sessions, session_count is 0.
+
+    A CI gate reading deltas alone cannot tell apart "no change" (real 0.0
+    deltas with sessions) from "no data" (0.0 deltas because one version
+    has no sessions). The session_count fields disambiguate this.
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # Baseline v1 has sessions with real KPIs.
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    # Candidate v2 has NO sessions at all.
+
+    comparison = compare_kpis(logger, "v1", "v2")
+
+    assert isinstance(comparison, KpiComparison)
+    # Candidate has no sessions, so improvement_rate is 0.0 (no verdicts).
+    # Baseline improvement_rate is 1.0 (one approved verdict).
+    # Delta is 0.0 - 1.0 = -1.0 — not a false green, but misleading
+    # without the session counts.
+    assert comparison.deltas["improvement_rate"] == pytest.approx(-1.0)
+    assert comparison.deltas["cycle_time_seconds"] is None
+    # But the session counts reveal the truth.
+    assert comparison.baseline_session_count == 1
+    assert comparison.candidate_session_count == 0
 
 
 def test_main_comparison_prints_baseline_candidate_delta_columns(tmp_path, capsys):
@@ -564,10 +594,18 @@ def test_main_comparison_json_structure(tmp_path, capsys):
     assert rc == 0
 
     payload = json.loads(captured.out)
-    assert set(payload.keys()) == {"baseline", "candidate", "deltas"}
+    assert set(payload.keys()) == {
+        "baseline",
+        "candidate",
+        "deltas",
+        "baseline_session_count",
+        "candidate_session_count",
+    }
     assert payload["baseline"]["improvement_rate"] == 1.0
     assert payload["candidate"]["improvement_rate"] == 0.0
     assert payload["deltas"]["improvement_rate"] == -1.0
+    assert payload["baseline_session_count"] == 1
+    assert payload["candidate_session_count"] == 1
 
 
 def test_main_comparison_requires_both_versions(tmp_path):
