@@ -28,6 +28,11 @@ patient with each other.
 
 ## Development setup
 
+> First time here? The [getting-started tutorial](./docs/TUTORIAL.md)
+> walks you from `git clone` to inspecting your first trace in under 30
+> minutes, fully offline. This section is the reference setup; the
+> tutorial is the guided path.
+
 ```bash
 git clone https://github.com/anchapin/foundry-x.git
 cd foundry-x
