@@ -211,6 +211,7 @@ class Critic:
         pytest_args: list[str] | None = None,
         benchmark_tasks: list[BenchmarkTask] | None = None,
         max_diff_lines: int = 200,
+        gate_timeout_s: float | None = None,
     ) -> None:
         self.harness_dir = harness_dir
         self.benchmark_path = benchmark_path
@@ -223,6 +224,14 @@ class Critic:
         if max_diff_lines < 1:
             raise ValueError("max_diff_lines must be >= 1")
         self.max_diff_lines = max_diff_lines
+        # Wall-clock cap applied to every subprocess spawned inside
+        # ``evaluate()`` (issue #890, ADR-0004). ``None`` preserves the
+        # historical unbounded behaviour; a positive float bounds git apply,
+        # load_check, and pytest so a hanging child cannot inflate
+        # ``kpi-cycle-time`` to infinity.
+        if gate_timeout_s is not None and gate_timeout_s <= 0:
+            raise ValueError("gate_timeout_s must be > 0 or None")
+        self.gate_timeout_s = gate_timeout_s
         # In-process registry wiring (issue #108): the Critic can now
         # enumerate benchmark tasks without spawning pytest. Stored as
         # ``None`` so the registry is loaded lazily on first access --
@@ -641,13 +650,24 @@ class Critic:
                         edit_index=edit_index,
                         failure_class=failure_class,
                     )
-                apply_result = subprocess.run(
-                    ["git", "apply", "--whitespace=nowarn"],
-                    input=proposed_diff,
-                    cwd=sandbox_root.parent,
-                    capture_output=True,
-                    text=True,
-                )
+                try:
+                    apply_result = subprocess.run(
+                        ["git", "apply", "--whitespace=nowarn"],
+                        input=proposed_diff,
+                        cwd=sandbox_root.parent,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.gate_timeout_s,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    return CriticVerdict(
+                        verdict=False,
+                        passed_checks=passed_checks,
+                        failed_checks=[*failed_checks, "git apply:timeout"],
+                        notes=_timeout_notes(exc),
+                        edit_index=edit_index,
+                        failure_class=failure_class,
+                    )
                 if apply_result.returncode != 0:
                     return CriticVerdict(
                         verdict=False,
@@ -663,17 +683,28 @@ class Critic:
             #    against the sandbox copy. A harness tree that fails to load
             #    must fail the gate *before* pytest runs.
             load_check_script = sandbox_root / "scripts" / "load_check.py"
-            load_result = subprocess.run(
-                [
-                    sys.executable,
-                    str(load_check_script),
-                    "--harness-dir",
-                    str(sandbox_root),
-                ],
-                cwd=sandbox_root,
-                capture_output=True,
-                text=True,
-            )
+            try:
+                load_result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(load_check_script),
+                        "--harness-dir",
+                        str(sandbox_root),
+                    ],
+                    cwd=sandbox_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.gate_timeout_s,
+                )
+            except subprocess.TimeoutExpired as exc:
+                return CriticVerdict(
+                    verdict=False,
+                    passed_checks=passed_checks,
+                    failed_checks=[*failed_checks, "load_check:timeout"],
+                    notes=_timeout_notes(exc),
+                    edit_index=edit_index,
+                    failure_class=failure_class,
+                )
             if load_result.returncode != 0:
                 return CriticVerdict(
                     verdict=False,
@@ -696,13 +727,24 @@ class Critic:
             pytest_env = os.environ.copy()
             if token_budget is not None:
                 pytest_env["FOUNDRY_TOKEN_BUDGET"] = str(token_budget)
-            pytest_result = subprocess.run(
-                [sys.executable, "-m", "pytest", *self.pytest_args],
-                cwd=sandbox_root,
-                capture_output=True,
-                text=True,
-                env=pytest_env,
-            )
+            try:
+                pytest_result = subprocess.run(
+                    [sys.executable, "-m", "pytest", *self.pytest_args],
+                    cwd=sandbox_root,
+                    capture_output=True,
+                    text=True,
+                    env=pytest_env,
+                    timeout=self.gate_timeout_s,
+                )
+            except subprocess.TimeoutExpired as exc:
+                return CriticVerdict(
+                    verdict=False,
+                    passed_checks=passed_checks,
+                    failed_checks=[*failed_checks, "pytest:timeout"],
+                    notes=_timeout_notes(exc),
+                    edit_index=edit_index,
+                    failure_class=failure_class,
+                )
             if pytest_result.returncode == 0:
                 passed_checks.append("pytest")
                 # Record every benchmark tag the run covered (issue #185).
@@ -725,3 +767,28 @@ class Critic:
 def _tail(text: str) -> str:
     """Return the trailing window of *text* for inclusion in verdict notes."""
     return text.strip()[-_NOTES_TAIL_CHARS:]
+
+
+def _timeout_notes(exc: subprocess.TimeoutExpired) -> str:
+    """Build a ``CriticVerdict.notes`` string from a ``TimeoutExpired``.
+
+    Mirrors the contract in :meth:`Critic.evaluate`'s docstring: the trailing
+    window of any partial output the process managed to write before being
+    killed, or a wall-clock-cap message when no partial output was captured.
+
+    Handles both ``str`` (``text=True``) and ``bytes`` payloads defensively,
+    since :class:`subprocess.TimeoutExpired` attributes are not guaranteed to
+    be populated on every platform when ``subprocess.run`` kills the child.
+    """
+    raw_out: object = exc.output
+    raw_err: object = exc.stderr
+    if isinstance(raw_out, bytes):
+        raw_out = raw_out.decode("utf-8", errors="replace")
+    if isinstance(raw_err, bytes):
+        raw_err = raw_err.decode("utf-8", errors="replace")
+    out_s = raw_out if isinstance(raw_out, str) else ""
+    err_s = raw_err if isinstance(raw_err, str) else ""
+    combined = f"{out_s}\n{err_s}".strip()
+    if combined:
+        return _tail(combined)
+    return f"subprocess exceeded gate_timeout_s={exc.timeout}s and was killed"
