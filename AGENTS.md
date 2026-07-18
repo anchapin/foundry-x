@@ -18,11 +18,21 @@ Before you write code in this repo, read in this order:
 5. `docs/SECURITY.md` — guardrails, especially for `harness/` edits.
    `harness/manifest.json` controls which hooks are active; adding or
    removing a hook file requires updating the manifest.
-6. `docs/adr/` — read the relevant ADR before changing that area:
-   - `harness/` → ADR-0004 | `pyproject.toml` / deps → ADR-0002
-   - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
-   - Module-boundary models → ADR-0006 | `src/foundry_x/execution/` → ADR-0010
-7. The relevant module under `src/foundry_x/`.
+6. `docs/CONTEXT.md` — glossary of project terms and the `kind`
+   vocabulary produced by the `TraceLogger` (relevant whenever a
+   payload, event name, or subsystem name is ambiguous).
+7. `docs/ARCHITECTURE.md` — runtime architecture map (Runner,
+   TraceLogger, Digester, Evolver, Critic and how they connect).
+8. `docs/OPERATOR.md` — human-side workflow that mirrors the agent
+   loop in §3 below.
+9. `docs/MODEL_CONFIG.md` — the full set of model-side env vars
+   (`OPENCODE_SERVER_URL`, `FOUNDRY_TOKEN_BUDGET`, `FOUNDRY_TASK_TIMEOUT`,
+   `FOUNDRY_REQUEST_TIMEOUT_S`, …) and the resolution order.
+10. `docs/adr/` — read the relevant ADR before changing that area:
+    - `harness/` → ADR-0004 | `pyproject.toml` / deps → ADR-0002
+    - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
+    - Module-boundary models → ADR-0006 | `src/foundry_x/execution/` → ADR-0010
+11. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
 stop and read it. Speculation is not evidence.
@@ -102,9 +112,19 @@ mirrors the way our product works:
   - Benchmarks live alongside unit tests in `benchmarks/tasks/` and are
     marked `@pytest.mark.benchmark` (ADR-0004, ADR-0005).
   - Run the full benchmark suite: `uv run pytest -m benchmark`
+  - `benchmarks/fixtures/` contains large benchmark inputs and is
+    excluded from both ruff and pytest on purpose
+    (`pyproject.toml` `extend-exclude` + `norecursedirs`). Don't lint
+    or import from it; copy fixtures into `tests/` if you need them.
+- **Critic harness-load smoke test:** before the pytest suite, the
+  Critic runs `harness/scripts/load_check.py` to confirm the harness
+  imports and registers cleanly. If your hook or skill change fails
+  there but passes pytest, the harness can't be loaded at runtime.
 - **CLI tools:**
   - `uv run fx-runner --task "..."` — run a single agent task session
-  - `uv run foundry-x-trace` — inspect trace sessions (`--help` for flags)
+  - `uv run foundry-x-trace` (alias `foundry-trace`) — inspect trace
+    sessions, render timelines, grep events, prune old sessions
+    (`--help` for flags)
   - `uv run foundry-kpis` — compute PRD success-metric KPIs from traces
   - `uv run fx-trace regression-report` — aggregate Critic verdicts
   - `uv run foundry-evolve` — run one evolution iteration against a failure report
@@ -115,8 +135,7 @@ mirrors the way our product works:
 - **Logging:** the project's own `TraceLogger`. Do not sprinkle
   `print()` or generic `logging.info` in library code; route through
   trace events so the evolution loop can see them.
-- **Search:** prefer `rg` over `grep`. Prefer reading the file over
-  re-explaining it from memory.
+- **Search:** prefer `rg` over `grep`.
 - **Shell:** prefer `workdir` over `cd`. Quote paths with spaces.
 
 ## 5. Commit and PR etiquette
