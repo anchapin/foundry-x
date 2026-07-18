@@ -952,19 +952,32 @@ class TraceLogger:
             self._delete_session_sqlite(session_id)
         return True
 
-    def prune_sessions(self, to_delete: Sequence[str]) -> int:
+    def prune_sessions(self, to_delete: Sequence[str], *, vacuum: bool = False) -> int:
         """Remove every event and the session row for each ``session_id`` in *to_delete*.
 
         This is a bulk operation: all sessions in *to_delete* are deleted in a single
         file rewrite (jsonl) or batch DELETE (sqlite), making it O(1) file I/O
         instead of O(n) for n sessions. Returns the number of sessions deleted.
         Issue #752.
+
+        When *vacuum* is ``True`` and the backend is sqlite, the DELETE is
+        followed by ``VACUUM`` plus ``PRAGMA wal_checkpoint(TRUNCATE)`` so the
+        freed pages are returned to the filesystem and the ``-wal`` sidecar is
+        physically shrunk. Without this, SQLite's WAL accumulates deleted pages
+        indefinitely and ``logs/*.db-wal`` can grow to several times the size
+        of the live data (issue #896). The flag is a no-op on the jsonl
+        backend — the streaming rewrite already reclaims space. ``VACUUM``
+        requires exclusive access and is therefore opt-in: callers that prune
+        while a Runner is still writing should leave it off.
         """
         if not to_delete:
             return 0
         if self.backend == "jsonl":
             return self._prune_jsonl(to_delete)
-        return self._prune_sqlite(to_delete)
+        deleted = self._prune_sqlite(to_delete)
+        if vacuum:
+            self._vacuum_sqlite()
+        return deleted
 
     def _prune_sqlite(self, to_delete: Sequence[str]) -> int:
         assert self._conn is not None  # backend == "sqlite"
@@ -978,6 +991,23 @@ class TraceLogger:
                 list(to_delete),
             )
         return cur.rowcount
+
+    def _vacuum_sqlite(self) -> None:
+        """Reclaim sqlite free pages and WAL space (issue #896).
+
+        ``DELETE`` leaves free pages inside the main database file and frames
+        inside the ``-wal`` sidecar; neither is returned to the filesystem
+        automatically. ``VACUUM`` rebuilds the database into a freshly
+        compacted file (and, under WAL mode, checkpoints the WAL into it
+        first), then ``PRAGMA wal_checkpoint(TRUNCATE)`` physically truncates
+        the ``-wal`` file to zero bytes so it stops counting toward disk
+        usage. Must be called outside any open transaction — the caller
+        (``prune_sessions``) wraps the DELETEs in a committed ``with
+        self._conn:`` block before reaching here.
+        """
+        assert self._conn is not None  # backend == "sqlite"
+        self._conn.execute("VACUUM")
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def _prune_jsonl(self, to_delete: Sequence[str]) -> int:
         if not self.path.exists():

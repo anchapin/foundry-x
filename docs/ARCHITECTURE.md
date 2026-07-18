@@ -67,7 +67,12 @@ logs/
 
 The SQLite default is `logs/traces.db`. Use `--db logs/traces.jsonl` to
 target the JSONL backend. Both backends share the same schema; see
-[ADR-0003](./adr/0003-sqlite-as-trace-store.md) for the rationale.
+[ADR-0003](./adr/0003-sqlite-as-trace-store.md) for the rationale and
+[ADR-0013](./adr/0013-wal-mode-and-connection-reuse.md) for the WAL
+mode decision. The `-wal` sidecar is checkpointed back into the main
+file on clean connection close; `prune --vacuum` (issue #896) forces a
+`TRUNCATE` checkpoint between pruning cycles so heavy retention
+management does not leave `logs/traces.db-wal` unboundedly large.
 
 ---
 
@@ -149,6 +154,19 @@ foundry-trace prune --older-than 30 --db logs/traces.db
 
 # Dry run first
 foundry-trace prune --older-than 30 --dry-run --db logs/traces.db
+```
+
+SQLite's WAL mode accumulates deleted pages in `logs/traces.db-wal`
+across pruning cycles; the sidecar can grow to several times the
+live-data size and is not reclaimed by the `DELETE` itself. Pass
+`--vacuum` to run `VACUUM` plus `PRAGMA wal_checkpoint(TRUNCATE)` after
+the delete so the freed pages and WAL frames are returned to the
+filesystem (issue #896). `VACUUM` needs exclusive access, so leave the
+flag off when pruning while a Runner is still writing to the same
+database; it is a no-op on the JSONL backend.
+
+```
+foundry-trace prune --keep-last 10 --vacuum --db logs/traces.db
 ```
 
 ### Further reading
