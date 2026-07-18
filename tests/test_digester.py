@@ -356,8 +356,8 @@ def test_context_overflow_yields_context_overflow_class():
     assert step["kind"] == "outcome"
     assert step["event_id"] == "e-co"
     assert step["signal"] == "outcome:truncated/max_steps"
-    # Cause template includes the step count for traceability.
-    assert any("steps=10" in c for c in report.suspected_causes)
+    # Cause template includes the keyword match for traceability.
+    assert any("matched: max_steps" in c for c in report.suspected_causes)
     assert any("pruning hook" in c for c in report.suspected_causes)
 
 
@@ -409,7 +409,8 @@ def test_context_overflow_with_missing_steps_uses_question_mark():
     ]
     report = Digester().digest(_SESSION, events)
     assert report.proposed_class == "context-overflow"
-    assert any("steps=?" in c for c in report.suspected_causes)
+    # The matched keyword is still captured for traceability even when steps is missing.
+    assert any("matched: max_steps" in c for c in report.suspected_causes)
 
 
 def test_context_overflow_vocabulary_is_exported():
@@ -480,6 +481,14 @@ _TOOL_ERROR_KEYWORDS: tuple[str, ...] = (
     "failed",
 )
 
+# Issue #798: context-overflow keywords for direct classification fallback
+_CONTEXT_OVERFLOW_KEYWORDS: tuple[str, ...] = (
+    "max_steps",
+    "context overflow",
+    "context limit",
+    "token budget",
+)
+
 
 def _one_failing_event(
     keyword: str,
@@ -531,6 +540,14 @@ def test_tool_error_keyword_classifies_as_tool_error(keyword: str) -> None:
     assert any("Tool execution raised an error" in c for c in report.suspected_causes)
 
 
+# Issue #798: context-overflow keywords for direct classification fallback
+@pytest.mark.parametrize("keyword", _CONTEXT_OVERFLOW_KEYWORDS)
+def test_context_overflow_keyword_classifies_as_context_overflow(keyword: str) -> None:
+    report = Digester().digest(_SESSION, _one_failing_event(keyword))
+    assert report.proposed_class == "context-overflow"
+    assert any("context budget limit" in c for c in report.suspected_causes)
+
+
 # --- Specificity / precedence ----------------------------------------------
 # digester.py:65-71: each mode has a priority, and the most-specific keyword
 # wins over the ``tool-error`` catch-all. If a payload accidentally contains
@@ -546,6 +563,8 @@ def test_tool_error_keyword_classifies_as_tool_error(keyword: str) -> None:
         ("prompt is ambiguous and missing context", "bad-prompt"),
         ("file not found: missing.py", "state-leak"),
         ("already exists: /tmp/x", "state-leak"),
+        ("max_steps limit reached", "context-overflow"),
+        ("context overflow detected", "context-overflow"),
     ],
     ids=[
         "wrong-tool-beats-tool-error",
@@ -553,6 +572,8 @@ def test_tool_error_keyword_classifies_as_tool_error(keyword: str) -> None:
         "bad-prompt-beats-tool-error",
         "state-leak-beats-tool-error",
         "state-leak-exists-beats-tool-error",
+        "context-overflow-beats-tool-error",
+        "context-overflow-overflow-beats-tool-error",
     ],
 )
 def test_specific_keyword_beats_tool_error_catchall(keyword: str, expected_class: str) -> None:
@@ -802,7 +823,7 @@ def test_truncated_max_steps_yields_context_overflow_class() -> None:
     assert step["payload"]["status"] == "truncated"
     assert step["payload"]["reason"] == "max_steps"
     assert step["payload"]["steps"] == 10
-    assert any("max_steps" in c and "10" in c for c in report.suspected_causes)
+    assert any("matched: max_steps" in c for c in report.suspected_causes)
 
 
 def test_context_overflow_takes_precedence_over_later_tool_error() -> None:
