@@ -19,7 +19,11 @@ from foundry_x.evolution.critic import CriticVerdict
 from foundry_x.observability.kpis import (
     KpiComparison,
     KpiSummary,
+    SkillKpiSlice,
+    TaskKpiMetadata,
     _format_delta,
+    _slice_verdict_rates,
+    build_task_metadata,
     compare_kpis,
     compute_kpis,
     main,
@@ -380,6 +384,8 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     # Stable contract: every KpiSummary field is present at the top level
     # so downstream tooling can `payload["cycle_time_seconds"]` etc.
     # ``server_restart_count`` is the issue #899 auxiliary metric.
+    # ``per_skill`` / ``per_task_family`` / ``per_difficulty_tier`` are the
+    # issue #898 slice fields (empty unless ``--group-by`` is supplied).
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
@@ -399,6 +405,9 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "tool_argument_parse_error_count",
         "event_limit_abort_count",
         "server_restart_count",
+        "per_skill",
+        "per_task_family",
+        "per_difficulty_tier",
     }
 
 
@@ -664,6 +673,7 @@ def test_main_comparison_json_structure(tmp_path, capsys):
         "deltas",
         "baseline_session_count",
         "candidate_session_count",
+        "slice_deltas",
     }
     assert payload["baseline"]["improvement_rate"] == 1.0
     assert payload["candidate"]["improvement_rate"] == 0.0
@@ -1207,3 +1217,391 @@ def test_main_comparison_renders_parse_error_row(tmp_path, capsys):
     # 0 baseline, 2 candidate → delta +2 (negative/bad because
     # higher-is-better=False for parse-error count).
     assert "0 | 2 | +2.00 (negative)" in parse_error_row
+
+
+# ---------------------------------------------------------------------------
+# Issue #898: per-skill / per-task-family / per-difficulty-tier slices.
+# ---------------------------------------------------------------------------
+
+
+def _task_metadata(**overrides: TaskKpiMetadata) -> dict[str, TaskKpiMetadata]:
+    """Build a ``name -> TaskKpiMetadata`` map from explicit overrides.
+
+    Tasks not listed here are simply absent from the map, which is how an
+    operator supplies partial metadata (e.g. only the tasks the current
+    benchmark suite declares).
+    """
+    return {meta.name: meta for meta in overrides.values()}
+
+
+def test_compute_kpis_default_has_empty_slices(tmp_path):
+    """Without ``group_by`` the slice fields default to empty dicts."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+
+    summary = compute_kpis(logger)
+
+    assert summary.per_skill == {}
+    assert summary.per_task_family == {}
+    assert summary.per_difficulty_tier == {}
+
+
+def test_compute_kpis_group_by_skill_slices_improvement_and_regression(tmp_path):
+    """``group_by='skill'`` buckets verdicts by the skills their tasks require."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # Two approved verdicts touching bash tasks, one rejected bash task
+    # that previously passed → bash regression. read_file task is a
+    # separate skill with its own slice.
+    _seed_session(logger, "v1", verdict=True, passed_checks=["list_dir_nav"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["edit_conf"])
+    _seed_session(logger, "v1", verdict=False, failed_checks=["list_dir_nav"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["read_multi"])
+
+    metadata = _task_metadata(
+        bash_a=TaskKpiMetadata(name="list_dir_nav", skills=["bash", "list_dir"]),
+        bash_b=TaskKpiMetadata(name="edit_conf", skills=["bash", "edit_file"]),
+        reader=TaskKpiMetadata(name="read_multi", skills=["read_file"]),
+    )
+
+    summary = compute_kpis(logger, group_by="skill", task_metadata=metadata)
+
+    # Only the selected dimension is populated; the others stay empty.
+    assert summary.per_task_family == {}
+    assert summary.per_difficulty_tier == {}
+    bash = summary.per_skill["bash"]
+    assert isinstance(bash, SkillKpiSlice)
+    # bash touches 3 verdicts (list_dir_nav x2, edit_conf x1); 2 approved.
+    assert bash.verdict_count == 3
+    assert bash.session_count == 3
+    assert bash.improvement_rate == pytest.approx(2 / 3)
+    # list_dir_nav passed in session 1 then failed in session 3 → 1 of 3.
+    assert bash.regression_rate == pytest.approx(1 / 3)
+    # list_dir sub-skill only touches the list_dir_nav verdicts (2 of them).
+    assert summary.per_skill["list_dir"].verdict_count == 2
+    assert summary.per_skill["list_dir"].improvement_rate == pytest.approx(1 / 2)
+    # read_file is an independent slice with 1 approved verdict.
+    assert summary.per_skill["read_file"].verdict_count == 1
+    assert summary.per_skill["read_file"].improvement_rate == 1.0
+    assert summary.per_skill["read_file"].regression_rate == 0.0
+
+
+def test_compute_kpis_group_by_skill_regression_scoped_to_own_group(tmp_path):
+    """A multi-skill task that regresses only counts against its own skills."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["shared_task"])
+    _seed_session(logger, "v1", verdict=False, failed_checks=["shared_task"])
+
+    metadata = _task_metadata(
+        m=TaskKpiMetadata(name="shared_task", skills=["alpha", "beta"]),
+        other=TaskKpiMetadata(name="unrelated", skills=["gamma"]),
+    )
+
+    summary = compute_kpis(logger, group_by="skill", task_metadata=metadata)
+
+    # shared_task regressed → alpha and beta each see 1 regression of 2.
+    assert summary.per_skill["alpha"].regression_rate == pytest.approx(1 / 2)
+    assert summary.per_skill["beta"].regression_rate == pytest.approx(1 / 2)
+    # gamma never appears in any verdict → absent from the slices entirely.
+    assert "gamma" not in summary.per_skill
+
+
+def test_compute_kpis_group_by_task_family_uses_tags(tmp_path):
+    """``group_by='task_family'`` buckets by ``BenchmarkTask.tags``."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["io_task"])
+    _seed_session(logger, "v1", verdict=False, failed_checks=["io_task"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["math_task"])
+
+    metadata = _task_metadata(
+        io=TaskKpiMetadata(name="io_task", task_families=["filesystem", "io"]),
+        math=TaskKpiMetadata(name="math_task", task_families=["compute"]),
+    )
+
+    summary = compute_kpis(logger, group_by="task_family", task_metadata=metadata)
+
+    assert summary.per_skill == {}
+    # io_task carries two tags → both families see its 2 verdicts (1 approved).
+    assert summary.per_task_family["filesystem"].verdict_count == 2
+    assert summary.per_task_family["filesystem"].improvement_rate == pytest.approx(1 / 2)
+    assert summary.per_task_family["io"].regression_rate == pytest.approx(1 / 2)
+    assert summary.per_task_family["compute"].verdict_count == 1
+    assert summary.per_task_family["compute"].improvement_rate == 1.0
+
+
+def test_compute_kpis_group_by_difficulty_tier(tmp_path):
+    """``group_by='difficulty_tier'`` buckets by the single tier per task."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["a"])
+    _seed_session(logger, "v1", verdict=False, failed_checks=["a"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["b"])
+
+    metadata = _task_metadata(
+        a=TaskKpiMetadata(name="a", difficulty_tier="easy"),
+        b=TaskKpiMetadata(name="b", difficulty_tier="medium"),
+        c=TaskKpiMetadata(name="c", difficulty_tier=None),
+    )
+
+    summary = compute_kpis(logger, group_by="difficulty_tier", task_metadata=metadata)
+
+    assert summary.per_difficulty_tier["easy"].verdict_count == 2
+    assert summary.per_difficulty_tier["easy"].improvement_rate == pytest.approx(1 / 2)
+    assert summary.per_difficulty_tier["medium"].verdict_count == 1
+    # A task with difficulty_tier=None contributes no group.
+    assert "None" not in summary.per_difficulty_tier
+
+
+def test_compute_kpis_group_by_without_metadata_leaves_slices_empty(tmp_path):
+    """``group_by`` with empty metadata degrades gracefully (no slices)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+
+    summary = compute_kpis(logger, group_by="skill", task_metadata=None)
+
+    assert summary.per_skill == {}
+    # Aggregate KPIs are unaffected.
+    assert summary.improvement_rate == 1.0
+
+
+def test_compute_kpis_group_by_respects_harness_version_filter(tmp_path):
+    """The slice scan inherits the ``harness_version`` filter."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+    _seed_session(logger, "v2", verdict=False, failed_checks=["task_a"])
+
+    metadata = _task_metadata(a=TaskKpiMetadata(name="task_a", skills=["bash"]))
+
+    summary = compute_kpis(logger, harness_version="v1", group_by="skill", task_metadata=metadata)
+
+    # Only the v1 verdict is counted → 1 approved, no regression.
+    assert summary.per_skill["bash"].verdict_count == 1
+    assert summary.per_skill["bash"].improvement_rate == 1.0
+    assert summary.per_skill["bash"].regression_rate == 0.0
+
+
+def test_slice_verdict_rates_empty_when_group_by_none(tmp_path):
+    """The helper returns ``{}`` when ``group_by`` is ``None``."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+    metadata = _task_metadata(a=TaskKpiMetadata(name="task_a", skills=["bash"]))
+
+    assert _slice_verdict_rates(logger, None, None, metadata) == {}
+
+
+def test_build_task_metadata_maps_benchmark_fields(monkeypatch):
+    """``build_task_metadata`` lazily maps registry tasks to TaskKpiMetadata."""
+    import benchmarks.models as models_mod
+
+    fake_tasks = [
+        models_mod.BenchmarkTask(
+            name="t1",
+            description="d",
+            requires_skills=["bash"],
+            tags=["io"],
+            difficulty_tier="easy",
+        ),
+        models_mod.BenchmarkTask(
+            name="t2",
+            description="d",
+            requires_skills=["read_file"],
+            tags=[],
+            difficulty_tier="medium",
+        ),
+    ]
+    # build_task_metadata imports load_all_tasks at call time, so patching
+    # the registry symbol is enough to drive the mapping.
+    monkeypatch.setattr("benchmarks.registry.load_all_tasks", lambda: list(fake_tasks))
+
+    metadata = build_task_metadata()
+
+    assert set(metadata) == {"t1", "t2"}
+    assert metadata["t1"].skills == ["bash"]
+    assert metadata["t1"].task_families == ["io"]
+    assert metadata["t1"].difficulty_tier == "easy"
+    assert metadata["t2"].task_families == []
+    assert metadata["t2"].difficulty_tier == "medium"
+
+
+def test_compare_kpis_group_by_skill_includes_slice_deltas(tmp_path):
+    """``compare_kpis`` with ``group_by`` attaches per-slice deltas."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # Baseline v1: bash task always approved.
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+    # Candidate v2: bash task regresses once.
+    _seed_session(logger, "v2", verdict=True, passed_checks=["task_a"])
+    _seed_session(logger, "v2", verdict=False, failed_checks=["task_a"])
+
+    metadata = _task_metadata(a=TaskKpiMetadata(name="task_a", skills=["bash"]))
+
+    comparison = compare_kpis(logger, "v1", "v2", group_by="skill", task_metadata=metadata)
+
+    assert isinstance(comparison, KpiComparison)
+    assert "skill" in comparison.slice_deltas
+    bash = comparison.slice_deltas["skill"]["bash"]
+    # Baseline improvement 1.0 → candidate 0.5 → delta -0.5.
+    assert bash.improvement_rate == pytest.approx(-0.5)
+    # Baseline regression 0.0 → candidate 0.5 → delta +0.5.
+    assert bash.regression_rate == pytest.approx(0.5)
+    # Candidate verdict count carried for reference.
+    assert bash.verdict_count == 2
+    # The per-slice summaries on baseline/candidate are also populated.
+    assert comparison.baseline.per_skill["bash"].improvement_rate == 1.0
+    assert comparison.candidate.per_skill["bash"].improvement_rate == 0.5
+
+
+def test_compare_kpis_without_group_by_has_empty_slice_deltas(tmp_path):
+    """``compare_kpis`` without ``group_by`` leaves ``slice_deltas`` empty."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v2", verdict=True, passed_checks=["bench"])
+
+    comparison = compare_kpis(logger, "v1", "v2")
+
+    assert comparison.slice_deltas == {}
+
+
+def test_main_group_by_skill_renders_slice_section(tmp_path, capsys):
+    """The markdown output includes a Per-Skill Slices table (issue #898)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+    _seed_session(logger, "v1", verdict=False, failed_checks=["task_a"])
+
+    meta_path = tmp_path / "meta.json"
+    meta_path.write_text(
+        '{"task_a": {"skills": ["bash"], "task_families": ["io"], "difficulty_tier": "easy"}}',
+        encoding="utf-8",
+    )
+
+    rc = main(["--db", str(db), "--group-by", "skill", "--task-metadata", str(meta_path)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Per-Skill Slices (issue #898)" in captured.out
+    assert "| bash |" in captured.out
+    # task_family / difficulty_tier sections are absent (not selected).
+    assert "Per-Task Family" not in captured.out
+
+
+def test_main_group_by_task_family_renders_section(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+
+    meta_path = tmp_path / "meta.json"
+    meta_path.write_text(
+        '{"task_a": {"skills": ["bash"], "task_families": ["io"]}}', encoding="utf-8"
+    )
+
+    rc = main(["--db", str(db), "--group-by", "task_family", "--task-metadata", str(meta_path)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Per-Task Family Slices (issue #898)" in captured.out
+    assert "| io |" in captured.out
+
+
+def test_main_group_by_json_includes_slice_field(tmp_path, capsys):
+    """The JSON snapshot carries the populated ``per_skill`` field."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+
+    meta_path = tmp_path / "meta.json"
+    meta_path.write_text('{"task_a": {"skills": ["bash"]}}', encoding="utf-8")
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--group-by",
+            "skill",
+            "--task-metadata",
+            str(meta_path),
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert "per_skill" in payload
+    assert payload["per_skill"]["bash"]["verdict_count"] == 1
+    # Unselected dimensions are present but empty (model defaults).
+    assert payload["per_task_family"] == {}
+
+
+def test_main_group_by_rejects_from_history_combo(tmp_path, capsys):
+    """``--group-by`` is incompatible with ``--from-history``."""
+    history = tmp_path / "hist.jsonl"
+    history.write_text(
+        '{"timestamp": "2024-01-01T00:00:00+00:00", "regression_rate": 0.0, '
+        '"improvement_rate": 1.0}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit):
+        main(["--from-history", str(history), "--group-by", "skill"])
+    err = capsys.readouterr().err
+    assert "--group-by cannot be combined with --from-history" in err
+
+
+def test_main_comparison_group_by_skill_renders_slice_deltas(tmp_path, capsys):
+    """The comparison markdown appends a per-skill delta table."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+    _seed_session(logger, "v2", verdict=False, failed_checks=["task_a"])
+
+    meta_path = tmp_path / "meta.json"
+    meta_path.write_text('{"task_a": {"skills": ["bash"]}}', encoding="utf-8")
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--baseline-harness-version",
+            "v1",
+            "--candidate-harness-version",
+            "v2",
+            "--group-by",
+            "skill",
+            "--task-metadata",
+            str(meta_path),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Per-Skill Slice Deltas (issue #898)" in captured.out
+    assert "| bash |" in captured.out
+
+
+def test_append_kpi_history_excludes_slices(tmp_path):
+    """Per-slice maps are excluded from the JSONL history line (issue #898)."""
+    from foundry_x.observability.kpis import append_kpi_history, read_kpi_history
+
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+    metadata = _task_metadata(a=TaskKpiMetadata(name="task_a", skills=["bash"]))
+
+    summary = compute_kpis(logger, group_by="skill", task_metadata=metadata)
+    assert summary.per_skill  # sanity: slice is populated
+
+    hist = tmp_path / "hist.jsonl"
+    append_kpi_history(hist, summary, harness_version="v1")
+
+    raw = hist.read_text(encoding="utf-8").strip()
+    payload = json.loads(raw)
+    assert "per_skill" not in payload
+    assert "per_task_family" not in payload
+    # The history entry still parses cleanly.
+    assert read_kpi_history(hist)[0].improvement_rate == 1.0

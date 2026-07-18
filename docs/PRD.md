@@ -83,3 +83,16 @@ fourth tracked metric for token budget enforcement:
   via `foundry-kpis` and the regression report alongside the three PRD KPIs.
   The raw session count (`token_budget_abort_count`) is retained as an
   auxiliary signal.
+
+### 5b. Per-Slice Breakdowns
+
+The `improvement_rate` and `regression_rate` KPIs are aggregate across
+every `critic_verdict` event. Issue #898 adds an on-demand diagnostic
+breakdown: `foundry-kpis --group-by {skill|task_family|difficulty_tier}`
+slices both rates by the selected dimension, attributing each verdict to
+the groups its checks touch (skills from `BenchmarkTask.requires_skills`,
+task families from `BenchmarkTask.tags`, tiers from
+`BenchmarkTask.difficulty_tier`). The slices are independent views (not a
+partition) and are excluded from the KPI history log — they are computed
+live from the trace store to localize a regression to the offending skill
+or task family.
