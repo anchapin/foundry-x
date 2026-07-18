@@ -1463,7 +1463,7 @@ async def run_task(
     # (one argument: the payload dict); the hook internally calls
     # tracer(payload) and the tracer forwards to log.record with the
     # session_id and kind wired in from the outer scope.
-    if registry is not None and hasattr(registry, "_hooks"):
+    if registry is not None:
         from harness.hooks.injection_firewall import InjectionFirewallHook
 
         def _inject_tracer(kind: str, payload: dict[str, object]) -> None:
@@ -1602,7 +1602,6 @@ async def run_task(
                     hit_event_limit = True
                 raise
 
-            event_count += chunk_count
             if _check_event_limit(session_id):
                 outcome_status = "failed"
                 outcome_reason = "event_limit"
