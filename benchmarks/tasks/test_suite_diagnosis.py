@@ -60,15 +60,25 @@ FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / TASK.name
 
 def _copy_fixture_to_workspace(fixture_dir: Path, workspace: Path) -> None:
     """Copy the fixture pkg/ and tests/ directories into workspace."""
+    skip_dirs = {"__pycache__", ".git", ".venv", "node_modules"}
     for subdir in ("pkg", "tests"):
         src = fixture_dir / subdir
         dst = workspace / subdir
         for file in src.rglob("*"):
-            if file.is_file():
+            if file.is_file() and not any(part in skip_dirs for part in file.parts):
                 rel = file.relative_to(src)
                 dst_file = dst / rel
                 dst_file.parent.mkdir(parents=True, exist_ok=True)
                 dst_file.write_text(file.read_text())
+
+
+def _clear_pycache(workspace: Path) -> None:
+    """Strip ``__pycache__`` directories from a workspace."""
+    import shutil
+
+    for cache in workspace.rglob("__pycache__"):
+        if cache.is_dir():
+            shutil.rmtree(cache, ignore_errors=True)
 
 
 def _run_pytest(workspace: Path) -> subprocess.CompletedProcess[str]:
@@ -112,6 +122,7 @@ def test_test_suite_diagnosis(benchmark_workspace: Path) -> None:
         f"task {TASK.name}: golden fix must remove the broken assertion"
     )
     test_file.write_text(fixed_test)
+    _clear_pycache(benchmark_workspace)
 
     good = _run_pytest(benchmark_workspace)
     assert good.returncode == 0, (

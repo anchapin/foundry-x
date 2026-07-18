@@ -727,7 +727,9 @@ def test_original():
                     "payload": {"status": "truncated", "reason": "max_steps", "steps": 10},
                 }
             ],
-            suspected_causes=["Agent loop reached max_steps (steps=10) before producing a final answer."],
+            suspected_causes=[
+                "Agent loop reached max_steps (steps=10) before producing a final answer."
+            ],
             proposed_class="context-overflow",
         )
 
@@ -741,5 +743,8 @@ def test_original():
         )
         edit = edits[0]
         assert edit.target_file == "harness/manifest.json"
-        assert "context-overflow" in edit.rationale.lower() or "token_threshold" in edit.rationale.lower()
+        assert (
+            "context-overflow" in edit.rationale.lower()
+            or "token_threshold" in edit.rationale.lower()
+        )
         assert len(edit.unified_diff) > 0
