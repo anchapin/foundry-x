@@ -59,7 +59,7 @@ We design against these threats:
   - LLM calls: 60/hour (shared across all Evolver instances)
   - LLM cost: $5.00/day (shared across all Evolver instances)
 - **Runaway detection.** The runner enforces three resource caps per task:
-  - ``FOUNDRY_TASK_TIMEOUT`` (wall-clock seconds, default 300): when exceeded,
+  - ``FOUNDRY_TASK_TIMEOUT`` (wall-clock seconds, default 600): when exceeded,
     ``run_with_limits`` records ``task_aborted(reason="wall_clock")`` and
     raises ``asyncio.TimeoutError``.
   - ``FOUNDRY_TOKEN_BUDGET`` (total tokens, unset by default): when the
