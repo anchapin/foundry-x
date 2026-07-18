@@ -48,6 +48,30 @@ def test_session_duration_is_positive(tmp_path, backend):
     assert duration.total_seconds() > 0
 
 
+def test_sqlite_session_duration_uses_targeted_query(tmp_path, monkeypatch):
+    logger = TraceLogger(tmp_path / "traces.db")
+    with logger.session(harness_version="test-0.0") as sid:
+        time.sleep(0.01)
+
+    statements = []
+    assert logger._conn is not None
+    logger._conn.set_trace_callback(statements.append)
+    monkeypatch.setattr(
+        logger,
+        "list_sessions",
+        lambda: pytest.fail("session_duration must not list sessions"),
+    )
+
+    duration = logger.session_duration(sid)
+
+    assert duration is not None
+    assert duration.total_seconds() > 0
+    selects = [statement for statement in statements if statement.startswith("SELECT ")]
+    assert len(selects) == 1
+    assert "FROM sessions WHERE session_id =" in selects[0]
+    assert sid in selects[0]
+
+
 @_BACKENDS
 def test_failed_session_body_still_records_ended_at(tmp_path, backend):
     logger = TraceLogger(tmp_path / f"traces{_suffix(backend)}", backend=backend)
