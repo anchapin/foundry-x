@@ -673,6 +673,207 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
         assert event.payload["hook_overhead_ms"] < min_expected + 100
 
 
+def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monkeypatch):
+    """hook_post_overhead_ms reflects run_post delay when a hook is registered (issue #903).
+
+    Mirrors the structure of ``test_run_task_records_hook_overhead_ms_with_delayed_hook``
+    but exercises the post-hook fan-out instead of the pre-hook fan-out. The
+    post-hook includes the security-critical injection scan and was previously
+    un-timed; this test pins its visibility in the ``tool_call`` event.
+
+    The first ``tool_call`` event (emitted before the skill runs and before
+    ``run_post`` is invoked) carries ``hook_post_overhead_ms=None`` because
+    the value is not yet known. The second ``tool_call`` event (emitted after
+    ``run_post`` completes) carries the measured wall-clock milliseconds.
+    """
+    from foundry_x.execution import runner
+
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+
+    tool_call = ModelToolCall(
+        id="call_post_hook",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments=json.dumps({"command": "true"}),
+        ),
+    )
+
+    class Adapter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    message=ModelMessage(
+                        role="assistant",
+                        content=None,
+                        tool_calls=[tool_call],
+                    ),
+                    tool_calls=[tool_call],
+                    finish_reason="tool_calls",
+                )
+            return ModelResponse(
+                message=ModelMessage(role="assistant", content="done"),
+                finish_reason="stop",
+            )
+
+        async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+            return await self.complete(messages, tools, **kwargs)
+
+        async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+            response = await self.complete(messages, tools, **kwargs)
+            if response.message.content:
+                yield ModelResponseChunk(content=response.message.content)
+            for i, tc in enumerate(response.tool_calls):
+                yield ModelResponseChunk(
+                    tool_calls=[
+                        ModelToolCallChunk(
+                            index=i,
+                            id=tc.id,
+                            type=tc.type,
+                            function=ToolCallFunctionChunk(
+                                name=tc.function.name,
+                                arguments=tc.function.arguments,
+                            ),
+                        )
+                    ]
+                )
+            if response.finish_reason:
+                yield ModelResponseChunk(finish_reason=response.finish_reason)
+
+    async def executor(name, arguments):  # noqa: ANN001, ARG001
+        return {"status": "ok"}
+
+    # Case 1: No hooks - mock _resolve_hook_registry to return None
+    def mock_resolve_none(log, session_id):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(runner, "_resolve_hook_registry", mock_resolve_none)
+
+    db1 = tmp_path / "traces_no_hooks.db"
+
+    async def drive_no_hooks():
+        logger = TraceLogger(db1)
+        with logger.session(harness_version="0.1.0") as session_id:
+            await run_task(
+                "hook-post-overhead-check",
+                harness_dir,
+                logger,
+                session_id,
+                model_adapter=Adapter(),
+                skill_executor=executor,
+            )
+
+    asyncio.run(drive_no_hooks())
+
+    logger = TraceLogger(db1)
+    events = logger.load_session(logger.list_sessions()[0].session_id)
+    tool_call_events = [e for e in events if e.kind == "tool_call"]
+    assert len(tool_call_events) == 2
+    for event in tool_call_events:
+        assert "hook_post_overhead_ms" in event.payload
+        assert event.payload["hook_post_overhead_ms"] is None
+
+    # Case 2: One hook with slow run_post
+    post_hook_delay_ms = 50
+
+    class MockRegistrySlowPost:
+        _hooks: list = []
+
+        async def run_pre(self, call):
+            return call
+
+        async def run_post(self, call, result):
+            await asyncio.sleep(post_hook_delay_ms / 1000.0)
+            return result
+
+    def mock_resolve_slow_post(log, session_id):  # noqa: ANN001
+        return MockRegistrySlowPost()
+
+    monkeypatch.setattr(runner, "_resolve_hook_registry", mock_resolve_slow_post)
+
+    db2 = tmp_path / "traces_slow_post.db"
+
+    async def drive_slow_post():
+        logger = TraceLogger(db2)
+        with logger.session(harness_version="0.1.0") as session_id:
+            await run_task(
+                "hook-post-overhead-check",
+                harness_dir,
+                logger,
+                session_id,
+                model_adapter=Adapter(),
+                skill_executor=executor,
+            )
+
+    asyncio.run(drive_slow_post())
+
+    logger = TraceLogger(db2)
+    events = logger.load_session(logger.list_sessions()[0].session_id)
+    tool_call_events = [e for e in events if e.kind == "tool_call"]
+    assert len(tool_call_events) == 2
+    # First event emitted before run_post runs - field is the placeholder null.
+    assert "hook_post_overhead_ms" in tool_call_events[0].payload
+    assert tool_call_events[0].payload["hook_post_overhead_ms"] is None
+    # Second event emitted after run_post - field carries the measured value.
+    second = tool_call_events[1]
+    assert "hook_post_overhead_ms" in second.payload
+    assert second.payload["hook_post_overhead_ms"] is not None
+    assert second.payload["hook_post_overhead_ms"] >= post_hook_delay_ms
+    assert second.payload["hook_post_overhead_ms"] < post_hook_delay_ms + 100
+
+    # Case 3: Two hooks with combined post-hook delay
+    post_hook1_delay_ms = 30
+    post_hook2_delay_ms = 40
+
+    class MockRegistryTwoSlowPost:
+        _hooks: list = []
+
+        async def run_pre(self, call):
+            return call
+
+        async def run_post(self, call, result):
+            await asyncio.sleep(post_hook1_delay_ms / 1000.0)
+            await asyncio.sleep(post_hook2_delay_ms / 1000.0)
+            return result
+
+    def mock_resolve_two_post(log, session_id):  # noqa: ANN001
+        return MockRegistryTwoSlowPost()
+
+    monkeypatch.setattr(runner, "_resolve_hook_registry", mock_resolve_two_post)
+
+    db3 = tmp_path / "traces_two_post.db"
+
+    async def drive_two_post():
+        logger = TraceLogger(db3)
+        with logger.session(harness_version="0.1.0") as session_id:
+            await run_task(
+                "hook-post-overhead-check",
+                harness_dir,
+                logger,
+                session_id,
+                model_adapter=Adapter(),
+                skill_executor=executor,
+            )
+
+    asyncio.run(drive_two_post())
+
+    logger = TraceLogger(db3)
+    events = logger.load_session(logger.list_sessions()[0].session_id)
+    tool_call_events = [e for e in events if e.kind == "tool_call"]
+    assert len(tool_call_events) == 2
+    second = tool_call_events[1]
+    assert "hook_post_overhead_ms" in second.payload
+    assert second.payload["hook_post_overhead_ms"] is not None
+    min_expected = post_hook1_delay_ms + post_hook2_delay_ms
+    assert second.payload["hook_post_overhead_ms"] >= min_expected
+    assert second.payload["hook_post_overhead_ms"] < min_expected + 100
+
+
 # --- harness layout validation (issue #90) ---------------------------------
 
 
