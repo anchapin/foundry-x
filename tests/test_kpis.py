@@ -192,6 +192,142 @@ def test_compute_kpis_harness_version_filter(tmp_path):
     assert summary_v2.improvement_rate == 0.0
 
 
+# ---------------------------------------------------------------------------
+# Issue #895: ``cycle_time_seconds`` excludes sessions that fail before the
+# Critic runs (no ``critic_verdict``). The exclusion count is surfaced on
+# ``KpiSummary.excluded_from_cycle_time`` so the survivorship bias is
+# interpretable. ``foundry-kpis`` renders the count when > 0 and
+# ``compare_kpis`` carries its baseline/candidate delta.
+# ---------------------------------------------------------------------------
+
+
+def test_cycle_time_excludes_session_without_critic_verdict(tmp_path):
+    """A session with ``task_received`` but no ``critic_verdict`` is excluded (issue #895).
+
+    Plants one session that fails before the Critic runs (no verdict)
+    alongside one that completes normally. The exclusion count must be 1
+    and the completing session still contributes to ``cycle_time_seconds``.
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # Session that completes: task_received + critic_verdict.
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    # Session that fails before the Critic runs: task_received only.
+    _seed_session(logger, "v1", verdict=None)
+
+    summary = compute_kpis(logger)
+
+    # The excluding session is counted, not silently dropped.
+    assert summary.excluded_from_cycle_time == 1
+    # The completing session still produces a positive cycle time.
+    assert summary.cycle_time_seconds is not None
+    assert summary.cycle_time_seconds > 0.0
+
+
+def test_cycle_time_excluded_count_is_zero_when_all_sessions_verdict(tmp_path):
+    """Every session reaching a ``critic_verdict`` → exclusion count is 0."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=False, failed_checks=["bench"])
+
+    summary = compute_kpis(logger)
+
+    assert summary.excluded_from_cycle_time == 0
+    assert summary.cycle_time_seconds is not None
+
+
+def test_cycle_time_excluded_count_respects_harness_version_filter(tmp_path):
+    """The exclusion count honors ``harness_version`` like the other KPIs."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # v1: one completes, one excluded.
+    _seed_session(logger, "v1", verdict=True)
+    _seed_session(logger, "v1", verdict=None)
+    # v2: clean (both complete).
+    _seed_session(logger, "v2", verdict=True)
+    _seed_session(logger, "v2", verdict=True)
+
+    summary_v1 = compute_kpis(logger, harness_version="v1")
+    summary_v2 = compute_kpis(logger, harness_version="v2")
+
+    assert summary_v1.excluded_from_cycle_time == 1
+    assert summary_v2.excluded_from_cycle_time == 0
+
+
+def test_main_markdown_renders_excluded_from_cycle_time_when_present(tmp_path, capsys):
+    """``foundry-kpis`` renders the exclusion count when > 0 (issue #895)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+    _seed_session(logger, "v1", verdict=None)
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    assert "Excluded From Cycle Time" in captured.out
+    assert "1 session(s)" in captured.out
+
+
+def test_main_markdown_omits_excluded_from_cycle_time_when_clean(tmp_path, capsys):
+    """A clean store (no exclusions) keeps the summary compact."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    assert "Excluded From Cycle Time" not in captured.out
+
+
+def test_compare_kpis_includes_excluded_from_cycle_time_delta(tmp_path):
+    """``compare_kpis`` carries the exclusion-count delta (issue #895)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # Baseline v1: clean (both complete).
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    # Candidate v2: one completes, two fail before the Critic runs.
+    _seed_session(logger, "v2", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v2", verdict=None)
+    _seed_session(logger, "v2", verdict=None)
+
+    comparison = compare_kpis(logger, "v1", "v2")
+
+    assert comparison.baseline.excluded_from_cycle_time == 0
+    assert comparison.candidate.excluded_from_cycle_time == 2
+    assert comparison.deltas["excluded_from_cycle_time"] == 2
+
+
+def test_main_comparison_renders_excluded_from_cycle_time_row(tmp_path, capsys):
+    """The baseline/candidate table includes an exclusion-count row."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v2", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v2", verdict=None)
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--baseline-harness-version",
+            "v1",
+            "--candidate-harness-version",
+            "v2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    row = next(line for line in captured.out.splitlines() if "Excluded From Cycle Time" in line)
+    # Baseline 0, candidate 1, delta +1 marked negative (lower is better).
+    assert "0 | 1 | +1.00 (negative)" in row
+
+
 def test_main_prints_markdown_table(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
@@ -384,6 +520,8 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     # Stable contract: every KpiSummary field is present at the top level
     # so downstream tooling can `payload["cycle_time_seconds"]` etc.
     # ``server_restart_count`` is the issue #899 auxiliary metric.
+    # ``excluded_from_cycle_time`` is the issue #895 cycle-time coverage
+    # signal (sessions with task_received but no usable critic_verdict).
     # ``per_skill`` / ``per_task_family`` / ``per_difficulty_tier`` are the
     # issue #898 slice fields (empty unless ``--group-by`` is supplied).
     assert set(payload.keys()) == {
@@ -405,6 +543,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "tool_argument_parse_error_count",
         "event_limit_abort_count",
         "server_restart_count",
+        "excluded_from_cycle_time",
         "per_skill",
         "per_task_family",
         "per_difficulty_tier",

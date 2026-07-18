@@ -52,6 +52,15 @@ Issue #898: ``compute_kpis`` accepts a ``group_by`` parameter
 ``regression_rate`` slices. The CLI exposes this via ``--group-by``
 (and optional ``--task-metadata``); the slices are an on-demand
 diagnostic view and are excluded from the history log.
+
+Issue #895: ``cycle_time_seconds`` only counts sessions that produced a
+``critic_verdict``; sessions that fail before the Critic runs (model
+errors, early wall-clock / event-limit / token-budget aborts) are
+silently excluded, creating survivorship bias. :class:`KpiSummary` now
+carries ``excluded_from_cycle_time`` — the count of sessions that had a
+``task_received`` but did not contribute a positive delta to the mean —
+so an operator can tell whether the mean reflects the full population or
+a self-selected subpopulation of survivors.
 """
 
 from __future__ import annotations
@@ -252,6 +261,17 @@ class KpiSummary(BaseModel):
     with infrastructure reliability issues without confusing this with
     model-quality signals.
 
+    Issue #895 adds ``excluded_from_cycle_time``: the number of sessions
+    that have a ``task_received`` event but did not contribute a positive
+    ``task_received`` → ``critic_verdict`` delta to ``cycle_time_seconds``
+    — i.e. sessions that failed before the Critic ran (model errors,
+    early wall-clock / event-limit / token-budget aborts), plus the rare
+    session whose timestamps could not be parsed or whose delta was
+    non-positive. Surfaced as an auxiliary operator signal so the
+    survivorship bias in ``cycle_time_seconds`` (which reflects only
+    successful evolutions) is interpretable: a high exclusion count means
+    the mean is computed over a small, self-selected subpopulation.
+
     Issue #898 adds ``per_skill`` / ``per_task_family`` /
     ``per_difficulty_tier``: ``dict[str, SkillKpiSlice]`` breakdowns of
     ``improvement_rate`` and ``regression_rate``. Only the dimension
@@ -279,6 +299,7 @@ class KpiSummary(BaseModel):
     tool_argument_parse_error_count: int = 0
     event_limit_abort_count: int = 0
     server_restart_count: int = 0
+    excluded_from_cycle_time: int = 0
     per_skill: dict[str, SkillKpiSlice] = {}
     per_task_family: dict[str, SkillKpiSlice] = {}
     per_difficulty_tier: dict[str, SkillKpiSlice] = {}
@@ -420,7 +441,7 @@ def compute_kpis(
     down to the store so a multi-session fixture does not need to be
     materialized in Python.
     """
-    cycle_time = _cycle_time(logger, harness_version=harness_version)
+    cycle_time, excluded_from_cycle_time = _cycle_time(logger, harness_version=harness_version)
     regression_rate, improvement_rate = _verdict_rates(logger, harness_version=harness_version)
     injection_blocks = _injection_blocks(logger, harness_version=harness_version)
     token_totals = _token_totals(logger, harness_version=harness_version)
@@ -460,6 +481,7 @@ def compute_kpis(
         tool_argument_parse_error_count=tool_argument_parse_error_count,
         event_limit_abort_count=event_limit_abort_count,
         server_restart_count=server_restart_count,
+        excluded_from_cycle_time=excluded_from_cycle_time,
         **_slice_field(
             _slice_verdict_rates(
                 logger,
@@ -615,14 +637,23 @@ def _compute_deltas(
         "event_limit_abort_count": candidate.event_limit_abort_count
         - baseline.event_limit_abort_count,
         "server_restart_count": candidate.server_restart_count - baseline.server_restart_count,
+        # Issue #895: exclusion-count delta (candidate - baseline). A rising
+        # count means more sessions are failing before the Critic runs, which
+        # widens the survivorship-bias blind spot in ``cycle_time_seconds``.
+        "excluded_from_cycle_time": candidate.excluded_from_cycle_time
+        - baseline.excluded_from_cycle_time,
     }
 
 
 def _cycle_time(
     logger: TraceLogger,
     harness_version: str | None = None,
-) -> float | None:
-    """Mean wall-clock time from ``task_received`` to ``critic_verdict``.
+) -> tuple[float | None, int]:
+    """Mean wall-clock time from ``task_received`` to ``critic_verdict`` plus exclusion count.
+
+    Returns ``(mean_seconds, excluded_count)``. The mean is over sessions
+    that have both a ``task_received`` and a ``critic_verdict`` event with
+    a strictly positive delta; it is ``None`` when no session qualified.
 
     Issue #273 — previously looped every session id and called
     ``iter_events`` twice per session to find the first event of each
@@ -630,6 +661,16 @@ def _cycle_time(
     qualifying event in timestamp order; ``setdefault`` keeps the first
     (earliest) event per session, which is exactly the prior
     first-event-of-kind semantics.
+
+    Issue #895 — ``excluded_count`` is the number of sessions that have a
+    ``task_received`` event but did **not** contribute a positive delta to
+    the mean: sessions without a ``critic_verdict`` (the survivorship-bias
+    case called out in the issue — model errors, early wall-clock /
+    event-limit / token-budget aborts), plus the rare session whose
+    timestamps could not be parsed or whose delta was non-positive.
+    Surfacing the count alongside the mean lets an operator tell a mean
+    computed over every session from one computed over a small, self-
+    selected subpopulation of survivors.
     """
     start_events: dict[str, TraceEvent] = {}
     for event in logger.query_events(kind="task_received", harness_version=harness_version):
@@ -639,21 +680,30 @@ def _cycle_time(
         end_events.setdefault(event.session_id, event)
 
     deltas: list[float] = []
+    excluded = 0
     for sid, start_event in start_events.items():
         end_event = end_events.get(sid)
         if end_event is None:
+            # Issue #895: a session with ``task_received`` but no
+            # ``critic_verdict`` failed before the Critic ran and is
+            # excluded from the mean — count it so the survivorship bias
+            # is visible rather than silent.
+            excluded += 1
             continue
         try:
             t0 = datetime.fromisoformat(start_event.timestamp)
             t1 = datetime.fromisoformat(end_event.timestamp)
         except ValueError:
+            excluded += 1
             continue
         delta = (t1 - t0).total_seconds()
         if delta > 0:
             deltas.append(delta)
+        else:
+            excluded += 1
     if not deltas:
-        return None
-    return sum(deltas) / len(deltas)
+        return None, excluded
+    return sum(deltas) / len(deltas), excluded
 
 
 def _verdict_rates(
@@ -1362,6 +1412,18 @@ def _render_markdown(summary: KpiSummary) -> str:
             f"Server Restarts: {summary.server_restart_count} server_unavailable "
             "event(s) recorded by the runner's mid-session health-check."
         )
+    # Issue #895: surface the cycle-time exclusion count when > 0 so the
+    # survivorship bias in ``cycle_time_seconds`` is visible — a high count
+    # means the mean is computed over a small subpopulation of sessions
+    # that survived to a ``critic_verdict``. Zero (the clean-store case)
+    # keeps the summary compact.
+    if summary.excluded_from_cycle_time > 0:
+        lines.append("")
+        lines.append(
+            f"Excluded From Cycle Time: {summary.excluded_from_cycle_time} "
+            "session(s) had a task_received but no usable critic_verdict "
+            "(failed before the Critic ran)."
+        )
     if summary.failure_class_distribution:
         total = sum(summary.failure_class_distribution.values())
         lines.append("")
@@ -1506,6 +1568,13 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{baseline.server_restart_count} | "
         f"{candidate.server_restart_count} | "
         f"{_format_delta(float(baseline.server_restart_count), float(candidate.server_restart_count), higher_is_better=False)} |",
+        # Issue #895: exclusion count is an auxiliary signal (lower is
+        # better — fewer sessions lost to pre-Critic failures means less
+        # survivorship bias in ``cycle_time_seconds``).
+        "| Excluded From Cycle Time | "
+        f"{baseline.excluded_from_cycle_time} | "
+        f"{candidate.excluded_from_cycle_time} | "
+        f"{_format_delta(float(baseline.excluded_from_cycle_time), float(candidate.excluded_from_cycle_time), higher_is_better=False)} |",
     ]
     return "\n".join(lines)
 
@@ -1597,6 +1666,11 @@ def append_kpi_history(
             "token_totals",
             "streaming_quality",
             "wall_clock_abort_count",
+            # Issue #895: ``excluded_from_cycle_time`` is an auxiliary
+            # coverage signal recomputed from the trace store on demand
+            # (like the per-slice fields below), not a trend metric — keep
+            # the JSONL history line compact and its key set stable.
+            "excluded_from_cycle_time",
             # Issue #898: per-slice breakdowns are an on-demand diagnostic
             # view (populated only with --group-by), not a trend metric —
             # exclude them so the JSONL history line stays compact. They
