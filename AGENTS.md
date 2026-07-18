@@ -19,8 +19,11 @@ Before you write code in this repo, read in this order:
    `harness/manifest.json` controls which hooks are active; adding or
    removing a hook file requires updating the manifest.
 6. `docs/CONTEXT.md` — glossary of project terms and the `kind`
-   vocabulary produced by the `TraceLogger` (relevant whenever a
-   payload, event name, or subsystem name is ambiguous).
+   vocabulary produced by the `TraceLogger`. The §Event kinds table
+   is the canonical reference for trace event payload contracts
+   (relevant any time you read, emit, or change a `kind` value).
+   Adding a new `kind` is a vocabulary change that must ship in the
+   same PR as the code that emits it.
 7. `docs/ARCHITECTURE.md` — runtime architecture map (Runner,
    TraceLogger, Digester, Evolver, Critic and how they connect).
 8. `docs/OPERATOR.md` — human-side workflow that mirrors the agent
@@ -104,31 +107,78 @@ mirrors the way our product works:
   Run on demand with `uv run pre-commit run --all-files`. Hooks
   include ruff, ruff-format, gitleaks (secret scan), and standard
   hygiene checks. See `.pre-commit-config.yaml`.
-- **Lint:** `uv run ruff check .` — must pass before commit (and is
-  also enforced by pre-commit). Always run before pytest.
+- **Lint:** `uv run ruff check .` must pass before commit (also enforced
+  by pre-commit). Always run before pytest. The CI `lint` job additionally
+  runs `uv run ruff format --check`; do not let unformatted code reach
+  PR review.
 - **Test:** `uv run pytest` — must pass before commit. Run after lint.
+  Pytest discovers both `tests/` and `benchmarks/` (see `testpaths` in
+  `pyproject.toml`); benchmark tasks under `benchmarks/tasks/` are gated
+  by the `@pytest.mark.benchmark` marker (ADR-0004, ADR-0005).
+  - Unit tests only: `uv run pytest -m "not benchmark"`
   - Single test: `uv run pytest tests/path/to_test.py::test_name`
   - Single benchmark: `uv run pytest benchmarks/tasks/test_name.py -m benchmark`
-  - Benchmarks live alongside unit tests in `benchmarks/tasks/` and are
-    marked `@pytest.mark.benchmark` (ADR-0004, ADR-0005).
-  - Run the full benchmark suite: `uv run pytest -m benchmark`
+  - Full benchmark suite: `uv run pytest -m benchmark`
+  - List registered benchmark tasks without running them:
+    `uv run pytest --co -q -m benchmark`
+  - **Test fixtures** (defined in `tests/conftest.py` and `benchmarks/conftest.py`):
+    - `model_adapter` (tests/conftest.py): session-scoped `ModelAdapter`
+      selected by `TEST_MODEL_MODE` — defaults to a deterministic
+      `MockModelAdapter` with no network access, so unit tests and
+      most benchmarks run offline. Set `TEST_MODEL_MODE=real` to drive
+      `OpenAICompatibleAdapter` against `OPENCODE_SERVER_URL` /
+      `LLAMACPP_HOST` for live integration runs (matches
+      `.github/workflows/test.yml::test-real-model`).
+    - `mock_adapter` (tests/conftest.py): fresh `MockModelAdapter` per
+      test; ignore `TEST_MODEL_MODE`. Use when configuring
+      per-test responses without sharing state.
+    - `benchmark_workspace` (benchmarks/conftest.py): per-test isolated
+      `tmp_path` the benchmark task treats as the agent's entire
+      filesystem. Indirect-parametrize with the name of a directory
+      under `benchmarks/fixtures/<name>/` to seed inputs (fails loudly
+      if the fixture directory is missing).
   - `benchmarks/fixtures/` contains large benchmark inputs and is
     excluded from both ruff and pytest on purpose
     (`pyproject.toml` `extend-exclude` + `norecursedirs`). Don't lint
-    or import from it; copy fixtures into `tests/` if you need them.
+    or import from it; copy fixtures into the `benchmark_workspace`
+    (or `tests/`) if you need them outside a benchmark task.
 - **Critic harness-load smoke test:** before the pytest suite, the
   Critic runs `harness/scripts/load_check.py` to confirm the harness
   imports and registers cleanly. If your hook or skill change fails
   there but passes pytest, the harness can't be loaded at runtime.
-- **CLI tools:**
+- **CLI tools** (registered in `pyproject.toml` §`[project.scripts]`):
   - `uv run fx-runner --task "..."` — run a single agent task session
-  - `uv run foundry-x-trace` (alias `foundry-trace`) — inspect trace
-    sessions, render timelines, grep events, prune old sessions
-    (`--help` for flags)
-  - `uv run foundry-kpis` — compute PRD success-metric KPIs from traces
-  - `uv run fx-trace regression-report` — aggregate Critic verdicts
-  - `uv run foundry-evolve` — run one evolution iteration against a failure report
-  - `uv run foundry-sweep` — run a parametric sweep of harness variants
+    (extra flags `--harness-dir`, `--trace-path`, `--workspace-root`,
+    `--model-id`, `--quantization`, `--path-or-endpoint`; same module
+    as `python -m foundry_x.execution.runner`)
+  - `uv run foundry-x-trace` (alias `foundry-trace`) — trace-driven
+    inspection. Subcommands worth knowing: `sessions`, `show <sid>`,
+    `events-grep`, `render-failure`, `seed-sample-trace` (plant a
+    deterministic offline session), and `prune` (drop old sessions
+    from `logs/traces.db` — see Operational notes below). `--help` for
+    the full list.
+  - `uv run foundry-kpis` — compute the three PRD success-metric
+    KPIs (cycle time, regression rate, improvement rate) plus the
+    tracked token-budget metric from traces.
+  - `uv run fx-trace regression-report` — aggregate `critic_verdict`
+    events from `logs/` into a regression baseline report.
+  - `uv run foundry-evolve --session-id <id>` — run one evolution
+    iteration (Digester → Evolver → Critic) against an existing
+    session.
+  - `uv run foundry-sweep` — parametric sweep of harness variants
+    (e.g. quantization sweep; Phase 3).
+- **Operational notes:**
+  - `logs/` is gitignored but grows without bound. Manage retention
+    with `uv run foundry-x-trace prune --keep-last N` or
+    `--older-than DAYS`; both support `--dry-run`.
+  - End-to-end real-model benchmarks (launch llama-server, run the
+    sandboxed agent, assert the trace store grew, tear down):
+    `infra/scripts/run_benchmark.sh --task "..." [--model <gguf>]
+    [--dry-run] [--keep-server]`. See the script header for env
+    vars (`LLAMACPP_HOST`, `LLAMACPP_NGL`, etc.).
+  - Trace backend: SQLite is default (`./logs/traces.db`, WAL mode);
+    switch with `FOUNDRY_TRACE_BACKEND=jsonl` and a `.jsonl` path.
+    Same schema either way (ADR-0003).
 - **Type discipline:** Python 3.11+ syntax. `pydantic` for all
   structured data at module boundaries (ADR-0006). No `Any` without
   a comment explaining why.
