@@ -8,6 +8,7 @@ from foundry_x.evolution.digester import Digester
 from foundry_x.observability.kpis import _resolve_format
 from foundry_x.observability.regression_report import analyze_regressions
 from foundry_x.observability.render import render_failure_report, render_failure_report_json
+from foundry_x.observability.session_card import format_session_card
 from foundry_x.observability.session_summary import (
     SessionSummaryReport,
     _failure_class_distribution,
@@ -194,6 +195,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write the summary to this path instead of stdout.",
     )
 
+    session_card = sub.add_parser(
+        "session-card",
+        help="Render a one-screen per-session triage card (issue #804).",
+    )
+    session_card.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace store (sqlite .db or jsonl).",
+    )
+    session_card.add_argument(
+        "--session-id",
+        required=True,
+        help="Session UUID whose card should be rendered.",
+    )
+
     tool_latency = sub.add_parser(
         "tool-latency",
         help="Aggregate per-tool latency percentiles across sessions.",
@@ -318,6 +334,21 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.out).write_text(rendered, encoding="utf-8")
         else:
             sys.stdout.write(rendered)
+        return 0
+
+    if args.command == "session-card":
+        backend = _infer_backend(args.db)
+        logger = TraceLogger(args.db, backend=backend)
+        sessions = logger.list_sessions()
+        session = next((s for s in sessions if s.session_id == args.session_id), None)
+        if session is None:
+            sys.stderr.write(f"session {args.session_id} not found\n")
+            return 2
+        events = logger.load_session(args.session_id)
+        rendered = format_session_card(session, events)
+        sys.stdout.write(rendered)
+        if not rendered.endswith("\n"):
+            sys.stdout.write("\n")
         return 0
 
     if args.command == "tool-latency":
