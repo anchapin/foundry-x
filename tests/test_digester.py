@@ -602,7 +602,21 @@ def test_unknown_function_keyword_classifies_as_wrong_tool() -> None:
 
 
 @pytest.mark.parametrize(
-    "kind", ["tool_error", "task_failed", "run_failed", "agent_error", "error"]
+    "kind",
+    [
+        "tool_error",
+        "task_failed",
+        "run_failed",
+        "agent_error",
+        "error",
+        # Issue #867: ``model_error`` and ``hook_registry_error`` are
+        # production-emitted failure kinds that must trip the kind-field
+        # detector just like the legacy ``tool_error`` / ``task_failed``
+        # vocabulary. Pinning them here forces any future removal to be
+        # a deliberate, test-visible decision.
+        "model_error",
+        "hook_registry_error",
+    ],
 )
 def test_any_failure_kind_signals_via_kind_field(kind: str) -> None:
     """Every value in ``FAILURE_KINDS`` must trip ``signal='kind:<value>'``."""
@@ -910,3 +924,147 @@ def test_context_overflow_classification_is_specific(
         assert report.proposed_class != CONTEXT_OVERFLOW_CLASS
     else:
         assert report.proposed_class == expected_class
+
+
+# ---------------------------------------------------------------------------
+# Issue #867: ``model_error`` and ``hook_registry_error`` are production-emitted
+# failure kinds (Runner.run_task at runner.py:1592, Runner._resolve_hook_registry
+# at runner.py:675). Prior to this fix the Digester's ``FAILURE_KINDS`` frozenset
+# silently dropped both events and reported only the *later* downstream failure
+# as the root cause. The tests below lock in the corrected classification.
+# ---------------------------------------------------------------------------
+
+
+def _model_error_event(
+    *,
+    event_id: str = "e-model-err",
+    seq: int = 4,
+    error_type: str = "RuntimeError",
+    message: str = "adapter.complete timed out",
+    step: int = 2,
+) -> TraceEvent:
+    """Build a ``model_error`` event with the canonical Runner payload shape."""
+    return _ev(
+        "model_error",
+        {"step": step, "error_type": error_type, "message": message},
+        event_id=event_id,
+        seq=seq,
+    )
+
+
+def _hook_registry_error_event(
+    *,
+    event_id: str = "e-hook-err",
+    seq: int = 4,
+    error_type: str = "RuntimeError",
+    message: str = "harness.hooks.get_registry() raised",
+) -> TraceEvent:
+    """Build a ``hook_registry_error`` event with the canonical Runner payload shape."""
+    return _ev(
+        "hook_registry_error",
+        {"error_type": error_type, "message": message},
+        event_id=event_id,
+        seq=seq,
+    )
+
+
+def test_model_error_vocabulary_is_pinned_in_failure_kinds() -> None:
+    """``model_error`` is in ``FAILURE_KINDS`` (issue #867) so the first-failure walk classifies it."""
+    assert "model_error" in FAILURE_KINDS
+
+
+def test_hook_registry_error_vocabulary_is_pinned_in_failure_kinds() -> None:
+    """``hook_registry_error`` is in ``FAILURE_KINDS`` (issue #867) so security-degraded sessions are observable."""
+    assert "hook_registry_error" in FAILURE_KINDS
+
+
+def test_model_error_kind_triggers_first_failure_classification() -> None:
+    """A ``model_error`` event without any recognisable keyword falls back to the ``tool-error`` catch-all
+    via ``kind:<value>`` signal — acceptance: model fault is recognised as the session's first failure.
+    """
+    events = [
+        *_CLEAN_EVENTS,
+        _model_error_event(message="synthetic model fault"),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "tool-error"
+    assert len(report.failed_steps) == 1
+    step = report.failed_steps[0]
+    assert step["kind"] == "model_error"
+    assert step["signal"] == "kind:model_error"
+    # The payload is preserved so the Evolver can re-derive error_type / message
+    # without re-parsing the original transport exception.
+    assert step["payload"]["error_type"] == "RuntimeError"
+    # The summary carries the model_error kind name and the message text
+    # (digester._detail falls back to the flattened blob when no payload key in
+    # FAILURE_PAYLOAD_KEYS matches — payload uses ``message``, not ``error``).
+    assert "kind=model_error" in report.summary
+    assert "synthetic model fault" in report.summary
+
+
+def test_hook_registry_error_kind_triggers_first_failure_classification() -> None:
+    """A ``hook_registry_error`` event trips the kind detector and surfaces as the first failure.
+
+    Critical for #867: without this classification a session whose
+    ``InjectionFirewallHook`` was silently disabled would be reported as
+    clean even though every downstream security hook was off.
+    """
+    events = [
+        *_CLEAN_EVENTS,
+        _hook_registry_error_event(message="firewall registry unreachable"),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "tool-error"
+    assert len(report.failed_steps) == 1
+    step = report.failed_steps[0]
+    assert step["kind"] == "hook_registry_error"
+    assert step["signal"] == "kind:hook_registry_error"
+    assert step["payload"]["error_type"] == "RuntimeError"
+
+
+def test_model_error_precedes_tool_error_in_first_failure_walk() -> None:
+    """Issue #867 acceptance: ``model_error`` at step N followed by ``tool_error`` at step M
+    classifies ``model_error`` as the first failure (not the later tool_error).
+
+    Without the fix the Digester would skip the ``model_error`` event entirely
+    (because its kind was not in ``FAILURE_KINDS``) and report the later
+    ``tool_error`` as the root cause. This regression test pins the corrected
+    precedence so the bug cannot return silently.
+    """
+    events = [
+        *_CLEAN_EVENTS,
+        _model_error_event(event_id="e-model-err", seq=4, message="upstream model timeout"),
+        _ev(
+            "tool_error",
+            {"error": "second failure (downstream)"},
+            event_id="e-tool-err",
+            seq=5,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert len(report.failed_steps) == 1
+    step = report.failed_steps[0]
+    assert step["event_id"] == "e-model-err"
+    assert step["kind"] == "model_error"
+    assert step["index"] == 3  # 3 clean events precede it in the timestamp-sorted order
+
+
+def test_hook_registry_error_precedes_tool_error_in_first_failure_walk() -> None:
+    """Companion to ``test_model_error_precedes_tool_error_in_first_failure_walk``
+    for the security-degraded path. The firewall-down signal must not be masked
+    by a later ``tool_error`` that the agent produced while running unguarded.
+    """
+    events = [
+        *_CLEAN_EVENTS,
+        _hook_registry_error_event(event_id="e-hook-err", seq=4),
+        _ev(
+            "tool_error",
+            {"error": "later tool failure during degraded mode"},
+            event_id="e-tool-err",
+            seq=5,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert len(report.failed_steps) == 1
+    assert report.failed_steps[0]["event_id"] == "e-hook-err"
+    assert report.failed_steps[0]["kind"] == "hook_registry_error"

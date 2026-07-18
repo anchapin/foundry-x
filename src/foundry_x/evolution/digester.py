@@ -65,6 +65,17 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         "run_failed",
         "agent_error",
         "error",
+        # Issue #867: ``model_error`` is emitted by the Runner whenever
+        # ``adapter.complete`` raises (runner.py:1592). Without it the
+        # first-failure walk reports a later failure (e.g. ``tool_error``)
+        # as root cause, hiding the actual model fault.
+        "model_error",
+        # Issue #867: ``hook_registry_error`` is emitted by the Runner
+        # when ``harness.hooks.get_registry()`` raises (runner.py:675).
+        # The session continues in degraded mode with the security-critical
+        # ``InjectionFirewallHook`` silently disabled; the Digester must
+        # surface this so the Evolver and operators flag the degradation.
+        "hook_registry_error",
     }
 )
 
