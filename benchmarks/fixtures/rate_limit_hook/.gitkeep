@@ -1,0 +1,4 @@
+# placeholder -- rate_limit_hook drives RateLimitHook through a fresh
+# HookRegistry (issues #332, #874); it does not read any seed data from
+# fixtures. The directory exists so tests/benchmarks/test_hygiene.py's
+# fixture-existence invariant has a target to check.
