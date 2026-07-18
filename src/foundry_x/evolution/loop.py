@@ -77,6 +77,7 @@ def run_evolution_step(
     *,
     critic: Critic | None = None,
     evolver: Evolver | None = None,
+    no_verify: bool = False,
 ) -> EvolutionResult:
     """Run one iteration of the evolution loop over a session's trace events.
 
@@ -106,6 +107,11 @@ def run_evolution_step(
         Optional :class:`Evolver` instance. When omitted a default instance is
         constructed. The Evolver is only used when the failure report is not
         clean; a clean report short-circuits before any proposal work.
+    no_verify:
+        When ``True``, skip the Critic gate and return a synthetic
+        ``CriticVerdict(verdict=None, notes="--no-verify: skipped")`` for the
+        last proposed edit (issue #888). The audit trail still records a
+        verdict event; downstream consumers treat ``None`` as a non-approval.
 
     Returns
     -------
@@ -158,14 +164,28 @@ def run_evolution_step(
             completed_at=_now_iso(),
         )
 
-    if critic is None:
+    if critic is None and not no_verify:
         critic = Critic(harness_dir=harness_dir)
 
     verdict = None
-    for idx, edit in enumerate(proposed_edits):
-        verdict = critic.evaluate(
-            edit.unified_diff, edit_index=idx, failure_class=failure_report.proposed_class
-        )
+    if no_verify:
+        # Skip the Critic gate but preserve the audit trail (issue #888).
+        # The synthetic verdict carries ``edit_index`` of the last edit so
+        # downstream consumers can correlate it with the proposed edit.
+        for idx, edit in enumerate(proposed_edits):
+            verdict = CriticVerdict(
+                verdict=None,
+                passed_checks=[],
+                failed_checks=[],
+                notes="--no-verify: skipped",
+                edit_index=idx,
+                failure_class=failure_report.proposed_class,
+            )
+    else:
+        for idx, edit in enumerate(proposed_edits):
+            verdict = critic.evaluate(
+                edit.unified_diff, edit_index=idx, failure_class=failure_report.proposed_class
+            )
 
     return EvolutionResult(
         session_id=session_id,
@@ -187,12 +207,17 @@ async def run_evolution_step_async(
     *,
     critic: Critic | None = None,
     evolver: Evolver | None = None,
+    no_verify: bool = False,
 ) -> EvolutionResult:
     """Async variant of :func:`run_evolution_step`.
 
     Awaits ``evolver.propose_async()`` instead of calling ``evolver.propose()``.
     The Critic is still invoked synchronously because the subprocess call is
     inherently blocking (ADR-0010).
+
+    When ``no_verify=True`` the Critic is skipped and a synthetic
+    ``CriticVerdict(verdict=None, notes="--no-verify: skipped")`` is returned
+    for the last proposed edit (issue #888).
     """
     harness_version = resolve_harness_version(harness_dir)
     started_at = _now_iso()
@@ -239,12 +264,24 @@ async def run_evolution_step_async(
             completed_at=_now_iso(),
         )
 
-    if critic is None:
+    if critic is None and not no_verify:
         critic = Critic(harness_dir=harness_dir)
 
     verdict = None
-    for idx, edit in enumerate(proposed_edits):
-        verdict = critic.evaluate(edit.unified_diff, edit_index=idx)
+    if no_verify:
+        # Skip the Critic gate but preserve the audit trail (issue #888).
+        for idx, edit in enumerate(proposed_edits):
+            verdict = CriticVerdict(
+                verdict=None,
+                passed_checks=[],
+                failed_checks=[],
+                notes="--no-verify: skipped",
+                edit_index=idx,
+                failure_class=failure_report.proposed_class,
+            )
+    else:
+        for idx, edit in enumerate(proposed_edits):
+            verdict = critic.evaluate(edit.unified_diff, edit_index=idx)
 
     return EvolutionResult(
         session_id=session_id,

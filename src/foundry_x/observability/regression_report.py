@@ -13,9 +13,16 @@ TOKEN_BUDGET_REASON = "token_budget"
 
 
 class VerdictRecord(BaseModel):
-    """Structured payload persisted for every Critic verdict (ADR-0006 boundary model)."""
+    """Structured payload persisted for every Critic verdict (ADR-0006 boundary model).
 
-    verdict: bool = False
+    ``verdict`` mirrors :class:`foundry_x.evolution.critic.CriticVerdict.verdict`
+    and is ``None`` when the gate was skipped via ``--no-verify`` (issue #888).
+    The regression-pairing logic in :func:`_compute` treats ``None`` as a
+    non-approval (falsy) so skipped gates do not seed ``prior_passed`` entries
+    that would later flag unrelated failures as regressions.
+    """
+
+    verdict: bool | None = None
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
     notes: str = ""
