@@ -22,6 +22,7 @@ of test-suite comprehension. See ADR-0005 and ADR-0010.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -72,11 +73,13 @@ def _copy_fixture_to_workspace(fixture_dir: Path, workspace: Path) -> None:
 
 
 def _run_pytest(workspace: Path) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
         cwd=workspace,
         capture_output=True,
         text=True,
+        env=env,
     )
 
 
