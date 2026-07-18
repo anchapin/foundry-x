@@ -1716,6 +1716,7 @@ async def run_task(
                         "arguments": call.arguments,
                         "duration_ms": 0,
                         "hook_overhead_ms": hook_overhead_ms,
+                        "hook_post_overhead_ms": None,
                     },
                 )
                 if _check_event_limit(session_id):
@@ -1732,6 +1733,16 @@ async def run_task(
                     output = None
                     error = f"{type(exc).__name__}: {exc}"
                 duration_ms = int((time.monotonic() - start) * 1000)
+                result = hook_result_cls(name=call.name, output=output, error=error)
+
+                post_hook_start = time.monotonic()
+                if registry is not None:
+                    result = await registry.run_post(call, result)
+                hook_post_overhead_ms: int | None = (
+                    int((time.monotonic() - post_hook_start) * 1000)
+                    if registry is not None
+                    else None
+                )
                 _record_and_count(
                     session_id,
                     kind="tool_call",
@@ -1742,6 +1753,7 @@ async def run_task(
                         "arguments": arguments,
                         "duration_ms": duration_ms,
                         "hook_overhead_ms": hook_overhead_ms,
+                        "hook_post_overhead_ms": hook_post_overhead_ms,
                     },
                 )
                 if _check_event_limit(session_id):
@@ -1749,10 +1761,6 @@ async def run_task(
                     outcome_reason = "event_limit"
                     hit_event_limit = True
                     break
-                result = hook_result_cls(name=call.name, output=output, error=error)
-
-                if registry is not None:
-                    result = await registry.run_post(call, result)
 
                 _record_and_count(
                     session_id,
