@@ -1609,17 +1609,9 @@ async def run_task(
         event_count += 1
         log.record(sid, kind=kind, payload=payload)
 
-    _record_and_count(
-        session_id,
-        kind="user_prompt",
-        payload={"content": task, "tool_count": len(tool_definitions)},
-    )
-    if _check_event_limit(session_id):
-        outcome_status = "failed"
-        outcome_reason = "event_limit"
-        hit_event_limit = True
-        return
-
+    # Initialize outcome-tracking state BEFORE any limit check so the
+    # ``finally`` block below can always emit a well-formed ``outcome``
+    # event, even on the pre-loop event-limit path (issue #894).
     outcome_status: str | None = None
     outcome_reason: str | None = None
     outcome_steps = 0
@@ -1627,9 +1619,31 @@ async def run_task(
     tokens_used = 0
     hit_event_limit = False
 
+    _record_and_count(
+        session_id,
+        kind="user_prompt",
+        payload={"content": task, "tool_count": len(tool_definitions)},
+    )
+    # Pre-loop event-limit check (issue #894): when the session is
+    # already over budget before the agent loop starts, record the
+    # abort here and skip the loop body. The previous code
+    # ``return``-ed at this point, bypassing the ``finally`` block
+    # and leaving the trace without an ``outcome`` event — producing
+    # an inconsistent shape versus the in-loop abort paths. We now
+    # fall through to the ``try``/``finally`` below so the
+    # ``outcome`` event is emitted with the same
+    # ``status="failed"`` / ``reason="event_limit"`` contract
+    # documented in CONTEXT.md and ADR-0010 §Termination semantics.
+    if _check_event_limit(session_id):
+        outcome_status = "failed"
+        outcome_reason = "event_limit"
+        hit_event_limit = True
+
     step = 0
     try:
         while True:
+            if hit_event_limit:
+                break
             if max_steps_dynamic:
                 max_steps = _resolve_max_steps()
             if step >= max_steps:
