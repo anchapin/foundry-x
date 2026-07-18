@@ -471,7 +471,6 @@ class TraceLogger:
         harness_version: str,
         model_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-        model_config: Any = None,
     ) -> Iterator[str]:
         # Issue #121: scrub the metadata dict before either backend writes it.
         # The original ``record()`` path already redacts its payload; the
