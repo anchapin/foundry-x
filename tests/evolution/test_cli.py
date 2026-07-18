@@ -341,7 +341,9 @@ class TestRunLoopIntegration:
             logger.record(sid, "user_prompt", {"prompt": "Do the thing", "tool_count": 1})
             logger.record(sid, "tool_call", {"name": "read_file"})
             logger.record(sid, "tool_result", {"name": "read_file", "output": "file contents"})
-            logger.record(sid, "outcome", {"status": "success", "reason": "final_answer", "steps": 1})
+            logger.record(
+                sid, "outcome", {"status": "success", "reason": "final_answer", "steps": 1}
+            )
 
         harness = tmp_path / "harness"
         harness.mkdir()
