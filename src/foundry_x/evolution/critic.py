@@ -128,9 +128,17 @@ DEFAULT_BASELINE_PATH: Path = Path("logs") / "critic_baseline.json"
 
 
 class CriticVerdict(BaseModel):
-    """Result of a Critic gate run against a proposed harness edit (ADR-0006)."""
+    """Result of a Critic gate run against a proposed harness edit (ADR-0006).
 
-    verdict: bool
+    ``verdict`` is ``True`` when the Critic approved the edit, ``False`` when
+    it rejected the edit, and ``None`` when the gate was explicitly skipped
+    via ``--no-verify`` (issue #888). The ``None`` value preserves the audit
+    trail: ``record_verdict`` still persists a ``critic_verdict`` trace event
+    so downstream consumers (regression report, KPIs) can distinguish a
+    skipped gate from a rejected one.
+    """
+
+    verdict: bool | None
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
     notes: str = ""

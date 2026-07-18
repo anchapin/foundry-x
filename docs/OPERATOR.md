@@ -144,6 +144,57 @@ When the trace store is empty, both commands exit 0 and print
 remains the right tool when you already have an id from
 `fx-trace sessions` or `foundry-kpis`.
 
+## `foundry-evolve` flag reference (issue #888)
+
+The `evolve` subcommand has two flags that change how the loop runs.
+Both are **operator-only** and ship with the warnings described below;
+neither relaxes the ADR-0004 Critic gate for CI-bound harness edits.
+
+### `--background` (replaces `--async`)
+
+```
+uv run foundry-evolve evolve \
+    --session-id <id> --trace-db <db> --harness-dir <dir> \
+    --background
+```
+
+Spawns the full Digester → Evolver → Critic loop as a detached
+subprocess (`start_new_session=True` on POSIX) and exits 0 immediately
+after printing the child PID. The child writes progress to the trace
+store and the `ProposedEditStore`; operators poll for completion with
+`foundry-evolve list-pending` or `fx-trace events-grep <sid>
+--pattern critic_verdict`. Combine with `--no-verify` to forward the
+skip to the background run.
+
+The legacy top-level `--async` flag is **deprecated** (issue #888) and
+emits a `stderr` notice pointing at `--background`. `--async` ran the
+loop on the asyncio event loop but still blocked the caller until
+completion; `--background` is the true detach. `--async` will be
+removed in a future release.
+
+### `--no-verify`
+
+```
+uv run foundry-evolve evolve \
+    --session-id <id> --trace-db <db> --harness-dir <dir> \
+    --no-verify
+```
+
+Skips the `Critic.evaluate(...)` gate and records an explicit
+`CriticVerdict(verdict=None, notes="--no-verify: skipped")` so the
+audit trail still carries a `critic_verdict` trace event. The CLI
+prints a prominent `stderr` warning naming ADR-0004 and reminding the
+operator that the resulting harness edit cannot ship to `main`
+without a subsequent Critic-passed run. The rendered verdict block
+shows `Critic Verdict: SKIPPED` so the operator can distinguish a
+skip from an approval or rejection at a glance.
+
+`--no-verify` is a **local-experimentation escape hatch**, not a CI
+gate bypass. The orchestrator's own PRs (including this one) still go
+through normal CI and the Critic gate. See
+[`SECURITY.md` §"`--no-verify` and the Critic gate"](./SECURITY.md#no-verify-and-the-critic-gate)
+for the threat model.
+
 ## Hook Registry Failure Degradation Mode
 
 When `harness.hooks.get_registry()` raises during session start,
@@ -423,6 +474,8 @@ reference, and `infra/llama-cpp/README.md` for the underlying
 
 | Term | Definition |
 |------|------------|
+| **--background** | `foundry-evolve evolve` flag that spawns the loop as a detached subprocess and exits 0 immediately after printing the child PID (issue #888). Replaces the deprecated top-level `--async` flag. |
+| **--no-verify** | `foundry-evolve evolve` flag that skips the `Critic.evaluate(...)` gate and records a `CriticVerdict(verdict=None)` for the audit trail (issue #888). Local-experimentation escape hatch only — per ADR-0004 harness edits not evaluated by Critic cannot ship to `main`. |
 | **Benchmark Task** | A standardised coding task marked `@pytest.mark.benchmark`; the Critic gates harness changes against the full benchmark suite. |
 | **Critic** | The gatekeeper that runs the proposed edit through the pytest suite and benchmark suite, rejecting any edit that causes regressions. |
 | **Digester** | The component that parses traces and produces a failure report naming what failed, where, and the candidate root cause. |

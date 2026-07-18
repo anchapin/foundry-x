@@ -32,7 +32,11 @@ We design against these threats:
 
 - **Critic gate (hard requirement, ADR-0004).** Every harness edit
   must pass the `Critic` benchmark gate before it is marked active.
-  Enforced via `.github/workflows/critic.yml`.
+  Enforced via `.github/workflows/critic.yml`. The CLI flag
+  `--no-verify` (issue #888) skips the gate for local
+  experimentation only — it cannot ship a harness edit to `main`.
+  See [`--no-verify` and the Critic gate](#no-verify-and-the-critic-gate)
+  below for the threat model.
 - **Test gate.** Every change to `src/foundry_x/` must pass
   `uv run pytest`. CI blocks merges. Enforced via
   `.github/workflows/ci.yml`.
@@ -124,6 +128,56 @@ Treat all such content as untrusted:
   `<|...|>`).
 - Reject evolution proposals whose diff is dominated by text that
   resembles instructions to the harness itself.
+
+## `--no-verify` and the Critic gate
+
+`foundry-evolve evolve --no-verify` (issue #888) is the only documented
+way to skip the `Critic.evaluate(...)` gate from the CLI. The flag is
+gated behind an explicit operator action, emits a prominent `stderr`
+warning naming ADR-0004, and **never** silently produces a shippable
+harness edit. The threat model for the flag is:
+
+- **Local experimentation only.** The flag exists so an operator can
+  inspect what the `Evolver` would propose against a failure without
+  paying the Critic's pytest + benchmark cost. It is **not** a CI gate
+  bypass: the orchestrator's own PRs go through normal CI, and the
+  `Critic` workflow in `.github/workflows/critic.yml` still runs the
+  full gate on every harness-touching PR.
+- **Audit trail preserved.** The CLI records a synthetic
+  `CriticVerdict(verdict=None, notes="--no-verify: skipped")` via
+  `record_verdict`, so the `critic_verdict` trace event still fires.
+  Downstream consumers treat `verdict=None` as a non-approval:
+  - `analyze_regressions` / `generate_regression_report` count a
+    skipped verdict as neither an approval nor a rejection, and the
+    regression-pairing logic does not seed `prior_passed` from a skip
+    (so an unrelated later failure is not mis-attributed as a
+    regression).
+  - The `foundry-kpis` approval/rejection counters see the skip in
+    the total but not in either bucket.
+- **Cannot ship to `main`.** A harness edit persisted with
+  `verdict=None` is rejected by the Critic workflow on the next PR.
+  The flag does not modify any harness DNA file (system prompt, hooks,
+  skills) in place; it only persists the proposed edit and the
+  synthetic verdict to the trace store and `ProposedEditStore` for
+  operator review. Operators who want to actually apply the edit must
+  still go through `foundry-evolve approve` → `foundry-evolve apply`,
+  and the apply step still runs `git apply` against the harness
+  directory.
+- **Combined with `--background`.** When both flags are set, the
+  background subprocess inherits the skip — the operator gets a
+  non-blocking `Evolver` run with no Critic cost. The same audit-trail
+  and cannot-ship-to-main guarantees apply.
+
+Operators who see a `critic_verdict` event with `verdict=None` in the
+trace store should treat it as evidence of a `--no-verify` run, not
+evidence of an approval. The `notes` field always carries the string
+`--no-verify: skipped` so the skip is grep-able:
+
+```
+foundry-trace events-grep <session_id> \
+    --pattern critic_verdict \
+    --db logs/traces.db
+```
 
 ## Reporting a vulnerability
 
