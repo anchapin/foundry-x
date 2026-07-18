@@ -365,6 +365,60 @@ async def test_consume_model_stream_returns_none_ttft_for_empty_stream(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_consume_model_stream_reports_ttft_on_tool_call_only_stream(tmp_path):
+    """Issue #905 acceptance: a stream that emits only tool-call deltas
+    (no text content) must still report a non-``None`` ``ttft_ms``.
+
+    ``chunk.tool_calls`` is the *streaming* fragment list for the current
+    delta, not the final accumulated tool calls, so the first delta that
+    carries any tool-call fragment trips the time-to-first-token
+    measurement the same way a content delta does. The contract pinned by
+    this test: ``ttft_ms is None`` iff the stream produced zero payload
+    deltas of either kind.
+    """
+    db = tmp_path / "traces.db"
+    chunks = [
+        ModelResponseChunk(content=""),  # OpenAI role marker: empty payload
+        ModelResponseChunk(
+            tool_calls=[
+                ModelToolCallChunk(
+                    index=0,
+                    id="call_42",
+                    type="function",
+                    function=ToolCallFunctionChunk(name="bash"),
+                )
+            ]
+        ),
+        ModelResponseChunk(
+            tool_calls=[
+                ModelToolCallChunk(
+                    index=0,
+                    function=ToolCallFunctionChunk(arguments='{"command": "echo hi"}'),
+                )
+            ]
+        ),
+        ModelResponseChunk(finish_reason="tool_calls"),
+    ]
+    adapter = _StubAdapter(chunks)
+    log = TraceLogger(db)
+    with log.session(harness_version="test") as session_id:
+        _, ttft_ms, chunk_count, _ = await _consume_model_stream(
+            adapter,
+            [ModelMessage(role="user", content="ping")],
+            [],
+            log,
+            session_id,
+            step=0,
+        )
+    # Tool-call-only streams still report a TTFT on the first tool-call
+    # fragment — see CONTEXT.md §model_response, runner.py
+    # _consume_model_stream docstring.
+    assert ttft_ms is not None
+    assert ttft_ms >= 0
+    assert chunk_count == 4
+
+
+@pytest.mark.asyncio
 async def test_openai_adapter_parses_llama_server_sse_end_to_end():
     """``OpenAICompatibleAdapter.stream()`` must parse the exact wire
     format llama.cpp's chat-completions server emits (see PR description
