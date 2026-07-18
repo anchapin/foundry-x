@@ -144,6 +144,42 @@ def test_build_session_summary_filters_by_harness_version(tmp_path):
     assert [row.session_id for row in rows] == ["sess-0004-new"]
 
 
+def test_build_session_summary_filters_by_since(tmp_path):
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rows = build_session_summary(TraceLogger(db), since="2026-07-10T11:30:00+00:00")
+
+    # sess-0001-old (10:00) and sess-0002-mid (11:00) are before the cutoff;
+    # sess-0003-no-outcome (12:00) and sess-0004-new (13:00) are after.
+    sids = [row.session_id for row in rows]
+    assert "sess-0001-old" not in sids
+    assert "sess-0002-mid" not in sids
+    assert "sess-0003-no-outcome" in sids
+    assert "sess-0004-new" in sids
+
+
+def test_build_session_summary_since_preserves_newest_first_ordering(tmp_path):
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rows = build_session_summary(TraceLogger(db), since="2026-07-10T11:30:00+00:00")
+
+    started_at_values = [row.started_at for row in rows]
+    assert started_at_values == sorted(started_at_values, reverse=True)
+
+
+def test_build_session_summary_since_exact_boundary_included(tmp_path):
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rows = build_session_summary(TraceLogger(db), since="2026-07-10T10:00:00+00:00")
+
+    # sess-0001-old starts exactly at 10:00:00 — boundary must be inclusive.
+    sids = [row.session_id for row in rows]
+    assert "sess-0001-old" in sids
+
+
 def test_render_session_summary_emits_header_and_underscores(tmp_path):
     db = tmp_path / "traces.db"
     _plant_four_sessions(db)
@@ -280,6 +316,22 @@ def test_cli_session_summary_respects_harness_version_filter(tmp_path, capsys):
         if sid == "sess-0004-new":
             continue
         assert sid not in out_lines[1]
+
+
+def test_cli_session_summary_respects_since_filter(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rc = cli_main(
+        ["session-summary", "--db", str(db), "--since", "2026-07-10T11:30:00+00:00"]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "sess-0001-old" not in out
+    assert "sess-0002-mid" not in out
+    assert "sess-0003-no-outcome" in out
+    assert "sess-0004-new" in out
 
 
 def test_cli_session_summary_respects_limit(tmp_path, capsys):
