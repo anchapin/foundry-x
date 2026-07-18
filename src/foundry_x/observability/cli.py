@@ -169,6 +169,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Show at most N sessions after newest-first ordering.",
     )
     session_summary.add_argument(
+        "--since",
+        default=None,
+        help="ISO-8601 timestamp; only include sessions started at or after this time.",
+    )
+    session_summary.add_argument(
         "--format",
         default=None,
         choices=("markdown", "json"),
@@ -294,7 +299,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "session-summary":
         backend = _infer_backend(args.db)
         logger = TraceLogger(args.db, backend=backend)
-        rows = build_session_summary(logger, harness_version=args.harness_version)
+        rows = build_session_summary(
+            logger,
+            harness_version=args.harness_version,
+            since=args.since,
+        )
         failure_class_distribution = _failure_class_distribution(rows)
         if args.limit is not None:
             rows = rows[: args.limit]
@@ -307,7 +316,9 @@ def main(argv: list[str] | None = None) -> int:
             rendered = report.model_dump_json(indent=2) + "\n"
         else:
             rendered = (
-                render_session_summary(rows, failure_class_distribution=failure_class_distribution)
+                render_session_summary(
+                    rows, limit=None, failure_class_distribution=failure_class_distribution
+                )
                 + "\n"
             )
         if args.out:
