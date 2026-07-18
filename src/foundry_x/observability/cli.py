@@ -7,7 +7,7 @@ from pathlib import Path
 from foundry_x.evolution.digester import Digester
 from foundry_x.observability.kpis import _resolve_format
 from foundry_x.observability.regression_report import analyze_regressions
-from foundry_x.observability.render import render_failure_report, render_failure_report_json
+from foundry_x.observability.render import render_failure_report
 from foundry_x.observability.session_card import format_session_card
 from foundry_x.observability.session_summary import (
     SessionSummaryReport,
@@ -21,7 +21,7 @@ from foundry_x.observability.tool_latency import (
     render_tool_latency_json,
     render_tool_latency_markdown,
 )
-from foundry_x.trace.logger import TraceEvent, TraceLogger
+from foundry_x.trace.logger import TraceLogger
 
 
 def _infer_backend(path: str | Path) -> str:
@@ -102,8 +102,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     timeline.add_argument(
         "--session-id",
-        required=True,
-        help="Session UUID whose events should be rendered.",
+        default=None,
+        help="Session UUID whose events should be rendered. "
+        "If omitted, the most recent session for --harness-version is used.",
+    )
+    timeline.add_argument(
+        "--harness-version",
+        default=None,
+        help="Only render the most recent session for this harness version. Issue #803.",
     )
     timeline.add_argument(
         "--format",
@@ -119,15 +125,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--out",
         default=None,
         help="Write the timeline to this path instead of stdout.",
-    )
-    timeline.add_argument(
-        "--kind",
-        "-k",
-        default=None,
-        help=(
-            "Comma-separated list of event kinds to include "
-            "(e.g. tool_call,tool_result). When omitted, all events are shown."
-        ),
     )
 
     # Issue #268: human-readable failure analysis for a single session.
@@ -146,15 +143,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--session-id",
         required=True,
         help="Session UUID whose events should be digested and rendered.",
-    )
-    failure_report.add_argument(
-        "--format",
-        default=None,
-        choices=("markdown", "json"),
-        help=(
-            "Output format (issue #735). Default: 'markdown'. ``json`` emits "
-            "the structured FailureReport (model_dump_json)."
-        ),
     )
 
     # Issue #184: cross-session outcome roll-up. Lets an Operator read
@@ -262,26 +250,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "timeline":
         backend = _infer_backend(args.db)
         logger = TraceLogger(args.db, backend=backend)
-        if args.kind is not None:
-            kinds = [k.strip() for k in args.kind.split(",") if k.strip()]
-            if not kinds:
-                kinds = [None]
-            # iter_events with kind=None returns all events; with a single kind
-            # it filters to that kind. For multiple kinds we collect from each
-            # kind and merge (maintaining timestamp order).
-            if len(kinds) == 1 and kinds[0] is not None:
-                events = list(logger.iter_events(args.session_id, kind=kinds[0]))
-            elif len(kinds) > 1:
-                events: list[TraceEvent] = []
-                for k in kinds:
-                    events.extend(logger.iter_events(args.session_id, kind=k))
-                events.sort(key=lambda e: e.timestamp)
-            else:
-                events = list(logger.iter_events(args.session_id))
-        else:
-            events = list(logger.iter_events(args.session_id))
+        session_id = args.session_id
+        if session_id is None:
+            if args.harness_version is None:
+                sys.stderr.write("either --session-id or --harness-version is required\n")
+                return 2
+            sessions = logger.list_sessions(harness_version=args.harness_version)
+            if not sessions:
+                sys.stderr.write(f"no session found for harness version {args.harness_version}\n")
+                return 2
+            session_id = sessions[-1].session_id
+        events = logger.load_session(session_id)
         if not events:
-            sys.stderr.write(f"session {args.session_id} not found or empty\n")
+            sys.stderr.write(f"session {session_id} not found or empty\n")
             return 2
         fmt = _resolve_format(args.format, args.out)
         if fmt == "json":
@@ -304,11 +285,10 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write(f"session {args.session_id} not found or empty\n")
             return 2
         report = Digester().digest(args.session_id, events)
-        if args.format == "json":
-            rendered = render_failure_report_json(report)
-        else:
-            rendered = render_failure_report(report)
+        rendered = render_failure_report(report)
         sys.stdout.write(rendered)
+        if not rendered.endswith("\n"):
+            sys.stdout.write("\n")
         return 0
 
     if args.command == "session-summary":
