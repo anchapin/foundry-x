@@ -62,6 +62,9 @@ CONTEXT_MD = REPO_ROOT / "docs" / "CONTEXT.md"
 #   - InjectionFirewallHook: ``firewall_exception`` (via ``tracer`` callback, issue #823)
 #   - ContextPruningHook: ``context_pruned`` (via ``tracer`` callback)
 #   - record_verdict: ``critic_verdict`` (constant ``VERDICT_KIND``)
+#   - Runner: ``server_unavailable`` (issue #899: ``FoundryServerManager``
+#     reported an unhealthy ``/health`` mid-session and triggered the
+#     supervisor's restart loop)
 KNOWN_KINDS: frozenset[str] = frozenset(
     {
         "context_pruned",
@@ -73,6 +76,7 @@ KNOWN_KINDS: frozenset[str] = frozenset(
         "model_request",
         "model_response",
         "outcome",
+        "server_unavailable",
         "session_end",
         "session_start",
         "task_aborted",

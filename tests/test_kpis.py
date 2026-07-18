@@ -379,6 +379,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     payload = json.loads(captured.out)
     # Stable contract: every KpiSummary field is present at the top level
     # so downstream tooling can `payload["cycle_time_seconds"]` etc.
+    # ``server_restart_count`` is the issue #899 auxiliary metric.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
@@ -397,6 +398,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "model_retry_count",
         "tool_argument_parse_error_count",
         "event_limit_abort_count",
+        "server_restart_count",
     }
 
 

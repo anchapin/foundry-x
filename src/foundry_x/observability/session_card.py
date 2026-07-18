@@ -55,8 +55,12 @@ from foundry_x.trace.logger import TraceEvent, TraceSession
 # appears in the digester's curated :data:`FAILURE_KINDS` set. The
 # ``outcome`` kind is intentionally *not* a failure — it is a terminal
 # marker whose ``status`` field already carries success/failure, and is
-# surfaced separately in its own card line.
-_ERROR_KIND_RE = re.compile(r"error|fail|abort", re.IGNORECASE)
+# surfaced separately in its own card line. ``unavailable`` was added
+# for issue #899 so ``server_unavailable`` events flow into the
+# ``errors_by_kind`` bucket alongside ``task_aborted`` / ``model_error``
+# — the operator should see the infrastructure-restart signal on the
+# per-session card without having to query the trace store.
+_ERROR_KIND_RE = re.compile(r"error|fail|abort|unavailable", re.IGNORECASE)
 
 # Stable column width so the rendered card is line-for-line
 # reproducible; the golden test relies on it.

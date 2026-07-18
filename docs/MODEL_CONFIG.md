@@ -56,6 +56,23 @@ If your endpoint requires no token, leave both unset.
 | `FOUNDRY_REQUEST_TIMEOUT_S` | `30` | Per-request round-trip cap in seconds |
 | `FOUNDRY_ADAPTER_MAX_RETRIES` | `2` | Retry limit on transient errors (408/429/5xx, connect failures) |
 
+### Server supervision (issue #899)
+
+When `fx-runner` is launched against a local `llama-server` (or any
+OpenAI-compatible endpoint), the runner supervises the server via a
+`FoundryServerManager` that probes `/health` before each session and
+restarts the server on mid-session failure. The supervisor is opt-in
+via `FOUNDRY_SERVER_AUTOSTART`; when disabled the manager degrades to
+a passive health-checker that records `server_unavailable` trace
+events but does not spawn or kill anything.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `FOUNDRY_SERVER_AUTOSTART` | `0` | When `1`, the runner spawns/restarts the local `llama-server`. Defaults to `0` (off) so operators who manage the server out-of-band are not surprised by spawn/kill side effects; the manager still probes `/health` and records `server_unavailable` events on failure. |
+| `FOUNDRY_SERVER_NGpuLayers` | `0` | Layers to offload to the GPU when the manager launches `llama-server`. Mirrors the `--n-gpu-layers` flag from `infra/scripts/launch_llamacpp.sh`. |
+| `FOUNDRY_SERVER_CTXSize` | `8192` | Context window size when the manager launches `llama-server`. Mirrors the `--ctx-size` flag from `infra/scripts/launch_llamacpp.sh`. Recommended minimum is 8192 for tool-calling agents (see [§3](#3-minimum-model-requirements)). |
+| `FOUNDRY_SERVER_BIN` | `llama-server` | Path to the `llama-server` binary. Override when the binary is not on `PATH`. |
+
 ---
 
 ## 2. Supported model types

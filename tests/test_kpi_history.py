@@ -298,7 +298,8 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     # was not supplied. hooks_disabled_count and hooks_disabled_rate are
     # scalar fields and are included (issue #585). model_retry_count and
     # tool_argument_parse_error_count are also scalar fields, so they land in
-    # the trend line (issues #871 and #872).
+    # the trend line (issues #871 and #872). server_restart_count is a
+    # scalar field introduced for issue #899.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
@@ -314,6 +315,7 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "model_retry_count",
         "tool_argument_parse_error_count",
         "event_limit_abort_count",
+        "server_restart_count",
     }
     assert "injection_blocks" not in payload
     assert "token_totals" not in payload
