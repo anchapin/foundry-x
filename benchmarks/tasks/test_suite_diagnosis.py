@@ -61,11 +61,12 @@ FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / TASK.name
 
 def _copy_fixture_to_workspace(fixture_dir: Path, workspace: Path) -> None:
     """Copy the fixture pkg/ and tests/ directories into workspace."""
+    skip_dirs = {"__pycache__", ".git", ".venv", "node_modules"}
     for subdir in ("pkg", "tests"):
         src = fixture_dir / subdir
         dst = workspace / subdir
         for file in src.rglob("*"):
-            if file.is_file():
+            if file.is_file() and not any(part in skip_dirs for part in file.parts):
                 rel = file.relative_to(src)
                 dst_file = dst / rel
                 dst_file.parent.mkdir(parents=True, exist_ok=True)
