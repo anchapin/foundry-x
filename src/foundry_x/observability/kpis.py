@@ -44,6 +44,14 @@ manually diffing four JSON snapshots. The per-session
 ``injection_blocks`` map is intentionally excluded from history
 entries; the trend table is a one-row-per-run summary, not a
 per-session inventory.
+
+Issue #898: ``compute_kpis`` accepts a ``group_by`` parameter
+(``"skill"`` / ``"task_family"`` / ``"difficulty_tier"``) plus a
+``task_metadata`` map and populates a matching ``per_*`` field on
+:class:`KpiSummary` with per-group ``improvement_rate`` and
+``regression_rate`` slices. The CLI exposes this via ``--group-by``
+(and optional ``--task-metadata``); the slices are an on-demand
+diagnostic view and are excluded from the history log.
 """
 
 from __future__ import annotations
@@ -53,9 +61,9 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Literal, Sequence
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from foundry_x.evolution.digester import INJECTION_BLOCKED_KIND
 from foundry_x.observability.regression_report import VerdictRecord
@@ -88,6 +96,73 @@ TOOL_ARGUMENT_PARSE_ERROR_KIND = "tool_argument_parse_error"
 # ``server_restart_count`` KPI is the cumulative number of such events
 # across the trace store.
 SERVER_UNAVAILABLE_KIND = "server_unavailable"
+
+
+#: Dimension accepted by :func:`compute_kpis`'s ``group_by`` parameter
+#: (issue #898). Each value selects which :class:`TaskKpiMetadata` field
+#: drives the per-slice breakdown of ``improvement_rate`` and
+#: ``regression_rate``.
+GroupByDim = Literal["skill", "task_family", "difficulty_tier"]
+
+
+class TaskKpiMetadata(BaseModel):
+    """Grouping metadata for one benchmark task (ADR-0006 boundary model).
+
+    Issue #898 — the per-skill / per-task-family / per-difficulty-tier KPI
+    slices need a way to attribute each task name that appears in a
+    ``critic_verdict``'s ``passed_checks`` / ``failed_checks`` to the
+    dimensions declared on its :class:`~benchmarks.models.BenchmarkTask`
+    (``requires_skills``, ``tags``, ``difficulty_tier``). The KPI layer
+    must not import ``benchmarks`` at module load time — the dependency
+    runs the other way (``benchmarks`` depends on ``foundry_x``, as in
+    ``src/foundry_x/evolution/critic.py``) — so this model is the boundary
+    contract: the CLI builds it via :func:`build_task_metadata` and hands
+    it to :func:`compute_kpis`.
+
+    A task with no declared metadata for a dimension simply contributes
+    no groups for that dimension — the verdict is then invisible to the
+    corresponding slice, which is the desired graceful degradation.
+    """
+
+    name: str
+    skills: list[str] = Field(default_factory=list)
+    task_families: list[str] = Field(default_factory=list)
+    difficulty_tier: str | None = None
+
+
+class SkillKpiSlice(BaseModel):
+    """Per-group ``improvement_rate`` / ``regression_rate`` for one slice key (issue #898).
+
+    Despite the ``Skill`` prefix this model is reused for all three
+    grouping dimensions (``skill``, ``task_family``, ``difficulty_tier``);
+    the name matches the issue's acceptance criterion (#2) which calls out
+    the per-skill case explicitly. ADR-0006 places it at the module
+    boundary so JSON consumers and the ``foundry-kpis`` CLI share one
+    contract.
+
+    The two rate fields follow the same definition as the aggregate KPIs,
+    just over the subpopulation of verdicts whose checks touch the group:
+
+    * ``improvement_rate`` — approved verdicts attributed to the group /
+      total verdicts attributed to the group.
+    * ``regression_rate`` — sessions attributed to the group in which a
+      task belonging to the group regressed / sessions attributed to the
+      group with a verdict.
+
+    A verdict is *attributed to* a group when any of its checks names a
+    task whose metadata lists that group. Because a task may declare
+    several skills (or tags), a single verdict can be attributed to
+    several groups — the slices are independent views, not a partition,
+    so their verdict/session counts need not sum to the aggregate. In
+    :attr:`KpiComparison.slice_deltas` the rate fields carry the
+    candidate-minus-baseline delta (sign-agnostic, as with the aggregate
+    deltas) and the counts carry the candidate side for reference.
+    """
+
+    improvement_rate: float = 0.0
+    regression_rate: float = 0.0
+    verdict_count: int = 0
+    session_count: int = 0
 
 
 class KpiSummary(BaseModel):
@@ -176,6 +251,14 @@ class KpiSummary(BaseModel):
     operator signal so operators can correlate cycle-time regressions
     with infrastructure reliability issues without confusing this with
     model-quality signals.
+
+    Issue #898 adds ``per_skill`` / ``per_task_family`` /
+    ``per_difficulty_tier``: ``dict[str, SkillKpiSlice]`` breakdowns of
+    ``improvement_rate`` and ``regression_rate``. Only the dimension
+    selected via :func:`compute_kpis`'s ``group_by`` parameter is
+    populated; the other two stay empty so the JSON snapshot stays
+    compact and the selected dimension is unambiguous. See
+    :class:`SkillKpiSlice` for the verdict-attribution semantics.
     """
 
     cycle_time_seconds: float | None = None
@@ -196,6 +279,9 @@ class KpiSummary(BaseModel):
     tool_argument_parse_error_count: int = 0
     event_limit_abort_count: int = 0
     server_restart_count: int = 0
+    per_skill: dict[str, SkillKpiSlice] = {}
+    per_task_family: dict[str, SkillKpiSlice] = {}
+    per_difficulty_tier: dict[str, SkillKpiSlice] = {}
 
 
 class StreamingQualityData(BaseModel):
@@ -224,6 +310,13 @@ class KpiComparison(BaseModel):
     so that callers can distinguish "no change" (deltas near 0.0 with real
     sessions) from "no data" (deltas are 0.0 because one version has zero
     sessions in the trace store).
+
+    Issue #898 adds ``slice_deltas``: per-group candidate-minus-baseline
+    deltas keyed by grouping dimension (``"skill"`` / ``"task_family"`` /
+    ``"difficulty_tier"``), then by group name. Only populated when
+    :func:`compare_kpis` is called with ``group_by`` set; each
+    :class:`SkillKpiSlice` carries the delta in its rate fields and the
+    candidate's verdict/session counts for reference.
     """
 
     baseline: KpiSummary
@@ -231,6 +324,7 @@ class KpiComparison(BaseModel):
     deltas: dict[str, float | None]
     baseline_session_count: int = 0
     candidate_session_count: int = 0
+    slice_deltas: dict[str, dict[str, SkillKpiSlice]] = {}
 
 
 class KpiHistoryEntry(BaseModel):
@@ -290,6 +384,9 @@ def _failure_class_distribution(
 def compute_kpis(
     logger: TraceLogger,
     harness_version: str | None = None,
+    *,
+    group_by: GroupByDim | None = None,
+    task_metadata: dict[str, TaskKpiMetadata] | None = None,
 ) -> KpiSummary:
     """Compute KPIs from the trace store backing *logger*.
 
@@ -300,6 +397,20 @@ def compute_kpis(
     harness_version:
         When provided, only sessions created with this harness version are
         considered.
+    group_by:
+        Issue #898 — when set to ``"skill"``, ``"task_family"``, or
+        ``"difficulty_tier"``, additionally breaks ``improvement_rate`` and
+        ``regression_rate`` down per group and populates the matching field
+        on the returned :class:`KpiSummary` (``per_skill`` /
+        ``per_task_family`` / ``per_difficulty_tier``). Requires
+        *task_metadata* to attribute verdict checks to groups; when
+        *task_metadata* is ``None`` or empty the slice fields stay empty
+        (graceful degradation) and the aggregate KPIs are unaffected.
+    task_metadata:
+        ``task name -> TaskKpiMetadata`` map. Build it with
+        :func:`build_task_metadata` (auto-loaded from the benchmark
+        registry) or supply your own (e.g. from a JSON file via the
+        ``--task-metadata`` CLI flag).
 
     Issue #273 — the per-session helpers below each call
     :meth:`TraceLogger.query_events` exactly once per event kind. The
@@ -349,13 +460,46 @@ def compute_kpis(
         tool_argument_parse_error_count=tool_argument_parse_error_count,
         event_limit_abort_count=event_limit_abort_count,
         server_restart_count=server_restart_count,
+        **_slice_field(
+            _slice_verdict_rates(
+                logger,
+                harness_version=harness_version,
+                group_by=group_by,
+                task_metadata=task_metadata,
+            ),
+            group_by,
+        ),
     )
+
+
+def _slice_field(
+    slices: dict[str, SkillKpiSlice],
+    group_by: GroupByDim | None,
+) -> dict[str, dict[str, SkillKpiSlice]]:
+    """Map a computed slice dict onto the matching ``KpiSummary`` field.
+
+    Returns a ``{field_name: slices}`` kwargs dict for the ``**`` spread
+    in :func:`compute_kpis`. When *group_by* is ``None`` or the slices are
+    empty (no task metadata available), returns ``{}`` so the summary is
+    built with the field defaults and stays compact.
+    """
+    if group_by is None or not slices:
+        return {}
+    field_name = {
+        "skill": "per_skill",
+        "task_family": "per_task_family",
+        "difficulty_tier": "per_difficulty_tier",
+    }[group_by]
+    return {field_name: slices}
 
 
 def compare_kpis(
     logger: TraceLogger,
     baseline_version: str,
     candidate_version: str,
+    *,
+    group_by: GroupByDim | None = None,
+    task_metadata: dict[str, TaskKpiMetadata] | None = None,
 ) -> KpiComparison:
     """Compute a baseline-vs-candidate comparison (issue #100).
 
@@ -368,9 +512,24 @@ def compare_kpis(
     Issue #736: session counts are included so callers can distinguish
     "no change" (deltas near 0.0 with real sessions) from "no data"
     (deltas are 0.0 because one version has zero sessions).
+
+    Issue #898: when *group_by* is set, both summaries are computed with
+    the same ``group_by`` / ``task_metadata`` and per-slice deltas are
+    attached as :attr:`KpiComparison.slice_deltas` (one entry per group;
+    rate fields are candidate-minus-baseline).
     """
-    baseline = compute_kpis(logger, harness_version=baseline_version)
-    candidate = compute_kpis(logger, harness_version=candidate_version)
+    baseline = compute_kpis(
+        logger,
+        harness_version=baseline_version,
+        group_by=group_by,
+        task_metadata=task_metadata,
+    )
+    candidate = compute_kpis(
+        logger,
+        harness_version=candidate_version,
+        group_by=group_by,
+        task_metadata=task_metadata,
+    )
     baseline_session_count = len(logger.list_sessions(harness_version=baseline_version))
     candidate_session_count = len(logger.list_sessions(harness_version=candidate_version))
     return KpiComparison(
@@ -379,7 +538,55 @@ def compare_kpis(
         deltas=_compute_deltas(baseline, candidate),
         baseline_session_count=baseline_session_count,
         candidate_session_count=candidate_session_count,
+        slice_deltas=_compute_slice_deltas(baseline, candidate, group_by),
     )
+
+
+def _slices_for(summary: KpiSummary, group_by: GroupByDim | None) -> dict[str, SkillKpiSlice]:
+    """Return the slice dict on *summary* matching *group_by*."""
+    if group_by == "skill":
+        return summary.per_skill
+    if group_by == "task_family":
+        return summary.per_task_family
+    if group_by == "difficulty_tier":
+        return summary.per_difficulty_tier
+    return {}
+
+
+def _compute_slice_deltas(
+    baseline: KpiSummary,
+    candidate: KpiSummary,
+    group_by: GroupByDim | None,
+) -> dict[str, dict[str, SkillKpiSlice]]:
+    """Per-slice candidate-minus-baseline deltas keyed by dimension (issue #898).
+
+    Returns ``{}`` when *group_by* is ``None``. The union of baseline and
+    candidate group keys is walked so a group that exists on only one
+    side still appears (the missing side contributes a 0.0 rate). Each
+    :class:`SkillKpiSlice` carries the delta in its rate fields and the
+    *candidate*'s verdict/session counts for reference, matching the
+    "candidate is the subject of the delta" convention of
+    :func:`_compute_deltas`.
+    """
+    if group_by is None:
+        return {}
+    base = _slices_for(baseline, group_by)
+    cand = _slices_for(candidate, group_by)
+    inner: dict[str, SkillKpiSlice] = {}
+    for group in sorted(set(base) | set(cand)):
+        b = base.get(group)
+        c = cand.get(group)
+        b_imp = b.improvement_rate if b else 0.0
+        c_imp = c.improvement_rate if c else 0.0
+        b_reg = b.regression_rate if b else 0.0
+        c_reg = c.regression_rate if c else 0.0
+        inner[group] = SkillKpiSlice(
+            improvement_rate=c_imp - b_imp,
+            regression_rate=c_reg - b_reg,
+            verdict_count=c.verdict_count if c else 0,
+            session_count=c.session_count if c else 0,
+        )
+    return {group_by: inner}
 
 
 def _compute_deltas(
@@ -494,6 +701,140 @@ def _verdict_rates(
         len(regression_sessions) / len(sessions_with_verdicts) if sessions_with_verdicts else 0.0
     )
     return regression_rate, improvement_rate
+
+
+def _groups_for_task(meta: TaskKpiMetadata, group_by: GroupByDim) -> set[str]:
+    """Return the set of group keys a task contributes to for *group_by*.
+
+    * ``skill``        → ``meta.skills`` (a task may require several skills).
+    * ``task_family``  → ``meta.task_families`` (a task may carry several
+      ``BenchmarkTask.tags``).
+    * ``difficulty_tier`` → ``{meta.difficulty_tier}`` (exactly one tier, or
+      empty when the task declares none).
+    """
+    if group_by == "skill":
+        return set(meta.skills)
+    if group_by == "task_family":
+        return set(meta.task_families)
+    if group_by == "difficulty_tier":
+        return {meta.difficulty_tier} if meta.difficulty_tier is not None else set()
+    return set()
+
+
+class _SliceAcc:
+    """Mutable accumulator for one slice key (issue #898).
+
+    Mirrors the local variables the aggregate :func:`_verdict_rates`
+    keeps: a verdict count, an approved count, the set of sessions with a
+    verdict, the set of sessions with a regression, and the set of tasks
+    that previously passed (scoped to this group so a task is only a
+    regression for the groups it actually belongs to).
+    """
+
+    __slots__ = ("total", "approved", "sessions", "regression_sessions", "prior_passed")
+
+    def __init__(self) -> None:
+        self.total = 0
+        self.approved = 0
+        self.sessions: set[str] = set()
+        self.regression_sessions: set[str] = set()
+        self.prior_passed: set[str] = set()
+
+
+def _slice_verdict_rates(
+    logger: TraceLogger,
+    harness_version: str | None,
+    group_by: GroupByDim | None,
+    task_metadata: dict[str, TaskKpiMetadata] | None,
+) -> dict[str, SkillKpiSlice]:
+    """Per-group ``improvement_rate`` / ``regression_rate`` (issue #898).
+
+    Walks the same single ``critic_verdict`` cursor as the aggregate
+    :func:`_verdict_rates` (one streaming scan, ``harness_version`` pushed
+    down — issue #273) but buckets each verdict into every group its
+    checks touch. Returns an empty dict when *group_by* is ``None`` or
+    *task_metadata* is empty, so the caller's slice fields stay at their
+    defaults and the aggregate KPIs are unaffected.
+
+    A verdict is attributed to a group when any of its checks names a
+    task whose :class:`TaskKpiMetadata` lists that group. Because a task
+    may declare several skills (or tags), a single verdict can land in
+    several groups' buckets — the slices are independent views, not a
+    partition. ``prior_passed`` is scoped per group so a regressing task
+    only counts against the groups it belongs to.
+    """
+    if group_by is None or not task_metadata:
+        return {}
+
+    acc: dict[str, _SliceAcc] = {}
+    for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
+        record = VerdictRecord(**event.payload)
+        # Resolve every group this verdict touches up front so the per-
+        # group loop below does not re-walk the metadata per check.
+        touched: set[str] = set()
+        for task in (*record.passed_checks, *record.failed_checks):
+            meta = task_metadata.get(task)
+            if meta is not None:
+                touched |= _groups_for_task(meta, group_by)
+        if not touched:
+            continue
+        for group in touched:
+            bucket = acc.setdefault(group, _SliceAcc())
+            bucket.total += 1
+            bucket.sessions.add(event.session_id)
+            if record.verdict:
+                bucket.approved += 1
+            for task in record.failed_checks:
+                if task in bucket.prior_passed:
+                    bucket.regression_sessions.add(event.session_id)
+            for task in record.passed_checks:
+                meta = task_metadata.get(task)
+                # Only seed prior_passed for the groups this task belongs
+                # to, so a multi-skill task is not a false regression for
+                # an unrelated skill that happened to share the verdict.
+                if meta is not None and group in _groups_for_task(meta, group_by):
+                    bucket.prior_passed.add(task)
+
+    slices: dict[str, SkillKpiSlice] = {}
+    for group, bucket in acc.items():
+        slices[group] = SkillKpiSlice(
+            improvement_rate=bucket.approved / bucket.total if bucket.total else 0.0,
+            regression_rate=(
+                len(bucket.regression_sessions) / len(bucket.sessions) if bucket.sessions else 0.0
+            ),
+            verdict_count=bucket.total,
+            session_count=len(bucket.sessions),
+        )
+    return slices
+
+
+def build_task_metadata() -> dict[str, TaskKpiMetadata]:
+    """Build the ``task name -> TaskKpiMetadata`` map (issue #898).
+
+    Lazy-imports :func:`benchmarks.registry.load_all_tasks` so this KPI
+    module never imports ``benchmarks`` at load time — the dependency
+    direction stays ``benchmarks`` → ``foundry_x`` (mirroring
+    ``src/foundry_x/evolution/critic.py``'s lazy registry wiring). Maps
+    each ``BenchmarkTask``'s ``requires_skills`` → ``skills``,
+    ``tags`` → ``task_families``, and ``difficulty_tier`` through.
+
+    Returns an empty map when the registry cannot be imported (e.g.
+    running the CLI outside the repo) so callers degrade gracefully:
+    :func:`compute_kpis` with no metadata leaves the slice fields empty.
+    """
+    try:
+        from benchmarks.registry import load_all_tasks
+    except ImportError:
+        return {}
+    metadata: dict[str, TaskKpiMetadata] = {}
+    for task in load_all_tasks():
+        metadata[task.name] = TaskKpiMetadata(
+            name=task.name,
+            skills=list(task.requires_skills),
+            task_families=list(task.tags),
+            difficulty_tier=task.difficulty_tier,
+        )
+    return metadata
 
 
 def _injection_blocks(
@@ -1033,7 +1374,43 @@ def _render_markdown(summary: KpiSummary) -> str:
         lines.append("| --- | --- |")
         for cls, count in sorted(summary.failure_class_distribution.items()):
             lines.append(f"| {cls} | {count} |")
+    # Issue #898: render the populated per-slice breakdown (only the
+    # dimension selected via ``--group-by`` is non-empty, so at most one
+    # of these sections appears). Compact and omitted entirely when no
+    # task metadata was supplied.
+    for label, slices in (
+        ("Skill", summary.per_skill),
+        ("Task Family", summary.per_task_family),
+        ("Difficulty Tier", summary.per_difficulty_tier),
+    ):
+        if slices:
+            lines.extend(_render_slice_section(label, slices))
     return "\n".join(lines)
+
+
+def _render_slice_section(label: str, slices: dict[str, SkillKpiSlice]) -> list[str]:
+    """Render one per-slice breakdown table (issue #898).
+
+    *label* is the human-facing dimension name (``"Skill"`` /
+    ``"Task Family"`` / ``"Difficulty Tier"``); *slices* is the
+    ``group -> SkillKpiSlice`` map. Groups are sorted for deterministic
+    output. The verdict/session counts are included so the operator can
+    tell a noisy 1-verdict slice from a stable 50-verdict one.
+    """
+    lines = [
+        "",
+        f"### Per-{label} Slices (issue #898)",
+        "",
+        f"| {label} | Improvement Rate | Regression Rate | Verdicts | Sessions |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for key in sorted(slices):
+        s = slices[key]
+        lines.append(
+            f"| {key} | {_format_value(s.improvement_rate)} | "
+            f"{_format_value(s.regression_rate)} | {s.verdict_count} | {s.session_count} |"
+        )
+    return lines
 
 
 def _resolve_format(args_format: str | None, out: str | None) -> str:
@@ -1049,6 +1426,27 @@ def _resolve_format(args_format: str | None, out: str | None) -> str:
     if out is not None and Path(out).suffix.lower() == ".json":
         return "json"
     return "markdown"
+
+
+def _load_task_metadata(path: Path) -> dict[str, TaskKpiMetadata]:
+    """Load a ``--task-metadata`` JSON file into a ``TaskKpiMetadata`` map (issue #898).
+
+    The JSON shape is ``{task_name: {skills, task_families, difficulty_tier}}``
+    (all fields optional; the key supplies ``name``). Non-dict values are
+    skipped so a partially-malformed file does not abort the whole run;
+    a non-object top-level document raises :class:`ValueError` because no
+    metadata can be recovered from it.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"--task-metadata JSON must be an object, got {type(data).__name__}")
+    metadata: dict[str, TaskKpiMetadata] = {}
+    for name, fields in data.items():
+        if not isinstance(fields, dict):
+            continue
+        payload = {**fields, "name": name}
+        metadata[name] = TaskKpiMetadata.model_validate(payload)
+    return metadata
 
 
 def _render_json(summary: KpiSummary) -> str:
@@ -1117,6 +1515,41 @@ def _render_comparison_json(comparison: KpiComparison) -> str:
     return comparison.model_dump_json(indent=2)
 
 
+def _render_comparison_slice_deltas(comparison: KpiComparison) -> str:
+    """Render per-slice candidate-minus-baseline delta tables (issue #898).
+
+    Appended under the main comparison table when
+    :attr:`KpiComparison.slice_deltas` is non-empty. The rate columns are
+    raw candidate-minus-baseline deltas (sign-agnostic — the rendering
+    layer for the aggregate comparison applies the PRD "good direction"
+    mark, but per-slice deltas are kept neutral so an operator can scan
+    all groups at once). Candidate verdict counts anchor the delta so a
+    reviewer can spot slices built from one or two verdicts.
+    """
+    labels = {
+        "skill": "Skill",
+        "task_family": "Task Family",
+        "difficulty_tier": "Difficulty Tier",
+    }
+    blocks: list[str] = []
+    for dim, slices in comparison.slice_deltas.items():
+        label = labels.get(dim, dim)
+        lines = [
+            f"### Per-{label} Slice Deltas (issue #898)",
+            "",
+            f"| {label} | Improvement Δ | Regression Δ | Candidate Verdicts |",
+            "| --- | --- | --- | --- |",
+        ]
+        for key in sorted(slices):
+            s = slices[key]
+            lines.append(
+                f"| {key} | {s.improvement_rate:+.4f} | "
+                f"{s.regression_rate:+.4f} | {s.verdict_count} |"
+            )
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
 def _now_iso() -> str:
     """Return a UTC ISO-8601 timestamp with offset suffix.
 
@@ -1164,6 +1597,13 @@ def append_kpi_history(
             "token_totals",
             "streaming_quality",
             "wall_clock_abort_count",
+            # Issue #898: per-slice breakdowns are an on-demand diagnostic
+            # view (populated only with --group-by), not a trend metric —
+            # exclude them so the JSONL history line stays compact. They
+            # are recomputed from the trace store on demand.
+            "per_skill",
+            "per_task_family",
+            "per_difficulty_tier",
         },
     )
     payload["timestamp"] = _now_iso()
@@ -1372,6 +1812,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--group-by",
+        dest="group_by",
+        choices=("skill", "task_family", "difficulty_tier"),
+        default=None,
+        help=(
+            "Break improvement_rate and regression_rate down by this dimension"
+            " (issue #898): 'skill' (per harness skill, from"
+            " BenchmarkTask.requires_skills), 'task_family' (per"
+            " BenchmarkTask tag), or 'difficulty_tier' (smoke/easy/medium)."
+            " Requires task metadata to attribute verdict checks to groups;"
+            " see --task-metadata. Works in both single-summary and"
+            " baseline-vs-candidate comparison modes."
+        ),
+    )
+    parser.add_argument(
+        "--task-metadata",
+        dest="task_metadata",
+        default=None,
+        help=(
+            "JSON file mapping task names to {skills, task_families,"
+            " difficulty_tier}. When --group-by is set and this is omitted,"
+            " metadata is auto-built from benchmarks.registry.load_all_tasks()"
+            " (issue #898). Use this flag to supply metadata outside the"
+            " repo or to override the registry."
+        ),
+    )
+    parser.add_argument(
         "--format",
         choices=("markdown", "json"),
         default=None,
@@ -1462,6 +1929,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--trend requires --from-history: sparklines are rendered from the KPI history log"
         )
 
+    if args.group_by is not None and args.from_history is not None:
+        parser.error(
+            "--group-by cannot be combined with --from-history: per-slice"
+            " breakdowns are computed live from the trace store, not the"
+            " history log"
+        )
+
     if args.from_history is not None:
         # Issue #183: trend rendering is a pure read of the JSONL log;
         # it does not require a trace store, so we short-circuit before
@@ -1480,19 +1954,42 @@ def main(argv: Sequence[str] | None = None) -> int:
     fmt = _resolve_format(args.format, args.out)
     logger = TraceLogger(args.db)
 
+    # Issue #898: build the task-name -> metadata map once (when --group-by
+    # is set) so both the single-summary and comparison paths share it.
+    task_metadata = None
+    if args.group_by is not None:
+        task_metadata = (
+            _load_task_metadata(Path(args.task_metadata))
+            if args.task_metadata is not None
+            else build_task_metadata()
+        )
+
     if baseline_version is not None and candidate_version is not None:
-        comparison = compare_kpis(logger, baseline_version, candidate_version)
+        comparison = compare_kpis(
+            logger,
+            baseline_version,
+            candidate_version,
+            group_by=args.group_by,
+            task_metadata=task_metadata,
+        )
         if fmt == "json":
             output = _render_comparison_json(comparison)
         else:
             output = _render_comparison_markdown(comparison.baseline, comparison.candidate)
+            if comparison.slice_deltas:
+                output += "\n\n" + _render_comparison_slice_deltas(comparison)
         if args.out:
             Path(args.out).write_text(output, encoding="utf-8")
         else:
             print(output)
         return 0
     else:
-        summary = compute_kpis(logger, harness_version=args.harness_version)
+        summary = compute_kpis(
+            logger,
+            harness_version=args.harness_version,
+            group_by=args.group_by,
+            task_metadata=task_metadata,
+        )
         if args.log_to is not None:
             append_kpi_history(
                 Path(args.log_to),
