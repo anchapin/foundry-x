@@ -128,6 +128,8 @@ def get_default_rate_window_hours() -> int:
 
 
 class RateLimitHook:
+    _phase: int = 3
+
     """Hook that enforces per-hour evolver call cap (issue #332).
 
     Implements the ``Hook`` protocol. ``pre_tool`` checks the sliding
@@ -141,28 +143,25 @@ class RateLimitHook:
 
     __slots__ = ()
 
-    def pre_tool(self, call: ToolCall) -> ToolCall:
+    async def pre_tool(self, call: ToolCall) -> ToolCall:
         if call.name != _EVOLVER_TOOL_NAME:
             return call
         window = _get_window()
         _purge_old(window, DEFAULT_RATE_WINDOW_HOURS)
         allowed = _count_recent(window) < _RL_STATE["max_per_hour"]
-        window.append((datetime.now(timezone.utc), allowed))
         if not allowed:
             raise RuntimeError(
                 f"RateLimitHook: {DEFAULT_MAX_PROPOSALS_PER_HOUR} proposals per "
                 f"hour cap reached; rejecting {call.name}"
             )
+        window.append((datetime.now(timezone.utc), True))
         return call
 
-    def post_tool(self, call: ToolCall, result: ToolResult) -> ToolResult:
+    async def post_tool(self, call: ToolCall, result: ToolResult) -> ToolResult:
         if call.name != _EVOLVER_TOOL_NAME:
             return result
         window = _get_window()
         if not window:
-            return result
-        _timestamp, allowed = window[-1]
-        if not allowed:
             return result
         if result.error is not None:
             window.pop()

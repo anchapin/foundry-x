@@ -82,3 +82,18 @@ def test_run_limits_from_env_override():
 def test_run_limits_from_env_disable_timeout():
     limits = run_limits_from_env(env={"FOUNDRY_TASK_TIMEOUT": "0"})
     assert limits.task_timeout_s is None
+
+
+def test_run_limits_max_events_defaults_to_none():
+    limits = run_limits_from_env(env={})
+    assert limits.max_events_per_session is None
+
+
+def test_run_limits_from_env_max_events():
+    limits = run_limits_from_env(env={"FOUNDRY_MAX_EVENTS_PER_SESSION": "5000"})
+    assert limits.max_events_per_session == 5000
+
+
+def test_run_limits_from_env_max_events_disabled():
+    limits = run_limits_from_env(env={"FOUNDRY_MAX_EVENTS_PER_SESSION": ""})
+    assert limits.max_events_per_session is None

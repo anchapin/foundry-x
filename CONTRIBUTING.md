@@ -38,6 +38,15 @@ uv run pytest                 # smoke tests
 uv run ruff check .           # lint
 ```
 
+## Before you push
+
+Every PR must pass the full suite (unit + benchmark) before merge.
+
+```bash
+uv run ruff check .
+uv run pytest
+```
+
 ## Workflow
 
 1. **Branch** off `develop`. Naming:
@@ -93,6 +102,111 @@ Because these are evolved artifacts, hand-additions must:
 3. Be proposed as a `ProposedEdit` and merged via the evolution
    pipeline. The hand-add path is a documented escape hatch, not the
    default.
+
+## Human review workflow for harness edits
+
+Every proposed change to `harness/` — whether produced by the
+`Evolver` or drafted by hand — must pass human review before it is
+applied to the live harness. This gate exists because harness changes
+directly affect agent behaviour; a bad edit can degrade capability or
+introduce regressions silently (see [ADR-0004](docs/adr/0004-self-modification-guardrails.md)).
+
+### The end-to-end loop
+
+```
+task failure → TraceLogger → Digester → Evolver → ProposedEdit
+                                                   ↓
+                                              Critic (automated gate)
+                                                   ↓
+                                         Human review → merge → harness updated
+```
+
+1. **Evolver** produces a `ProposedEdit`: a `target_file`, a
+   `rationale`, and a `unified_diff` (see [ADR-0006](docs/adr/0006-pydantic-for-module-boundaries.md)).
+2. **Critic** evaluates the edit in a sandbox: it copies the harness,
+   applies the diff, runs `harness/scripts/load_check.py`, then runs
+   the full pytest suite including `@pytest.mark.benchmark` tasks
+   ([ADR-0004](docs/adr/0004-self-modification-guardrails.md),
+   [ADR-0005](docs/adr/0005-pytest-as-evaluation-framework.md)).
+3. A human reviewer evaluates the edit's substantive quality (see
+   §Evaluating an edit below).
+4. The edit is merged (or rejected), and the harness is updated.
+
+### When to review
+
+Review is required **before** applying any edit to `harness/`. This
+applies to:
+
+- Evolver-produced `ProposedEdit`s (automated gate passes, but the edit
+  still needs a human to assess the rationale and confirm it targets the
+  right file).
+- Hand-drafted edits to `harness/system_prompt.txt`,
+  `harness/manifest.json`, `harness/hooks/`, or `harness/skills/`.
+
+Hand-edits require explicit justification in the PR body and a second
+human approval ([ADR-0004](docs/adr/0004-self-modification-guardrails.md)).
+
+### Evaluating an edit
+
+When reviewing a `ProposedEdit` (or a hand-drafted harness diff),
+evaluate it against these criteria:
+
+**Correctness**
+
+- Does the `unified_diff` apply cleanly? (`git apply` must succeed in
+  the Critic sandbox; a broken patch is caught automatically, but verify
+  the intent is sound.)
+- Does the target file exist and is the path confined to the harness
+  tree? (`system_prompt.txt`, `manifest.json`, `hooks/`, `skills/` —
+  see [ADR-0012](docs/adr/0012-manifest-json-as-evolver-target.md).)
+- Is the `rationale` consistent with the failure report or benchmark
+  evidence? A diff with no clear connection to a documented failure is
+  a red flag.
+
+**Security** (see [ADR-0009](docs/adr/0009-security-evals-benchmark-family.md))
+
+- Does the diff contain prompt-injection patterns?
+  (`ignore previous instructions`, role-tag sequences, etc.)
+  The Critic scans for these automatically, but reviewers should still
+  read the diff content.
+- Does the edit touch `manifest.json`? If so, verify the JSON remains
+  valid and that the declared hooks/skills match the on-disk files
+  ([ADR-0012](docs/adr/0012-manifest-json-as-evolver-target.md)).
+
+**Scope**
+
+- Is the diff focused (one concern per edit)? Large, unfocused diffs
+  are harder to review and risk introducing unrelated changes.
+- Does the diff stay within the line cap (default 200 lines)?
+  The Critic enforces this; a reviewer flagging an unusually large
+  diff should ask whether it can be split.
+
+**Benchmarks**
+
+- Did the Critic's `passed_checks` include the relevant benchmark tags?
+  A `benchmark:security` failure means a control was weakened (see
+  [ADR-0009](docs/adr/0009-security-evals-benchmark-family.md)).
+- Did any previously-passing benchmark newly fail? A regression in the
+  regression baseline blocks the gate ([ADR-0004](docs/adr/0004-self-modification-guardrails.md)).
+
+### Rollback procedure
+
+If an approved harness edit causes regressions in production or the
+benchmark suite:
+
+1. **Revert the commit** that applied the edit:
+   ```bash
+   git revert <commit-hash>
+   git push
+   ```
+2. **File a failure report** in the trace store (see `foundry-trace`
+   CLI) documenting what broke, so the Evolver can propose a targeted
+   fix rather than re-introducing the same change.
+3. **Notify the reviewer** who approved the edit, citing the regression
+   evidence. Their sign-off is part of the feedback loop.
+4. **Update the regression baseline** if the regression was caught by
+   the Critic (the baseline file is at `logs/critic_baseline.json` per
+   [ADR-0004](docs/adr/0004-self-modification-guardrails.md)).
 
 ## Reporting security issues
 

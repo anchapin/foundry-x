@@ -431,3 +431,71 @@ def test_redact_event_preserves_timestamp_ordering(tmp_path, backend):
                 f"non-redacted event at index {idx} changed payload: "
                 f"{pre_payloads[idx]} -> {post.payload}"
             )
+
+
+# --- Issue #752: prune_sessions bulk delete ------------------------------------
+
+
+@_BACKENDS
+def test_prune_sessions_removes_target_and_keeps_others(tmp_path, backend):
+    """``prune_sessions`` removes the target sessions and their events, leaving
+    every other session in the store untouched."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="0.1.0") as sid_drop1:
+        logger.record(sid_drop1, kind="user_prompt", payload={"text": "drop-me-1"})
+    with logger.session(harness_version="0.1.0") as sid_drop2:
+        logger.record(sid_drop2, kind="user_prompt", payload={"text": "drop-me-2"})
+    with logger.session(harness_version="0.1.0") as sid_keep:
+        logger.record(sid_keep, kind="user_prompt", payload={"text": "keep-me"})
+
+    deleted = logger.prune_sessions([sid_drop1, sid_drop2])
+    assert deleted == 2
+
+    surviving = [s.session_id for s in logger.list_sessions()]
+    assert sid_drop1 not in surviving
+    assert sid_drop2 not in surviving
+    assert sid_keep in surviving
+    assert len(logger.load_session(sid_keep)) == 1
+    assert logger.load_session(sid_keep)[0].payload == {"text": "keep-me"}
+
+
+@_BACKENDS
+def test_prune_sessions_persists_across_new_logger_instance(tmp_path, backend):
+    """The deletion is written to disk, so a fresh ``TraceLogger``
+    instance on the same path sees the post-delete state."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="0.1.0") as sid1:
+        logger.record(sid1, kind="user_prompt", payload={"text": "x"})
+    with logger.session(harness_version="0.1.0") as sid2:
+        logger.record(sid2, kind="user_prompt", payload={"text": "y"})
+
+    assert logger.prune_sessions([sid1, sid2]) == 2
+
+    fresh = TraceLogger(path, backend=backend)
+    assert fresh.list_sessions() == []
+
+
+@_BACKENDS
+def test_prune_sessions_empty_list_is_noop(tmp_path, backend):
+    """Calling ``prune_sessions`` with an empty list is a no-op."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, kind="user_prompt", payload={"text": "hi"})
+
+    assert logger.prune_sessions([]) == 0
+    assert len(logger.list_sessions()) == 1
+
+
+@_BACKENDS
+def test_prune_sessions_unknown_ids_returns_zero(tmp_path, backend):
+    """Passing ids that do not exist returns 0 and touches nothing."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, kind="user_prompt", payload={"text": "hi"})
+
+    assert logger.prune_sessions(["never-existed-1", "never-existed-2"]) == 0
+    assert len(logger.list_sessions()) == 1

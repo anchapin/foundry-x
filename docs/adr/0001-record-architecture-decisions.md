@@ -30,8 +30,27 @@ Each ADR follows this lightweight template:
 Lightweight MADR-style. We do not use `adr-tools` or a generator —
 files are plain Markdown and reviewable in any diff.
 
-## Consequences
+### ADR writing conventions
 
+All ADRs MUST use concrete names from the actual codebase:
+
+- **File paths**: real paths like `src/foundry_x/trace/logger.py`, not
+  `src/foo/bar.py`
+- **Class/function names**: actual symbols like `TraceLogger`, `HookRegistry`,
+  `FailureReport`, not `Foo`, `Bar`, `baz()`
+- **Code examples**: real code from the repo, not invented snippets
+- **Line references**: actual line numbers from the source, verified at write time
+
+This ensures ADRs serve as accurate documentation — a reader can grep the
+codebase and find exactly what the ADR describes. Abstract or placeholder
+examples create a disconnect between documentation and reality that misleads
+future contributors.
+
+## Process
+
+- **Proposed→Accepted**: mark `Accepted` in the same PR that ships the
+  implementation. An ADR MUST NOT remain `Proposed` after its change
+  lands.
 - New ADRs land in the same PR as the change they justify when
   practical. Otherwise the ADR precedes the change.
 - Superseded ADRs are not deleted; their `Status` is updated and a
@@ -40,3 +59,5 @@ files are plain Markdown and reviewable in any diff.
   faithful map of how this codebase came to be.
 - ADR review is human-only — agents may draft ADRs but a human must
   approve them.
+
+## Consequences

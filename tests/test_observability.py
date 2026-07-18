@@ -374,6 +374,84 @@ def test_cli_timeline_default_format_is_markdown(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# Issue #803: fx-trace timeline --harness-version filter.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_timeline_harness_version_renders_most_recent_session(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # Record two sessions for the same harness version.
+    with logger.session(harness_version="v1.0.0") as sid1:
+        logger.record(sid1, "user_prompt", {"prompt": "first session"})
+    with logger.session(harness_version="v1.0.0") as sid2:
+        logger.record(sid2, "user_prompt", {"prompt": "second session"})
+
+    rc = cli_main(["timeline", "--db", str(db), "--harness-version", "v1.0.0"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The most recent session (sid2) should be rendered.
+    assert "second session" in out
+    assert "first session" not in out
+
+
+def test_cli_timeline_harness_version_error_when_no_session(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = cli_main(["timeline", "--db", str(db), "--harness-version", "v99.0.0"])
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "no session found for harness version v99.0.0" in captured.err
+
+
+def test_cli_timeline_harness_version_with_different_versions(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1.0.0") as sid1:
+        logger.record(sid1, "user_prompt", {"prompt": "v1 session"})
+    with logger.session(harness_version="v2.0.0") as sid2:
+        logger.record(sid2, "user_prompt", {"prompt": "v2 session"})
+
+    rc = cli_main(["timeline", "--db", str(db), "--harness-version", "v2.0.0"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "v2 session" in out
+    assert "v1 session" not in out
+
+
+def test_cli_timeline_neither_session_id_nor_harness_version_errors(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = cli_main(["timeline", "--db", str(db)])
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "either --session-id or --harness-version is required" in captured.err
+
+
+def test_cli_timeline_harness_version_json_format(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1.0.0") as sid:
+        logger.record(sid, "user_prompt", {"prompt": "test prompt"})
+
+    rc = cli_main(["timeline", "--db", str(db), "--harness-version", "v1.0.0", "--format", "json"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert isinstance(payload, list)
+    assert len(payload) == 1
+    assert payload[0]["kind"] == "user_prompt"
+
+
+# ---------------------------------------------------------------------------
 # Issue #268: fx-trace failure-report subcommand.
 # ---------------------------------------------------------------------------
 

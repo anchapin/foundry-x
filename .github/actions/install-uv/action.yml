@@ -19,15 +19,15 @@ description: >-
 
 inputs:
   uv-version:
-    description: Pinned uv release tag (e.g. 0.9.30).
+    description: Pinned uv release tag (e.g. 0.11.29).
     required: false
-    default: "0.9.30"
+    default: "0.11.29"
   uv-sha256:
     description: >-
       SHA256 of the uv-x86_64-unknown-linux-gnu tarball for the pinned
       version.
     required: false
-    default: "8b3762374972daa7a74bbc6896cc73229ca69a07403dd9f9ea3805a51ffd7582"
+    default: "04f8b82f5d47f0512dcd32c67a4a6f16a0ea27c81537c338fd0ad6b23cebe829"
 
 runs:
   using: composite

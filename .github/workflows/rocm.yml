@@ -1,0 +1,20 @@
+name: rocm
+
+on:
+  pull_request:
+    paths:
+      - "infra/llama-cpp/**"
+      - ".github/workflows/rocm.yml"
+  push:
+    branches: [develop]
+
+jobs:
+  rocm-check:
+    name: ROCm pre-flight check (issue #637)
+    runs-on: self-hosted-rocm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: ROCm pre-flight check
+        run: infra/llama-cpp/rocm_setup.sh --check-rocm

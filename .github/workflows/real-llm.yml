@@ -1,0 +1,56 @@
+name: real-llm
+
+on:
+  schedule:
+    - cron: "0 0 * * 0"  # Weekly Sunday midnight UTC
+  workflow_dispatch:
+    inputs:
+      quantization:
+        description: "Quantization to test (comma-separated, e.g. Q4_K_S,Q5_K_M)"
+        required: false
+        default: "Q4_K_S,Q5_K_M"
+
+jobs:
+  benchmark:
+    name: "benchmark (${{ matrix.quantization }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        quantization: ["Q4_K_S", "Q5_K_M"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv (hash-verified)
+        uses: ./.github/actions/install-uv
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Set quantization
+        run: echo "FOUNDRY_MODEL_ID=${{ matrix.quantization }}" >> "${GITHUB_ENV}"
+
+      - name: Wait for llama-server readiness
+        run: |
+          infra/scripts/wait_for_llamacpp.sh \
+            --host "${LLAMACPP_HOST:-127.0.0.1}" \
+            --port "${LLAMACPP_PORT:-8080}" \
+            --timeout "${LLAMACPP_WAIT_TIMEOUT:-60}"
+
+      - name: Run benchmark suite
+        env:
+          FOUNDRY_RUN_LIVE_LLM: "1"
+          FOUNDRY_MODEL_QUANT: ${{ matrix.quantization }}
+        run: uv run pytest -m benchmark
+
+      - name: Upload trace artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: traces-${{ matrix.quantization }}-${{ github.run_id }}
+          path: logs/
+          retention-days: 30

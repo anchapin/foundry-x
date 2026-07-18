@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from foundry_x.evolution.digester import (
+    CONTEXT_OVERFLOW_CLASS,
     FAILURE_KINDS,
     FAILURE_PAYLOAD_KEYS,
     INJECTION_ATTEMPT_CLASS,
@@ -316,6 +317,107 @@ def test_injection_block_vocabulary_is_exported():
     # is handled by a dedicated aggregation pass, not the generic
     # first-failure walk.
     assert INJECTION_BLOCKED_KIND not in FAILURE_KINDS
+
+
+# --- Issue #805: context-overflow aggregation ---------------------------------
+# Triggered when the runner agent loop terminates via
+# ``outcome.status='truncated'`` / ``outcome.reason='max_steps'`` (ADR-0010).
+# The class takes precedence over injection-block aggregation since it is a
+# terminal condition.
+
+
+def _outcome_event(
+    status: str,
+    reason: str,
+    steps: int = 10,
+    event_id: str = "e-outcome",
+    seq: int = 4,
+) -> TraceEvent:
+    """Build an ``outcome`` event with the given status/reason payload."""
+    return _ev(
+        "outcome",
+        {"status": status, "reason": reason, "steps": steps},
+        event_id=event_id,
+        seq=seq,
+    )
+
+
+def test_context_overflow_yields_context_overflow_class():
+    """A truncated outcome with max_steps reason must produce the context-overflow class."""
+    events = [
+        *_CLEAN_EVENTS,
+        _outcome_event("truncated", "max_steps", steps=10, event_id="e-co", seq=4),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "context-overflow"
+    assert "context-overflow" in report.summary
+    assert len(report.failed_steps) == 1
+    step = report.failed_steps[0]
+    assert step["kind"] == "outcome"
+    assert step["event_id"] == "e-co"
+    assert step["signal"] == "outcome:truncated/max_steps"
+    # Cause template includes the step count for traceability.
+    assert any("steps=10" in c for c in report.suspected_causes)
+    assert any("pruning hook" in c for c in report.suspected_causes)
+
+
+def test_context_overflow_takes_precedence_over_injection_blocks():
+    """A session with both context-overflow and injection blocks must report context-overflow.
+
+    Context-overflow is a terminal condition (the session ended) whereas
+    injection blocks are a partial adversarial surface that the session
+    survived. The Evolver must address the loop termination first.
+    """
+    events = [
+        _ev("user_prompt", {"text": "go"}, event_id="e1", seq=1),
+        _block_event(["ignore_previous"], event_id="e-block", seq=2),
+        _outcome_event("truncated", "max_steps", steps=5, event_id="e-co", seq=3),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "context-overflow"
+    # The injection block is still observed but context-overflow wins.
+    assert report.failed_steps[0]["event_id"] == "e-co"
+
+
+def test_context_overflow_without_truncated_status_returns_none():
+    """An outcome event without truncated status must not trigger context-overflow."""
+    events = [
+        _outcome_event("completed", "normal", steps=5, event_id="e-ok", seq=1),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "clean"
+
+
+def test_context_overflow_without_max_steps_reason_returns_none():
+    """An outcome event without max_steps reason must not trigger context-overflow."""
+    events = [
+        _outcome_event("truncated", "timeout", steps=5, event_id="e-timeout", seq=1),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "clean"
+
+
+def test_context_overflow_with_missing_steps_uses_question_mark():
+    """A malformed outcome payload (no steps key) must still produce a useful report."""
+    events = [
+        _ev(
+            "outcome",
+            {"status": "truncated", "reason": "max_steps"},
+            event_id="e-malformed",
+            seq=1,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "context-overflow"
+    assert any("steps=?" in c for c in report.suspected_causes)
+
+
+def test_context_overflow_vocabulary_is_exported():
+    """The new class constant is pinned as a module-level export."""
+    assert CONTEXT_OVERFLOW_CLASS == "context-overflow"
+    # ``outcome`` is intentionally NOT in ``FAILURE_KINDS``: it is handled
+    # by a dedicated aggregation pass, not the generic first-failure walk.
+    assert "outcome" not in FAILURE_KINDS
 
 
 # --- Coverage added by issue #95 --------------------------------------------
@@ -658,3 +760,132 @@ def test_model_default_unknown_is_only_reached_when_constructed_directly() -> No
     # Via digester → clean
     via_digester = Digester().digest(_SESSION, _CLEAN_EVENTS)
     assert via_digester.proposed_class == "clean"
+
+
+# ---------------------------------------------------------------------------
+# Issue #576: ``outcome`` events with ``status=truncated`` /
+# ``reason=max_steps`` aggregate into ``proposed_class == 'context-overflow'``.
+# ---------------------------------------------------------------------------
+
+
+def _outcome_event(
+    status: str,
+    reason: str,
+    steps: int = 10,
+    *,
+    event_id: str = "e-outcome",
+    seq: int = 4,
+) -> TraceEvent:
+    """Build an ``outcome`` event with the canonical payload shape."""
+    return _ev(
+        "outcome",
+        {"status": status, "reason": reason, "steps": steps},
+        event_id=event_id,
+        seq=seq,
+    )
+
+
+def test_truncated_max_steps_yields_context_overflow_class() -> None:
+    """An ``outcome`` event with ``status=truncated`` / ``reason=max_steps`` maps to ``context-overflow``."""
+    events = [
+        *_CLEAN_EVENTS,
+        _outcome_event("truncated", "max_steps", steps=10, event_id="e-co", seq=4),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == CONTEXT_OVERFLOW_CLASS
+    assert "context-overflow failure" in report.summary
+    assert len(report.failed_steps) == 1
+    step = report.failed_steps[0]
+    assert step["kind"] == "outcome"
+    assert step["event_id"] == "e-co"
+    assert step["signal"] == "outcome:truncated/max_steps"
+    assert step["payload"]["status"] == "truncated"
+    assert step["payload"]["reason"] == "max_steps"
+    assert step["payload"]["steps"] == 10
+    assert any("max_steps" in c and "10" in c for c in report.suspected_causes)
+
+
+def test_context_overflow_takes_precedence_over_later_tool_error() -> None:
+    """A context-overflow outcome is the more actionable signal even when a later tool_error exists.
+
+    Even if a ``tool_error`` event arrives after a max-steps truncation, the
+    Digester must surface the context-overflow class so the Evolver does not
+    propose a fix for the wrong problem.
+    """
+    events = [
+        *_CLEAN_EVENTS,
+        _outcome_event("truncated", "max_steps", steps=5, event_id="e-co", seq=4),
+        _ev("tool_error", {"error": "exit code 1"}, event_id="e-tool-err", seq=5),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == CONTEXT_OVERFLOW_CLASS
+    assert report.failed_steps[0]["event_id"] == "e-co"
+
+
+def test_no_context_overflow_falls_through_to_existing_classifier() -> None:
+    """Without a matching outcome event, the generic first-failure walk still wins."""
+    events = [
+        *_CLEAN_EVENTS,
+        _ev(
+            "tool_error",
+            {"error": "no such tool: frobnicate"},
+            event_id="e-fail",
+            seq=4,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "wrong-tool"
+    assert report.failed_steps[0]["kind"] == "tool_error"
+
+
+def test_context_overflow_precedes_injection_block() -> None:
+    """Context-overflow aggregation runs before injection-block aggregation.
+
+    Per issue #576, context-overflow is checked first in digest() so that
+    a max-steps truncation is reported as context-overflow even when the
+    session also contains injection blocks (which would otherwise take precedence
+    as the more recently added aggregation pass).
+    """
+    events = [
+        *_CLEAN_EVENTS,
+        _outcome_event("truncated", "max_steps", steps=8, event_id="e-co", seq=4),
+        _block_event(["ignore_previous"], event_id="e-block", seq=5),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == CONTEXT_OVERFLOW_CLASS
+    assert report.failed_steps[0]["event_id"] == "e-co"
+
+
+def test_context_overflow_class_vocabulary_is_exported() -> None:
+    """The new class name is pinned as a module-level constant."""
+    assert CONTEXT_OVERFLOW_CLASS == "context-overflow"
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "expected_class"),
+    [
+        ("truncated", "max_steps", CONTEXT_OVERFLOW_CLASS),
+        ("truncated", "wall_clock", None),
+        ("complete", "max_steps", None),
+        ("truncated", "unknown_reason", None),
+    ],
+    ids=[
+        "truncated-max_steps->context-overflow",
+        "truncated-wall_clock->fallthrough",
+        "complete->fallthrough",
+        "truncated-unknown->fallthrough",
+    ],
+)
+def test_context_overflow_classification_is_specific(
+    status: str, reason: str, expected_class: str | None
+) -> None:
+    """Only ``status=truncated`` + ``reason=max_steps`` triggers context-overflow."""
+    events = [
+        *_CLEAN_EVENTS,
+        _outcome_event(status, reason, steps=5, event_id="e-co", seq=4),
+    ]
+    report = Digester().digest(_SESSION, events)
+    if expected_class is None:
+        assert report.proposed_class != CONTEXT_OVERFLOW_CLASS
+    else:
+        assert report.proposed_class == expected_class

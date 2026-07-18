@@ -482,6 +482,197 @@ def test_run_task_records_tool_call_duration_ms(tmp_path):
     assert duration_ms < DEFAULT_TASK_TIMEOUT_S
 
 
+def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypatch):
+    """hook_overhead_ms reflects run_pre delay when a hook is registered (issue #709).
+
+    Verifies that when a hook with a known delay is registered via a mocked
+    _resolve_hook_registry, the tool_call event carries the measured
+    hook_overhead_ms. The test covers three scenarios: no hooks (null),
+    one hook (positive integer), and multiple hooks (combined delay).
+    """
+    from foundry_x.execution import runner
+
+    db = tmp_path / "traces.db"
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+
+    tool_call = ModelToolCall(
+        id="call_hook",
+        type="function",
+        function=ToolCallFunction(
+            name="bash",
+            arguments=json.dumps({"command": "true"}),
+        ),
+    )
+
+    class Adapter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    message=ModelMessage(
+                        role="assistant",
+                        content=None,
+                        tool_calls=[tool_call],
+                    ),
+                    tool_calls=[tool_call],
+                    finish_reason="tool_calls",
+                )
+            return ModelResponse(
+                message=ModelMessage(role="assistant", content="done"),
+                finish_reason="stop",
+            )
+
+        async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+            return await self.complete(messages, tools, **kwargs)
+
+        async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+            response = await self.complete(messages, tools, **kwargs)
+            if response.message.content:
+                yield ModelResponseChunk(content=response.message.content)
+            for i, tc in enumerate(response.tool_calls):
+                yield ModelResponseChunk(
+                    tool_calls=[
+                        ModelToolCallChunk(
+                            index=i,
+                            id=tc.id,
+                            type=tc.type,
+                            function=ToolCallFunctionChunk(
+                                name=tc.function.name,
+                                arguments=tc.function.arguments,
+                            ),
+                        )
+                    ]
+                )
+            if response.finish_reason:
+                yield ModelResponseChunk(finish_reason=response.finish_reason)
+
+    async def executor(name, arguments):  # noqa: ANN001, ARG001
+        return {"status": "ok"}
+
+    # Case 1: No hooks - mock _resolve_hook_registry to return None
+    def mock_resolve_none(log, session_id):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(runner, "_resolve_hook_registry", mock_resolve_none)
+
+    async def drive_no_hooks():
+        logger = TraceLogger(db)
+        with logger.session(harness_version="0.1.0") as session_id:
+            await run_task(
+                "hook-overhead-check",
+                harness_dir,
+                logger,
+                session_id,
+                model_adapter=Adapter(),
+                skill_executor=executor,
+            )
+
+    asyncio.run(drive_no_hooks())
+
+    logger = TraceLogger(db)
+    events = logger.load_session(logger.list_sessions()[0].session_id)
+    tool_call_events = [e for e in events if e.kind == "tool_call"]
+    assert len(tool_call_events) == 2
+    for event in tool_call_events:
+        assert "hook_overhead_ms" in event.payload
+        assert event.payload["hook_overhead_ms"] is None
+
+    # Case 2: One hook with 50ms delay
+    hook_delay_ms = 50
+
+    class MockRegistryOneHook:
+        _hooks: list = []
+
+        async def run_pre(self, call):
+            await asyncio.sleep(hook_delay_ms / 1000.0)
+            return call
+
+        async def run_post(self, call, result):
+            return result
+
+    def mock_resolve_one(log, session_id):  # noqa: ANN001
+        return MockRegistryOneHook()
+
+    monkeypatch.setattr(runner, "_resolve_hook_registry", mock_resolve_one)
+
+    db2 = tmp_path / "traces2.db"
+
+    async def drive_one_hook():
+        logger = TraceLogger(db2)
+        with logger.session(harness_version="0.1.0") as session_id:
+            await run_task(
+                "hook-overhead-check",
+                harness_dir,
+                logger,
+                session_id,
+                model_adapter=Adapter(),
+                skill_executor=executor,
+            )
+
+    asyncio.run(drive_one_hook())
+
+    logger = TraceLogger(db2)
+    events = logger.load_session(logger.list_sessions()[0].session_id)
+    tool_call_events = [e for e in events if e.kind == "tool_call"]
+    assert len(tool_call_events) == 2
+    for event in tool_call_events:
+        assert "hook_overhead_ms" in event.payload
+        assert event.payload["hook_overhead_ms"] is not None
+        assert event.payload["hook_overhead_ms"] >= hook_delay_ms
+        assert event.payload["hook_overhead_ms"] < hook_delay_ms + 100
+
+    # Case 3: Two hooks with combined delay
+    hook1_delay_ms = 30
+    hook2_delay_ms = 40
+
+    class MockRegistryTwoHooks:
+        _hooks: list = []
+
+        async def run_pre(self, call):
+            await asyncio.sleep(hook1_delay_ms / 1000.0)
+            await asyncio.sleep(hook2_delay_ms / 1000.0)
+            return call
+
+        async def run_post(self, call, result):
+            return result
+
+    def mock_resolve_two(log, session_id):  # noqa: ANN001
+        return MockRegistryTwoHooks()
+
+    monkeypatch.setattr(runner, "_resolve_hook_registry", mock_resolve_two)
+
+    db3 = tmp_path / "traces3.db"
+
+    async def drive_two_hooks():
+        logger = TraceLogger(db3)
+        with logger.session(harness_version="0.1.0") as session_id:
+            await run_task(
+                "hook-overhead-check",
+                harness_dir,
+                logger,
+                session_id,
+                model_adapter=Adapter(),
+                skill_executor=executor,
+            )
+
+    asyncio.run(drive_two_hooks())
+
+    logger = TraceLogger(db3)
+    events = logger.load_session(logger.list_sessions()[0].session_id)
+    tool_call_events = [e for e in events if e.kind == "tool_call"]
+    assert len(tool_call_events) == 2
+    min_expected = hook1_delay_ms + hook2_delay_ms
+    for event in tool_call_events:
+        assert "hook_overhead_ms" in event.payload
+        assert event.payload["hook_overhead_ms"] is not None
+        assert event.payload["hook_overhead_ms"] >= min_expected
+        assert event.payload["hook_overhead_ms"] < min_expected + 100
+
+
 # --- harness layout validation (issue #90) ---------------------------------
 
 

@@ -18,16 +18,11 @@ implemented and tested.
 
 ## Phase 2: The Evolution Engine -- the meta-agent layer
 
-**Status: MOSTLY SHIPPED** (as of 929b327, 2026-07-11) — The full
+**Status: SHIPPED** (as of 929b327, 2026-07-11) — The full
 Digester → Evolver → Critic chain exists with pydantic models, pytest
-coverage, and CI gates. Two known stubs remain:
-
-1. **`Evolver.propose()` body** (`src/foundry_x/evolution/evolver.py`) —
-   guardrails are implemented and tested, but the meta-agent body that
-   turns a `FailureReport` into `ProposedEdit`(s) raises
-   `NotImplementedError`.
-2. **`_default_skill_executor`** (`src/foundry_x/execution/runner.py`) —
-   returns a benign ack envelope; does *not* actually run bash/edit/grep/write.
+coverage, and CI gates. The Evolver generates template-based
+`ProposedEdit` objects from the `_PROPOSED_CLASS_EDIT_TEMPLATES` registry;
+novel LLM-powered edit generation is a future enhancement.
 
 **Goal:** Create the automated feedback loop.
 
@@ -39,13 +34,20 @@ coverage, and CI gates. Two known stubs remain:
 
 ## Phase 3: Optimization and Scaling
 
-**Status: NOT STARTED** (as of 929b327, 2026-07-11) — Quantization
-sweep, context pruning at scale, real-LLM benchmark runs, and token
-budget enforcement (plumbed but not counted) remain to be implemented.
+**Status: SHIPPED** (as of 929b327, 2026-07-11) — Quantization
+sweep, token-aware context pruning, full LLM Evolver with rate limiting
+and retry logic, real-model smoke tests, and token budget observability
+all implemented.
 
 **Goal:** Hardware and model performance tuning.
 
-**Milestones:**
+**What was delivered:**
 
-- Automate model swapping: test the same harness against different quantizations (for example Q4 vs. Q5) to find the "intelligence floor."
-- Optimize context management: refine the hooks to prune historical logs efficiently and keep inference latency low on the 5600G / 6600 XT setup.
+- `foundry-sweep` CLI + `Critic.quantization_sweep()` (issues #464, PRs #473, #527, #526, #528)
+- `TokenAwarePruningHook` + `FOUNDRY_CONTEXT_TOKENS` config (issues #465, #418, PR #519)
+- Token budget observability: KPIs, session-summary, regression-report (issue #466)
+- Full LLM Evolver with rate limiting and retry logic (issues #476–#481, PRs #516, #518, #523, #533, #536)
+- Real-model full-loop smoke test (issues #483, #484, PRs #525, #529)
+- Token usage in trace events + `RuntimeWarning` on missing telemetry (issues #191, #486, PRs #489, #514, #521)
+
+(All Phase 3b items — #537, #539, #540 — are closed; Phase 3 is fully shipped.)

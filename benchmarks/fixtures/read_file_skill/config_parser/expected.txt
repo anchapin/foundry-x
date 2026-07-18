@@ -1,0 +1,14 @@
+name=sample-app
+version=1.2.3
+author=Platform Team
+license=MIT
+host=localhost
+port=5432
+name=production_db
+pool_size=10
+host=0.0.0.0
+port=8080
+workers=4
+timeout=30
+level=INFO
+format=%(asctime)s - %(name)s - %(levelname)s - %(message)s
