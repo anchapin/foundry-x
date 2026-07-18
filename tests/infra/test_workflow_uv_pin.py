@@ -6,14 +6,17 @@ Mirrors ``tests/test_uv_pinning.py`` (which guards the Dockerfile) and
 runner required.
 
 Per ADR-0002 and ``docs/SECURITY.md`` threat #3, every workflow in
-``.github/workflows/`` MUST install uv through the SHA256-pinned
-composite action at ``.github/actions/install-uv`` (issue #208).  The
-old ``pip install --upgrade uv`` path allowed a compromised PyPI
-release or a MITM between the runner and PyPI to swap the binary that
-gates every PR.
+``.github/workflows/`` that installs uv MUST do so through the
+SHA256-pinned composite action at ``.github/actions/install-uv``
+(issue #208).  The old ``pip install --upgrade uv`` path allowed a
+compromised PyPI release or a MITM between the runner and PyPI to swap
+the binary that gates every PR.
 
 Guards the workflow migration so the supply-chain guardrail cannot
-regress silently.
+regress silently.  ``EXPECTED_WORKFLOWS`` below lists every workflow
+that uses the composite action as of issue #868; any new workflow that
+needs uv MUST be added here (or the test will silently fail to guard
+it).
 """
 
 from __future__ import annotations
@@ -27,9 +30,25 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 COMPOSITE_ACTION = REPO_ROOT / ".github" / "actions" / "install-uv" / "action.yml"
 
-#: Workflows expected to install uv.  If a new workflow is added that
-#: needs uv, add it here so the test enforces the pin on it too.
-EXPECTED_WORKFLOWS = ["ci.yml", "audit.yml", "critic.yml", "docker.yml"]
+#: Workflows expected to install uv via the hash-verified composite
+#: action (issue #208).  Keep in sync with the set of workflows under
+#: ``.github/workflows/`` that reference ``./.github/actions/install-uv``.
+#: As of issue #868 this is the full set of 9 workflows that install uv:
+#: ci.yml, audit.yml, critic.yml, docker.yml, lint.yml, pre-commit.yml,
+#: test.yml, quantization-sweep.yml, real-llm.yml.  If a new workflow is
+#: added that needs uv, add it here so the parametrized guards enforce
+#: the pin on it too.
+EXPECTED_WORKFLOWS = [
+    "ci.yml",
+    "audit.yml",
+    "critic.yml",
+    "docker.yml",
+    "lint.yml",
+    "pre-commit.yml",
+    "test.yml",
+    "quantization-sweep.yml",
+    "real-llm.yml",
+]
 
 
 def _load_workflow(name: str) -> str:
