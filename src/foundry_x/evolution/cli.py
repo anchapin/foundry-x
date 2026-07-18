@@ -7,8 +7,20 @@ run one evolution step without writing Python code::
 
 The loop is: TraceLogger -> Digester -> Evolver -> Critic.
 
+Issue #888 adds two flags to the ``evolve`` subcommand:
+
+* ``--background`` spawns the evolution loop as a detached subprocess and
+  returns exit code 0 immediately after printing the child PID. Replaces
+  the legacy ``--async`` flag (kept with a deprecation warning).
+* ``--no-verify`` skips ``Critic.evaluate(...)``, records an explicit
+  ``CriticVerdict(verdict=None, notes="--no-verify: skipped")`` for the
+  audit trail, and prints a prominent stderr warning. Per ADR-0004 the
+  resulting harness edit cannot ship to ``main`` without a subsequent
+  Critic-passed run; the flag is a local-experimentation escape hatch,
+  not a gate bypass for CI.
+
 Exit codes:
-    0  Critic approved the edit (or no failure was detected)
+    0  Critic approved the edit (or no failure was detected, or ``--no-verify`` skipped the gate)
     1  Critic rejected the edit
     2  Digester produced no session events, or other usage error
 """
@@ -18,6 +30,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -36,6 +49,25 @@ from foundry_x.execution.runner import resolve_harness_version
 from foundry_x.evolution.store import ProposedEditStore, TrackedProposedEdit, ProposedEditStatus
 from foundry_x.observability.regression_report import record_verdict
 from foundry_x.trace.logger import TraceLogger
+
+#: Prominent stderr warning emitted whenever ``--no-verify`` bypasses the
+#: Critic gate. Per ADR-0004 harness edits not evaluated by the Critic
+#: cannot ship to ``main``; the flag is a local-experimentation escape
+#: hatch only (issue #888).
+_NO_VERIFY_WARNING = (
+    "WARNING: --no-verify bypasses the Critic gate. Per ADR-0004, harness "
+    "edits not evaluated by Critic cannot ship to main. "
+    "Use only for local experimentation.\n"
+)
+
+#: Deprecation notice emitted on stderr whenever the legacy top-level
+#: ``--async`` flag is used (issue #888). ``--async`` blocked on the event
+#: loop and never returned control to the caller; ``--background`` spawns a
+#: detached subprocess instead.
+_ASYNC_DEPRECATED_MSG = (
+    "Deprecation: top-level --async is replaced by `foundry-evolve evolve "
+    "--background` (issue #888). --async will be removed in a future release.\n"
+)
 
 
 def _now_iso() -> str:
@@ -109,8 +141,18 @@ def _render_tracked_edit(edit: TrackedProposedEdit, verbose: bool = False) -> st
 
 
 def _render_critic_verdict(verdict: CriticVerdict) -> str:
-    """Render a CriticVerdict as a compact plain-text summary."""
-    status = "APPROVED" if verdict.verdict else "REJECTED"
+    """Render a CriticVerdict as a compact plain-text summary.
+
+    A ``None`` verdict represents a skipped Critic gate (``--no-verify``,
+    issue #888) and renders as ``SKIPPED`` so operators can distinguish a
+    skipped run from an approved or rejected one at a glance.
+    """
+    if verdict.verdict is None:
+        status = "SKIPPED"
+    elif verdict.verdict:
+        status = "APPROVED"
+    else:
+        status = "REJECTED"
     lines = [f"Critic Verdict: {status}"]
     if verdict.passed_checks:
         lines.append("  Passed checks:")
@@ -163,14 +205,23 @@ def _run_loop(
     trace_db: str,
     harness_dir: Path,
     verbose: bool = False,
+    no_verify: bool = False,
 ) -> tuple[FailureReport, ProposedEdit | None, CriticVerdict | None, int, str]:
     """Execute the evolution loop: Digester -> Evolver -> Critic.
 
     Returns (failure_report, proposed_edit, verdict, exit_code, harness_version).
     proposed_edit may be None if no failure was detected or Evolver is not yet
     implemented. verdict is None if no proposed_edit was produced.
-    Exit code 0 = approved / no failure, 1 = rejected, 2 = error.
+    Exit code 0 = approved / no failure / ``--no-verify`` skip,
+    1 = rejected, 2 = error.
+
+    When ``no_verify=True`` the Critic gate is skipped and a synthetic
+    ``CriticVerdict(verdict=None, notes="--no-verify: skipped")`` is
+    recorded for the audit trail (issue #888). A stderr warning is emitted
+    so the operator sees the bypass.
     """
+    if no_verify:
+        sys.stderr.write(_NO_VERIFY_WARNING)
     harness_version = resolve_harness_version(harness_dir)
     started_at = _now_iso()
     backend = _infer_backend(trace_db)
@@ -215,8 +266,19 @@ def _run_loop(
     print(_render_proposed_edit(edit, verbose=verbose))
     print()
 
-    critic = Critic(harness_dir=harness_dir)
-    verdict = critic.evaluate(edit.unified_diff, failure_class=report.proposed_class)
+    if no_verify:
+        # Skip the Critic gate but preserve the audit trail (issue #888).
+        verdict = CriticVerdict(
+            verdict=None,
+            passed_checks=[],
+            failed_checks=[],
+            notes="--no-verify: skipped",
+            edit_index=0,
+            failure_class=report.proposed_class,
+        )
+    else:
+        critic = Critic(harness_dir=harness_dir)
+        verdict = critic.evaluate(edit.unified_diff, failure_class=report.proposed_class)
     verdict_with_class = CriticVerdict(
         verdict=verdict.verdict,
         passed_checks=list(verdict.passed_checks),
@@ -232,7 +294,8 @@ def _run_loop(
     print(f"Started: {started_at} | Completed: {completed_at}")
     print()
 
-    exit_code = 0 if verdict.verdict else 1
+    # None (skipped) and True (approved) both exit 0; only False exits 1.
+    exit_code = 1 if verdict.verdict is False else 0
     return report, edit, verdict, exit_code, harness_version
 
 
@@ -241,11 +304,22 @@ async def _run_loop_async(
     trace_db: str,
     harness_dir: Path,
     verbose: bool = False,
-) -> tuple[FailureReport, ProposedEdit | None, CriticVerdict | None, int]:
+    no_verify: bool = False,
+) -> tuple[FailureReport, ProposedEdit | None, CriticVerdict | None, int, str]:
     """Async variant of _run_loop.
 
-    Phase 1: awaits run_evolution_step_async (no-op, Critic is still sync).
+    Phase 1: awaits run_evolution_step_async (Critic is still sync inside the
+    pipeline unless ``no_verify=True``).
+
+    Issue #888 fixes an observability gap: the async path now mirrors the
+    sync path by calling :func:`record_verdict` so the ``critic_verdict``
+    trace event is persisted for downstream consumers (regression report,
+    KPIs). When ``no_verify=True`` the Critic is skipped via
+    :func:`run_evolution_step_async` and a synthetic
+    ``CriticVerdict(verdict=None, notes="--no-verify: skipped")`` is recorded.
     """
+    if no_verify:
+        sys.stderr.write(_NO_VERIFY_WARNING)
     harness_version = resolve_harness_version(harness_dir)
     started_at = _now_iso()
     backend = _infer_backend(trace_db)
@@ -259,6 +333,7 @@ async def _run_loop_async(
         session_id=session_id,
         events=events,
         harness_dir=harness_dir,
+        no_verify=no_verify,
     )
 
     report = result.failure_report
@@ -281,11 +356,22 @@ async def _run_loop_async(
     print()
 
     if result.verdict is not None:
+        # Audit-trail parity with the sync path (issue #888): persist the
+        # critic_verdict trace event whether the gate ran, approved, rejected,
+        # or was skipped via --no-verify (verdict.verdict is None).
+        record_verdict(logger, session_id, result.verdict)
         print(_render_critic_verdict(result.verdict))
         print()
 
-    exit_code = 0 if (result.verdict and result.verdict.verdict) else 1
-    return report, edit, result.verdict, exit_code
+    completed_at = _now_iso()
+    print(f"Started: {started_at} | Completed: {completed_at}")
+    print()
+
+    # None (no verdict produced), None (skipped via --no-verify), and True
+    # (approved) all exit 0; only an explicit False (rejected) exits 1.
+    rejected = result.verdict is not None and result.verdict.verdict is False
+    exit_code = 1 if rejected else 0
+    return report, edit, result.verdict, exit_code, harness_version
 
 
 def _list_pending(args: argparse.Namespace) -> int:
@@ -406,7 +492,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--async",
         dest="use_async",
         action="store_true",
-        help="Run the evolution loop asynchronously (Phase 1: no-op, awaits the call).",
+        help=(
+            "DEPRECATED (issue #888): use `foundry-evolve evolve --background` "
+            "instead. --async runs the loop on the asyncio event loop but "
+            "still blocks the caller until completion; --background spawns a "
+            "detached subprocess and returns immediately."
+        ),
     )
     return parser
 
@@ -601,6 +692,29 @@ def _build_evolve_subparser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Print the full unified_diff of each ProposedEdit.",
     )
+    parser.add_argument(
+        "--background",
+        dest="background",
+        action="store_true",
+        help=(
+            "Spawn the evolution loop as a detached subprocess and exit 0 "
+            "immediately after printing the child PID. Operators can poll "
+            "for completion via `foundry-evolve list-pending` and the trace "
+            "store. Replaces the legacy top-level --async flag (issue #888)."
+        ),
+    )
+    parser.add_argument(
+        "--no-verify",
+        dest="no_verify",
+        action="store_true",
+        help=(
+            "Skip the Critic.evaluate(...) gate and record a synthetic "
+            "CriticVerdict(verdict=None, notes='--no-verify: skipped') for "
+            "the audit trail. Prints a prominent stderr warning. Per "
+            "ADR-0004 harness edits not evaluated by Critic cannot ship to "
+            "main; use only for local experimentation (issue #888)."
+        ),
+    )
 
 
 def _build_sweep_subparser(parser: argparse.ArgumentParser) -> None:
@@ -653,20 +767,76 @@ def _build_sweep_subparser(parser: argparse.ArgumentParser) -> None:
 
 
 def _main_evolve(args: argparse.Namespace) -> int:
+    # ``--background`` spawns the evolution loop as a detached subprocess and
+    # returns immediately (issue #888). The child re-invokes the CLI without
+    # ``--background`` so it runs the full sync loop in the background.
+    if getattr(args, "background", False):
+        return _spawn_background_evolve(args)
+    no_verify = getattr(args, "no_verify", False)
     _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
         session_id=args.session_id,
         trace_db=args.trace_db,
         harness_dir=args.harness_dir,
         verbose=args.verbose,
+        no_verify=no_verify,
     )
     return exit_code
+
+
+def _spawn_background_evolve(args: argparse.Namespace) -> int:
+    """Spawn the evolution loop as a detached subprocess and return 0 (issue #888).
+
+    Re-invokes the same CLI entry point as ``[sys.executable, "-m",
+    "foundry_x.evolution.cli", "evolve", ...]`` with ``--background`` stripped
+    so the child runs the full sync loop. ``--no-verify`` is forwarded when
+    set so the operator's intent propagates to the background run.
+
+    Uses :class:`subprocess.Popen` with ``start_new_session=True`` so the
+    child survives parent exit (POSIX). The child's PID is printed to stdout
+    so operators can monitor it; the child writes progress to the trace
+    store and the ProposedEditStore.
+    """
+    cmd: list[str] = [
+        sys.executable,
+        "-m",
+        "foundry_x.evolution.cli",
+        "evolve",
+        "--session-id",
+        str(args.session_id),
+        "--trace-db",
+        str(args.trace_db),
+        "--harness-dir",
+        str(args.harness_dir),
+    ]
+    if getattr(args, "verbose", False):
+        cmd.append("--verbose")
+    if getattr(args, "no_verify", False):
+        cmd.append("--no-verify")
+    detached = os.name == "posix"
+    proc = subprocess.Popen(
+        cmd,
+        start_new_session=detached,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    sys.stdout.write(
+        f"Background evolution started (PID {proc.pid}). "
+        "Poll via `foundry-evolve list-pending` or the trace store.\n"
+    )
+    sys.stdout.flush()
+    # Do not wait — return immediately so the caller regains control.
+    return 0
 
 
 def _main_evolve_legacy(argv: list[str] | None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.use_async:
-        _report, _edit, _verdict, exit_code = asyncio.run(
+        # Deprecation notice (issue #888): --async blocks on the event loop
+        # and will be removed in a future release. Point operators at
+        # ``evolve --background`` which actually detaches.
+        sys.stderr.write(_ASYNC_DEPRECATED_MSG)
+        _report, _edit, _verdict, exit_code, _harness_version = asyncio.run(
             _run_loop_async(
                 session_id=args.session_id,
                 trace_db=args.trace_db,
