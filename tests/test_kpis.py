@@ -396,6 +396,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "failure_class_distribution",
         "model_retry_count",
         "tool_argument_parse_error_count",
+        "event_limit_abort_count",
     }
 
 

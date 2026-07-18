@@ -72,7 +72,10 @@ We design against these threats:
     ``outcome.status="failed"``, ``outcome.reason="event_limit"``.
   All caps emit a ``task_aborted`` trace event and set the terminal
   ``outcome`` accordingly so KPI consumers (``token_budget_abort_count``,
-  ``token_budget_hit``, ``event_limit_hit``) can observe the abort.
+  ``token_budget_hit_rate``, ``wall_clock_abort_count``,
+  ``event_limit_abort_count``) can observe the abort. Issue #869
+  adds ``event_limit_abort_count`` so event-limit-driven failures
+  are visible alongside the existing abort counters.
 - **Sandbox.** Run benchmarks and evolution inside a Docker
   container with read-only mounts for the host filesystem (see
   `infra/`). The default local dev path runs unsandboxed but should

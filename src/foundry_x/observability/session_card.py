@@ -28,6 +28,15 @@ substring matches ``_ERROR_KIND_RE`` below, so it is automatically
 counted by the per-kind ``errors_by_kind`` bucket without any
 card-specific code path. The dedicated session-aggregate KPI lives in
 :mod:`foundry_x.observability.kpis` (``KpiSummary.tool_argument_parse_error_count``).
+
+Issue #869 — the runner emits ``task_aborted(reason="event_limit")`` when
+the per-session event cap is exceeded (see
+``src/foundry_x/execution/runner.py:1523``). The kind's ``"abort"``
+substring matches ``_ERROR_KIND_RE`` below, so it is automatically
+counted by the per-kind ``errors_by_kind`` bucket as ``task_aborted=N``
+without any card-specific code path. The dedicated session-aggregate KPI
+lives in :mod:`foundry_x.observability.kpis`
+(``KpiSummary.event_limit_abort_count``).
 """
 
 from __future__ import annotations

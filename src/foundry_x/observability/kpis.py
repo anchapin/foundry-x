@@ -63,6 +63,12 @@ from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 TASK_ABORTED_KIND = "task_aborted"
 TOKEN_BUDGET_REASON = "token_budget"
+# Issue #869: the runner emits ``task_aborted(reason="event_limit")`` when the
+# per-session event cap is exceeded (see ``execution/runner.py:1523``). The
+# constant lives next to ``TOKEN_BUDGET_REASON`` so any future reference
+# (Digester classification, regression report, etc.) shares the same spelling
+# without re-typing the literal.
+EVENT_LIMIT_REASON = "event_limit"
 
 
 CONTEXT_PRUNED_KIND = "context_pruned"
@@ -145,6 +151,15 @@ class KpiSummary(BaseModel):
     between the tool schema and the model's capabilities, so the counter
     is surfaced alongside ``wall_clock_abort_count`` as an auxiliary
     operator signal.
+
+    Issue #869 adds ``event_limit_abort_count``: the total count of
+    ``task_aborted(reason="event_limit")`` events emitted by the runner
+    when the per-session event cap (``FOUNDRY_MAX_EVENTS_PER_SESSION``)
+    is exceeded. A rising rate signals runaway or looping agent
+    behavior — the agent produced more events than the harness expected,
+    which usually means the context-pruning or stop-on-error policies
+    are not strict enough. Surfaced alongside ``token_budget_abort_count``
+    and ``wall_clock_abort_count`` as an auxiliary operator signal.
     """
 
     cycle_time_seconds: float | None = None
@@ -163,6 +178,7 @@ class KpiSummary(BaseModel):
     failure_class_distribution: dict[str, int] = {}
     model_retry_count: int = 0
     tool_argument_parse_error_count: int = 0
+    event_limit_abort_count: int = 0
 
 
 class StreamingQualityData(BaseModel):
@@ -295,6 +311,7 @@ def compute_kpis(
     tool_argument_parse_error_count = _tool_argument_parse_error_count(
         logger, harness_version=harness_version
     )
+    event_limit_abort_count = _event_limit_abort_count(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -312,6 +329,7 @@ def compute_kpis(
         failure_class_distribution=failure_class_distribution,
         model_retry_count=model_retry_count,
         tool_argument_parse_error_count=tool_argument_parse_error_count,
+        event_limit_abort_count=event_limit_abort_count,
     )
 
 
@@ -368,6 +386,8 @@ def _compute_deltas(
         "tool_argument_parse_error_count": (
             candidate.tool_argument_parse_error_count - baseline.tool_argument_parse_error_count
         ),
+        "event_limit_abort_count": candidate.event_limit_abort_count
+        - baseline.event_limit_abort_count,
     }
 
 
@@ -711,6 +731,40 @@ def _wall_clock_abort_count(
     return count
 
 
+def _event_limit_abort_count(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> int:
+    """Count sessions aborted by the FOUNDRY_MAX_EVENTS_PER_SESSION event cap (issue #869).
+
+    Counts every ``task_aborted`` event whose ``reason`` is ``"event_limit"``,
+    fired by :func:`foundry_x.execution.runner.run_task` when the accumulated
+    event count reaches the per-session cap (see
+    ``foundry_x.execution.runner._check_event_limit``). Each session
+    contributes at most one such event (the runner records it once per
+    abort before terminating with ``outcome.status="failed"`` and
+    ``outcome.reason="event_limit"``).
+
+    A non-zero count signals a session that exceeded the configured event
+    budget — typically a runaway loop where the agent keeps producing
+    events without making progress. The counter is surfaced alongside
+    :func:`_token_budget_abort_count` and :func:`_wall_clock_abort_count`
+    as an auxiliary operator signal so the operator can distinguish
+    event-limit-driven failures from other abort reasons.
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    count = 0
+    for event in logger.query_events(
+        kind=TASK_ABORTED_KIND,
+        harness_version=harness_version,
+    ):
+        if event.payload.get("reason") == EVENT_LIMIT_REASON:
+            count += 1
+    return count
+
+
 def _model_retry_count(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -893,6 +947,16 @@ def _render_markdown(summary: KpiSummary) -> str:
             f"Tool Argument Parse Errors: {summary.tool_argument_parse_error_count} "
             "malformed tool-call argument(s) emitted by the runner."
         )
+    # Issue #869: surface event-limit abort count as an auxiliary operator
+    # signal. Zero means the per-session event cap is not firing (expected
+    # for healthy runs); non-zero means a session was aborted by
+    # FOUNDRY_MAX_EVENTS_PER_SESSION, which usually indicates a runaway loop.
+    if summary.event_limit_abort_count > 0:
+        lines.append("")
+        lines.append(
+            f"Event Limit Aborts: {summary.event_limit_abort_count} session(s) "
+            "hit the per-session event cap."
+        )
     if summary.failure_class_distribution:
         total = sum(summary.failure_class_distribution.values())
         lines.append("")
@@ -972,6 +1036,10 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{baseline.tool_argument_parse_error_count} | "
         f"{candidate.tool_argument_parse_error_count} | "
         f"{_format_delta(float(baseline.tool_argument_parse_error_count), float(candidate.tool_argument_parse_error_count), higher_is_better=False)} |",
+        "| Event Limit Abort Count | "
+        f"{baseline.event_limit_abort_count} | "
+        f"{candidate.event_limit_abort_count} | "
+        f"{_format_delta(float(baseline.event_limit_abort_count), float(candidate.event_limit_abort_count), higher_is_better=False)} |",
     ]
     return "\n".join(lines)
 
@@ -1005,12 +1073,13 @@ def append_kpi_history(
     excluded (the "minus per-session maps" half of the round-trip contract).
     ``hooks_disabled_count``, ``hooks_disabled_rate``,
     ``token_budget_abort_count``, ``token_budget_hit_rate``,
-    ``model_retry_count``, and ``tool_argument_parse_error_count`` are scalar
-    fields and are included so the trend table can show their drift across
-    harness edits. Then ``timestamp`` and the optional ``harness_version``
-    are added. Parent directories are created on demand so the operator does
-    not have to ``mkdir`` before the first run. ``failure_class_distribution``
-    is included so the trend table can show per-class deltas (issue #705).
+    ``model_retry_count``, ``tool_argument_parse_error_count``, and
+    ``event_limit_abort_count`` are scalar fields and are included so the
+    trend table can show their drift across harness edits. Then
+    ``timestamp`` and the optional ``harness_version`` are added. Parent
+    directories are created on demand so the operator does not have to
+    ``mkdir`` before the first run. ``failure_class_distribution`` is
+    included so the trend table can show per-class deltas (issue #705).
 
     The file is opened in append mode and a single ``\\n``-terminated
     line is written per call, so concurrent appends from independent
