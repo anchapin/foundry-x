@@ -345,18 +345,32 @@ class TraceLogger:
         timestamps could not be parsed. Intended for the Digester and the
         trace CLI.
         """
-        for session in self.list_sessions():
-            if session.session_id != session_id:
-                continue
-            if session.ended_at is None:
+        if self.backend == "sqlite":
+            assert self._conn is not None
+            row = self._conn.execute(
+                "SELECT started_at, ended_at FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
                 return None
-            try:
-                start = datetime.fromisoformat(session.started_at)
-                end = datetime.fromisoformat(session.ended_at)
-            except ValueError:
+            started_at, ended_at = row
+        else:
+            session = next(
+                (session for session in self.list_sessions() if session.session_id == session_id),
+                None,
+            )
+            if session is None:
                 return None
-            return end - start
-        return None
+            started_at = session.started_at
+            ended_at = session.ended_at
+        if ended_at is None:
+            return None
+        try:
+            start = datetime.fromisoformat(started_at)
+            end = datetime.fromisoformat(ended_at)
+        except ValueError:
+            return None
+        return end - start
 
     def record(
         self,
