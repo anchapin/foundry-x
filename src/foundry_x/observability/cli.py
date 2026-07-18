@@ -17,6 +17,7 @@ from foundry_x.observability.session_summary import (
 )
 from foundry_x.observability.timeline import format_timeline, render_timeline_json
 from foundry_x.observability.tool_latency import (
+    LatencyWindow,
     aggregate_tool_latency,
     render_tool_latency_json,
     render_tool_latency_markdown,
@@ -233,6 +234,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Only include sessions recorded with this harness version.",
     )
+    tool_latency.add_argument(
+        "--window",
+        action="append",
+        choices=[w.value for w in LatencyWindow],
+        default=None,
+        help=(
+            "Window spec for trend analysis (issue #877). May be passed "
+            "multiple times to request several windows in a single "
+            "report. Choices: last_5_sessions, last_24h, last_7d. "
+            "Default (no flag): single all-time aggregate, no trend "
+            "section."
+        ),
+    )
     return parser
 
 
@@ -350,8 +364,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "tool-latency":
         backend = _infer_backend(args.db)
         logger = TraceLogger(args.db, backend=backend)
+        windows = (
+            [LatencyWindow(value) for value in args.window] if args.window is not None else None
+        )
         report = aggregate_tool_latency(
-            logger, since=args.since, harness_version=args.harness_version
+            logger,
+            since=args.since,
+            harness_version=args.harness_version,
+            windows=windows,
         )
         if args.format == "json":
             rendered = render_tool_latency_json(report)
