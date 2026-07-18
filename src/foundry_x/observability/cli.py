@@ -339,7 +339,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "tool-latency":
         backend = _infer_backend(args.db)
         logger = TraceLogger(args.db, backend=backend)
-        report = aggregate_tool_latency(logger, since=args.since, harness_version=args.harness_version)
+        report = aggregate_tool_latency(
+            logger, since=args.since, harness_version=args.harness_version
+        )
         if args.format == "json":
             rendered = render_tool_latency_json(report)
         else:
