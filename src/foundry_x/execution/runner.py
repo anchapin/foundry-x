@@ -1474,7 +1474,6 @@ async def run_task(
     # (one argument: the payload dict); the hook internally calls
     # tracer(payload) and the tracer forwards to log.record with the
     # session_id and kind wired in from the outer scope.
-<<<<<<< HEAD
     if registry is not None and hasattr(registry, "_hooks"):
         from harness.hooks.injection_firewall import InjectionFirewallHook
 
