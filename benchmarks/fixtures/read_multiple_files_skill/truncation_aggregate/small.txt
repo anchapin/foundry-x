@@ -1,0 +1,2 @@
+A small notes file used by the truncation_aggregate benchmark case.
+It is short enough to be read in full when max_bytes=2048.

@@ -1,0 +1,13 @@
+{
+  "service": "benchmark-api",
+  "version": "0.1.0",
+  "endpoints": {
+    "health": "/health",
+    "version": "/version"
+  },
+  "limits": {
+    "max_requests_per_minute": 60,
+    "timeout_seconds": 15
+  },
+  "tags": ["bench", "demo", "multi-file"]
+}
