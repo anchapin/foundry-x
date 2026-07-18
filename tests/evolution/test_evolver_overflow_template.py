@@ -20,6 +20,7 @@ These tests pin the JSON-aware patching contract:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -104,11 +105,12 @@ def _apply_diff(parent_dir: Path, diff: str) -> None:
 
 def _copy_tree(src: Path, dst: Path) -> None:
     """Recursively copy a directory tree preserving files and empty dirs."""
-    for root, dirs, files in src.walk():
-        rel = root.relative_to(src)
+    for root, _dirs, files in os.walk(src):
+        root_path = Path(root)
+        rel = root_path.relative_to(src)
         (dst / rel).mkdir(parents=True, exist_ok=True)
         for name in files:
-            (dst / rel / name).write_bytes((root / name).read_bytes())
+            (dst / rel / name).write_bytes((root_path / name).read_bytes())
 
 
 def _materialize_sandbox(tmp_path: Path, name: str, harness_dir: Path) -> Path:
