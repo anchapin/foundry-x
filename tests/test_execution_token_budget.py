@@ -547,16 +547,12 @@ async def test_run_task_token_budget_check_runs_before_message_append(tmp_path):
     # history. The over-budget response (and its marker content) MUST NOT
     # be present; only the safe response that preceded it should be.
     messages_snapshot = adapter.captured_messages
-    contents = [
-        msg.content for msg in messages_snapshot if msg.content is not None
-    ]
+    contents = [msg.content for msg in messages_snapshot if msg.content is not None]
     assert over_budget_marker not in contents, (
-        "over-budget response leaked into conversation history; "
-        f"messages contents: {contents!r}"
+        f"over-budget response leaked into conversation history; messages contents: {contents!r}"
     )
     assert "safe-0" in contents, (
-        "last safe response missing from history; "
-        f"messages contents: {contents!r}"
+        f"last safe response missing from history; messages contents: {contents!r}"
     )
 
 
