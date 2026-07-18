@@ -25,6 +25,11 @@ uv run python -m foundry_x.execution.runner --task "hello world"
 uv run pytest              # smoke test for TraceLogger
 ```
 
+**New to the project?** Walk through the
+[getting-started tutorial](docs/TUTORIAL.md) — a guided end-to-end tour
+(clone → plant a trace → inspect events → read KPIs) that takes under 30
+minutes and runs fully offline.
+
 ## CLI entrypoints
 
 Three console scripts ship with `foundry-x` (registered in
