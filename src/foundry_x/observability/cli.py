@@ -10,6 +10,8 @@ from foundry_x.observability.regression_report import analyze_regressions
 from foundry_x.observability.render import render_failure_report
 from foundry_x.observability.session_card import format_session_card
 from foundry_x.observability.session_summary import (
+    SessionSummaryReport,
+    _failure_class_distribution,
     build_session_summary,
     render_session_summary,
 )
@@ -166,6 +168,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Show at most N sessions after newest-first ordering.",
     )
+    session_summary.add_argument(
+        "--format",
+        default=None,
+        choices=("markdown", "json"),
+        help=(
+            "Output format (issue #624). Default: 'markdown'. When --out"
+            " ends in '.json', 'json' is selected automatically."
+        ),
+    )
+    session_summary.add_argument(
+        "--out",
+        default=None,
+        help="Write the summary to this path instead of stdout.",
+    )
 
     session_card = sub.add_parser(
         "session-card",
@@ -279,8 +295,25 @@ def main(argv: list[str] | None = None) -> int:
         backend = _infer_backend(args.db)
         logger = TraceLogger(args.db, backend=backend)
         rows = build_session_summary(logger, harness_version=args.harness_version)
-        sys.stdout.write(render_session_summary(rows, limit=args.limit))
-        sys.stdout.write("\n")
+        failure_class_distribution = _failure_class_distribution(rows)
+        if args.limit is not None:
+            rows = rows[: args.limit]
+        fmt = _resolve_format(args.format, args.out)
+        if fmt == "json":
+            report = SessionSummaryReport(
+                failure_class_distribution=failure_class_distribution,
+                rows=list(rows),
+            )
+            rendered = report.model_dump_json(indent=2) + "\n"
+        else:
+            rendered = (
+                render_session_summary(rows, failure_class_distribution=failure_class_distribution)
+                + "\n"
+            )
+        if args.out:
+            Path(args.out).write_text(rendered, encoding="utf-8")
+        else:
+            sys.stdout.write(rendered)
         return 0
 
     if args.command == "session-card":
