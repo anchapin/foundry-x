@@ -238,6 +238,13 @@ _PROPOSED_CLASS_EDIT_TEMPLATES: dict[str, tuple[str, str, list[str]]] = {
             "  - Encourage the model to produce a final answer rather than repeating tool calls.",
         ],
     ),
+    "unknown": (
+        "system_prompt.txt",
+        "address unknown-class failure: add clarification guidance",
+        [
+            "  - When in doubt about the task or context, surface the ambiguity explicitly instead of guessing.",
+        ],
+    ),
 }
 
 
