@@ -11,8 +11,10 @@ The PRD (``docs/PRD.md`` §5) defines:
 This module derives approximations of those metrics from the events already
 recorded by :class:`~foundry_x.trace.logger.TraceLogger`:
 
-* ``cycle_time_seconds`` — mean wall-clock time from the first
-  ``task_received`` event to the first ``critic_verdict`` event per session.
+* ``cycle_time_seconds`` — the operational proxy: mean wall-clock time from
+  the first ``task_received`` event to the first ``critic_verdict`` event
+  per session (the closest measurable proxy for the business-level "Agent
+  Failure" → "Harness Edit Proposal" definition above).
 * ``regression_rate`` — fraction of sessions with a ``critic_verdict`` in which
   a task previously seen in ``passed_checks`` later appears in ``failed_checks``
   (the persisted :class:`~foundry_x.observability.regression_report.VerdictRecord`
@@ -115,6 +117,11 @@ class KpiSummary(BaseModel):
     Empty by default; populated only when at least one ``context_pruned``
     event has been recorded. Like ``injection_blocks`` and ``token_totals``
     this is an auxiliary operator signal.
+
+    Issue #800 adds ``hooks_disabled_rate`` and ``wall_clock_abort_count``:
+    the fraction of sessions that recorded a ``hook_registry_error`` event
+    and the total count of ``task_aborted`` events whose ``reason`` is
+    ``"wall_clock"``, respectively.
     """
 
     cycle_time_seconds: float | None = None
@@ -310,7 +317,7 @@ def compare_kpis(
 def _compute_deltas(
     baseline: KpiSummary,
     candidate: KpiSummary,
-) -> dict[str, float | None]:
+) -> dict[str, float | int | None]:
     def _delta(b: float | None, c: float | None) -> float | None:
         if b is None or c is None:
             return None
@@ -323,6 +330,9 @@ def _compute_deltas(
         "token_budget_hit_rate": _delta(
             baseline.token_budget_hit_rate, candidate.token_budget_hit_rate
         ),
+        "hooks_disabled_rate": _delta(baseline.hooks_disabled_rate, candidate.hooks_disabled_rate),
+        "wall_clock_abort_count": candidate.wall_clock_abort_count
+        - baseline.wall_clock_abort_count,
     }
 
 
@@ -502,7 +512,6 @@ def _hook_registry_errors(
     if not sessions_with_errors:
         return 0, 0.0
 
-    # Use sessions with task_received as the denominator (active work sessions).
     sessions_with_task: set[str] = set()
     for event in logger.query_events(kind="task_received", harness_version=harness_version):
         sessions_with_task.add(event.session_id)
@@ -815,11 +824,13 @@ def _render_json(summary: KpiSummary) -> str:
 
 
 def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> str:
-    """Render baseline / candidate / delta columns for the three PRD KPIs.
+    """Render baseline / candidate / delta columns for the three PRD KPIs plus issue #800 additions.
 
     Issue #100 requires the comparison to surface a delta column whose
     sign convention follows the PRD: improvement-rate up is good,
-    regression-rate and cycle-time up are bad.
+    regression-rate and cycle-time up are bad. Issue #800 adds
+    ``hooks_disabled_rate`` (lower is worse) and ``wall_clock_abort_count``
+    (lower is worse) to the comparison table.
     """
     lines = [
         "| KPI | Baseline | Candidate | Delta |",
@@ -840,6 +851,14 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{_format_value(baseline.token_budget_hit_rate)} | "
         f"{_format_value(candidate.token_budget_hit_rate)} | "
         f"{_format_delta(baseline.token_budget_hit_rate, candidate.token_budget_hit_rate, higher_is_better=False)} |",
+        "| Hooks Disabled Rate | "
+        f"{_format_value(baseline.hooks_disabled_rate)} | "
+        f"{_format_value(candidate.hooks_disabled_rate)} | "
+        f"{_format_delta(baseline.hooks_disabled_rate, candidate.hooks_disabled_rate, higher_is_better=False)} |",
+        "| Wall Clock Abort Count | "
+        f"{baseline.wall_clock_abort_count} | "
+        f"{candidate.wall_clock_abort_count} | "
+        f"{_format_delta(float(baseline.wall_clock_abort_count), float(candidate.wall_clock_abort_count), higher_is_better=False)} |",
     ]
     return "\n".join(lines)
 
@@ -888,7 +907,12 @@ def append_kpi_history(
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = summary.model_dump(
         mode="json",
-        exclude={"injection_blocks", "token_totals", "streaming_quality", "wall_clock_abort_count"},
+        exclude={
+            "injection_blocks",
+            "token_totals",
+            "streaming_quality",
+            "wall_clock_abort_count",
+        },
     )
     payload["timestamp"] = _now_iso()
     if harness_version is not None:

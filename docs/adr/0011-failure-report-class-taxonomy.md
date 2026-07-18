@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. 2026-07-11.
+Accepted. 2026-07-11. Updated 2026-07-17: `context-overflow` removed
+from "pending" — shipped in issue #576 (Phase 3).
 
 ## Context
 
@@ -131,16 +132,18 @@ code or in a test.
    this session; consider tightening the firewall patterns or the
    upstream tool-result scrubbing policy.
 
-### The fifth keyword class (proposed): `context-overflow`
+### The fifth keyword class: `context-overflow`
 
-The Phase-3 context-pruning work needs a class for sessions where the
-Runner agent loop terminates via
+The Phase-3 context-pruning work introduced a class for sessions where
+the Runner agent loop terminates via
 `outcome.status="truncated"` / `outcome.reason="max_steps"`
-([ADR-0010](0010-runner-agent-loop.md)). This ADR *proposes* the
-class name and trigger but does not implement the classification
-change in `src/foundry_x/evolution/digester.py`; that lands in a
-follow-up PR so the keyword tuple and the aggregation rule can be
-reviewed together.
+([ADR-0010](0010-runner-agent-loop.md) §Termination semantics).
+
+The classification change shipped in issue #576
+(`src/foundry_x/evolution/digester.py:347-431`), with keyword-bucket
+and parametrised tests in `tests/test_digester.py` (lines 666-793),
+following the same "ADR + keyword tuple + aggregation pass + test"
+pattern as the four existing classes.
 
 - **Class name:** `context-overflow`.
 - **Trigger event:** any `TraceEvent` with
@@ -151,19 +154,15 @@ reviewed together.
   `src/foundry_x/execution/runner.py:253`) is a separate guardrail
   and is **out of scope** for this class — it stays a `tool-error` or
   a future distinct class declared here in a later amendment.
-- **Keyword bucket:** to be defined in the follow-up. The
-  implementation PR will add a tuple entry to `_CLASS_KEYWORDS` (or
-  an aggregation pass, mirroring `injection-attempt`) and a
-  `FailureReport` cover test in `tests/test_digester.py` that pins
-  the new keyword bucket, exactly as the four existing classes do.
-- **Cause template (initial sketch):** "Agent loop reached
-  `max_steps` (steps=N) before producing a final answer; the context
-  budget was exhausted. Review the pruning hook and the model's
-  tendency to repeat tool calls."
-- **Out of scope (per issue #190):** the
-  `src/foundry_x/trace/` event-kind change that would also add
-  `truncated` to `FAILURE_KINDS`, and the Phase-3 pruning hook
-  implementation. Both ride in later PRs.
+- **Implementation:** `_aggregate_max_steps` in `Digester.digest()`
+  (`digester.py:347-431`), which short-circuits the generic walk so a
+  max-steps truncation is reported as `context-overflow` even when a
+  later `tool_error` also fires. Tests at
+  `tests/test_digester.py:687-793`.
+- **Cause template:** "Agent loop reached `max_steps` (steps=N)
+  before producing a final answer; the context budget was exhausted.
+  Review the pruning hook and the model's tendency to repeat tool
+  calls."
 
 ### Two non-failure sentinels
 
@@ -225,14 +224,14 @@ removes) a class:
   every class declared here. A refactor that silently swaps a
   keyword bucket surfaces as a test failure; a refactor that adds a
   class *without* an ADR amendment is rejected at PR review.
-- **`context-overflow` as a pending change.** The Phase-3
-  context-pruning implementation has a stable target: trigger on
-  `outcome`/`max_steps`, name the class `context-overflow`, follow
-  the same "ADR + keyword tuple + parametrised test" pattern that
-  has shipped the four existing classes. The class itself, however,
-  does not exist in `_CLASS_KEYWORDS` today; this ADR does not
-  change `src/foundry_x/evolution/digester.py`. Issue #190's "out of
-  scope" list binds that follow-up to a separate PR.
+- **`context-overflow` shipped.** Issue #576 implemented the
+  `_aggregate_max_steps` aggregation pass in `Digester.digest()`
+  (`digester.py:347-431`), making `context-overflow` a live failure
+  class. The implementation follows the same "ADR + aggregation pass +
+  parametrised test" pattern as `injection-attempt`, with tests at
+  `tests/test_digester.py:687-793`. The "out of scope" list in the
+  original proposal (issue #190's `FAILURE_KINDS` change and the
+  pruning-hook wiring) remain separate follow-up items.
 - **`injection-attempt` stays special.** Its aggregation rule
   deviates from the keyword-bucket pattern by design — adversarial
   blocks should always land as one report with the full surface in
@@ -243,8 +242,8 @@ removes) a class:
   vocabulary of `kind` values is a `pydantic` enum at module
   boundaries; this ADR does not modify that enum. The
   `outcome`/`truncated`/`max_steps` taxonomy is owned by
-  [ADR-0010](0010-runner-agent-loop.md); the classifier that turns
-  it into `context-overflow` is the next PR's job.
+  [ADR-0010](0010-runner-agent-loop.md); the `_aggregate_max_steps`
+  aggregation pass in issue #576 turned it into `context-overflow`.
 - **Cross-references.** See
   [ADR-0006](0006-pydantic-for-module-boundaries.md) (FailureReport
   is a pydantic model),

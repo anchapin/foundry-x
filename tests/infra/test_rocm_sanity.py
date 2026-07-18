@@ -280,3 +280,268 @@ def test_check_rocm_prints_hint_on_failure(tmp_path: Path) -> None:
     assert result.returncode == 1, result.stdout
     assert "hint:" in result.stderr
     assert "ROCm pitfalls" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Issue #754 acceptance: GPU responsiveness is checked (5th precondition).
+# ---------------------------------------------------------------------------
+
+
+def test_check_rocm_includes_gpu_responsive_check_in_output(tmp_path: Path) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-rocm"], fake.env(GPU_RESPONSIVE_PROBE="echo ok"))
+
+    out = result.stdout
+    assert "GPU responsive:" in out, f"Expected 'GPU responsive:' in output: {out}"
+
+
+def test_check_rocm_passes_when_gpu_responsive(tmp_path: Path) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-rocm"], fake.env(GPU_RESPONSIVE_PROBE="echo ok"))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "GPU responsive:" in result.stdout and "OK" in result.stdout
+
+
+def test_check_rocm_fails_when_gpu_not_responsive(tmp_path: Path) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-rocm"], fake.env(GPU_RESPONSIVE_PROBE="false"))
+
+    assert result.returncode == 1, result.stdout
+    assert "GPU responsive:" in result.stdout and "FAIL" in result.stdout
+
+
+def test_check_rocm_fails_when_responsive_probe_times_out(tmp_path: Path) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-rocm"], fake.env(GPU_RESPONSIVE_PROBE="timeout 1 sleep 10"))
+
+    assert result.returncode == 1, result.stdout
+    assert "GPU responsive:" in result.stdout and "FAIL" in result.stdout
+
+
+def test_check_gpu_responsive_flag_passes_when_responsive(tmp_path: Path) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-gpu-responsive"], fake.env(GPU_RESPONSIVE_PROBE="echo ok"))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "GPU responsive: OK" in result.stdout
+
+
+def test_check_gpu_responsive_flag_fails_when_not_responsive(tmp_path: Path) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-gpu-responsive"], fake.env(GPU_RESPONSIVE_PROBE="false"))
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "GPU responsive: FAIL" in result.stderr
+
+
+def test_check_rocm_uses_rocminfo_when_gpu_responsive_probe_not_set(
+    tmp_path: Path,
+) -> None:
+    fake = _healthy_fake(tmp_path)
+    result = _run(["--check-rocm"], fake.env(GPU_RESPONSIVE_PROBE=""))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "GPU responsive:" in result.stdout and "OK" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Issue #815 acceptance: GPU-active inference assertion in smoke test.
+# When LLAMACPP_SMOKE_NGL > 0 the smoke test must verify the server log
+# contains a ROCm GPU agent identifier; otherwise it exits non-zero.
+# ---------------------------------------------------------------------------
+
+
+class _FakeLlamaServer:
+    """A throwaway llama-server that listens on a port and writes a marker
+    to stderr so the caller can verify GPU-active inference was asserted.
+    Combine with a FakeRocm instance via ``env_from_fake()``."""
+
+    def __init__(self, root: Path, *, rocmmark: str = "ROCm initialized\n") -> None:
+        self.root = root
+        self.rocmmark = rocmmark
+        self.port = 18765
+        self.server_dir = root / "llama.cpp"
+        self.build_dir = self.server_dir / "build" / "bin"
+        self.build_dir.mkdir(parents=True)
+        self.model = root / "model.gguf"
+        self.model.touch()
+        self.log = root / "server.log"
+
+    def write_binary(self) -> None:
+        import subprocess as _subprocess
+
+        self.server_dir.mkdir(parents=True, exist_ok=True)
+        _subprocess.run(
+            ["git", "init", "-q", str(self.server_dir)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        _subprocess.run(
+            ["git", "config", "user.email", "test@test.test"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(self.server_dir),
+        )
+        _subprocess.run(
+            ["git", "config", "user.name", "test"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(self.server_dir),
+        )
+        readme = self.server_dir / "README"
+        readme.write_text("mock", encoding="utf-8")
+        _subprocess.run(
+            ["git", "add", "README"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(self.server_dir),
+        )
+        _subprocess.run(
+            ["git", "commit", "-q", "-m", "init"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(self.server_dir),
+        )
+        _subprocess.run(
+            ["git", "tag", "b9957", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(self.server_dir),
+        )
+        _subprocess.run(
+            ["git", "remote", "add", "origin", str(self.server_dir)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(self.server_dir),
+        )
+
+        self.build_dir.mkdir(parents=True, exist_ok=True)
+        cmakeLists = self.server_dir / "CMakeLists.txt"
+        cmakeLists.write_text(
+            "cmake_minimum_required(VERSION 3.16)\nadd_custom_target(llama-server ALL DEPENDS)\n",
+            encoding="utf-8",
+        )
+        self.build_dir.joinpath("bin").mkdir(parents=True, exist_ok=True)
+        srvbin = self.build_dir / "bin" / "llama-server"
+        srvbin.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n", encoding="utf-8")
+        srvbin.chmod(srvbin.stat().st_mode | stat.S_IXUSR)
+
+        content = f"""#!/usr/bin/env python3
+import os, sys, time, threading, http.server
+
+PORT = {self.port}
+MARKER = {self.rocmmark!r}
+LOG = {str(self.log)!r}
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{{"ok": true}}')
+        elif self.path == "/v1/models":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{{"data":[{{"id":"test"}}]}}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        if self.path == "/completion":
+            sys.stderr.write(MARKER)
+            sys.stderr.flush()
+            time.sleep(0.2)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{{"content":"hello"}}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+if __name__ == "__main__":
+    server = http.server.HTTPServer(("127.0.0.1", PORT), Handler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    time.sleep(30)
+"""
+        (self.build_dir / "llama-server").write_text(content, encoding="utf-8")
+        (self.build_dir / "llama-server").chmod(self.build_dir.stat().st_mode | stat.S_IXUSR)
+
+    def env_from_fake(self, fake: FakeRocm, **extra: str) -> dict[str, str]:
+        marker_file = self.root / ".gpu_marker"
+        marker_file.write_text(self.rocmmark, encoding="utf-8")
+        base = fake.env()
+        base.update(
+            {
+                "LLAMACPP_DIR": str(self.server_dir),
+                "LLAMACPP_SMOKE_MODEL": str(self.model),
+                "LLAMACPP_SMOKE_PORT": str(self.port),
+                "SERVER_LOG": str(self.log),
+                "LLAMACPP_REF": "HEAD",
+                "LLAMACPP_SKIP_BUILD": "1",
+                "LLAMACPP_GPU_MARKER_FILE": str(marker_file),
+            }
+        )
+        base.update(extra)
+        return base
+
+
+def _smoke_run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [_bash(), str(SCRIPT), "--smoke-test", env["LLAMACPP_SMOKE_MODEL"]],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=env,
+    )
+
+
+def test_smoke_skips_gpu_assertion_when_ngl_is_zero(tmp_path: Path) -> None:
+    fake = _healthy_fake(tmp_path)
+    srv = _FakeLlamaServer(tmp_path)
+    srv.write_binary()
+    result = _smoke_run(srv.env_from_fake(fake))
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "Smoke test PASSED" in combined
+    assert "no ROCm GPU agent found" not in combined
+
+
+def test_smoke_fails_gpu_assertion_when_ngl_positive_but_no_rocm_in_log(
+    tmp_path: Path,
+) -> None:
+    fake = _healthy_fake(tmp_path)
+    srv = _FakeLlamaServer(tmp_path, rocmmark="CPU mode active\n")
+    srv.write_binary()
+    result = _smoke_run(srv.env_from_fake(fake, LLAMACPP_SMOKE_NGL="35"))
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1, combined
+    assert "no ROCm GPU agent found" in combined
+    assert "ROCm pitfalls" in combined
+
+
+def test_smoke_passes_gpu_assertion_when_ngl_positive_and_rocm_in_log(
+    tmp_path: Path,
+) -> None:
+    fake = _healthy_fake(tmp_path)
+    srv = _FakeLlamaServer(tmp_path, rocmmark="ROCm initialized\namdgpu: gfx1032\n")
+    srv.write_binary()
+    result = _smoke_run(srv.env_from_fake(fake, LLAMACPP_SMOKE_NGL="35"))
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "Smoke test PASSED" in combined

@@ -1,10 +1,10 @@
-"""Tests for foundry-evolve CLI (issue #256)."""
+"""Tests for foundry-evolve CLI (issue #256, #799)."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from foundry_x.evolution.cli import _build_parser, _infer_backend, main
+from foundry_x.evolution.cli import _build_parser, _infer_backend, _run_loop, main
 from foundry_x.trace.logger import TraceLogger
 from tests._harness_fixture import install_load_check_prerequisites
 
@@ -213,3 +213,149 @@ class TestFoundryEvolveCLI:
         assert rc == 0
         out = capsys.readouterr().out
         assert "No failure detected" in out
+
+
+class TestRunLoopIntegration:
+    """Integration tests for _run_loop (issue #799).
+
+    These tests exercise the full pipeline (TraceLogger -> Digester -> Evolver -> Critic)
+    by calling _run_loop directly, testing _infer_backend, _render_failure_report,
+    and _render_critic_verdict in a live session context.
+    """
+
+    def test_clean_session_via_run_loop_exits_0(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_clean_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
+            session_id=sid,
+            trace_db=str(db),
+            harness_dir=harness,
+            verbose=False,
+        )
+
+        assert exit_code == 0
+        assert _report is not None
+        assert _report.proposed_class == "clean"
+        assert _edit is None
+        assert _verdict is None
+        out = capsys.readouterr().out
+        assert "Failure Report" in out
+        assert "clean" in out
+
+    def test_failing_session_via_run_loop_exits_1(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_failing_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
+            session_id=sid,
+            trace_db=str(db),
+            harness_dir=harness,
+            verbose=False,
+        )
+
+        assert exit_code == 1
+        assert _report is not None
+        assert _report.proposed_class != "clean"
+        assert _edit is not None
+        assert _verdict is not None
+        assert _verdict.verdict is False
+        out = capsys.readouterr().out
+        assert "Failure Report" in out
+        assert "tool-error" in out
+        assert "Proposed Edit" in out
+        assert "Critic Verdict" in out
+        assert "REJECTED" in out
+
+    def test_unknown_session_via_run_loop_exits_2(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        TraceLogger(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
+            session_id="does-not-exist",
+            trace_db=str(db),
+            harness_dir=harness,
+            verbose=False,
+        )
+
+        assert exit_code == 2
+        assert _report is None
+        assert _edit is None
+        assert _verdict is None
+        err = capsys.readouterr().err
+        assert "No events found" in err
+
+    def test_verbose_flag_via_run_loop_shows_diff(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_failing_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
+            session_id=sid,
+            trace_db=str(db),
+            harness_dir=harness,
+            verbose=True,
+        )
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "--- a/" in captured.out
+        assert "+++ b/" in captured.out
+        assert "Proposed Edit" in captured.out
+        assert "Critic Verdict" in captured.out
+
+    def test_run_loop_infers_sqlite_backend(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_clean_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
+            session_id=sid,
+            trace_db=str(db),
+            harness_dir=harness,
+            verbose=False,
+        )
+
+        assert exit_code == 0
+        assert _report is not None
+        assert _report.proposed_class == "clean"
+
+    def test_run_loop_infers_jsonl_backend(self, tmp_path, capsys):
+        db = tmp_path / "traces.jsonl"
+        logger = TraceLogger(db, backend="jsonl")
+        with logger.session(harness_version="0.1.0", model_id="test-model") as sid:
+            logger.record(sid, "task_received", {"prompt": "Do the thing"})
+            logger.record(sid, "user_prompt", {"prompt": "Do the thing", "tool_count": 1})
+            logger.record(sid, "tool_call", {"name": "read_file"})
+            logger.record(sid, "tool_result", {"name": "read_file", "output": "file contents"})
+            logger.record(
+                sid, "outcome", {"status": "success", "reason": "final_answer", "steps": 1}
+            )
+
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
+            session_id=sid,
+            trace_db=str(db),
+            harness_dir=harness,
+            verbose=False,
+        )
+
+        assert exit_code == 0
+        assert _report is not None
+        assert _report.proposed_class == "clean"

@@ -198,6 +198,7 @@ def _failure_class_distribution(
 def build_session_summary(
     logger: TraceLogger,
     harness_version: str | None = None,
+    since: str | None = None,
 ) -> list[SessionSummaryRow]:
     """Return one :class:`SessionSummaryRow` per session in *logger*.
 
@@ -212,8 +213,13 @@ def build_session_summary(
     ``task_aborted(reason="token_budget")`` event was recorded for
     the session, ``False`` when an outcome exists but no token budget
     abort, and ``None`` when the session has no outcome event at all.
+
+    *since* filters to sessions whose ``started_at`` is at or after the
+    given ISO-8601 timestamp.
     """
     sessions = logger.list_sessions(harness_version=harness_version)
+    if since is not None:
+        sessions = [s for s in sessions if s.started_at >= since]
     rows: list[SessionSummaryRow] = []
     for session in sessions:
         outcome = _latest_outcome(logger.iter_events(session.session_id, kind=OUTCOME_KIND))

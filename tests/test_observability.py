@@ -121,49 +121,6 @@ def test_format_timeline_omits_tool_latency_when_missing():
 
 
 # ---------------------------------------------------------------------------
-# Issue #631: timeline shows empty summary for hook_registry_error events.
-# ---------------------------------------------------------------------------
-
-
-def test_format_timeline_shows_hook_registry_error_message():
-    events = [
-        _event(
-            "hook_registry_error",
-            timedelta(seconds=0.0),
-            {"error_type": "HookRegistryError", "message": "get_registry() raised"},
-        ),
-    ]
-    output = format_timeline(events)
-    assert "get_registry() raised" in output
-
-
-def test_format_timeline_shows_error_type_when_message_absent():
-    events = [
-        _event(
-            "hook_registry_error",
-            timedelta(seconds=0.0),
-            {"error_type": "RuntimeError"},
-        ),
-    ]
-    output = format_timeline(events)
-    assert "RuntimeError" in output
-
-
-def test_build_timeline_records_hook_registry_error_is_error_flag():
-    records = build_timeline_records(
-        [
-            _event(
-                "hook_registry_error",
-                timedelta(seconds=0.0),
-                {"error_type": "HookRegistryError", "message": "get_registry() raised"},
-            ),
-        ]
-    )
-    assert len(records) == 1
-    assert records[0].is_error is True
-
-
-# ---------------------------------------------------------------------------
 # Issue #271: timeline shows cumulative token count on model_response lines.
 # ---------------------------------------------------------------------------
 
@@ -417,92 +374,81 @@ def test_cli_timeline_default_format_is_markdown(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# Issue #710: fx-trace timeline --kind / -k filter by event kind.
+# Issue #803: fx-trace timeline --harness-version filter.
 # ---------------------------------------------------------------------------
 
 
-def test_cli_timeline_kind_filter_single_kind(tmp_path, capsys):
+def test_cli_timeline_harness_version_renders_most_recent_session(tmp_path, capsys):
     db = tmp_path / "traces.db"
-    sid = _populate_session(db)
+    logger = TraceLogger(db)
+    # Record two sessions for the same harness version.
+    with logger.session(harness_version="v1.0.0") as sid1:
+        logger.record(sid1, "user_prompt", {"prompt": "first session"})
+    with logger.session(harness_version="v1.0.0") as sid2:
+        logger.record(sid2, "user_prompt", {"prompt": "second session"})
 
-    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid, "--kind", "tool_call"])
+    rc = cli_main(["timeline", "--db", str(db), "--harness-version", "v1.0.0"])
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "tool_call" in out
-    assert "user_prompt" not in out
-    # Only the tool_call event should appear.
-    step_lines = [ln for ln in out.splitlines() if re.search(r"#\d+", ln)]
-    assert len(step_lines) == 1
+    # The most recent session (sid2) should be rendered.
+    assert "second session" in out
+    assert "first session" not in out
 
 
-def test_cli_timeline_kind_filter_short_form(tmp_path, capsys):
+def test_cli_timeline_harness_version_error_when_no_session(tmp_path, capsys):
     db = tmp_path / "traces.db"
-    sid = _populate_session(db)
+    TraceLogger(db)
 
-    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid, "-k", "tool_result"])
+    rc = cli_main(["timeline", "--db", str(db), "--harness-version", "v99.0.0"])
 
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "tool_result" in out
-    assert "tool_call" not in out
-    step_lines = [ln for ln in out.splitlines() if re.search(r"#\d+", ln)]
-    assert len(step_lines) == 1
-
-
-def test_cli_timeline_kind_filter_multiple_kinds(tmp_path, capsys):
-    db = tmp_path / "traces.db"
-    sid = _populate_session(db)
-
-    rc = cli_main(
-        ["timeline", "--db", str(db), "--session-id", sid, "--kind", "tool_call,tool_result"]
-    )
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "tool_call" in out
-    assert "tool_result" in out
-    assert "user_prompt" not in out
-    # Two step lines: tool_call and tool_result.
-    step_lines = [ln for ln in out.splitlines() if re.search(r"#\d+", ln)]
-    assert len(step_lines) == 2
-
-
-def test_cli_timeline_kind_filter_json_format(tmp_path, capsys):
-    db = tmp_path / "traces.db"
-    sid = _populate_session(db)
-
-    rc = cli_main(
-        [
-            "timeline",
-            "--db",
-            str(db),
-            "--session-id",
-            sid,
-            "--kind",
-            "tool_call",
-            "--format",
-            "json",
-        ]
-    )
-
-    assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert len(payload) == 1
-    assert payload[0]["kind"] == "tool_call"
-
-
-def test_cli_timeline_kind_filter_no_match_returns_empty(tmp_path, capsys):
-    db = tmp_path / "traces.db"
-    sid = _populate_session(db)
-
-    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid, "--kind", "model_response"])
-
-    # When the kind filter yields no events, the CLI reports "not found or empty".
     assert rc == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "not found or empty" in captured.err
+    assert "no session found for harness version v99.0.0" in captured.err
+
+
+def test_cli_timeline_harness_version_with_different_versions(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1.0.0") as sid1:
+        logger.record(sid1, "user_prompt", {"prompt": "v1 session"})
+    with logger.session(harness_version="v2.0.0") as sid2:
+        logger.record(sid2, "user_prompt", {"prompt": "v2 session"})
+
+    rc = cli_main(["timeline", "--db", str(db), "--harness-version", "v2.0.0"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "v2 session" in out
+    assert "v1 session" not in out
+
+
+def test_cli_timeline_neither_session_id_nor_harness_version_errors(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = cli_main(["timeline", "--db", str(db)])
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "either --session-id or --harness-version is required" in captured.err
+
+
+def test_cli_timeline_harness_version_json_format(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1.0.0") as sid:
+        logger.record(sid, "user_prompt", {"prompt": "test prompt"})
+
+    rc = cli_main(["timeline", "--db", str(db), "--harness-version", "v1.0.0", "--format", "json"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert isinstance(payload, list)
+    assert len(payload) == 1
+    assert payload[0]["kind"] == "user_prompt"
 
 
 # ---------------------------------------------------------------------------

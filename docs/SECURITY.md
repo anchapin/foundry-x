@@ -46,7 +46,10 @@ We design against these threats:
 - **Prompt-input firewall.** Tool-call results that will be
   re-injected into a prompt must be checked for injection markers
   (`ignore previous instructions`, role-tag injection, etc.) and
-  either truncated or flagged for human review.
+  either truncated or flagged for human review. Every block emits a
+  ``firewall_exception`` trace event (issue #823) carrying
+  ``hook_name``, ``pattern_matched``, and ``risk_score`` so firewall
+  events are queryable via ``foundry-x-trace``.
 - **Rate limits.** The `Evolver` is rate-limited: max N proposals per
   hour, max M lines of harness diff per proposal, max LLM calls per hour,
   and max cost per day. Defaults live in
@@ -83,7 +86,9 @@ We design against these threats:
   the commit as compromised even after removal: git history is
   forever.
 - Trace stores MUST NOT contain raw API keys. Strip them at write
-  time.
+  time. Coverage includes AWS access key IDs, GCP service account
+  emails / ADC paths / project ID env vars, GitHub PATs, JWTs,
+  Stripe live keys, Slack tokens, and Bearer tokens.
 - If a trace is found to hold a secret that slipped past the write-time
   scrubber, the `foundry-trace` CLI offers two operator remediation
   commands (issue #192, backed by the `TraceLogger.delete_session` and
@@ -147,8 +152,13 @@ under `benchmarks/tasks/`:
 - `test_evolver_guardrail_evals.py` — `ProposedEdit` confines edits
   to `harness/{system_prompt.txt,hooks/,skills/}` and the `Evolver`
   enforces the §"Rate limits" cap.
+- `test_foundation_token_budget.py` — token-budget mechanism is
+  resilient to prompt-injection attempts embedded in task fixtures;
+  the agent must not exfiltrate or manipulate the `FOUNDRY_TOKEN_BUDGET`
+  value when an adversarial input is present in the task description
+  (issue #822).
 
-A regression in any of the four flips the Critic red before the
+A regression in any of the five flips the Critic red before the
 proposed harness edit ships. The Critic additionally persists a
 regression baseline at `logs/critic_baseline.json` (ADR-0004 step 3,
 issue #186): once a benchmark task is recorded as passing, any

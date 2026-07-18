@@ -36,6 +36,8 @@ def _seed_session(
     failed_checks: list[str] | None = None,
     injection_block_count: int = 0,
     failure_class: str | None = None,
+    hook_registry_error: bool = False,
+    wall_clock_abort: bool = False,
 ) -> str:
     """Create a session with task_received + optional persisted critic_verdict.
 
@@ -50,6 +52,9 @@ def _seed_session(
     Issue #705 adds the optional ``failure_class`` parameter: when provided,
     it is stored in the ``CriticVerdict`` so the KPI aggregation can
     compute ``failure_class_distribution``.
+
+    Issue #800 adds ``hook_registry_error`` and ``wall_clock_abort`` parameters
+    to plant the corresponding trace events for KPI computation.
     """
     with logger.session(harness_version=harness_version) as sid:
         logger.record(sid, kind="task_received", payload={"prompt": "do work"})
@@ -75,6 +80,18 @@ def _seed_session(
                     "tool": "read_file",
                     "preview": f"block {i}",
                 },
+            )
+        if hook_registry_error:
+            logger.record(
+                sid,
+                kind="hook_registry_error",
+                payload={"error_type": "ImportError", "message": "test error"},
+            )
+        if wall_clock_abort:
+            logger.record(
+                sid,
+                kind="task_aborted",
+                payload={"reason": "wall_clock", "timeout_s": 1.0, "token_budget": None},
             )
     return sid
 
@@ -500,6 +517,30 @@ def test_compare_kpis_zero_session_version_no_false_green(tmp_path):
     # But the session counts reveal the truth.
     assert comparison.baseline_session_count == 1
     assert comparison.candidate_session_count == 0
+
+
+def test_compare_kpis_includes_hooks_disabled_rate_and_wall_clock_abort_count_deltas(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # Baseline v1: no hooks disabled, no wall-clock aborts.
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    # Candidate v2: one session has hook_registry_error, one has wall-clock abort.
+    _seed_session(logger, "v2", verdict=True, passed_checks=["bench"], hook_registry_error=True)
+    _seed_session(logger, "v2", verdict=True, passed_checks=["bench"], wall_clock_abort=True)
+
+    comparison = compare_kpis(logger, "v1", "v2")
+
+    assert isinstance(comparison, KpiComparison)
+    # Baseline: 0 sessions with hook errors out of 2 → rate 0.0
+    # Candidate: 1 session with hook error out of 2 → rate 0.5
+    assert comparison.baseline.hooks_disabled_rate == 0.0
+    assert comparison.candidate.hooks_disabled_rate == 0.5
+    assert comparison.deltas["hooks_disabled_rate"] == pytest.approx(0.5)
+    # Baseline: 0 aborts. Candidate: 1 abort.
+    assert comparison.baseline.wall_clock_abort_count == 0
+    assert comparison.candidate.wall_clock_abort_count == 1
+    assert comparison.deltas["wall_clock_abort_count"] == 1
 
 
 def test_main_comparison_prints_baseline_candidate_delta_columns(tmp_path, capsys):

@@ -33,6 +33,7 @@ format and process.
 | [0019](./0019-quantization-intelligence-floor.md) | Quantization intelligence floor findings | Accepted |
 | [0020](./0020-phase-3-findings.md) | Phase 3 Intelligence Floor Findings | Accepted |
 | [0021](./0021-context-pruning-at-scale.md) | Context pruning at scale — Phase 3 findings | Accepted |
+| [0022](./0022-store-implementation-selection-criteria.md) | Store implementation selection criteria | Accepted |
 
 When adding a new ADR, append it to this table in the same PR.
 Mark the status `Accepted` in the same PR that ships the implementation;

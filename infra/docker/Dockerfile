@@ -114,4 +114,7 @@ COPY --from=builder /app/tests /app/tests
 # build tool, not a runtime dependency).
 ENV PATH="/app/.venv/bin:${PATH}"
 
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
+
 CMD ["python", "-m", "foundry_x.execution.runner"]

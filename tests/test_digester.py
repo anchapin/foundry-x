@@ -319,6 +319,108 @@ def test_injection_block_vocabulary_is_exported():
     assert INJECTION_BLOCKED_KIND not in FAILURE_KINDS
 
 
+# --- Issue #805: context-overflow aggregation ---------------------------------
+# Triggered when the runner agent loop terminates via
+# ``outcome.status='truncated'`` / ``outcome.reason='max_steps'`` (ADR-0010).
+# The class takes precedence over injection-block aggregation since it is a
+# terminal condition.
+
+
+def _outcome_event(
+    status: str,
+    reason: str,
+    steps: int = 10,
+    event_id: str = "e-outcome",
+    seq: int = 4,
+) -> TraceEvent:
+    """Build an ``outcome`` event with the given status/reason payload."""
+    return _ev(
+        "outcome",
+        {"status": status, "reason": reason, "steps": steps},
+        event_id=event_id,
+        seq=seq,
+    )
+
+
+def test_context_overflow_yields_context_overflow_class():
+    """A truncated outcome with max_steps reason must produce the context-overflow class."""
+    events = [
+        *_CLEAN_EVENTS,
+        _outcome_event("truncated", "max_steps", steps=10, event_id="e-co", seq=4),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "context-overflow"
+    assert "context-overflow" in report.summary
+    assert len(report.failed_steps) == 1
+    step = report.failed_steps[0]
+    assert step["kind"] == "outcome"
+    assert step["event_id"] == "e-co"
+    assert step["signal"] == "outcome:truncated/max_steps"
+    # Cause template includes the keyword match for traceability.
+    assert any("matched: max_steps" in c for c in report.suspected_causes)
+    assert any("pruning hook" in c for c in report.suspected_causes)
+
+
+def test_context_overflow_takes_precedence_over_injection_blocks():
+    """A session with both context-overflow and injection blocks must report context-overflow.
+
+    Context-overflow is a terminal condition (the session ended) whereas
+    injection blocks are a partial adversarial surface that the session
+    survived. The Evolver must address the loop termination first.
+    """
+    events = [
+        _ev("user_prompt", {"text": "go"}, event_id="e1", seq=1),
+        _block_event(["ignore_previous"], event_id="e-block", seq=2),
+        _outcome_event("truncated", "max_steps", steps=5, event_id="e-co", seq=3),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "context-overflow"
+    # The injection block is still observed but context-overflow wins.
+    assert report.failed_steps[0]["event_id"] == "e-co"
+
+
+def test_context_overflow_without_truncated_status_returns_none():
+    """An outcome event without truncated status must not trigger context-overflow."""
+    events = [
+        _outcome_event("completed", "normal", steps=5, event_id="e-ok", seq=1),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "clean"
+
+
+def test_context_overflow_without_max_steps_reason_returns_none():
+    """An outcome event without max_steps reason must not trigger context-overflow."""
+    events = [
+        _outcome_event("truncated", "timeout", steps=5, event_id="e-timeout", seq=1),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "clean"
+
+
+def test_context_overflow_with_missing_steps_uses_question_mark():
+    """A malformed outcome payload (no steps key) must still produce a useful report."""
+    events = [
+        _ev(
+            "outcome",
+            {"status": "truncated", "reason": "max_steps"},
+            event_id="e-malformed",
+            seq=1,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "context-overflow"
+    # The matched keyword is still captured for traceability even when steps is missing.
+    assert any("matched: max_steps" in c for c in report.suspected_causes)
+
+
+def test_context_overflow_vocabulary_is_exported():
+    """The new class constant is pinned as a module-level export."""
+    assert CONTEXT_OVERFLOW_CLASS == "context-overflow"
+    # ``outcome`` is intentionally NOT in ``FAILURE_KINDS``: it is handled
+    # by a dedicated aggregation pass, not the generic first-failure walk.
+    assert "outcome" not in FAILURE_KINDS
+
+
 # --- Coverage added by issue #95 --------------------------------------------
 # Per-mode keyword exhaustiveness, specificity/precedence, extended
 # first-failed-step scenarios, signal/cause contract, and a lock-in of the
@@ -379,6 +481,14 @@ _TOOL_ERROR_KEYWORDS: tuple[str, ...] = (
     "failed",
 )
 
+# Issue #798: context-overflow keywords for direct classification fallback
+_CONTEXT_OVERFLOW_KEYWORDS: tuple[str, ...] = (
+    "max_steps",
+    "context overflow",
+    "context limit",
+    "token budget",
+)
+
 
 def _one_failing_event(
     keyword: str,
@@ -430,6 +540,14 @@ def test_tool_error_keyword_classifies_as_tool_error(keyword: str) -> None:
     assert any("Tool execution raised an error" in c for c in report.suspected_causes)
 
 
+# Issue #798: context-overflow keywords for direct classification fallback
+@pytest.mark.parametrize("keyword", _CONTEXT_OVERFLOW_KEYWORDS)
+def test_context_overflow_keyword_classifies_as_context_overflow(keyword: str) -> None:
+    report = Digester().digest(_SESSION, _one_failing_event(keyword))
+    assert report.proposed_class == "context-overflow"
+    assert any("context budget limit" in c for c in report.suspected_causes)
+
+
 # --- Specificity / precedence ----------------------------------------------
 # digester.py:65-71: each mode has a priority, and the most-specific keyword
 # wins over the ``tool-error`` catch-all. If a payload accidentally contains
@@ -445,6 +563,8 @@ def test_tool_error_keyword_classifies_as_tool_error(keyword: str) -> None:
         ("prompt is ambiguous and missing context", "bad-prompt"),
         ("file not found: missing.py", "state-leak"),
         ("already exists: /tmp/x", "state-leak"),
+        ("max_steps limit reached", "context-overflow"),
+        ("context overflow detected", "context-overflow"),
     ],
     ids=[
         "wrong-tool-beats-tool-error",
@@ -452,6 +572,8 @@ def test_tool_error_keyword_classifies_as_tool_error(keyword: str) -> None:
         "bad-prompt-beats-tool-error",
         "state-leak-beats-tool-error",
         "state-leak-exists-beats-tool-error",
+        "context-overflow-beats-tool-error",
+        "context-overflow-overflow-beats-tool-error",
     ],
 )
 def test_specific_keyword_beats_tool_error_catchall(keyword: str, expected_class: str) -> None:
@@ -701,7 +823,7 @@ def test_truncated_max_steps_yields_context_overflow_class() -> None:
     assert step["payload"]["status"] == "truncated"
     assert step["payload"]["reason"] == "max_steps"
     assert step["payload"]["steps"] == 10
-    assert any("max_steps" in c and "10" in c for c in report.suspected_causes)
+    assert any("matched: max_steps" in c for c in report.suspected_causes)
 
 
 def test_context_overflow_takes_precedence_over_later_tool_error() -> None:

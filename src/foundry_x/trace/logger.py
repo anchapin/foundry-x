@@ -13,9 +13,11 @@ cover modern token formats and the previously-untouched metadata path.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import sys
+import tempfile
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -23,6 +25,199 @@ from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 from pydantic import BaseModel, Field
+
+
+class TraceLoggerAttributes(BaseModel):
+    """Canonical schema for every field that can appear in a trace event.
+
+    This class documents the union of all fields that can appear in the
+    ``payload`` dict of a :class:`TraceEvent`, plus the top-level fields
+    of :class:`TraceEvent` itself and the session/configuration records.
+    Fields are optional because no single event carries every field — the
+    presence of each field is gated by the event's ``kind`` (see the
+    ``kind`` column in the table below, and the full per-``kind`` payload
+    contracts in :gh:`docs/CONTEXT.md`.
+
+    ``kind`` vocabulary (closed set — adding a new value is a vocabulary
+    change; see ADR-0007 §Trace-driven development)
+    ═══════════════════════════════════════════════════════════════════════
+    Session lifecycle:  session_start | session_end | task_received |
+                       task_completed | task_failed | task_aborted
+    Agent loop:         user_prompt | model_request | model_response |
+                       model_error | tool_call | tool_result | outcome |
+                       hook_registry_error
+    Hooks:              injection_blocked | context_pruned
+    Critic pipeline:    critic_verdict
+    ═══════════════════════════════════════════════════════════════════════
+
+    Attributes
+    ----------
+    event_id:
+        UUID4 string identifying this event. Unique across all events in
+        all sessions. Primary key in the ``events`` table.
+    session_id:
+        UUID4 string identifying the session this event belongs to.
+        Foreign key into the ``sessions`` table.
+    timestamp:
+        ISO-8601 datetime string (UTC) at which the event was recorded.
+    kind:
+        Closed vocabulary string identifying the event type. Determines
+        which other fields are present in this event's payload.
+    payload:
+        Free-form dict whose schema is owned by the event ``kind``.
+        See the per-``kind`` contracts below.
+    started_at:
+        ISO-8601 datetime string (UTC) at which the session began.
+        Written by :meth:`TraceLogger.session` on session entry.
+    ended_at:
+        ISO-8601 datetime string (UTC) at which the session ended.
+        Written by :meth:`TraceLogger._end_session` on session exit.
+        ``None`` if the session is still open or the write failed.
+    harness_version:
+        Human-readable string identifying the harness version (e.g. a git
+        SHA or tag). Set by the caller of :meth:`TraceLogger.session`.
+    model_id:
+        Opaque model identifier string (e.g. ``"claude-3-5-sonnet-20241022"``).
+        Optional; set when known at session start via
+        :meth:`TraceLogger.session`.
+    metadata:
+        Arbitrary key/value dict supplied by the operator when opening a
+        session. Scrubbed of secrets before persisting
+        (see ``_redact`` and ``docs/SECURITY.md`` §Secrets).
+    quantization:
+        Quantization scheme applied to the model (e.g. ``"Q5_K_M"``).
+        Part of :class:`ModelConfig`; used for KPI attribution.
+    context_window:
+        Model context window size in tokens. Part of :class:`ModelConfig`.
+    hardware:
+        Hardware accelerator used (e.g. ``"NVIDIA H100"``).
+        Part of :class:`ModelConfig`.
+
+    Payload fields (present depending on ``kind``)
+    ----------------------------------------------
+    content:         str         user_prompt — task prompt text
+    tool_count:      int         user_prompt — number of tools available
+    step:            int         model_request | model_response | model_error |
+                                 tool_call | tool_result — zero-based loop index
+    message_count:   int         model_request — messages in conversation
+    finish_reason:   str         model_response — model stop reason
+    message:         dict        model_response — serialized ModelMessage
+    tool_calls:      list[dict]  model_response — tool call objects
+    token_usage:     dict        model_response — {"prompt_tokens",
+                       completion_tokens", "total_tokens"} or null
+    call_id:         str         tool_call | tool_result — tool call ID
+    name:            str         tool_call | tool_result — tool name
+    arguments:       dict        tool_call — tool input arguments
+    duration_ms:     int         tool_call | tool_result | task_completed |
+                                 task_failed — wall-clock ms
+    output:          Any         tool_result — tool return value (serialized)
+    error:           str         tool_result — error message when execution
+                       failed; presence of this key flags the event as a
+                       failure signal (see FAILURE_PAYLOAD_KEYS)
+    status:          str         outcome — "success" | "truncated" | "failed"
+    reason:          str         outcome — "final_answer" | "model_error" |
+                                 "max_steps"; task_aborted — "wall_clock"
+    steps:           int         outcome — total loop iterations
+    error_type:      str         task_failed | task_aborted | model_error |
+                                 hook_registry_error — exception class name
+    message:         str         task_failed | model_error | hook_registry_error
+                                 — str(exc) value
+    timeout_s:       float       task_aborted — wall-clock timeout seconds
+    token_budget:    int         task_aborted — active token budget at abort
+    prompt:          str         task_received — raw --task argument
+    markers:         list[str]   injection_blocked — sorted unique marker names
+    preview:         str         injection_blocked — first 120 chars of blocked
+                                 text, newlines folded to spaces
+    dropped:         int         context_pruned — events dropped to fit cap
+    threshold:       int         context_pruned — per-session event cap
+    approved:        bool        critic_verdict — true if no regressions
+    passed_checks:   list[str]   critic_verdict — checks that passed
+    failed_checks:   list[str]   critic_verdict — checks that failed
+    notes:           str         critic_verdict — free-text critic notes
+    """
+
+    event_id: str | None = Field(default=None, description="UUID4 event identifier (primary key)")
+    session_id: str | None = Field(
+        default=None, description="UUID4 session identifier (foreign key)"
+    )
+    timestamp: str | None = Field(default=None, description="ISO-8601 UTC timestamp")
+    kind: str | None = Field(default=None, description="Closed event-kind vocabulary string")
+    payload: dict | None = Field(default=None, description="Kind-specific free-form payload dict")
+
+    started_at: str | None = Field(default=None, description="ISO-8601 UTC session start")
+    ended_at: str | None = Field(default=None, description="ISO-8601 UTC session end")
+    harness_version: str | None = Field(default=None, description="Harness version identifier")
+    model_id: str | None = Field(default=None, description="Model identifier string")
+    metadata: dict | None = Field(default=None, description="Operator-supplied key/value metadata")
+    quantization: str | None = Field(default=None, description="Quantization scheme (e.g. Q5_K_M)")
+    context_window: int | None = Field(default=None, description="Context window size in tokens")
+    hardware: str | None = Field(default=None, description="Hardware accelerator used")
+
+    content: str | None = Field(default=None, description="Task prompt text (user_prompt)")
+    tool_count: int | None = Field(
+        default=None, description="Number of tools available (user_prompt)"
+    )
+    step: int | None = Field(
+        default=None, description="Zero-based agent-loop index (model_*, tool_*)"
+    )
+    message_count: int | None = Field(
+        default=None, description="Messages in conversation (model_request)"
+    )
+    finish_reason: str | None = Field(
+        default=None, description="Model stop reason (model_response)"
+    )
+    message: dict | None = Field(
+        default=None, description="Serialized ModelMessage (model_response)"
+    )
+    tool_calls: list | None = Field(default=None, description="Tool call objects (model_response)")
+    token_usage: dict | None = Field(default=None, description="Token usage dict (model_response)")
+    call_id: str | None = Field(default=None, description="Tool call ID (tool_call, tool_result)")
+    name: str | None = Field(default=None, description="Tool name (tool_call, tool_result)")
+    arguments: dict | None = Field(default=None, description="Tool input arguments (tool_call)")
+    duration_ms: int | None = Field(
+        default=None, description="Wall-clock ms (tool_call, tool_result, task_*)"
+    )
+    output: dict | None = Field(default=None, description="Tool return value (tool_result)")
+    error: str | None = Field(default=None, description="Error message on failure (tool_result)")
+    status: str | None = Field(
+        default=None, description="Outcome status: success|truncated|failed (outcome)"
+    )
+    reason: str | None = Field(
+        default=None, description="Outcome or abort reason (outcome, task_aborted)"
+    )
+    steps: int | None = Field(default=None, description="Total agent-loop iterations (outcome)")
+    error_type: str | None = Field(
+        default=None, description="Exception class name (task_*, model_error, hook_*)"
+    )
+    prompt: str | None = Field(default=None, description="Raw --task argument (task_received)")
+    timeout_s: float | None = Field(
+        default=None, description="Wall-clock timeout seconds (task_aborted)"
+    )
+    token_budget: int | None = Field(
+        default=None, description="Active token budget at abort (task_aborted)"
+    )
+    markers: list | None = Field(
+        default=None, description="Sorted unique marker names (injection_blocked)"
+    )
+    preview: str | None = Field(
+        default=None, description="First 120 chars of blocked text (injection_blocked)"
+    )
+    dropped: int | None = Field(
+        default=None, description="Events dropped to fit cap (context_pruned)"
+    )
+    threshold: int | None = Field(
+        default=None, description="Per-session event cap (context_pruned)"
+    )
+    approved: bool | None = Field(
+        default=None, description="True if no regressions (critic_verdict)"
+    )
+    passed_checks: list | None = Field(
+        default=None, description="Checks that passed (critic_verdict)"
+    )
+    failed_checks: list | None = Field(
+        default=None, description="Checks that failed (critic_verdict)"
+    )
+    notes: str | None = Field(default=None, description="Free-text critic notes (critic_verdict)")
 
 
 class TraceEvent(BaseModel):
@@ -108,6 +303,20 @@ _AWS_ACCESS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
 _STRIPE_LIVE_KEY_RE = re.compile(r"\b(?:sk|pk|rk)_(?:live|restricted)_[A-Za-z0-9]{16,}")
 # Slack tokens: xox[baprs]- followed by the segment body.
 _SLACK_TOKEN_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}")
+# GCP service account email addresses: literal @ ending in iam.gserviceaccount.com.
+# The local-part is flexible; the domain is fixed.
+_GCP_SERVICE_ACCOUNT_EMAIL_RE = re.compile(
+    r"\b[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\.)*iam\.gserviceaccount\.com\b"
+)
+# GCP ADC path references: paths under ~/.config/gcloud/ or absolute paths
+# pointing to a GCP credentials file (commonly //application_default_credentials.json).
+_GCP_ADC_PATH_RE = re.compile(
+    r"(?:(?:HOME|USERPROFILE|GOOGLE_APPLICATION_CREDENTIALS)=)?.+?\.config[/\\]gcloud[/\\].*application_default_credentials\.json"
+)
+# GCP project ID variables — matched as env-var-style KEY=VALUE strings.
+_GCP_PROJECT_ID_RE = re.compile(
+    r"(\b(?:GCP_PROJECT_ID|GCP_PROJECT|GCP_LOCATION)=)[A-Za-z0-9_-]{4,}"
+)
 
 _DEFAULT_SECRET_KEY_NAMES: frozenset[str] = frozenset(
     {
@@ -116,6 +325,10 @@ _DEFAULT_SECRET_KEY_NAMES: frozenset[str] = frozenset(
         "authorization",
         "aws_access_key_id",
         "aws_secret_access_key",
+        "gcp_project_id",
+        "gcp_project",
+        "gcp_location",
+        "google_application_credentials",
         "github_token",
         "anthropic_api_key",
         "openai_api_key",
@@ -130,6 +343,10 @@ _DEFAULT_SECRET_KEY_NAMES: frozenset[str] = frozenset(
         "slack_token",
         "stripe_key",
         "token",
+        "gcp_access_token",
+        "gcp_credentials",
+        "google_credentials",
+        "gcp_service_account",
     }
 )
 
@@ -140,6 +357,10 @@ def _redact_value(value: str) -> str:
     Order matters only for readability: PEM blocks (which can contain
     ``-----BEGIN`` and ``sk-``-like substrings) are scrubbed first, then
     the remaining content-patterns. Token order is fixed across calls.
+
+    Covers: PEM blocks, JWTs, sk- API keys, GitHub classic/fine-grained
+    PATs, AWS access key IDs, Stripe live keys, Slack tokens, Bearer
+    headers, GCP access tokens (ya29...), and GCP service-account emails.
     """
     value = _PEM_RE.sub("[REDACTED:pem]", value)
     value = _JWT_RE.sub("[REDACTED:jwt]", value)
@@ -150,6 +371,9 @@ def _redact_value(value: str) -> str:
     value = _STRIPE_LIVE_KEY_RE.sub("[REDACTED:stripe-key]", value)
     value = _SLACK_TOKEN_RE.sub("[REDACTED:slack-token]", value)
     value = _BEARER_RE.sub("[REDACTED:bearer]", value)
+    value = _GCP_SERVICE_ACCOUNT_EMAIL_RE.sub("[REDACTED:gcp-service-account]", value)
+    value = _GCP_ADC_PATH_RE.sub("[REDACTED:gcp-adc-path]", value)
+    value = _GCP_PROJECT_ID_RE.sub(r"\1[REDACTED:gcp-project-id]", value)
     return value
 
 
@@ -163,9 +387,10 @@ def _redact(
     lower-cased name is in ``secret_key_names`` have their entire value
     replaced with ``[REDACTED:secret]`` regardless of content; all other
     string values are scanned for ``sk-...``, ``Bearer ...``, PEM blocks,
-    GitHub classic/fine-grained PATs, JWTs, AWS access key IDs, Stripe
-    live keys, and Slack tokens. Issue #121 added the modern-token set
-    and the metadata-path coverage.
+    GitHub classic/fine-grained PATs, JWTs, AWS access key IDs, GCP
+    service account emails, GCP ADC paths, GCP project ID env vars,
+    Stripe live keys, and Slack tokens. Issue #121 added the modern-token
+    set and the metadata-path coverage; issue #824 added GCP coverage.
     """
     if isinstance(payload, dict):
         redacted: dict[str, Any] = {}
@@ -728,16 +953,39 @@ class TraceLogger:
             self._delete_session_sqlite(session_id)
         return True
 
-    def _delete_session_sqlite(self, session_id: str) -> None:
+    def prune_sessions(self, to_delete: Sequence[str]) -> int:
+        """Remove every event and the session row for each ``session_id`` in *to_delete*.
+
+        This is a bulk operation: all sessions in *to_delete* are deleted in a single
+        file rewrite (jsonl) or batch DELETE (sqlite), making it O(1) file I/O
+        instead of O(n) for n sessions. Returns the number of sessions deleted.
+        Issue #752.
+        """
+        if not to_delete:
+            return 0
+        if self.backend == "jsonl":
+            return self._prune_jsonl(to_delete)
+        return self._prune_sqlite(to_delete)
+
+    def _prune_sqlite(self, to_delete: Sequence[str]) -> int:
         assert self._conn is not None  # backend == "sqlite"
         with self._conn:
-            self._conn.execute("DELETE FROM events WHERE session_id = ?", (session_id,))
-            self._conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+            cur = self._conn.execute(
+                "DELETE FROM events WHERE session_id IN (" + ",".join("?" * len(to_delete)) + ")",
+                list(to_delete),
+            )
+            cur = self._conn.execute(
+                "DELETE FROM sessions WHERE session_id IN (" + ",".join("?" * len(to_delete)) + ")",
+                list(to_delete),
+            )
+        return cur.rowcount
 
-    def _delete_session_jsonl(self, session_id: str) -> None:
+    def _prune_jsonl(self, to_delete: Sequence[str]) -> int:
         if not self.path.exists():
-            return
+            return 0
+        delete_set = set(to_delete)
         kept: list[str] = []
+        removed_sessions: set[str] = set()
         with self.path.open("r", encoding="utf-8") as fh:
             for line in fh:
                 stripped = line.strip()
@@ -749,11 +997,81 @@ class TraceLogger:
                 except json.JSONDecodeError:
                     kept.append(line)
                     continue
-                if record.get("session_id") == session_id:
+                if record.get("session_id") in delete_set:
+                    removed_sessions.add(record.get("session_id"))
                     continue
                 kept.append(line)
         with self.path.open("w", encoding="utf-8") as fh:
             fh.writelines(kept)
+        return len(removed_sessions)
+
+    def _delete_session_sqlite(self, session_id: str) -> None:
+        assert self._conn is not None  # backend == "sqlite"
+        with self._conn:
+            self._conn.execute("DELETE FROM events WHERE session_id = ?", (session_id,))
+            self._conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+
+    def _delete_session_jsonl(self, session_id: str) -> None:
+        """Streaming rewrite of the JSONL file (issue #787, ADR-0021 §5).
+
+        Reads one line at a time and writes survivors directly to a
+        temporary file in the same directory, then atomically swaps it
+        into place via :func:`os.replace`. Peak memory is O(line)
+        rather than O(file), so pruning a multi-million-line trace no
+        longer allocates gigabytes of RSS. The atomic rename also
+        guarantees the store is never observed in a half-written
+        state: either the pre-delete file is visible or the fully
+        rewritten file is, never a partial write.
+
+        Idempotent: a missing source file is a no-op.
+        """
+        if not self.path.exists():
+            return
+        # The temp file MUST live in the same directory as the target
+        # so ``os.replace`` is an atomic rename on the same filesystem
+        # (POSIX guarantee) rather than a cross-device copy.
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=self.path.parent,
+            prefix=f".{self.path.name}.delete.",
+            suffix=".tmp",
+            delete=False,
+        )
+        try:
+            with self.path.open("r", encoding="utf-8") as src, tmp:
+                for line in src:
+                    stripped = line.strip()
+                    if not stripped:
+                        tmp.write(line)
+                        continue
+                    try:
+                        record = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        tmp.write(line)
+                        continue
+                    if record.get("session_id") == session_id:
+                        continue
+                    tmp.write(line)
+            # Preserve the original's mode so a 0644 trace file does
+            # not silently become 0600 (the NamedTemporaryFile default).
+            try:
+                os.chmod(tmp.name, self.path.stat().st_mode & 0o777)
+            except OSError:
+                pass
+            os.replace(tmp.name, self.path)
+        finally:
+            # If anything above raised before the rename, the temp
+            # file is still on disk and must be cleaned up so we do
+            # not leak ``.<name>.delete.*.tmp`` files into the trace
+            # directory. After a successful rename the name no longer
+            # exists, so FileNotFoundError is expected and swallowed.
+            try:
+                os.unlink(tmp.name)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
 
     def compact(self) -> int:
         """Rewrite the JSONL file removing orphaned session markers.

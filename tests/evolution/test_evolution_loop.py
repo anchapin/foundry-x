@@ -186,6 +186,34 @@ class TestRunEvolutionStep:
         assert result.verdict is not None
         assert result.verdict.edit_index == 1
 
+    def test_verdict_failure_class_from_failure_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Issue #796: verdict.failure_class is wired from failure_report.proposed_class."""
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix the failure",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+
+        result = run_evolution_step("sess-failure-class", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert result.verdict is not None
+        assert result.verdict.failure_class == result.failure_report.proposed_class
+
 
 class TestEvolutionResultModel:
     def test_result_model_fields(self):
@@ -382,6 +410,126 @@ class TestRunEvolutionStepAsync:
         assert result.proposed_edits == [proposed_edit]
         assert result.verdict is not None
         assert isinstance(result.verdict, CriticVerdict)
+
+    @pytest.mark.asyncio
+    async def test_multiple_edits_verdict_has_last_edit_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """When multiple edits are proposed, verdict.edit_index is the last one (issue #743)."""
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit1 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 1",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new1\n",
+        )
+        proposed_edit2 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 2",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new2\n",
+        )
+
+        async def mock_propose_async(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit1, proposed_edit2]
+
+        monkeypatch.setattr(Evolver, "propose_async", mock_propose_async)
+
+        result = await run_evolution_step_async("sess-multi-edit", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert len(result.proposed_edits) == 2
+        assert result.verdict is not None
+        assert result.verdict.edit_index == 1
+
+    @pytest.mark.asyncio
+    async def test_multiple_edits_async_evaluates_each_edit_with_correct_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Async path calls critic.evaluate per edit with correct edit_index (issue #797)."""
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit1 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 1",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new1\n",
+        )
+        proposed_edit2 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 2",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new2\n",
+        )
+
+        async def mock_propose_async(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit1, proposed_edit2]
+
+        monkeypatch.setattr(Evolver, "propose_async", mock_propose_async)
+
+        call_records: list[tuple[str, int]] = []
+
+        def mock_evaluate(self, proposed_diff, *, edit_index=None):
+            call_records.append((proposed_diff, edit_index))
+            return CriticVerdict(verdict=True, passed_checks=["git apply"], edit_index=edit_index)
+
+        monkeypatch.setattr("foundry_x.evolution.loop.Critic.evaluate", mock_evaluate)
+
+        result = await run_evolution_step_async("sess-multi-edit-index", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert len(result.proposed_edits) == 2
+        assert len(call_records) == 2
+        assert call_records[0][1] == 0
+        assert call_records[1][1] == 1
+
+    @pytest.mark.asyncio
+    async def test_oversized_edit_in_batch_rejected_with_diff_size_cap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """An oversized single edit in a batch is rejected with diff_size_cap (issue #797)."""
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        large_diff_lines = ["+line{}".format(i) for i in range(250)]
+        large_diff = "--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n{}\n".format(
+            "\n".join(large_diff_lines)
+        )
+
+        proposed_edit1 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 1",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new1\n",
+        )
+        proposed_edit2 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 2 - oversized",
+            unified_diff=large_diff,
+        )
+
+        async def mock_propose_async(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit1, proposed_edit2]
+
+        monkeypatch.setattr(Evolver, "propose_async", mock_propose_async)
+
+        result = await run_evolution_step_async("sess-oversized", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert len(result.proposed_edits) == 2
+        assert result.verdict is not None
+        assert result.verdict.edit_index == 1
+        assert "diff_size_cap" in result.verdict.failed_checks
 
     def test_result_model_with_harness_version(self):
         from foundry_x.evolution.digester import FailureReport

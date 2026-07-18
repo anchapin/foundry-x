@@ -208,17 +208,6 @@ def resolve_trace_backend(env: Mapping[str, str] | None = None) -> str:
     return backend
 
 
-# Trace-backend selection (issue #13). ``.env.example`` documents
-# ``FOUNDRY_TRACE_BACKEND`` as the way to switch the trace store between the
-# default SQLite database and the JSONL export format (ADR-0003). Keeping the
-# supported set in one place lets the runner validate the value up front
-# rather than silently falling through to a no-op backend, honoring
-# AGENTS.md §2 ("Never silently swallow an exception").
-_TRACE_BACKEND_ENV = "FOUNDRY_TRACE_BACKEND"
-_SUPPORTED_TRACE_BACKENDS: frozenset[str] = frozenset({"sqlite", "jsonl"})
-_DEFAULT_TRACE_BACKEND: str = "sqlite"
-
-
 def resolve_model_id(env: Mapping[str, str] | None = None) -> str | None:
     """Resolve the model identity to stamp into the trace session (issue #12).
 
@@ -1477,8 +1466,8 @@ async def run_task(
     if registry is not None:
         from harness.hooks.injection_firewall import InjectionFirewallHook
 
-        def _inject_tracer(payload: dict[str, object]) -> None:
-            log.record(session_id, kind="injection_blocked", payload=payload)
+        def _inject_tracer(kind: str, payload: dict[str, object]) -> None:
+            log.record(session_id, kind=kind, payload=payload)
 
         for hook in registry._hooks:
             if isinstance(hook, InjectionFirewallHook) and hook._tracer is None:
@@ -1562,8 +1551,8 @@ async def run_task(
         hit_event_limit = True
         return
 
-    outcome_status = "success"
-    outcome_reason = "final_answer"
+    outcome_status: str | None = None
+    outcome_reason: str | None = None
     outcome_steps = 0
     turn_ttfts: list[int] = []
     tokens_used = 0
@@ -1613,7 +1602,6 @@ async def run_task(
                     hit_event_limit = True
                 raise
 
-            event_count += chunk_count
             if _check_event_limit(session_id):
                 outcome_status = "failed"
                 outcome_reason = "event_limit"
@@ -1658,8 +1646,10 @@ async def run_task(
                 outcome_reason = "event_limit"
                 hit_event_limit = True
                 break
-            messages.append(response.message)
 
+            # Issue #789: check token_budget BEFORE appending the response so the
+            # offending message is not injected into conversation history. The
+            # outcome.payload must reflect the last safe response.
             if token_budget is not None and tokens_used > token_budget:
                 outcome_status = "failed"
                 outcome_reason = "token_budget"
@@ -1674,8 +1664,14 @@ async def run_task(
                 )
                 break
 
+            messages.append(response.message)
+
             if not response.tool_calls:
-                outcome_reason = "final_answer"
+                if response.finish_reason not in (None, "stop"):
+                    outcome_status = "truncated"
+                    outcome_reason = response.finish_reason
+                else:
+                    outcome_reason = "final_answer"
                 break
 
             for tool_call in response.tool_calls:
@@ -1800,8 +1796,8 @@ async def run_task(
             session_id,
             kind="outcome",
             payload={
-                "status": outcome_status,
-                "reason": outcome_reason,
+                "status": outcome_status if outcome_status is not None else "success",
+                "reason": outcome_reason if outcome_reason is not None else "final_answer",
                 "steps": outcome_steps,
                 "ttft_ms": ttft_p50,
                 "tokens_total": tokens_used,

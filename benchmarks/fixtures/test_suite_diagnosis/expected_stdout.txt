@@ -1,0 +1,2 @@
+test_math.py::test_add PASSED
+test_math.py::test_mul PASSED

@@ -37,3 +37,7 @@ def render_failure_report(report: FailureReport) -> str:
 
     lines += ["", f"## Classification: {report.proposed_class}", ""]
     return "\n".join(lines)
+
+
+def render_failure_report_json(report: FailureReport) -> str:
+    return report.model_dump_json(indent=2) + "\n"
