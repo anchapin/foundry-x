@@ -67,10 +67,36 @@ _FIXED_LINE = "return a * b"
 
 
 def _seed_workspace(workspace: Path) -> None:
-    """Copy the git repo fixture into *workspace*."""
+    """Copy the git repo fixture into *workspace* and set up a git working tree.
+
+    The workspace is seeded as a git repo with one staged+modified Python file
+    so that ``git diff --name-only`` shows it as a changed file.
+    """
     import shutil
 
     shutil.copytree(_FIXTURE_DIR, workspace, dirs_exist_ok=True)
+
+    # Initialize a git repo and make an initial commit
+    subprocess.run(["git", "init"], cwd=workspace, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@foundryx.dev"], cwd=workspace, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "FoundryX Test"], cwd=workspace, capture_output=True
+    )
+    # Stage and commit the initial (correct) version
+    subprocess.run(["git", "add", "calculator.py"], cwd=workspace, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=workspace, capture_output=True)
+    # Overwrite with the buggy version so git diff shows changes
+    buggy_content = (
+        "def multiply(a, b):\n"
+        "    # Bug: should be a * b\n"
+        "    return a + a\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    print(f'3*4={multiply(3, 4)}')  # expects 12\n"
+    )
+    (workspace / "calculator.py").write_text(buggy_content)
 
 
 def _run_calculator(workspace: Path) -> subprocess.CompletedProcess[str]:
