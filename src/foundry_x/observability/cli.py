@@ -31,6 +31,26 @@ def _infer_backend(path: str | Path) -> str:
     return "jsonl" if suffix == ".jsonl" else "sqlite"
 
 
+def _resolve_latest_session_id(
+    logger: TraceLogger,
+    *,
+    harness_version: str | None,
+) -> str | None:
+    """Return the session_id of the most recent session, or ``None`` when empty.
+
+    Issue #902. Mirrors the ``fx-trace timeline --harness-version``
+    auto-select pattern (the source list comes from
+    :meth:`TraceLogger.list_sessions`, which is ``ORDER BY started_at``
+    ascending, so the last element is the newest). ``harness_version``
+    narrows the candidate set to a single harness build; ``None`` means
+    no filter — pick the global most recent.
+    """
+    sessions = logger.list_sessions(harness_version=harness_version)
+    if not sessions:
+        return None
+    return sessions[-1].session_id
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fx-trace",
@@ -175,6 +195,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="ISO-8601 timestamp; only include sessions started at or after this time.",
     )
     session_summary.add_argument(
+        "--latest",
+        action="store_true",
+        default=False,
+        help=(
+            "Print only the single most recent session row. "
+            "Mutually exclusive with --limit (issue #902). "
+            "Combine with --harness-version to pick the most recent row "
+            "matching that harness build."
+        ),
+    )
+    session_summary.add_argument(
         "--format",
         default=None,
         choices=("markdown", "json"),
@@ -200,8 +231,31 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     session_card.add_argument(
         "--session-id",
-        required=True,
-        help="Session UUID whose card should be rendered.",
+        default=None,
+        help=(
+            "Session UUID whose card should be rendered. "
+            "Required unless --latest is passed (issue #902)."
+        ),
+    )
+    session_card.add_argument(
+        "--latest",
+        action="store_true",
+        default=False,
+        help=(
+            "Render the most recent session card. Mutually exclusive "
+            "with --session-id (issue #902). Combine with "
+            "--harness-version to pick the most recent session for that "
+            "harness build."
+        ),
+    )
+    session_card.add_argument(
+        "--harness-version",
+        default=None,
+        help=(
+            "When combined with --latest, selects the most recent "
+            "session for this harness version (issue #902). Has no "
+            "effect when --session-id is passed."
+        ),
     )
 
     tool_latency = sub.add_parser(
@@ -324,7 +378,16 @@ def main(argv: list[str] | None = None) -> int:
             since=args.since,
         )
         failure_class_distribution = _failure_class_distribution(rows)
-        if args.limit is not None:
+        # Issue #902: --latest limits the roll-up to the single most recent
+        # row after newest-first sorting. Mutually exclusive with --limit
+        # because the semantics (single newest row vs. up-to-N rows) are
+        # incompatible — a friendly CLI error is better than a surprise.
+        if args.latest and args.limit is not None:
+            sys.stderr.write("--latest and --limit are mutually exclusive\n")
+            return 2
+        if args.latest:
+            rows = rows[:1]
+        elif args.limit is not None:
             rows = rows[: args.limit]
         fmt = _resolve_format(args.format, args.out)
         if fmt == "json":
@@ -349,12 +412,31 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "session-card":
         backend = _infer_backend(args.db)
         logger = TraceLogger(args.db, backend=backend)
-        sessions = logger.list_sessions()
-        session = next((s for s in sessions if s.session_id == args.session_id), None)
-        if session is None:
-            sys.stderr.write(f"session {args.session_id} not found\n")
+        # Issue #902: --latest auto-selects the most recent session. The two
+        # selectors are mutually exclusive; missing both is a usage error.
+        # --harness-version narrows the latest search to a single build.
+        if args.latest and args.session_id is not None:
+            sys.stderr.write("--latest and --session-id are mutually exclusive\n")
             return 2
-        events = logger.load_session(args.session_id)
+        if args.latest:
+            target_id = _resolve_latest_session_id(logger, harness_version=args.harness_version)
+            if target_id is None:
+                sys.stdout.write("no sessions\n")
+                return 0
+        elif args.session_id is None:
+            sys.stderr.write("either --session-id or --latest is required\n")
+            return 2
+        else:
+            target_id = args.session_id
+        # --harness-version is documented to apply only with --latest; the
+        # --session-id path looks up by id regardless of harness build.
+        lookup_harness = args.harness_version if args.latest else None
+        sessions = logger.list_sessions(harness_version=lookup_harness)
+        session = next((s for s in sessions if s.session_id == target_id), None)
+        if session is None:
+            sys.stderr.write(f"session {target_id} not found\n")
+            return 2
+        events = logger.load_session(target_id)
         rendered = format_session_card(session, events)
         sys.stdout.write(rendered)
         if not rendered.endswith("\n"):

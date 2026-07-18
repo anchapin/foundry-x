@@ -112,9 +112,37 @@ Operators follow a six-step cycle (see AGENTS.md §3):
 1. **Observe** — read traces and existing code before proposing.
 2. **Digest** — turn observations into a failure report.
 3. **Propose** — produce a ProposedEdit (or, for a human, a PR).
-4. **Evaluate** — run the test and benchmark gate (Critic).
-5. **Commit** — atomic, conventional-commits change.
-6. **Hand off** — open a PR and wait for review.
+ 4. **Evaluate** — run the test and benchmark gate (Critic).
+ 5. **Commit** — atomic, conventional-commits change.
+ 6. **Hand off** — open a PR and wait for review.
+
+## Inspecting a session without knowing its id
+
+`fx-trace timeline`, `fx-trace session-summary`, and `fx-trace
+session-card` all support a `--latest` flag (issue #902) that
+auto-selects the most recent session without forcing you to look up a
+session_id first. For `session-summary` it limits the roll-up table to
+the single newest row; for `session-card` it renders the one-screen
+triage card of the newest session. Combine either flag with
+`--harness-version X` to pick the most recent session for a specific
+harness build.
+
+```
+# newest session overall
+uv run fx-trace session-summary --latest
+uv run fx-trace session-card    --latest
+
+# newest session for a specific harness build
+uv run fx-trace session-card --latest --harness-version 0.2.0
+```
+
+`--latest` and the explicit `--session-id` selector are mutually
+exclusive; passing both exits with code 2 and a `stderr` message.
+When the trace store is empty, both commands exit 0 and print
+`no sessions` to stdout — a friendly operator UX, not an error.
+`--session-id` (without `--latest`) keeps the original behavior and
+remains the right tool when you already have an id from
+`fx-trace sessions` or `foundry-kpis`.
 
 ## Hook Registry Failure Degradation Mode
 

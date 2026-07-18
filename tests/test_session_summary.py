@@ -671,3 +671,161 @@ def test_cli_session_summary_markdown_includes_failure_class_distribution(tmp_pa
     assert "Failure Class Distribution" in out
     assert "bad-prompt" in out
     assert "tool-error" in out
+
+
+# ---------------------------------------------------------------------------
+# Issue #902: --latest flag on fx-trace session-summary.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_session_summary_latest_renders_single_newest_row(tmp_path, capsys):
+    """Issue #902: ``fx-trace session-summary --latest`` prints only the most
+    recent session row (one header line + one data line).
+    """
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rc = cli_main(["session-summary", "--db", str(db), "--latest"])
+
+    assert rc == 0
+    out_lines = capsys.readouterr().out.splitlines()
+    # Header + exactly one data row.
+    assert len(out_lines) == 2
+    # The newest session is sess-0004-new; older sessions must not leak.
+    assert "sess-0004-new" in out_lines[1]
+    for sid in ("sess-0001-old", "sess-0002-mid", "sess-0003-no-outcome"):
+        assert sid not in out_lines[1]
+
+
+def test_cli_session_summary_latest_with_harness_version(tmp_path, capsys):
+    """Issue #902: ``--latest --harness-version X`` picks the newest session
+    matching X. The fixture stores one 0.2.0 session (sess-0004-new) and
+    three 0.1.0 sessions, so the harness-version filter restricts the
+    candidate set to a single row.
+    """
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rc = cli_main(
+        [
+            "session-summary",
+            "--db",
+            str(db),
+            "--latest",
+            "--harness-version",
+            "0.1.0",
+        ]
+    )
+
+    assert rc == 0
+    out_lines = capsys.readouterr().out.splitlines()
+    # Among the 0.1.0 sessions, sess-0002-mid is the newest (11:00 < 12:00).
+    assert len(out_lines) == 2
+    assert "sess-0003-no-outcome" in out_lines[1]
+    assert "sess-0001-old" not in out_lines[1]
+    assert "sess-0002-mid" not in out_lines[1]
+    assert "sess-0004-new" not in out_lines[1]  # excluded by harness-version filter
+
+
+def test_cli_session_summary_latest_empty_store_says_no_sessions(tmp_path, capsys):
+    """Issue #902: empty store + ``--latest`` exits 0 with ``no sessions``."""
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = cli_main(["session-summary", "--db", str(db), "--latest"])
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "no sessions"
+
+
+def test_cli_session_summary_latest_conflicts_with_limit(tmp_path, capsys):
+    """Issue #902: ``--latest`` and ``--limit`` are mutually exclusive —
+    the two selectors promise different things (single newest row vs.
+    up-to-N rows), so a friendly CLI error is better than a surprise.
+    """
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rc = cli_main(
+        [
+            "session-summary",
+            "--db",
+            str(db),
+            "--latest",
+            "--limit",
+            "2",
+        ]
+    )
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--latest and --limit are mutually exclusive" in captured.err
+
+
+def test_cli_session_summary_latest_with_harness_version_no_match(tmp_path, capsys):
+    """Issue #902: ``--latest --harness-version X`` where no session matches
+    X exits 0 with ``no sessions`` (matches the empty-store contract).
+    """
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rc = cli_main(
+        [
+            "session-summary",
+            "--db",
+            str(db),
+            "--latest",
+            "--harness-version",
+            "9.9.9",
+        ]
+    )
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "no sessions"
+
+
+def test_cli_session_summary_latest_json_format_one_row(tmp_path, capsys):
+    """Issue #902: ``--format json`` with ``--latest`` emits a single-row
+    JSON object so programmatic consumers get the same contract.
+    """
+    import json
+
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rc = cli_main(
+        [
+            "session-summary",
+            "--db",
+            str(db),
+            "--latest",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert rc == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert "rows" in parsed
+    assert len(parsed["rows"]) == 1
+    assert parsed["rows"][0]["session_id"] == "sess-0004-new"
+
+
+def test_cli_session_summary_without_latest_remains_backward_compatible(tmp_path, capsys):
+    """Issue #902 acceptance criterion 5: the existing
+    ``fx-trace session-summary`` invocation (no ``--latest``) is unchanged —
+    it still prints every session row newest-first. This guards against a
+    future change accidentally making ``--latest`` the default.
+    """
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rc = cli_main(["session-summary", "--db", str(db)])
+
+    assert rc == 0
+    out_lines = capsys.readouterr().out.splitlines()
+    # Header + all four session rows.
+    assert len(out_lines) == 5
+    for sid, *_ in _FOUR_SESSIONS:
+        assert any(sid in line for line in out_lines[1:])
