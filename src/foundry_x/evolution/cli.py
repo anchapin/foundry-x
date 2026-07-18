@@ -38,6 +38,11 @@ from foundry_x.observability.regression_report import record_verdict
 from foundry_x.trace.logger import TraceLogger
 
 
+def _now_iso() -> str:
+    """Return a UTC ISO-8601 timestamp with offset suffix."""
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _infer_backend(trace_db: str) -> str:
     """Return ``"jsonl"`` for ``.jsonl`` paths, ``"sqlite"`` otherwise."""
     return "jsonl" if trace_db.endswith(".jsonl") else "sqlite"
@@ -241,12 +246,14 @@ async def _run_loop_async(
 
     Phase 1: awaits run_evolution_step_async (no-op, Critic is still sync).
     """
+    harness_version = resolve_harness_version(harness_dir)
+    started_at = _now_iso()
     backend = _infer_backend(trace_db)
     logger = TraceLogger(trace_db, backend=backend)
     events = logger.load_session(session_id)
     if not events:
         sys.stderr.write(f"No events found for session {session_id}.\n")
-        return None, None, None, 2
+        return None, None, None, 2, harness_version
 
     result = await run_evolution_step_async(
         session_id=session_id,
@@ -259,12 +266,15 @@ async def _run_loop_async(
     print()
 
     if report.proposed_class == "clean":
+        completed_at = _now_iso()
+        print(f"Started: {started_at} | Completed: {completed_at}")
+        print()
         print("No failure detected — evolution loop complete.")
-        return report, None, None, 0
+        return report, None, None, 0, harness_version
 
     if not result.proposed_edits:
         print("Evolver returned no ProposedEdit objects.")
-        return report, None, None, 0
+        return report, None, None, 0, harness_version
 
     edit = result.proposed_edits[0]
     print(_render_proposed_edit(edit, verbose=verbose))
@@ -643,7 +653,7 @@ def _build_sweep_subparser(parser: argparse.ArgumentParser) -> None:
 
 
 def _main_evolve(args: argparse.Namespace) -> int:
-    _report, _edit, _verdict, exit_code = _run_loop(
+    _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
         session_id=args.session_id,
         trace_db=args.trace_db,
         harness_dir=args.harness_dir,
