@@ -1293,9 +1293,11 @@ async def _consume_model_stream(
     only at the terminal ``model_response``.
 
     Returns ``(assembled_response, time_to_first_token_ms, chunk_count, total_stream_ms)``.
-    ``time_to_first_token_ms`` is measured from stream start to the first
-    delta carrying content or a tool-call fragment; it is ``None`` when the
-    stream produced no payload deltas.
+    ``time_to_first_token_ms`` measures elapsed milliseconds from stream
+    start to the first delta carrying text content OR a tool-call fragment;
+    a tool-call-only response is still a payload (issue #905). The value is
+    ``None`` only when the stream produced zero payload deltas of either
+    kind (e.g. a role-marker-only stream or a usage-only terminal chunk).
     ``total_stream_ms`` is the wall-clock duration of the entire stream.
     """
     stream_start = time.monotonic()
