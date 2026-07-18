@@ -250,13 +250,19 @@ def _reset_default_registry() -> None:
     the runner only imports ``harness.hooks`` lazily, but the harness
     itself self-registers the prompt-input firewall on import. Calling
     :func:`reset_default_registry` ensures the in-process run starts
-    with a clean registry even if a prior test loaded the harness.
+    with a clean registry even if a prior test loaded the harness. The
+    firewall is then re-registered so subsequent test files
+    (``tests/test_injection_firewall.py``, ``tests/test_hook_isolation.py``)
+    still observe the default hook contract (issue #5 self-registration).
     """
     try:
         from harness.hooks.base import reset_default_registry
+        from harness.hooks.injection_firewall import InjectionFirewallHook
+        from harness.hooks import register_hook
     except ImportError:
         return
     reset_default_registry()
+    register_hook(InjectionFirewallHook())
 
 
 @pytest.fixture(autouse=True)
