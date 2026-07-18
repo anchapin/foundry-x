@@ -14,14 +14,15 @@ the skill ``name``, then loads every ``BenchmarkTask`` via
 the ``example_skill`` template) appears in at least one task's
 ``requires_skills`` list.
 
-Expected initial state
-----------------------
-The test is *intentionally failing* on the current main branch: only
-``bash`` has coverage today. The assertion message prints the uncovered
-skill names so that follow-up PRs know exactly which benchmarks to add.
-Once each uncovered skill gains at least one ``requires_skills`` entry,
-the test flips green and becomes a regression guard preventing future
-skills from shipping without coverage.
+Expected state
+--------------
+Once a benchmark task is added for every non-excluded harness skill, the
+test is green and acts as a regression guard: a new skill shipped without
+a covering benchmark task will fail CI. The ``@pytest.mark.xfail`` marker
+that wrapped this test in earlier revisions was removed (issue #873) once
+the last uncovered skill (``read_multiple_files``) gained coverage, per
+the test's original self-documenting "Expected initial state" note that
+called for marker removal at full coverage.
 
 Exclusion rationale
 -------------------
@@ -80,17 +81,6 @@ def _load_covered_skills() -> set[str]:
 
 
 @pytest.mark.benchmark
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "edit_file, grep_search, list_dir, and write_file skills lack "
-        "benchmark tasks -- no BenchmarkTask lists them in requires_skills. "
-        "Only bash is covered today. Tracked by follow-up issues; once each "
-        "uncovered skill gains a requires_skills entry, this xfail flips to "
-        "xpass and (with strict=True) forces removal of the marker so the "
-        "test resumes its role as a regression guard."
-    ),
-)
 def test_every_harness_skill_has_benchmark_coverage() -> None:
     """Assert every non-excluded harness skill appears in some ``requires_skills``.
 

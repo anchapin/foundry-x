@@ -1,0 +1,8 @@
+== truncation_aggregate ==
+truncated=True
+file_truncated=False
+bytes_returned=127
+bytes_total=127
+file_truncated=True
+bytes_returned=749
+bytes_total=17029

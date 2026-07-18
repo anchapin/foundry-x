@@ -1,0 +1,54 @@
+== multi_file_basic ==
+[OK]
+truncated=False
+content="""Minimal Flask-style app used by the multi_file_basic benchmark case."""
+
+from __future__ import annotations
+
+from flask import Flask, jsonify
+
+app = Flask(__name__)
+
+
+@app.get("/health")
+def health() -> tuple[dict[str, str], int]:
+    """Liveness probe; returns a tiny JSON document."""
+    return jsonify(status="ok"), 200
+
+
+@app.get("/version")
+def version() -> dict[str, str]:
+    """Return the running build version for diagnostics."""
+    return jsonify(version="1.0.0")
+
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=5000)
+[OK]
+truncated=False
+content={
+  "service": "benchmark-api",
+  "version": "0.1.0",
+  "endpoints": {
+    "health": "/health",
+    "version": "/version"
+  },
+  "limits": {
+    "max_requests_per_minute": 60,
+    "timeout_seconds": 15
+  },
+  "tags": ["bench", "demo", "multi-file"]
+}
+[OK]
+truncated=False
+content=# Benchmark Notes
+
+This multi-file reading exercise covers three fixture files at once:
+
+- `app.py` -- a tiny Flask app
+- `data.json` -- the matching service config
+- `notes.md` -- this file
+
+The expected outcome is that all three are returned in order, none are
+truncated, and the top-level `truncated` flag stays `false`. If any of those
+properties break, the benchmark catches the regression.
