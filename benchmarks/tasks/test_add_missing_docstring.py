@@ -40,15 +40,15 @@ def multiply(a, b):
 def test_add_missing_docstring(benchmark_workspace: Path) -> None:
     """Deterministic pass/fail check for TASK."""
     fixture_dir = Path(__file__).parent.parent / "fixtures" / TASK.name
-    (benchmark_workspace / "calculator.py").write_text(
-        (fixture_dir / "calculator.py").read_text()
-    )
+    (benchmark_workspace / "calculator.py").write_text((fixture_dir / "calculator.py").read_text())
     (benchmark_workspace / "calculator.py").write_text(GOLDEN_DOCUMENTED)
 
     import importlib.util
     import sys
 
-    spec = importlib.util.spec_from_file_location("calculator", benchmark_workspace / "calculator.py")
+    spec = importlib.util.spec_from_file_location(
+        "calculator", benchmark_workspace / "calculator.py"
+    )
     if spec is None or spec.loader is None:
         pytest.fail(f"task {TASK.name}: could not load calculator module")
     module = importlib.util.module_from_spec(spec)
@@ -63,14 +63,11 @@ def test_add_missing_docstring(benchmark_workspace: Path) -> None:
 
     for fn_name, fn in functions:
         doc = fn.__doc__
-        assert doc is not None and doc.strip(), (
-            f"task {TASK.name}: {fn_name} has no docstring"
-        )
-        assert len(doc.strip()) > 10, (
-            f"task {TASK.name}: {fn_name} docstring too short: {doc!r}"
-        )
+        assert doc is not None and doc.strip(), f"task {TASK.name}: {fn_name} has no docstring"
+        assert len(doc.strip()) > 10, f"task {TASK.name}: {fn_name} docstring too short: {doc!r}"
 
     import inspect
+
     for fn_name, fn in functions:
         help_output = inspect.getdoc(fn)
         assert help_output is not None and help_output.strip(), (
