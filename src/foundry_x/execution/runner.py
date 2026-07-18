@@ -1551,8 +1551,8 @@ async def run_task(
         hit_event_limit = True
         return
 
-    outcome_status = "success"
-    outcome_reason = "final_answer"
+    outcome_status: str | None = None
+    outcome_reason: str | None = None
     outcome_steps = 0
     turn_ttfts: list[int] = []
     tokens_used = 0
@@ -1793,8 +1793,8 @@ async def run_task(
             session_id,
             kind="outcome",
             payload={
-                "status": outcome_status,
-                "reason": outcome_reason,
+                "status": outcome_status if outcome_status is not None else "success",
+                "reason": outcome_reason if outcome_reason is not None else "final_answer",
                 "steps": outcome_steps,
                 "ttft_ms": ttft_p50,
                 "tokens_total": tokens_used,
