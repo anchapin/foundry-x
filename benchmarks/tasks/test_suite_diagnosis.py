@@ -73,6 +73,15 @@ def _copy_fixture_to_workspace(fixture_dir: Path, workspace: Path) -> None:
                 dst_file.write_text(file.read_text())
 
 
+def _clear_pycache(workspace: Path) -> None:
+    """Strip ``__pycache__`` directories from a workspace."""
+    import shutil
+
+    for cache in workspace.rglob("__pycache__"):
+        if cache.is_dir():
+            shutil.rmtree(cache, ignore_errors=True)
+
+
 def _run_pytest(workspace: Path) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     return subprocess.run(
@@ -116,6 +125,7 @@ def test_test_suite_diagnosis(benchmark_workspace: Path) -> None:
         f"task {TASK.name}: golden fix must remove the broken assertion"
     )
     test_file.write_text(fixed_test)
+    _clear_pycache(benchmark_workspace)
 
     good = _run_pytest(benchmark_workspace)
     assert good.returncode == 0, (
