@@ -287,6 +287,7 @@ async def _run_loop_async(
     exit_code = 0 if (result.verdict and result.verdict.verdict) else 1
     return report, edit, result.verdict, exit_code
 
+
 def _list_pending(args: argparse.Namespace) -> int:
     """Implement ``foundry-evolve list-pending`` (issue #498)."""
     store = ProposedEditStore(args.store)
