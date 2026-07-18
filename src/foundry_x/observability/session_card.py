@@ -15,6 +15,14 @@ and turning exit codes into the 0 / non-zero contract the issue
 requires. Keeping the formatter pure lets the unit tests pin the
 golden-string output (issue #180 acceptance: "synthetic session yields
 the expected lines").
+
+Issue #872 — the runner emits ``tool_argument_parse_error`` events when
+the model produces malformed tool-call arguments (see
+``src/foundry_x/execution/runner.py:1684``). The kind's ``"error"``
+substring matches ``_ERROR_KIND_RE`` below, so it is automatically
+counted by the per-kind ``errors_by_kind`` bucket without any
+card-specific code path. The dedicated session-aggregate KPI lives in
+:mod:`foundry_x.observability.kpis` (``KpiSummary.tool_argument_parse_error_count``).
 """
 
 from __future__ import annotations

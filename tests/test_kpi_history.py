@@ -294,7 +294,8 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     # The persisted line is the KpiSummary minus per-session map plus
     # the timestamp; harness_version is absent because --harness-version
     # was not supplied. hooks_disabled_count and hooks_disabled_rate are
-    # scalar fields and are included (issue #585).
+    # scalar fields and are included (issue #585). tool_argument_parse_error_count
+    # is also a scalar so it lands in the trend line (issue #872).
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
@@ -307,6 +308,7 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "hooks_disabled_rate",
         "context_pruned_count",
         "failure_class_distribution",
+        "tool_argument_parse_error_count",
     }
     assert "injection_blocks" not in payload
     assert "token_totals" not in payload
