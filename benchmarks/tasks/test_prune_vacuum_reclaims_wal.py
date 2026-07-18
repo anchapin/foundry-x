@@ -19,12 +19,33 @@ from pathlib import Path
 
 import pytest
 
+from benchmarks.models import BenchmarkTask
 from foundry_x.trace.logger import TraceLogger
 
 #: Acceptance threshold from issue #896. WAL must stay under 2x the live
 #: database file after a vacuuming prune. The constant is named so a future
 #: tightening (e.g. ``< 1.5x``) is a one-line change with a clear reason.
 WAL_TO_DB_RATIO_LIMIT = 2
+
+TASK = BenchmarkTask(
+    name="prune_vacuum_reclaims_wal",
+    description=(
+        "TraceLogger.prune_sessions(vacuum=True) reclaims SQLite WAL pages so "
+        "logs/*.db-wal stays under 2x the live database after a 90% prune "
+        "(issue #896 acceptance criterion #3)."
+    ),
+    prompt=(
+        "Inspect src/foundry_x/trace/logger.py: confirm prune_sessions() "
+        "issues PRAGMA wal_checkpoint(TRUNCATE) when vacuum=True so the WAL "
+        "sidecar does not grow unbounded across prune cycles."
+    ),
+    difficulty_tier="medium",
+    expected_outcome=(
+        "After 1000 sessions + prune 900 with --vacuum, the WAL file is "
+        "smaller than 2x the main database file."
+    ),
+    tags=["trace", "wal", "benchmark"],
+)
 
 
 def _wal_path(db_path: Path) -> Path:
