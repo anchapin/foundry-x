@@ -245,6 +245,9 @@ subset of the broader kind vocabulary above.
   exports. Manage unbounded growth with `foundry-trace prune` (issue #275):
   `--keep-last N` retains the N most recent sessions, `--older-than DAYS`
   drops aged ones; both support `--dry-run` and work on sqlite/jsonl.
+  Add `--vacuum` (sqlite, issue #896) on a retention pass to reclaim the
+  `logs/traces.db-wal` sidecar that heavy pruning otherwise grows
+  unboundedly.
 - `benchmarks/` — pytest-marked tasks the Critic uses to gate harness
   changes.
 - `docs/adr/` — recorded architecture decisions, numbered sequentially.

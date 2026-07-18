@@ -304,6 +304,12 @@ def _prune(args: argparse.Namespace) -> int:
     store. Both modes work on sqlite and jsonl backends. Exits 0 on
     success, 1 on argument errors (neither / both flags given, or DAYS
     not a positive integer).
+
+    ``--vacuum`` (sqlite only, issue #896) runs ``VACUUM`` plus
+    ``PRAGMA wal_checkpoint(TRUNCATE)`` after the DELETEs so freed pages
+    and WAL frames are returned to the filesystem; otherwise the
+    ``-wal`` sidecar grows unboundedly across pruning cycles. The flag
+    is a no-op on the jsonl backend.
     """
     logger = _logger_for(args.db)
     sessions = list(logger.list_sessions())
@@ -341,8 +347,13 @@ def _prune(args: argparse.Namespace) -> int:
         sys.stdout.write(f"Dry run: {count} session(s) would be deleted.\n")
         return 0
 
-    logger.prune_sessions([session.session_id for session in to_delete])
+    logger.prune_sessions(
+        [session.session_id for session in to_delete],
+        vacuum=getattr(args, "vacuum", False),
+    )
     sys.stdout.write(f"Deleted {count} session(s).\n")
+    if getattr(args, "vacuum", False) and logger.backend == "sqlite":
+        sys.stdout.write("Vacuumed SQLite database: WAL space reclaimed.\n")
     return 0
 
 
@@ -763,6 +774,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="List sessions that would be removed without deleting them.",
+    )
+    prune_parser.add_argument(
+        "--vacuum",
+        action="store_true",
+        help=(
+            "After pruning, run VACUUM and wal_checkpoint(TRUNCATE) on the "
+            "SQLite database to reclaim WAL/free space (issue #896). No-op "
+            "on the JSONL backend."
+        ),
     )
     prune_parser.set_defaults(func=_prune)
 

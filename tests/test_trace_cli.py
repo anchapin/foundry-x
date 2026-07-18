@@ -776,6 +776,118 @@ def test_prune_nonpositive_older_than_returns_nonzero(tmp_path, capsys):
     assert "positive integer" in capsys.readouterr().err
 
 
+# --- Issue #896: prune --vacuum reclaims WAL space ---------------------------
+# SQLite's WAL accumulates deleted pages across pruning cycles; ``--vacuum``
+# runs ``VACUUM`` + ``PRAGMA wal_checkpoint(TRUNCATE)`` so the ``-wal``
+# sidecar stays bounded relative to the live data.
+
+
+def _populate_many_sessions(
+    path: Path, count: int, events_per: int = 8, blob_size: int = 256
+) -> list[str]:
+    """Seed *count* sessions each with several events carrying a payload.
+
+    The payload gives each DELETE real pages to free so the WAL-side
+    reclaim is observable on disk rather than rounding away to nothing
+    on tiny databases.
+    """
+    logger = TraceLogger(path, backend="sqlite")
+    blob = "x" * blob_size
+    sids: list[str] = []
+    for _ in range(count):
+        with logger.session(harness_version="0.1.0") as sid:
+            for _ in range(events_per):
+                logger.record(sid, "tool_call", {"name": "read_file", "blob": blob})
+            sids.append(sid)
+    return sids
+
+
+def _wal_size(path: Path) -> int:
+    wal = path.with_suffix(path.suffix + "-wal")
+    return wal.stat().st_size if wal.exists() else 0
+
+
+def test_prune_vacuum_keeps_wal_under_2x_db(tmp_path, capsys):
+    """Acceptance criterion #3 for issue #896 (1000→900 path)."""
+    db = tmp_path / "traces.db"
+    _populate_many_sessions(db, count=1000, events_per=4, blob_size=128)
+
+    rc = main(["prune", "--keep-last", "100", "--vacuum", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Deleted 900 session(s)" in out
+    assert "WAL space reclaimed" in out
+    # Vacuum truncates the WAL sidecar, so it must be smaller than 2x the
+    # live database file — the regression that motivated issue #896.
+    assert _wal_size(db) < 2 * db.stat().st_size
+
+
+def test_prune_vacuum_shrinks_wal_relative_to_no_vacuum(tmp_path):
+    """Running ``--vacuum`` must not leave the WAL larger than without it."""
+    db = tmp_path / "traces.db"
+    sids = _populate_many_sessions(db, count=200, events_per=8, blob_size=256)
+
+    # Prune 180 without vacuum and snapshot the WAL size.
+    logger = TraceLogger(db, backend="sqlite")
+    logger.prune_sessions(sids[:180])
+    wal_without_vacuum = _wal_size(db)
+    logger.close()
+
+    # Prune the remaining 20 with vacuum and confirm the WAL is no larger.
+    logger = TraceLogger(db, backend="sqlite")
+    logger.prune_sessions(sids[180:], vacuum=True)
+    wal_with_vacuum = _wal_size(db)
+    logger.close()
+
+    assert wal_with_vacuum <= wal_without_vacuum
+
+
+def test_prune_vacuum_without_deletes_is_backward_compatible(tmp_path, capsys):
+    """``--vacuum`` on an empty prune result must not run VACUUM (criterion #2)."""
+    db = tmp_path / "traces.db"
+    TraceLogger(db, backend="sqlite")
+
+    rc = main(["prune", "--keep-last", "99", "--vacuum", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Nothing to prune" in out
+    # No sessions were deleted, so the vacuum branch must not have printed.
+    assert "WAL space reclaimed" not in out
+
+
+@_BACKENDS
+def test_prune_vacuum_jsonl_is_noop_message(tmp_path, backend, capsys):
+    """``--vacuum`` must not break the JSONL backend (and must not claim to vacuum it)."""
+    if backend != "jsonl":
+        pytest.skip("jsonl-only assertion")
+    db, _ = _populate_multi(tmp_path, backend, count=3)
+
+    rc = main(["prune", "--keep-last", "1", "--vacuum", "--db", db])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Deleted 2 session(s)" in out
+    # SQLite-only message; must not appear for the JSONL backend.
+    assert "WAL space reclaimed" not in out
+
+
+def test_prune_vacuum_flag_defaults_off(tmp_path):
+    """Without ``--vacuum`` the ``TraceLogger.prune_sessions`` API is unchanged."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db, backend="sqlite")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    # No vacuum kwarg → backward-compatible signature.
+    deleted = logger.prune_sessions([sid])
+
+    assert deleted == 1
+    assert logger.list_sessions() == []
+    logger.close()
+
+
 # --- Issue #632: compact ----------------------------------------------------
 # Rewrites JSONL file removing orphaned session_end markers (session_end
 # without a corresponding session_start).
