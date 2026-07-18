@@ -116,6 +116,163 @@ Operators follow a six-step cycle (see AGENTS.md §3):
 5. **Commit** — atomic, conventional-commits change.
 6. **Hand off** — open a PR and wait for review.
 
+## Hook Registry Failure Degradation Mode
+
+When `harness.hooks.get_registry()` raises during session start,
+`Runner._resolve_hook_registry()` catches the exception, records a
+`hook_registry_error` trace event, and returns `None`. The session
+continues **with all hooks silently disabled**. This is the
+"hook registry failure" degradation mode first surfaced by the
+runner instrumentation in issue #260 and tracked as a KPI by
+issue #585. Operators must treat any session that carries a
+`hook_registry_error` event as **degraded** — the agent runs, but
+its middleware layer (security controls, rate limits, context
+pruning) is offline.
+
+> A *missing* harness (`ImportError` in `_resolve_hook_registry`) is
+> a legitimate degraded mode that returns `None` without comment.
+> The case documented here is the *importable-but-broken* registry
+> path — `get_registry()` is reachable but raises — which must be
+> observed, not swallowed (AGENTS.md §2 — never silently swallow an
+> exception).
+
+### Affected security controls {#affected-hook-controls}
+
+When the registry fails to load, **every** hook in
+`harness/hooks/__init__.py` is unregistered for the lifetime of the
+session. The high-impact controls are:
+
+| Hook | Role | What you lose when disabled |
+|------|------|------------------------------|
+| `InjectionFirewallHook` | Quarantines tool-call results that carry prompt-injection markers before they are re-injected into the prompt. Mandated by `SECURITY.md` "Prompt-input firewall" and emits `firewall_exception` events (`issue #823`). | Adversarial tool output is passed straight to the model unfiltered. Untrusted content reaches the model verbatim. |
+| `ContextPruningHook` / `TokenAwarePruningHook` | Caps the live context window at the thresholds in `harness/manifest.json` (`token_threshold`, `event_threshold`) and emits `context_pruned` events. Registered lazily by the runner. | Token- and event-budget enforcement drift off; long sessions can balloon and breach `FOUNDRY_TOKEN_BUDGET` without a `task_aborted` event to mark it. |
+| `RateLimitHook` | Enforces the Evolver guardrail from `SECURITY.md` "Rate limits" (max proposals/hour, max diff lines/proposal, max LLM calls/hour, max daily cost). | The Evolver can exceed its cost and proposal budget, blowing past the runaway detection that `SECURITY.md` depends on. |
+
+`harness/hooks/base.py` (the registry itself) is the load-bearing
+piece — when it raises, the four hooks above cannot self-register,
+and `register_into(...)` calls inside the runner cannot find a
+registry to register into.
+
+### Detecting the condition {#detecting-hook-registry-failure}
+
+Three signals are available. Any one of them confirms the
+degradation mode is active for the relevant time window.
+
+1. **Trace event** — every failed registry load records exactly one
+   `hook_registry_error` event with payload
+   `{"error_type": <ExceptionClass>, "message": <str>}` (see
+   `src/foundry_x/execution/runner.py:670-681`). Grep a single
+   session:
+
+   ```
+   foundry-trace events-grep <session_id> \
+       --pattern hook_registry_error \
+       --db logs/traces.db
+   ```
+
+   Presence means **that session ran with the middleware layer
+   disabled**. A non-empty `error_type` identifies the exception
+   class (e.g. `KeyError`, `ImportError`, `AttributeError`) that
+   `get_registry()` raised; the `message` field carries the
+   str-formatted exception text.
+
+2. **KPI `hooks_disabled_count`** — the cumulative count of
+   `hook_registry_error` events across the trace store, paired with
+   `hooks_disabled_rate`, the fraction of sessions that recorded at
+   least one such event. Both are computed by
+   `src/foundry_x/observability/kpis.py:_hook_registry_errors`
+   (issue #585) and surfaced by `foundry-kpis`:
+
+   ```
+   foundry-kpis --db logs/traces.db
+   ```
+
+   `hooks_disabled_count > 0` is the canonical alarm;
+   `hooks_disabled_rate > 0` confirms the proportion of affected
+   sessions. A non-zero value on a fresh store is the operator's
+   signal to investigate **before** trusting any subsequent trace.
+
+3. **Digester classification** — once issue #867 lands, the
+   `Digester` will tag sessions with `hook_registry_error` events
+   under a dedicated failure class so the `Evolver` can route a
+   `ProposedEdit` that repairs the harness manifest or hook loader.
+   Until then, filter the regression report for
+   `hook_registry_error` events the same way you would any other
+   failure signature.
+
+### Recovery {#recovering-from-hook-registry-failure}
+
+Treat a non-zero `hooks_disabled_count` as a **session-affecting
+incident**, not a metric blip. Walk this checklist in order:
+
+1. **Confirm the harness manifest is intact.** Open
+   `harness/manifest.json` and confirm the `hooks` array lists
+   `["base", "injection_firewall", "context_pruning", "rate_limit",
+   "token_aware_pruning"]`. A missing entry here causes the registry
+   to raise because `harness/hooks/__init__.py` imports each hook
+   module to activate its self-registration.
+2. **Verify the hook files are present.** Every hook listed in the
+   manifest must have a corresponding module under `harness/hooks/`:
+
+   ```
+   ls harness/hooks/{base,injection_firewall,context_pruning,rate_limit,token_aware_pruning}.py
+   ```
+
+   A missing file produces an `ImportError` at registry load time.
+3. **Confirm the harness package is importable.** The registry
+   resolver returns `None` silently when `import harness.hooks`
+   raises `ImportError` — *that* path is a legitimate degraded mode
+   and is not what this section covers. From the runner's Python
+   environment, run:
+
+   ```
+   python -c "import harness.hooks; print(harness.hooks.get_registry())"
+   ```
+
+   A non-zero exit or traceback usually means `harness/` was not
+   added to `sys.path` (the foundry uses lazy import — see
+   `_resolve_hook_registry`'s docstring) or a sub-dependency failed
+   to import. Address the underlying import error before restarting.
+4. **Read the last `hook_registry_error` payload.** The `error_type`
+   field names the exception class; the `message` field names the
+   missing key, module, or attribute. Use those to drive the
+   fix — **do not** speculative-edit the harness. Harness edits
+   route through the `Critic` gate (ADR-0004, AGENTS.md §2).
+5. **Restart the runner** and run a smoke session. Confirm the new
+   session has no `hook_registry_error` event:
+
+   ```
+   foundry-trace events-grep <new_session_id> \
+       --pattern hook_registry_error \
+       --db logs/traces.db
+   ```
+
+   Presence on the new session means the fix did not take;
+   absence confirms recovery. Re-run `foundry-kpis` and confirm
+   `hooks_disabled_count` no longer increments.
+
+Until recovery is confirmed, consider **all recent sessions in the
+affected window as potentially compromised** by prompt injection
+that the `InjectionFirewallHook` would normally have quarantined.
+Do not feed untrusted external content into the agent during the
+investigation window — see `SECURITY.md` §"Prompt injection". If a
+`ProposedEdit` is needed to repair the harness loader, route it
+through the standard `Evolver` -> `Critic` pipeline; do not
+hand-edit `harness/hooks/*.py` (ADR-0004).
+
+### Trace event reference {#hook-registry-error-event-reference}
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `kind` | `"hook_registry_error"` | Event discriminant. Matches the entry in `CONTEXT.md` §Event kinds. |
+| `payload.error_type` | `str` | Exception class name raised by `get_registry()` (e.g. `KeyError`, `ImportError`, `AttributeError`). |
+| `payload.message` | `str` | The exception's `str()` output. Carries the missing key, module, or attribute that triggered the failure. |
+
+See `CONTEXT.md §Event kinds` for the full payload contract,
+`SECURITY.md` for the controls the affected hooks enforce, and
+`ADR-0004` for why this failure mode cannot bypass the `Critic`
+gate.
+
 ## Glossary {#glossary}
 
 | Term | Definition |
