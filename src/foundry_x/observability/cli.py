@@ -305,6 +305,8 @@ def main(argv: list[str] | None = None) -> int:
             since=args.since,
         )
         failure_class_distribution = _failure_class_distribution(rows)
+        if args.limit is not None:
+            rows = rows[: args.limit]
         fmt = _resolve_format(args.format, args.out)
         if fmt == "json":
             report = SessionSummaryReport(
@@ -315,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             rendered = (
                 render_session_summary(
-                    rows, limit=args.limit, failure_class_distribution=failure_class_distribution
+                    rows, limit=None, failure_class_distribution=failure_class_distribution
                 )
                 + "\n"
             )
