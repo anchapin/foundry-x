@@ -163,7 +163,7 @@ def run_evolution_step(
 
     verdict = None
     for idx, edit in enumerate(proposed_edits):
-        verdict = critic.evaluate(edit.unified_diff, edit_index=idx)
+        verdict = critic.evaluate(edit.unified_diff, edit_index=idx, failure_class=failure_report.proposed_class)
 
     return EvolutionResult(
         session_id=session_id,

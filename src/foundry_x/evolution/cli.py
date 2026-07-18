@@ -211,13 +211,13 @@ def _run_loop(
     print()
 
     critic = Critic(harness_dir=harness_dir)
-    verdict = critic.evaluate(edit.unified_diff)
+    verdict = critic.evaluate(edit.unified_diff, failure_class=report.proposed_class)
     verdict_with_class = CriticVerdict(
         verdict=verdict.verdict,
         passed_checks=list(verdict.passed_checks),
         failed_checks=list(verdict.failed_checks),
         notes=verdict.notes,
-        failure_class=report.proposed_class,
+        failure_class=verdict.failure_class,
     )
     record_verdict(logger, session_id, verdict_with_class)
     print(_render_critic_verdict(verdict))
