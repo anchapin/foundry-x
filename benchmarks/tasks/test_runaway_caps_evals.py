@@ -276,8 +276,10 @@ def test_max_steps_caps_loop(tmp_path, monkeypatch):
     )
 
     tool_calls = [event for event in events if event.kind == "tool_call"]
-    # develop emits 2 tool_call events per tool: before and after skill execution (#258)
-    expected_tool_calls = 2 * max_steps_cap
+    # One tool_call event per skill execution (issue #893); max_steps bounds the loop
+    # so exactly max_steps_cap events are emitted. A regression that drops the cap
+    # surfaces as additional events from the overflow response.
+    expected_tool_calls = max_steps_cap
     assert len(tool_calls) == expected_tool_calls, (
         f"step cap must produce exactly {expected_tool_calls} tool_call events; "
         f"got {len(tool_calls)} -- the loop continued past the cap"
