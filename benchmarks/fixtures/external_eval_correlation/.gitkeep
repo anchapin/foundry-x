@@ -1,0 +1,4 @@
+# placeholder -- external_eval_correlation exercises the pure plumbing under
+# src/foundry_x/evaluation/ against the committed slice at
+# benchmarks/external/humaneval_plus_sample.jsonl (issue #900); it does not
+# read any seed data from fixtures and does not invoke the Runner.
