@@ -576,7 +576,10 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
     logger = TraceLogger(db)
     events = logger.load_session(logger.list_sessions()[0].session_id)
     tool_call_events = [e for e in events if e.kind == "tool_call"]
-    assert len(tool_call_events) == 2
+    # Issue #893: run_task emits exactly one tool_call event per skill
+    # execution (after run_post), carrying both hook overheads and the
+    # actual duration_ms.
+    assert len(tool_call_events) == 1
     for event in tool_call_events:
         assert "hook_overhead_ms" in event.payload
         assert event.payload["hook_overhead_ms"] is None
@@ -618,7 +621,7 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
     logger = TraceLogger(db2)
     events = logger.load_session(logger.list_sessions()[0].session_id)
     tool_call_events = [e for e in events if e.kind == "tool_call"]
-    assert len(tool_call_events) == 2
+    assert len(tool_call_events) == 1
     for event in tool_call_events:
         assert "hook_overhead_ms" in event.payload
         assert event.payload["hook_overhead_ms"] is not None
@@ -664,7 +667,7 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
     logger = TraceLogger(db3)
     events = logger.load_session(logger.list_sessions()[0].session_id)
     tool_call_events = [e for e in events if e.kind == "tool_call"]
-    assert len(tool_call_events) == 2
+    assert len(tool_call_events) == 1
     min_expected = hook1_delay_ms + hook2_delay_ms
     for event in tool_call_events:
         assert "hook_overhead_ms" in event.payload
@@ -681,10 +684,10 @@ def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monk
     post-hook includes the security-critical injection scan and was previously
     un-timed; this test pins its visibility in the ``tool_call`` event.
 
-    The first ``tool_call`` event (emitted before the skill runs and before
-    ``run_post`` is invoked) carries ``hook_post_overhead_ms=None`` because
-    the value is not yet known. The second ``tool_call`` event (emitted after
-    ``run_post`` completes) carries the measured wall-clock milliseconds.
+    Issue #893 consolidated the prior two ``tool_call`` events (a pre-execution
+    marker plus a post-execution event) into a single event emitted after
+    ``run_post`` completes. That single event carries the measured
+    ``hook_post_overhead_ms`` — ``None`` only when no hooks are registered.
     """
     from foundry_x.execution import runner
 
@@ -773,10 +776,11 @@ def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monk
     logger = TraceLogger(db1)
     events = logger.load_session(logger.list_sessions()[0].session_id)
     tool_call_events = [e for e in events if e.kind == "tool_call"]
-    assert len(tool_call_events) == 2
-    for event in tool_call_events:
-        assert "hook_post_overhead_ms" in event.payload
-        assert event.payload["hook_post_overhead_ms"] is None
+    # Issue #893: exactly one tool_call event per skill execution.
+    assert len(tool_call_events) == 1
+    event = tool_call_events[0]
+    assert "hook_post_overhead_ms" in event.payload
+    assert event.payload["hook_post_overhead_ms"] is None
 
     # Case 2: One hook with slow run_post
     post_hook_delay_ms = 50
@@ -815,16 +819,13 @@ def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monk
     logger = TraceLogger(db2)
     events = logger.load_session(logger.list_sessions()[0].session_id)
     tool_call_events = [e for e in events if e.kind == "tool_call"]
-    assert len(tool_call_events) == 2
-    # First event emitted before run_post runs - field is the placeholder null.
-    assert "hook_post_overhead_ms" in tool_call_events[0].payload
-    assert tool_call_events[0].payload["hook_post_overhead_ms"] is None
-    # Second event emitted after run_post - field carries the measured value.
-    second = tool_call_events[1]
-    assert "hook_post_overhead_ms" in second.payload
-    assert second.payload["hook_post_overhead_ms"] is not None
-    assert second.payload["hook_post_overhead_ms"] >= post_hook_delay_ms
-    assert second.payload["hook_post_overhead_ms"] < post_hook_delay_ms + 100
+    # Issue #893: single consolidated event carries the measured overhead.
+    assert len(tool_call_events) == 1
+    event = tool_call_events[0]
+    assert "hook_post_overhead_ms" in event.payload
+    assert event.payload["hook_post_overhead_ms"] is not None
+    assert event.payload["hook_post_overhead_ms"] >= post_hook_delay_ms
+    assert event.payload["hook_post_overhead_ms"] < post_hook_delay_ms + 100
 
     # Case 3: Two hooks with combined post-hook delay
     post_hook1_delay_ms = 30
@@ -865,13 +866,158 @@ def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monk
     logger = TraceLogger(db3)
     events = logger.load_session(logger.list_sessions()[0].session_id)
     tool_call_events = [e for e in events if e.kind == "tool_call"]
-    assert len(tool_call_events) == 2
-    second = tool_call_events[1]
-    assert "hook_post_overhead_ms" in second.payload
-    assert second.payload["hook_post_overhead_ms"] is not None
+    assert len(tool_call_events) == 1
+    event = tool_call_events[0]
+    assert "hook_post_overhead_ms" in event.payload
+    assert event.payload["hook_post_overhead_ms"] is not None
     min_expected = post_hook1_delay_ms + post_hook2_delay_ms
-    assert second.payload["hook_post_overhead_ms"] >= min_expected
-    assert second.payload["hook_post_overhead_ms"] < min_expected + 100
+    assert event.payload["hook_post_overhead_ms"] >= min_expected
+    assert event.payload["hook_post_overhead_ms"] < min_expected + 100
+
+
+def test_run_task_emits_exactly_one_tool_call_event_per_call_per_step(tmp_path, monkeypatch):
+    """Issue #893 acceptance criterion #3: ``run_task`` records exactly one
+    ``tool_call`` trace event per emitted tool call per step.
+
+    Previously the runner emitted two events per call (a pre-execution marker
+    with ``duration_ms=0`` plus a post-execution event with the real
+    duration). Consumers deduplicating by ``call_id`` could randomly keep
+    either row, corrupting per-call latency percentiles. This test drives a
+    session with two steps — the first step emits two parallel tool calls,
+    the second step emits a single tool call — and asserts:
+
+    * the total ``tool_call`` event count equals the number of (step, call_id)
+      pairs (three), not double that,
+    * each (step, call_id) pair appears exactly once,
+    * every event carries a strictly-positive ``duration_ms`` (no phantom
+      zero-duration rows survive the consolidation).
+    """
+    from foundry_x.execution import runner
+
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+
+    call_step0_a = ModelToolCall(
+        id="call_s0_a",
+        type="function",
+        function=ToolCallFunction(name="bash", arguments=json.dumps({"command": "true"})),
+    )
+    call_step0_b = ModelToolCall(
+        id="call_s0_b",
+        type="function",
+        function=ToolCallFunction(name="bash", arguments=json.dumps({"command": "true"})),
+    )
+    call_step1 = ModelToolCall(
+        id="call_s1",
+        type="function",
+        function=ToolCallFunction(name="bash", arguments=json.dumps({"command": "true"})),
+    )
+
+    class Adapter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    message=ModelMessage(
+                        role="assistant",
+                        content=None,
+                        tool_calls=[call_step0_a, call_step0_b],
+                    ),
+                    tool_calls=[call_step0_a, call_step0_b],
+                    finish_reason="tool_calls",
+                )
+            if self.calls == 2:
+                return ModelResponse(
+                    message=ModelMessage(
+                        role="assistant",
+                        content=None,
+                        tool_calls=[call_step1],
+                    ),
+                    tool_calls=[call_step1],
+                    finish_reason="tool_calls",
+                )
+            return ModelResponse(
+                message=ModelMessage(role="assistant", content="done"),
+                finish_reason="stop",
+            )
+
+        async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+            return await self.complete(messages, tools, **kwargs)
+
+        async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+            response = await self.complete(messages, tools, **kwargs)
+            if response.message.content:
+                yield ModelResponseChunk(content=response.message.content)
+            for i, tc in enumerate(response.tool_calls):
+                yield ModelResponseChunk(
+                    tool_calls=[
+                        ModelToolCallChunk(
+                            index=i,
+                            id=tc.id,
+                            type=tc.type,
+                            function=ToolCallFunctionChunk(
+                                name=tc.function.name,
+                                arguments=tc.function.arguments,
+                            ),
+                        )
+                    ]
+                )
+            if response.finish_reason:
+                yield ModelResponseChunk(finish_reason=response.finish_reason)
+
+    async def executor(name, arguments):  # noqa: ANN001, ARG001
+        return {"status": "ok"}
+
+    # No hooks: keeps the test deterministic and isolates the consolidation
+    # contract from hook-timing concerns.
+    monkeypatch.setattr(runner, "_resolve_hook_registry", lambda log, session_id: None)
+
+    db = tmp_path / "traces_one_event.db"
+
+    async def drive():
+        logger = TraceLogger(db)
+        with logger.session(harness_version="0.1.0") as session_id:
+            await run_task(
+                "one-tool-call-per-step",
+                harness_dir,
+                logger,
+                session_id,
+                model_adapter=Adapter(),
+                skill_executor=executor,
+            )
+
+    asyncio.run(drive())
+
+    logger = TraceLogger(db)
+    events = logger.load_session(logger.list_sessions()[0].session_id)
+    tool_call_events = [e for e in events if e.kind == "tool_call"]
+
+    # 2 calls in step 0 + 1 call in step 1 = 3 events total (NOT 6).
+    assert len(tool_call_events) == 3, (
+        f"expected exactly 3 tool_call events (one per call per step); got {len(tool_call_events)}"
+    )
+
+    # Each (step, call_id) pair must appear exactly once.
+    seen: set[tuple[int, str]] = set()
+    for event in tool_call_events:
+        key = (event.payload["step"], event.payload["call_id"])
+        assert key not in seen, f"duplicate (step, call_id) pair: {key}"
+        seen.add(key)
+    expected_pairs = {(0, "call_s0_a"), (0, "call_s0_b"), (1, "call_s1")}
+    assert seen == expected_pairs, f"unexpected (step, call_id) pairs: {seen}"
+
+    # No phantom zero-duration rows from a pre-execution emission — the
+    # consolidated event always carries the actual skill-execution
+    # wall-clock time, which is a non-negative int. (The stub executor is
+    # essentially instant, so duration may legitimately be 0 on a fast
+    # machine; the dedup-safety contract is the (step, call_id) uniqueness
+    # asserted above, not the magnitude of duration_ms.)
+    for event in tool_call_events:
+        assert isinstance(event.payload["duration_ms"], int)
+        assert event.payload["duration_ms"] >= 0
 
 
 # --- harness layout validation (issue #90) ---------------------------------

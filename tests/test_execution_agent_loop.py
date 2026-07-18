@@ -265,9 +265,9 @@ def test_agent_loop_records_full_event_sequence(tmp_path, monkeypatch):
 
     assert kinds.count("model_request") == 2
     assert kinds.count("model_response") == 2
-    # develop emits 2 tool_call events per tool: before execution (duration_ms=0)
-    # via _execute_skill and after execution with real duration (#258)
-    assert kinds.count("tool_call") == 2
+    # Issue #893: run_task emits exactly one tool_call event per skill
+    # execution (after _execute_skill returns), carrying the real duration_ms.
+    assert kinds.count("tool_call") == 1
     assert kinds.count("tool_result") == 1
     assert kinds[0] == "task_received"
     assert kinds[-1] == "task_completed"
@@ -325,10 +325,10 @@ def test_agent_loop_terminates_with_truncated_outcome_on_max_steps(tmp_path, mon
     assert outcome_event.payload["steps"] == 2
 
     tool_calls = [event for event in events if event.kind == "tool_call"]
-    # develop emits 2 tool_call events per tool: before and after skill execution (#258)
-    # max_steps=2 means 2 steps with 1 tool each → 4 events
-    assert len(tool_calls) == 4, (
-        "cap at max_steps=2 must produce exactly four ``tool_call`` events; the third adapter "
+    # Issue #893: one tool_call event per skill execution; max_steps=2 means
+    # 2 steps with 1 tool each -> exactly 2 events.
+    assert len(tool_calls) == 2, (
+        "cap at max_steps=2 must produce exactly two ``tool_call`` events; the third adapter "
         "call should not happen because the loop exits before it"
     )
 

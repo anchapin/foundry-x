@@ -1796,24 +1796,15 @@ async def run_task(
                     int((time.monotonic() - hook_start) * 1000) if registry is not None else None
                 )
 
-                _record_and_count(
-                    session_id,
-                    kind="tool_call",
-                    payload={
-                        "step": step,
-                        "call_id": tool_call.id,
-                        "name": call.name,
-                        "arguments": call.arguments,
-                        "duration_ms": 0,
-                        "hook_overhead_ms": hook_overhead_ms,
-                        "hook_post_overhead_ms": None,
-                    },
-                )
-                if _check_event_limit(session_id):
-                    outcome_status = "failed"
-                    outcome_reason = "event_limit"
-                    hit_event_limit = True
-                    break
+                # Issue #893: emit exactly one ``tool_call`` event per skill
+                # execution. Previously the runner emitted two events per call
+                # — a pre-execution marker with ``duration_ms=0`` (which
+                # corrupted per-call latency percentiles because consumers
+                # deduplicating by ``call_id`` could keep the zero-duration
+                # row) and a post-execution event with the real duration. The
+                # consolidated event below carries the actual ``duration_ms``
+                # plus both hook overheads, matching the single-event contract
+                # documented in CONTEXT.md §Event kinds and ADR-0010.
                 start = time.monotonic()
                 output: Any
                 error: str | None = None
@@ -1839,8 +1830,8 @@ async def run_task(
                     payload={
                         "step": step,
                         "call_id": tool_call.id,
-                        "name": tool_call.function.name,
-                        "arguments": arguments,
+                        "name": call.name,
+                        "arguments": call.arguments,
                         "duration_ms": duration_ms,
                         "hook_overhead_ms": hook_overhead_ms,
                         "hook_post_overhead_ms": hook_post_overhead_ms,
