@@ -8,6 +8,7 @@ render-failure CLI subcommand (both stdout and --out Markdown paths).
 
 from __future__ import annotations
 
+import inspect
 import json
 import sqlite3
 import time
@@ -23,6 +24,10 @@ _BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
 
 def _suffix(backend: str) -> str:
     return ".db" if backend == "sqlite" else ".jsonl"
+
+
+def test_session_signature_excludes_model_config():
+    assert "model_config" not in inspect.signature(TraceLogger.session).parameters
 
 
 @_BACKENDS
