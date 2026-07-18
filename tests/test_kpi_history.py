@@ -313,6 +313,7 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "failure_class_distribution",
         "model_retry_count",
         "tool_argument_parse_error_count",
+        "event_limit_abort_count",
     }
     assert "injection_blocks" not in payload
     assert "token_totals" not in payload
