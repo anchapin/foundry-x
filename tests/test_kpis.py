@@ -38,6 +38,7 @@ def _seed_session(
     failure_class: str | None = None,
     hook_registry_error: bool = False,
     wall_clock_abort: bool = False,
+    tool_argument_parse_error_count: int = 0,
 ) -> str:
     """Create a session with task_received + optional persisted critic_verdict.
 
@@ -55,6 +56,11 @@ def _seed_session(
 
     Issue #800 adds ``hook_registry_error`` and ``wall_clock_abort`` parameters
     to plant the corresponding trace events for KPI computation.
+
+    Issue #872 adds ``tool_argument_parse_error_count``: when >0, that many
+    ``tool_argument_parse_error`` events are planted so the KPI aggregation
+    can surface the count emitted by the runner at
+    ``src/foundry_x/execution/runner.py:1684``.
     """
     with logger.session(harness_version=harness_version) as sid:
         logger.record(sid, kind="task_received", payload={"prompt": "do work"})
@@ -92,6 +98,18 @@ def _seed_session(
                 sid,
                 kind="task_aborted",
                 payload={"reason": "wall_clock", "timeout_s": 1.0, "token_budget": None},
+            )
+        for i in range(tool_argument_parse_error_count):
+            logger.record(
+                sid,
+                kind="tool_argument_parse_error",
+                payload={
+                    "step": i,
+                    "call_id": f"call-{i}",
+                    "name": "read_file",
+                    "raw": "not-json",
+                    "error": "JSONDecodeError: malformed",
+                },
             )
     return sid
 
@@ -376,6 +394,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "context_pruned_count",
         "wall_clock_abort_count",
         "failure_class_distribution",
+        "tool_argument_parse_error_count",
     }
 
 
@@ -1028,3 +1047,159 @@ def test_cycle_time_alert_threshold_message_includes_values(tmp_path, capsys):
     assert "exceeds threshold" in captured.err
     # The actual cycle time is a positive number and the threshold was 0.001.
     assert "0.00" in captured.err or "0.01" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Issue #872: tool-call argument parse-error count is exposed as an
+# auxiliary KPI. The runner records a ``tool_argument_parse_error`` event
+# whenever the model emits a tool call whose ``arguments`` JSON cannot be
+# parsed (see ``src/foundry_x/execution/runner.py:1684``). The KPI counter
+# is a session-aggregated scalar — surfaced in the markdown table when
+# non-zero and in the JSON contract as ``tool_argument_parse_error_count``.
+# ---------------------------------------------------------------------------
+
+
+def test_tool_argument_parse_error_count_zero_when_clean(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    summary = compute_kpis(logger)
+
+    assert summary.tool_argument_parse_error_count == 0
+
+
+def test_tool_argument_parse_error_count_aggregates_across_sessions(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, tool_argument_parse_error_count=2)
+    _seed_session(logger, "v1", verdict=True, tool_argument_parse_error_count=3)
+    _seed_session(logger, "v1", verdict=True)  # session with zero parse errors
+
+    summary = compute_kpis(logger)
+
+    assert summary.tool_argument_parse_error_count == 5
+
+
+def test_tool_argument_parse_error_count_respects_harness_version_filter(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, tool_argument_parse_error_count=4)
+    _seed_session(logger, "v2", verdict=True, tool_argument_parse_error_count=7)
+
+    summary_v1 = compute_kpis(logger, harness_version="v1")
+    summary_v2 = compute_kpis(logger, harness_version="v2")
+
+    assert summary_v1.tool_argument_parse_error_count == 4
+    assert summary_v2.tool_argument_parse_error_count == 7
+
+
+def test_tool_argument_parse_error_count_round_trips_through_kpi_summary(tmp_path):
+    """The new field round-trips through ``KpiSummary.model_validate``."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, tool_argument_parse_error_count=2)
+
+    summary = compute_kpis(logger)
+    round_tripped = KpiSummary.model_validate(summary.model_dump())
+    assert round_tripped == summary
+    assert round_tripped.tool_argument_parse_error_count == 2
+
+
+def test_main_markdown_renders_parse_error_section(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, tool_argument_parse_error_count=4)
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    output = captured.out
+    assert "Tool Argument Parse Errors" in output
+    assert "4 malformed tool-call argument(s) emitted by the runner." in output
+
+
+def test_main_markdown_omits_parse_error_section_when_clean(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    # Clean store → no Parse Errors section, mirroring wall-clock aborts.
+    assert "Tool Argument Parse Errors" not in captured.out
+
+
+def test_main_json_includes_tool_argument_parse_error_count(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, tool_argument_parse_error_count=6)
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert payload["tool_argument_parse_error_count"] == 6
+
+
+def test_compare_kpis_includes_tool_argument_parse_error_count_delta(tmp_path):
+    """Baseline/candidate delta exposes the parse-error counter (issue #872)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # Baseline v1: zero parse errors.
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    # Candidate v2: one session had 3 parse errors.
+    _seed_session(
+        logger,
+        "v2",
+        verdict=True,
+        passed_checks=["bench"],
+        tool_argument_parse_error_count=3,
+    )
+    _seed_session(logger, "v2", verdict=True, passed_checks=["bench"])
+
+    comparison = compare_kpis(logger, "v1", "v2")
+
+    assert isinstance(comparison, KpiComparison)
+    assert comparison.baseline.tool_argument_parse_error_count == 0
+    assert comparison.candidate.tool_argument_parse_error_count == 3
+    assert comparison.deltas["tool_argument_parse_error_count"] == 3
+
+
+def test_main_comparison_renders_parse_error_row(tmp_path, capsys):
+    """The comparison markdown surfaces a Tool Argument Parse Error row (issue #872)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(
+        logger,
+        "v2",
+        verdict=True,
+        passed_checks=["bench"],
+        tool_argument_parse_error_count=2,
+    )
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--baseline-harness-version",
+            "v1",
+            "--candidate-harness-version",
+            "v2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    rows = captured.out.splitlines()
+    parse_error_row = next(
+        line for line in rows if line.lstrip().startswith("| Tool Argument Parse Error Count")
+    )
+    # 0 baseline, 2 candidate → delta +2 (negative/bad because
+    # higher-is-better=False for parse-error count).
+    assert "0 | 2 | +2.00 (negative)" in parse_error_row

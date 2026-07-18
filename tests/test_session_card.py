@@ -253,3 +253,89 @@ def test_cli_session_card_shows_error_kinds(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "error=2" in out
+
+
+# --- Issue #872: tool-call argument parse-error events are surfaced in the
+# session card via the existing ``errors_by_kind`` bucket. The runner emits a
+# ``tool_argument_parse_error`` event whenever the model emits a tool call
+# whose ``arguments`` JSON cannot be parsed (see
+# ``src/foundry_x/execution/runner.py:1684``); the kind's "error" substring
+# matches the session-card failure-regex, so it flows into the per-kind
+# count automatically. These tests pin that contract. ---
+
+
+def test_format_session_card_counts_tool_argument_parse_error_events():
+    session = _sample_session()
+    events = _sample_events() + [
+        _event(
+            "tool_argument_parse_error",
+            timedelta(seconds=1.5),
+            {
+                "call_id": "call-abc",
+                "name": "read_file",
+                "raw": "not-json",
+                "error": "JSONDecodeError",
+            },
+        ),
+        _event(
+            "tool_argument_parse_error",
+            timedelta(seconds=1.7),
+            {
+                "call_id": "call-def",
+                "name": "read_file",
+                "raw": '{"oops"',
+                "error": "expected JSON object, got str",
+            },
+        ),
+    ]
+
+    output = format_session_card(session, events)
+
+    assert "tool_argument_parse_error=2" in output
+
+
+def test_format_session_card_omits_parse_error_count_when_absent():
+    session = _sample_session()
+    events = _sample_events()  # no tool_argument_parse_error events
+
+    output = format_session_card(session, events)
+
+    assert "tool_argument_parse_error" not in output
+
+
+def test_cli_session_card_surfaces_tool_argument_parse_error_count(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(str(db))
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "user_prompt", {"prompt": "Hello"})
+        logger.record(
+            sid,
+            "tool_argument_parse_error",
+            {
+                "call_id": "call-abc",
+                "name": "read_file",
+                "raw": "not-json",
+                "error": "JSONDecodeError",
+            },
+        )
+        logger.record(
+            sid,
+            "tool_argument_parse_error",
+            {
+                "call_id": "call-def",
+                "name": "read_file",
+                "raw": '{"oops"',
+                "error": "expected JSON object, got str",
+            },
+        )
+        logger.record(
+            sid,
+            "outcome",
+            {"status": "failed", "reason": "parse_error", "steps": 1},
+        )
+
+    rc = cli_main(["session-card", "--db", str(db), "--session-id", sid])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tool_argument_parse_error=2" in out

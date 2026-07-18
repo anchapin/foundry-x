@@ -66,6 +66,12 @@ TOKEN_BUDGET_REASON = "token_budget"
 
 
 CONTEXT_PRUNED_KIND = "context_pruned"
+# Issue #872: the runner emits ``tool_argument_parse_error`` when the model
+# produces malformed tool-call arguments (see ``execution/runner.py:1684``).
+# The constant lives next to the other kind vocabulary strings so any future
+# reference (Digester classification, regression report, etc.) shares the
+# same spelling without re-typing the literal.
+TOOL_ARGUMENT_PARSE_ERROR_KIND = "tool_argument_parse_error"
 
 
 class KpiSummary(BaseModel):
@@ -122,6 +128,14 @@ class KpiSummary(BaseModel):
     the fraction of sessions that recorded a ``hook_registry_error`` event
     and the total count of ``task_aborted`` events whose ``reason`` is
     ``"wall_clock"``, respectively.
+
+    Issue #872 adds ``tool_argument_parse_error_count``: the total number
+    of ``tool_argument_parse_error`` events emitted by the runner when the
+    model produces tool-call arguments that cannot be parsed as JSON. A
+    rising rate signals model output quality degradation or a mismatch
+    between the tool schema and the model's capabilities, so the counter
+    is surfaced alongside ``wall_clock_abort_count`` as an auxiliary
+    operator signal.
     """
 
     cycle_time_seconds: float | None = None
@@ -138,6 +152,7 @@ class KpiSummary(BaseModel):
     context_pruned_count: dict[str, int] = {}
     wall_clock_abort_count: int = 0
     failure_class_distribution: dict[str, int] = {}
+    tool_argument_parse_error_count: int = 0
 
 
 class StreamingQualityData(BaseModel):
@@ -266,6 +281,9 @@ def compute_kpis(
     failure_class_distribution = _failure_class_distribution(
         logger, harness_version=harness_version
     )
+    tool_argument_parse_error_count = _tool_argument_parse_error_count(
+        logger, harness_version=harness_version
+    )
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -281,6 +299,7 @@ def compute_kpis(
         context_pruned_count=context_pruned_count,
         wall_clock_abort_count=wall_clock_abort_count,
         failure_class_distribution=failure_class_distribution,
+        tool_argument_parse_error_count=tool_argument_parse_error_count,
     )
 
 
@@ -333,6 +352,9 @@ def _compute_deltas(
         "hooks_disabled_rate": _delta(baseline.hooks_disabled_rate, candidate.hooks_disabled_rate),
         "wall_clock_abort_count": candidate.wall_clock_abort_count
         - baseline.wall_clock_abort_count,
+        "tool_argument_parse_error_count": (
+            candidate.tool_argument_parse_error_count - baseline.tool_argument_parse_error_count
+        ),
     }
 
 
@@ -676,6 +698,36 @@ def _wall_clock_abort_count(
     return count
 
 
+def _tool_argument_parse_error_count(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> int:
+    """Count ``tool_argument_parse_error`` events emitted by the runner (issue #872).
+
+    The runner records one such event each time the model emits a tool-call
+    whose ``arguments`` JSON cannot be parsed (or is not a JSON object) — see
+    ``foundry_x.execution.runner._parse_tool_arguments``. The runner still
+    proceeds with an empty ``arguments`` dict so the loop survives, so a
+    rising count is the only signal that the model is producing malformed
+    tool calls (schema mismatch, instruction drift, etc.).
+
+    A rising rate correlates with model output quality degradation, so this
+    counter is surfaced alongside :func:`_wall_clock_abort_count` as an
+    auxiliary operator signal — scalar, session-aggregated, fit for the
+    ``foundry-kpis`` markdown table and the baseline/candidate delta column.
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    count = 0
+    for event in logger.query_events(
+        kind=TOOL_ARGUMENT_PARSE_ERROR_KIND,
+        harness_version=harness_version,
+    ):
+        count += 1
+    return count
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -788,6 +840,16 @@ def _render_markdown(summary: KpiSummary) -> str:
             f"Wall-Clock Aborts: {summary.wall_clock_abort_count} session(s) "
             "were aborted by FOUNDRY_TASK_TIMEOUT."
         )
+    # Issue #872: surface tool-call argument parse-error count when at least
+    # one event was recorded. A rising rate signals model output quality
+    # degradation or a schema mismatch, so this is operator-visible signal
+    # only (clean store stays compact, mirroring wall-clock aborts).
+    if summary.tool_argument_parse_error_count > 0:
+        lines.append("")
+        lines.append(
+            f"Tool Argument Parse Errors: {summary.tool_argument_parse_error_count} "
+            "malformed tool-call argument(s) emitted by the runner."
+        )
     if summary.failure_class_distribution:
         total = sum(summary.failure_class_distribution.values())
         lines.append("")
@@ -859,6 +921,10 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{baseline.wall_clock_abort_count} | "
         f"{candidate.wall_clock_abort_count} | "
         f"{_format_delta(float(baseline.wall_clock_abort_count), float(candidate.wall_clock_abort_count), higher_is_better=False)} |",
+        "| Tool Argument Parse Error Count | "
+        f"{baseline.tool_argument_parse_error_count} | "
+        f"{candidate.tool_argument_parse_error_count} | "
+        f"{_format_delta(float(baseline.tool_argument_parse_error_count), float(candidate.tool_argument_parse_error_count), higher_is_better=False)} |",
     ]
     return "\n".join(lines)
 
@@ -891,12 +957,13 @@ def append_kpi_history(
     ``token_totals``, ``streaming_quality``, and ``wall_clock_abort_count``
     excluded (the "minus per-session maps" half of the round-trip contract).
     ``hooks_disabled_count``, ``hooks_disabled_rate``,
-    ``token_budget_abort_count``, and ``token_budget_hit_rate`` are scalar
-    fields and are included. Then ``timestamp`` and the optional
-    ``harness_version`` are added. Parent directories are created on
-    demand so the operator does not have to ``mkdir`` before the first run.
-    ``failure_class_distribution`` is included so the trend table can show
-    per-class deltas (issue #705).
+    ``token_budget_abort_count``, ``token_budget_hit_rate``, and
+    ``tool_argument_parse_error_count`` are scalar fields and are included
+    so the trend table can show their drift across harness edits. Then
+    ``timestamp`` and the optional ``harness_version`` are added. Parent
+    directories are created on demand so the operator does not have to
+    ``mkdir`` before the first run. ``failure_class_distribution`` is
+    included so the trend table can show per-class deltas (issue #705).
 
     The file is opened in append mode and a single ``\\n``-terminated
     line is written per call, so concurrent appends from independent
