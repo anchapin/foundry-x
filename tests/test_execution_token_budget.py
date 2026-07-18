@@ -56,9 +56,22 @@ class _ScriptedAdapter:
     def __init__(self, responses: list[ModelResponse]) -> None:
         self._responses = list(responses)
         self.calls = 0
+        # Captured reference to the runner's internal messages list. The
+        # runner mutates this list in place via ``messages.append(...)``,
+        # so reading ``captured_messages`` after ``run_task`` returns
+        # reflects every mutation — including any that should NOT have
+        # happened (issue #789).
+        self.captured_messages: list[ModelMessage] = []
+
+    def _capture(self, messages) -> None:
+        if not self.captured_messages:
+            # Capture the reference on the first call. Subsequent calls
+            # receive the same list object (the runner never rebinds it).
+            self.captured_messages = messages
 
     async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
         self.calls += 1
+        self._capture(messages)
         if not self._responses:
             raise RuntimeError(
                 f"_ScriptedAdapter exhausted after {self.calls - 1} call(s);"
@@ -71,6 +84,7 @@ class _ScriptedAdapter:
 
     async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
         self.calls += 1
+        self._capture(messages)
         if not self._responses:
             raise RuntimeError(
                 f"_ScriptedAdapter exhausted after {self.calls - 1} call(s);"
@@ -435,6 +449,111 @@ async def test_run_task_warns_and_zero_tokens_when_usage_missing(tmp_path):
     outcome = next(event for event in events if event.kind == "outcome")
     assert outcome.payload["status"] == "success"
     assert outcome.payload["tokens_total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_task_token_budget_check_runs_before_message_append(tmp_path):
+    """Issue #789 regression: when a response pushes the running total over
+    ``token_budget``, the offending response MUST NOT be appended to the
+    conversation history before the loop breaks.
+
+    Before the fix, ``messages.append(response.message)`` ran unconditionally
+    before the budget check, so a session terminated by ``token_budget``
+    carried the over-budget assistant message in its history — corrupting
+    downstream consumers that read ``outcome.reason="token_budget"`` together
+    with the messages array (the array promised "last safe response" but
+    actually contained the offending one).
+
+    We observe the runner's internal ``messages`` list by capturing the
+    reference handed to the adapter on each call (Python passes the list by
+    reference, so ``messages.append`` mutations are visible after
+    ``run_task`` returns). The over-budget response carries a distinctive
+    marker string so the assertion is unambiguous.
+    """
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+    db = tmp_path / "traces.db"
+
+    over_budget_marker = "OVER_BUDGET_MARKER_789"
+
+    def _safe_step_response(step_index: int) -> ModelResponse:
+        tool_call = ModelToolCall(
+            id=f"call_step_{step_index}",
+            type="function",
+            function=ToolCallFunction(
+                name="bash",
+                arguments=json.dumps({"command": "true"}),
+            ),
+        )
+        return ModelResponse(
+            message=ModelMessage(
+                role="assistant",
+                content=f"safe-{step_index}",
+                tool_calls=[tool_call],
+            ),
+            tool_calls=[tool_call],
+            finish_reason="tool_calls",
+            usage=ModelUsage(prompt_tokens=40, completion_tokens=60, total_tokens=100),
+        )
+
+    over_budget_response = ModelResponse(
+        message=ModelMessage(role="assistant", content=over_budget_marker),
+        finish_reason="stop",
+        usage=ModelUsage(prompt_tokens=80, completion_tokens=120, total_tokens=200),
+    )
+
+    adapter = _ScriptedAdapter([_safe_step_response(0), over_budget_response])
+    limits = RunLimits(token_budget=150)
+
+    async def noop_executor(name, arguments):  # noqa: ANN001, ARG001
+        return {"status": "ok"}
+
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as session_id:
+        await run_task(
+            "budget-ordering-789",
+            harness_dir,
+            logger,
+            session_id,
+            model_adapter=adapter,
+            skill_executor=noop_executor,
+            limits=limits,
+        )
+
+    # The adapter must have been called exactly twice: once for the safe
+    # response, once for the over-budget response. A third call would mean
+    # the loop did not break on the budget check.
+    assert adapter.calls == 2
+
+    events = logger.load_session(session_id)
+
+    aborted = [event for event in events if event.kind == "task_aborted"]
+    assert len(aborted) == 1
+    assert aborted[0].payload == {
+        "reason": "token_budget",
+        "tokens_used": 300,
+        "token_budget": 150,
+    }
+
+    outcome = next(event for event in events if event.kind == "outcome")
+    assert outcome.payload["status"] == "failed"
+    assert outcome.payload["reason"] == "token_budget"
+    # tokens_total reflects the last safe running total — the over-budget
+    # response's tokens ARE counted (the spend happened) but its message
+    # is not in the history.
+    assert outcome.payload["tokens_total"] == 300
+
+    # The captured messages list is the runner's internal conversation
+    # history. The over-budget response (and its marker content) MUST NOT
+    # be present; only the safe response that preceded it should be.
+    messages_snapshot = adapter.captured_messages
+    contents = [msg.content for msg in messages_snapshot if msg.content is not None]
+    assert over_budget_marker not in contents, (
+        f"over-budget response leaked into conversation history; messages contents: {contents!r}"
+    )
+    assert "safe-0" in contents, (
+        f"last safe response missing from history; messages contents: {contents!r}"
+    )
 
 
 @pytest.mark.asyncio

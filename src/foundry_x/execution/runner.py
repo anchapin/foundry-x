@@ -1646,8 +1646,10 @@ async def run_task(
                 outcome_reason = "event_limit"
                 hit_event_limit = True
                 break
-            messages.append(response.message)
 
+            # Issue #789: check token_budget BEFORE appending the response so the
+            # offending message is not injected into conversation history. The
+            # outcome.payload must reflect the last safe response.
             if token_budget is not None and tokens_used > token_budget:
                 outcome_status = "failed"
                 outcome_reason = "token_budget"
@@ -1661,6 +1663,8 @@ async def run_task(
                     },
                 )
                 break
+
+            messages.append(response.message)
 
             if not response.tool_calls:
                 if response.finish_reason not in (None, "stop"):
