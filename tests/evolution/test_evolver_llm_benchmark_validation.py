@@ -665,3 +665,81 @@ class TestLLMEvolverNoRegressions:
             assert verdict.verdict is True, (
                 f"Edit for {failure_report.proposed_class} failed Critic gate: {verdict.notes}"
             )
+
+
+class TestTemplateFallback:
+    """Test template-based fallback when LLM is unavailable (issue #794)."""
+
+    @pytest.fixture
+    def harness_dir_with_manifest(self, tmp_path: Path) -> Path:
+        """Create a minimal harness directory with manifest.json for template fallback tests."""
+        harness_dir = tmp_path / "harness"
+        tests_dir = harness_dir / "tests"
+        tests_dir.mkdir(parents=True)
+        (harness_dir / "system_prompt.txt").write_text("original system prompt\n", encoding="utf-8")
+        (harness_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "version": "0.1.0",
+                    "model_target": "minimax-coding-plan/MiniMax-M3",
+                    "hooks": ["base", "context_pruning"],
+                    "context_pruning": {
+                        "token_threshold": 8192,
+                        "event_threshold": 200,
+                    },
+                    "skills": ["bash.json"],
+                    "skill_inventory": [],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (tests_dir / "test_gate.py").write_text(
+            """
+import pytest
+
+@pytest.mark.benchmark
+def test_original():
+    assert True
+""".lstrip(),
+            encoding="utf-8",
+        )
+        install_load_check_prerequisites(harness_dir)
+        return harness_dir
+
+    def test_context_overflow_template_produces_one_edit(
+        self, harness_dir_with_manifest: Path
+    ) -> None:
+        """Test that context-overflow failure with no LLM adapter produces one ProposedEdit.
+
+        Regression test for issue #794: _PROPOSED_CLASS_EDIT_TEMPLATES had no
+        context-overflow entry, causing _propose_from_template to return [] and
+        silently waste the evolution cycle.
+        """
+        failure_report = FailureReport(
+            session_id="sess-template-fallback",
+            summary="Agent loop reached max_steps before producing a final answer.",
+            failed_steps=[
+                {
+                    "kind": "outcome",
+                    "event_id": "e-co",
+                    "payload": {"status": "truncated", "reason": "max_steps", "steps": 10},
+                }
+            ],
+            suspected_causes=["Agent loop reached max_steps (steps=10) before producing a final answer."],
+            proposed_class="context-overflow",
+        )
+
+        evolver = Evolver(model_adapter=None)
+
+        edits = evolver.propose(harness_dir_with_manifest, failure_report)
+
+        assert len(edits) == 1, (
+            f"Expected 1 ProposedEdit for context-overflow, got {len(edits)}. "
+            "Check that _PROPOSED_CLASS_EDIT_TEMPLATES has a context-overflow entry."
+        )
+        edit = edits[0]
+        assert edit.target_file == "harness/manifest.json"
+        assert "context-overflow" in edit.rationale.lower() or "token_threshold" in edit.rationale.lower()
+        assert len(edit.unified_diff) > 0
