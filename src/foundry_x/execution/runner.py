@@ -38,6 +38,12 @@ from foundry_x.execution.model_adapter import (
     ToolFunctionSchema,
     resolve_adapter_max_retries,
 )
+from foundry_x.infra.server_manager import (
+    FoundryServerManager,
+    SERVER_UNAVAILABLE_KIND,
+    ServerLaunchError,
+    ServerNotManagedError,
+)
 from foundry_x.trace.logger import TraceLogger
 
 if TYPE_CHECKING:
@@ -692,6 +698,66 @@ def _import_hook_types() -> tuple[type, type]:
     from harness.hooks.base import ToolCall, ToolResult
 
     return ToolCall, ToolResult
+
+
+async def _handle_server_unavailable(
+    server_manager: FoundryServerManager,
+    log: TraceLogger,
+    session_id: str,
+    step: int,
+) -> bool:
+    """Record a ``server_unavailable`` trace event and call :meth:`restart`.
+
+    Issue #899. The runner invokes this hook at the start of each agent
+    loop iteration when ``server_manager.is_healthy()`` returns ``False``.
+    Exactly one ``server_unavailable`` event is recorded per detected
+    failure; its payload carries ``step``, ``host``, and the post-restart
+    outcome (``restart_attempted``) so the ``server_restart_count`` KPI
+    consumer (issue #899) can aggregate detection count separately
+    from actual supervisor recoveries. The :attr:`FoundryServerManager.restart_count`
+    counter on the manager is the authoritative source of truth for
+    "how many restart cycles actually succeeded".
+
+    Returns ``True`` when the runner should abort the session — i.e.
+    when ``autostart`` is on and the supervisor's bounded restart loop
+    failed to re-establish ``/health`` within the configured retry
+    budget. Returns ``False`` when the supervisor recovered (the loop
+    should continue) OR when the operator opted out of autostart (the
+    manager is a passive prober and the runner should let the model
+    adapter's own retry policy decide how to handle the outage).
+
+    Exceptions raised by :meth:`FoundryServerManager.restart` are not
+    silenced — the runner is the outermost supervisor and must surface
+    a launch failure rather than swallow it (AGENTS.md §2).
+    """
+    payload: dict[str, object] = {
+        "step": step,
+        "host": server_manager.host,
+        "health_url": server_manager.health_url,
+        "restart_attempted": bool(server_manager.config.autostart),
+    }
+    log.record(session_id, kind=SERVER_UNAVAILABLE_KIND, payload=payload)
+    if not server_manager.config.autostart:
+        # Passive health-check only — no spawn / kill is attempted; the
+        # model adapter's own retry policy (FOUNDRY_ADAPTER_MAX_RETRIES)
+        # handles the outage. The trace event lets the operator see the
+        # degradation via ``foundry-trace events-grep server_unavailable``
+        # and the ``server_restart_count`` KPI.
+        return False
+    try:
+        healthy_after = await server_manager.restart()
+    except (ServerLaunchError, ServerNotManagedError) as exc:
+        log.record(
+            session_id,
+            kind="model_error",
+            payload={
+                "step": step,
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            },
+        )
+        return True
+    return not healthy_after
 
 
 def _truncate_at_newline(data: bytes, max_bytes: int) -> tuple[bytes, bool]:
@@ -1366,6 +1432,7 @@ async def run_task(
     skill_executor: SkillExecutor | None = None,
     limits: RunLimits | None = None,
     workspace_root: Path | None = None,
+    server_manager: FoundryServerManager | None = None,
 ) -> None:
     """Drive one task through the asyncio agent loop (issue #89, ADR-0010).
 
@@ -1568,6 +1635,29 @@ async def run_task(
             if step >= max_steps:
                 break
             outcome_steps = step + 1
+            # Issue #899: probe the model server before each round-trip.
+            # A mid-session crash of llama-server is otherwise invisible to
+            # the trace until the next ``model_request`` raises a connection
+            # error; recording ``server_unavailable`` here makes the
+            # degradation observable to the Digester and the
+            # ``server_restart_count`` KPI. The check is bounded to the
+            # ``FOUNDRY_SERVER_HEALTH_TIMEOUT_S`` budget so a stuck
+            # endpoint cannot block the agent loop (matches the per-step
+            # ``FOUNDRY_REQUEST_TIMEOUT_S`` policy). When
+            # ``FOUNDRY_SERVER_AUTOSTART=0`` the supervisor is passive and
+            # records the event without spawning or killing anything, so
+            # operators who manage the server out-of-band see a trace
+            # signal without the runner aborting the session.
+            if server_manager is not None:
+                healthy = await server_manager.is_healthy()
+                if not healthy:
+                    should_abort = await _handle_server_unavailable(
+                        server_manager, log, session_id, step
+                    )
+                    if should_abort:
+                        outcome_status = "failed"
+                        outcome_reason = "server_unavailable"
+                        break
             _record_and_count(
                 session_id,
                 kind="model_request",
@@ -1909,12 +1999,41 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
             path_or_endpoint=path_or_endpoint_override,
         )
 
+    # Issue #899: ``FoundryServerManager`` supervises llama-server for the
+    # session. Built unconditionally — when ``FOUNDRY_SERVER_AUTOSTART=0``
+    # (the default for operators who manage the server out-of-band) the
+    # manager degrades to a passive ``/health`` prober without spawning
+    # or killing anything; the agent loop's mid-session hook still
+    # surfaces ``server_unavailable`` events so a Digester can spot the
+    # degradation even when no restart is attempted.
+    server_manager = FoundryServerManager()
+
     with logger.session(harness_version=harness_version, model_id=model_id) as session_id:
         logger.record(session_id, kind="task_received", payload={"prompt": args.task})
         start = time.monotonic()
         if run_task_fn is not None:
             task_coro = task(args.task, harness_dir, logger, session_id)
         else:
+            # Pre-session health probe (issue #899 acceptance #3). When
+            # the server is not healthy the manager attempts a bounded
+            # exponential-backoff restart (autostart=on); when the
+            # server is still unhealthy the loop is opened anyway and
+            # the first model_request will trigger the mid-session
+            # hook — surfacing the failure via ``server_unavailable``
+            # rather than silently aborting a 60 s readiness wait.
+            try:
+                asyncio.run(server_manager.ensure_healthy())
+            except (ServerLaunchError, ServerNotManagedError) as exc:
+                logger.record(
+                    session_id,
+                    kind="task_failed",
+                    payload={
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                        "duration_ms": 0,
+                    },
+                )
+                raise
             task_coro = task(
                 args.task,
                 harness_dir,
@@ -1923,6 +2042,7 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
                 model_adapter=model_adapter,
                 limits=limits,
                 workspace_root=workspace_root,
+                server_manager=server_manager,
             )
         try:
             asyncio.run(

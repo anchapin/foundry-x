@@ -82,6 +82,12 @@ MODEL_RETRY_KIND = "model_retry"
 # reference (Digester classification, regression report, etc.) shares the
 # same spelling without re-typing the literal.
 TOOL_ARGUMENT_PARSE_ERROR_KIND = "tool_argument_parse_error"
+# Issue #899: the runner emits ``server_unavailable`` when the
+# ``FoundryServerManager`` reports ``/health`` returning a non-200 status
+# mid-session and triggers the supervisor's restart loop. The
+# ``server_restart_count`` KPI is the cumulative number of such events
+# across the trace store.
+SERVER_UNAVAILABLE_KIND = "server_unavailable"
 
 
 class KpiSummary(BaseModel):
@@ -160,6 +166,16 @@ class KpiSummary(BaseModel):
     which usually means the context-pruning or stop-on-error policies
     are not strict enough. Surfaced alongside ``token_budget_abort_count``
     and ``wall_clock_abort_count`` as an auxiliary operator signal.
+
+    Issue #899 adds ``server_restart_count``: the total count of
+    ``server_unavailable`` events emitted by the runner when the
+    ``FoundryServerManager`` reports a mid-session ``/health`` failure
+    and triggers the supervisor's restart loop. A rising rate signals
+    that llama-server (or the local model backend) is crashing or
+    becoming unreachable mid-benchmark — surfacing it as an auxiliary
+    operator signal so operators can correlate cycle-time regressions
+    with infrastructure reliability issues without confusing this with
+    model-quality signals.
     """
 
     cycle_time_seconds: float | None = None
@@ -179,6 +195,7 @@ class KpiSummary(BaseModel):
     model_retry_count: int = 0
     tool_argument_parse_error_count: int = 0
     event_limit_abort_count: int = 0
+    server_restart_count: int = 0
 
 
 class StreamingQualityData(BaseModel):
@@ -312,6 +329,7 @@ def compute_kpis(
         logger, harness_version=harness_version
     )
     event_limit_abort_count = _event_limit_abort_count(logger, harness_version=harness_version)
+    server_restart_count = _server_restart_count(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -330,6 +348,7 @@ def compute_kpis(
         model_retry_count=model_retry_count,
         tool_argument_parse_error_count=tool_argument_parse_error_count,
         event_limit_abort_count=event_limit_abort_count,
+        server_restart_count=server_restart_count,
     )
 
 
@@ -388,6 +407,7 @@ def _compute_deltas(
         ),
         "event_limit_abort_count": candidate.event_limit_abort_count
         - baseline.event_limit_abort_count,
+        "server_restart_count": candidate.server_restart_count - baseline.server_restart_count,
     }
 
 
@@ -816,6 +836,38 @@ def _tool_argument_parse_error_count(
     return count
 
 
+def _server_restart_count(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> int:
+    """Count ``server_unavailable`` events emitted by the runner (issue #899).
+
+    The runner records one such event each time the
+    :class:`~foundry_x.infra.server_manager.FoundryServerManager` reports
+    that ``GET /health`` returned a non-200 status and triggers the
+    supervisor's bounded exponential-backoff restart loop (see
+    ``foundry_x.execution.runner._handle_server_unavailable``). A rising
+    count correlates with infrastructure reliability regressions
+    (``llama-server`` crashes, GPU OOM, host reboots) rather than
+    model-quality signals, so it is surfaced alongside
+    :func:`_wall_clock_abort_count` as an auxiliary operator signal.
+
+    The counter is scalar and session-aggregated, fit for the
+    ``foundry-kpis`` markdown table and the baseline/candidate delta
+    column. Uses one :meth:`TraceLogger.query_events` cursor with the
+    kind and ``harness_version`` filters pushed down so a multi-session
+    fixture does not need to be materialized in Python (matches the
+    per-KPI helper convention introduced in issue #273).
+    """
+    count = 0
+    for event in logger.query_events(
+        kind=SERVER_UNAVAILABLE_KIND,
+        harness_version=harness_version,
+    ):
+        count += 1
+    return count
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -957,6 +1009,18 @@ def _render_markdown(summary: KpiSummary) -> str:
             f"Event Limit Aborts: {summary.event_limit_abort_count} session(s) "
             "hit the per-session event cap."
         )
+    # Issue #899: surface server-restart count as an auxiliary operator
+    # signal. Zero means the supervisor never saw an unhealthy /health
+    # response (expected for healthy runs); non-zero means the
+    # ``FoundryServerManager`` triggered its bounded restart loop at
+    # least once during the harness-version window — typically a sign
+    # of infrastructure flakiness, not a model-quality regression.
+    if summary.server_restart_count > 0:
+        lines.append("")
+        lines.append(
+            f"Server Restarts: {summary.server_restart_count} server_unavailable "
+            "event(s) recorded by the runner's mid-session health-check."
+        )
     if summary.failure_class_distribution:
         total = sum(summary.failure_class_distribution.values())
         lines.append("")
@@ -1040,6 +1104,10 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{baseline.event_limit_abort_count} | "
         f"{candidate.event_limit_abort_count} | "
         f"{_format_delta(float(baseline.event_limit_abort_count), float(candidate.event_limit_abort_count), higher_is_better=False)} |",
+        "| Server Restart Count | "
+        f"{baseline.server_restart_count} | "
+        f"{candidate.server_restart_count} | "
+        f"{_format_delta(float(baseline.server_restart_count), float(candidate.server_restart_count), higher_is_better=False)} |",
     ]
     return "\n".join(lines)
 
@@ -1073,13 +1141,14 @@ def append_kpi_history(
     excluded (the "minus per-session maps" half of the round-trip contract).
     ``hooks_disabled_count``, ``hooks_disabled_rate``,
     ``token_budget_abort_count``, ``token_budget_hit_rate``,
-    ``model_retry_count``, ``tool_argument_parse_error_count``, and
-    ``event_limit_abort_count`` are scalar fields and are included so the
-    trend table can show their drift across harness edits. Then
-    ``timestamp`` and the optional ``harness_version`` are added. Parent
-    directories are created on demand so the operator does not have to
-    ``mkdir`` before the first run. ``failure_class_distribution`` is
-    included so the trend table can show per-class deltas (issue #705).
+    ``model_retry_count``, ``tool_argument_parse_error_count``,
+    ``event_limit_abort_count``, and ``server_restart_count`` are scalar
+    fields and are included so the trend table can show their drift
+    across harness edits. Then ``timestamp`` and the optional
+    ``harness_version`` are added. Parent directories are created on
+    demand so the operator does not have to ``mkdir`` before the first
+    run. ``failure_class_distribution`` is included so the trend table
+    can show per-class deltas (issue #705).
 
     The file is opened in append mode and a single ``\\n``-terminated
     line is written per call, so concurrent appends from independent

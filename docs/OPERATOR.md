@@ -273,6 +273,124 @@ See `CONTEXT.md §Event kinds` for the full payload contract,
 `ADR-0004` for why this failure mode cannot bypass the `Critic`
 gate.
 
+## Server Supervision (FoundryServerManager, issue #899)
+
+The runner supervises the local model server (`llama-server` or any
+OpenAI-compatible endpoint) through a `FoundryServerManager` that
+probes `GET /health` before each session and triggers a bounded
+exponential-backoff restart loop when the server becomes unhealthy
+mid-session. The supervisor is **opt-in** via
+`FOUNDRY_SERVER_AUTOSTART` — when set to `0` the manager degrades to
+a passive health-checker that records `server_unavailable` trace
+events but does not spawn or kill anything (preserves the existing
+operator workflow of a manually-launched server on a remote box).
+
+### Failure mode
+
+When `is_healthy()` returns `False` at the start of an agent-loop
+iteration, the runner records a `server_unavailable` trace event and
+calls `restart()`. The restart loop performs up to 3 attempts with
+exponential backoff (1 s, 2 s, 4 s; capped at 8 s). If the loop
+re-establishes `/health` the agent loop continues; otherwise the
+session terminates with `outcome.status="failed"` and
+`outcome.reason="server_unavailable"`.
+
+### Detecting the condition {#detecting-server-unavailable}
+
+Three signals are available:
+
+1. **Trace event** — every failed health probe records exactly one
+   `server_unavailable` event with payload
+   `{"step": int, "host": str, "health_url": str, "restart_attempted": bool}`.
+   Grep a single session:
+
+   ```
+   foundry-trace events-grep <session_id> \
+       --pattern server_unavailable \
+       --db logs/traces.db
+   ```
+
+   Presence means **that session observed a llama-server failure
+   mid-run**. The `restart_attempted` field names whether the
+   supervisor tried to recover; check the session's `outcome.reason`
+   to see if recovery succeeded (`"final_answer"` / `"max_steps"` /
+   `"token_budget"`) or failed (`"server_unavailable"`).
+
+2. **KPI `server_restart_count`** — the cumulative count of
+   `server_unavailable` events across the trace store, surfaced by
+   `foundry-kpis` and the regression baseline report. A non-zero
+   value on a fresh store is the operator's signal to investigate
+   llama-server reliability — typically GPU OOM, host reboot, or a
+   crashed background process. The metric is intentionally separated
+   from model-quality KPIs so an infrastructure regression does not
+   get blamed on a harness edit.
+
+3. **Runner-managed process lifecycle** — when
+   `FOUNDRY_SERVER_AUTOSTART=1` the manager owns the subprocess and
+   restarts it transparently; the PID is held inside
+   `FoundryServerManager._proc` and torn down on `stop()` (or process
+   exit). When `FOUNDRY_SERVER_AUTOSTART=0` the manager does not
+   spawn or kill anything — the operator is responsible for the
+   server process.
+
+### Recovery {#recovering-from-server-unavailable}
+
+Treat a non-zero `server_restart_count` as an
+**infrastructure-affecting incident**, not a metric blip. Walk this
+checklist in order:
+
+1. **Confirm the model file is intact.** Open
+   `LLAMACPP_MODEL_PATH` (or `FOUNDRY_MODEL_PATH`) and verify the
+   GGUF file exists and has not been truncated. The supervisor
+   refuses to launch when `LLAMACPP_MODEL_PATH` is unset.
+2. **Check `rocm-smi` for VRAM pressure.** A Q5_K_M model needs
+   ~5.5 GB VRAM at full offload; partial offload
+   (`FOUNDRY_SERVER_NGpuLayers`) trades speed for VRAM. A GPU OOM
+   manifests as the server crashing immediately after startup — the
+   supervisor's restart loop then repeatedly hits the same failure.
+3. **Verify the host:port pair matches `LLAMACPP_HOST`.** The
+   supervisor's `host` field is the value of `LLAMACPP_HOST`. A
+   misconfigured value (e.g. pointing at `0.0.0.0` instead of
+   `127.0.0.1`) causes `/health` to return 404 forever.
+4. **Restart `llama-server` out-of-band when autostart is disabled.**
+   When `FOUNDRY_SERVER_AUTOSTART=0` the supervisor will not
+   re-spawn the process; the operator must restart it manually
+   (`./llama.cpp/build/bin/llama-server ...`) before the next
+   `fx-runner` invocation.
+5. **Re-run `fx-runner` and confirm the new session has no
+   `server_unavailable` event:**
+
+   ```
+   foundry-trace events-grep <new_session_id> \
+       --pattern server_unavailable \
+       --db logs/traces.db
+   ```
+
+   Presence on the new session means the fix did not take;
+   absence confirms recovery. Re-run `foundry-kpis` and confirm
+   `server_restart_count` is no longer incrementing.
+
+Until recovery is confirmed, treat the affected window as
+**infrastructure-degraded**: cycle-time KPI may be inflated by
+restart latency even when model output quality is unchanged. Do not
+attribute a cycle-time regression to a harness edit without ruling
+out `server_restart_count > 0` first.
+
+### Trace event reference {#server-unavailable-event-reference}
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `kind` | `"server_unavailable"` | Event discriminant. Matches the entry in `CONTEXT.md` §Event kinds. |
+| `payload.step` | `int` | Agent-loop step index at which the unhealthy `/health` was observed. |
+| `payload.host` | `str` | Resolved value of `LLAMACPP_HOST` at probe time. |
+| `payload.health_url` | `str` | Absolute `/health` URL probed (scheme + netloc + `/health`). |
+| `payload.restart_attempted` | `bool` | `true` when the supervisor invoked `restart()` (i.e. `FOUNDRY_SERVER_AUTOSTART=1`). `false` when the manager is a passive prober. |
+
+See `CONTEXT.md §Event kinds` for the full payload contract,
+`docs/MODEL_CONFIG.md §Server supervision` for the env-var
+reference, and `infra/llama-cpp/README.md` for the underlying
+`llama-server` launch workflow.
+
 ## Glossary {#glossary}
 
 | Term | Definition |
