@@ -243,6 +243,31 @@ def test_aggregate_aggregates_across_sessions(tmp_path):
     assert row.p99_ms == 30.0
 
 
+def test_aggregate_respects_harness_version_filter(tmp_path):
+    """Only sessions matching --harness-version are included in the aggregation."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1.0.0") as sid_a:
+        logger.record(sid_a, "tool_call", {"name": "read_file", "duration_ms": 10})
+        logger.record(sid_a, "tool_call", {"name": "read_file", "duration_ms": 30})
+    with logger.session(harness_version="v2.0.0") as sid_b:
+        logger.record(sid_b, "tool_call", {"name": "read_file", "duration_ms": 20})
+
+    report_v1 = aggregate_tool_latency(TraceLogger(db), harness_version="v1.0.0")
+    assert len(report_v1.rows) == 1
+    assert report_v1.rows[0].count == 2
+    # Nearest-rank on [10, 30]: p50 rank ceil(50/100*2)=1 → index 0 → 10.
+    assert report_v1.rows[0].p50_ms == 10.0
+
+    report_v2 = aggregate_tool_latency(TraceLogger(db), harness_version="v2.0.0")
+    assert len(report_v2.rows) == 1
+    assert report_v2.rows[0].count == 1
+    assert report_v2.rows[0].p50_ms == 20.0
+
+    report_all = aggregate_tool_latency(TraceLogger(db))
+    assert report_all.rows[0].count == 3
+
+
 # ---------------------------------------------------------------------------
 # Renderers
 # ---------------------------------------------------------------------------
@@ -397,3 +422,24 @@ def test_cli_tool_latency_since_filter_drops_older_events(tmp_path, capsys):
     out = capsys.readouterr().out
     # Only the two later rows survive → count column shows 2.
     assert "| read_file | 2 |" in out
+
+
+def test_cli_tool_latency_harness_version_filter(tmp_path, capsys):
+    """--harness-version only includes sessions with that version."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1.0.0") as sid_v1:
+        logger.record(sid_v1, "tool_call", {"name": "read_file", "duration_ms": 10})
+        logger.record(sid_v1, "tool_call", {"name": "read_file", "duration_ms": 30})
+    with logger.session(harness_version="v2.0.0") as sid_v2:
+        logger.record(sid_v2, "tool_call", {"name": "read_file", "duration_ms": 20})
+
+    rc = cli_main(["tool-latency", "--db", str(db), "--harness-version", "v1.0.0"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "| read_file | 2 |" in out
+
+    rc = cli_main(["tool-latency", "--db", str(db), "--harness-version", "v2.0.0"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "| read_file | 1 |" in out

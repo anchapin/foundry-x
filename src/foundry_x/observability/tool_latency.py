@@ -115,6 +115,7 @@ def _extract_duration_ms(payload: dict) -> float | None:
 def aggregate_tool_latency(
     logger: TraceLogger,
     since: str | None = None,
+    harness_version: str | None = None,
 ) -> ToolLatencyReport:
     """Walk every session and bucket tool_call durations by tool name.
 
@@ -124,7 +125,8 @@ def aggregate_tool_latency(
     ``tool_call`` events through :meth:`TraceLogger.iter_events`. The
     ``since`` filter is applied as a string ``>=`` comparison after the
     fetch (the logger deliberately does not accept a timestamp filter
-    on ``iter_events`` — see regression_report.py:94-96).
+    on ``iter_events`` — see regression_report.py:94-96). The
+    ``harness_version`` filter is passed directly to ``list_sessions``.
 
     Tools with zero matching events in the window are excluded by
     construction: the bucket is only created when a valid duration is
@@ -136,7 +138,7 @@ def aggregate_tool_latency(
     latest: str | None = None
     total_calls = 0
 
-    for session in logger.list_sessions():
+    for session in logger.list_sessions(harness_version=harness_version):
         for event in logger.iter_events(session.session_id, kind=TOOL_CALL_KIND):
             if since is not None and event.timestamp < since:
                 continue
