@@ -186,7 +186,9 @@ class TestRunEvolutionStep:
         assert result.verdict is not None
         assert result.verdict.edit_index == 1
 
-    def test_verdict_failure_class_from_failure_report(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_verdict_failure_class_from_failure_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         """Issue #796: verdict.failure_class is wired from failure_report.proposed_class."""
         harness_dir = _write_harness(tmp_path)
 
