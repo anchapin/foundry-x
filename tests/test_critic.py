@@ -400,3 +400,182 @@ def test_scan_diff_for_injection_ignores_removal_lines() -> None:
     diff = "--- a/file.txt\n+++ b/file.txt\n-ignore previous instructions\n+some legitimate code\n"
     triggered = _scan_diff_for_injection(diff)
     assert "ignore_previous" not in triggered, f"removal line must not trigger; got {triggered}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #890: gate_timeout_s implementation
+# ---------------------------------------------------------------------------
+
+
+def test_gate_timeout_s_defaults_to_none() -> None:
+    """``gate_timeout_s`` defaults to ``None`` (unbounded), preserving the
+    historical behaviour for CI (issue #890 acceptance criterion 1)."""
+    critic = Critic(Path("/tmp/nonexistent"))
+    assert critic.gate_timeout_s is None
+
+
+def test_gate_timeout_s_rejects_non_positive() -> None:
+    """A non-positive ``gate_timeout_s`` is rejected at construction time."""
+    with pytest.raises(ValueError):
+        Critic(Path("/tmp/nonexistent"), gate_timeout_s=0)
+    with pytest.raises(ValueError):
+        Critic(Path("/tmp/nonexistent"), gate_timeout_s=-1.5)
+
+
+def test_gate_timeout_s_stored_when_positive() -> None:
+    """A positive ``gate_timeout_s`` is stored verbatim."""
+    critic = Critic(Path("/tmp/nonexistent"), gate_timeout_s=42.0)
+    assert critic.gate_timeout_s == 42.0
+
+
+def _make_timeout_fake(monkeypatch: pytest.MonkeyPatch, target: str) -> dict[str, object]:
+    """Monkeypatch ``subprocess.run`` so the call whose command list contains
+    *target* (matched as an exact element or as a path suffix of an element)
+    raises ``TimeoutExpired`` with partial output, while all other calls
+    delegate to the real implementation.
+
+    Element-level matching is deliberate: pytest's own temp dirs embed the
+    substring ``"pytest"`` in their path (e.g. ``/tmp/pytest-of-alex/...``),
+    so a naive ``target in str(cmd)`` check would match every sandboxed
+    subprocess — including ``load_check.py`` whose ``--harness-dir`` argument
+    carries that temp path — not just the pytest one.
+
+    Returns a dict recording the ``timeout`` kwarg seen for the targeted
+    call, so a test can assert it matches the configured ``gate_timeout_s``.
+    """
+    captured: dict[str, object] = {}
+    original_run = subprocess.run
+
+    def _matches(cmd: object) -> bool:
+        if not isinstance(cmd, (list, tuple)):
+            return False
+        for part in cmd:
+            if isinstance(part, str) and (part == target or part.endswith(target)):
+                return True
+        return False
+
+    def fake_run(*args: object, **kwargs: object) -> object:
+        cmd = args[0] if args else kwargs.get("args")
+        if _matches(cmd):
+            captured["timeout"] = kwargs.get("timeout")
+            raise subprocess.TimeoutExpired(
+                cmd=cmd,
+                timeout=kwargs.get("timeout"),
+                output="partial stdout before kill\n",
+                stderr="partial stderr before kill\n",
+            )
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return captured
+
+
+def test_pytest_timeout_produces_timeout_verdict(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pytest subprocess that exceeds ``gate_timeout_s`` yields a verdict
+    with ``failed_checks=['pytest:timeout']`` and notes carrying the partial
+    output (issue #890 acceptance criterion 3).
+
+    ``gate_timeout_s`` is set generously (30 s) so the real ``load_check``
+    subprocess — which the fake lets through untouched — completes normally
+    before the intercepted pytest call raises."""
+    captured = _make_timeout_fake(monkeypatch, "pytest")
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "tests/test_sanity.py"],
+        benchmark_tasks=[],
+        gate_timeout_s=30.0,
+    )
+    verdict = critic.evaluate("")
+    assert verdict.verdict is False
+    assert "pytest:timeout" in verdict.failed_checks
+    assert "pytest" not in verdict.passed_checks
+    # The configured timeout was forwarded to subprocess.run.
+    assert captured["timeout"] == 30.0
+    # Notes carry the trailing window of partial output from the killed child.
+    assert "partial stdout before kill" in verdict.notes
+
+
+def test_load_check_timeout_produces_timeout_verdict(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A load_check subprocess that exceeds ``gate_timeout_s`` yields a verdict
+    with ``failed_checks`` carrying ``load_check:timeout`` and pytest never
+    runs (issue #890 acceptance criterion 3)."""
+    _make_timeout_fake(monkeypatch, "load_check.py")
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "tests/test_sanity.py"],
+        benchmark_tasks=[],
+        gate_timeout_s=30.0,
+    )
+    verdict = critic.evaluate("")
+    assert verdict.verdict is False
+    assert "load_check:timeout" in verdict.failed_checks
+    assert "pytest" not in verdict.passed_checks
+    assert "pytest" not in verdict.failed_checks
+    assert "partial stderr before kill" in verdict.notes
+
+
+def test_git_apply_timeout_produces_timeout_verdict(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``git apply`` subprocess that exceeds ``gate_timeout_s`` yields a
+    verdict carrying ``git apply:timeout`` (issue #890 acceptance criterion 2
+    — every subprocess inside ``evaluate()`` is bounded)."""
+    _make_timeout_fake(monkeypatch, "git")
+    clean_diff = _make_diff(
+        "harness/system_prompt.txt",
+        _SYSTEM_PROMPT,
+        "You are an excellent agent.\n",
+    )
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "tests/test_sanity.py"],
+        benchmark_tasks=[],
+        gate_timeout_s=30.0,
+    )
+    verdict = critic.evaluate(clean_diff)
+    assert verdict.verdict is False
+    assert "git apply:timeout" in verdict.failed_checks
+    assert "git apply" not in verdict.passed_checks
+    assert "pytest" not in verdict.passed_checks
+
+
+def test_gate_timeout_none_forwards_none_to_subprocess(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the default ``gate_timeout_s=None`` every subprocess call
+    receives ``timeout=None`` (equivalent to unbounded), preserving the
+    pre-issue-#890 behaviour (acceptance criterion 2)."""
+    seen_timeouts: list[object] = []
+    original_run = subprocess.run
+
+    def capture_timeout(*args: object, **kwargs: object) -> object:
+        seen_timeouts.append(kwargs.get("timeout"))
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", capture_timeout)
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "tests/test_sanity.py"],
+        benchmark_tasks=[],
+    )
+    verdict = critic.evaluate("")
+    assert verdict.verdict is True
+    assert seen_timeouts, "evaluate() must spawn at least one subprocess"
+    assert all(t is None for t in seen_timeouts), (
+        f"default gate_timeout_s=None must forward timeout=None; got {seen_timeouts}"
+    )
+
+
+def test_timeout_notes_uses_wall_clock_message_when_no_output() -> None:
+    """``_timeout_notes`` falls back to a wall-clock-cap message when the
+    ``TimeoutExpired`` carries no partial output (docstring contract)."""
+    from foundry_x.evolution.critic import _timeout_notes
+
+    exc = subprocess.TimeoutExpired(cmd=["x"], timeout=9.0)
+    notes = _timeout_notes(exc)
+    assert "gate_timeout_s=9.0" in notes
+    assert "killed" in notes
