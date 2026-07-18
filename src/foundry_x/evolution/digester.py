@@ -135,6 +135,15 @@ _CLASS_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
+        "context-overflow",
+        (
+            "max_steps",
+            "context overflow",
+            "context limit",
+            "token budget",
+        ),
+    ),
+    (
         "tool-error",
         (
             "traceback",
@@ -183,10 +192,12 @@ _CLASS_CAUSE_TEMPLATES: dict[str, str] = {
     # Issue #805: context-overflow triggered when the runner agent loop terminates
     # via outcome.status=truncated / outcome.reason=max_steps. The steps value
     # is extracted from the payload so the Evolver can see how many steps ran.
+    # Issue #798: also matched via _CLASS_KEYWORDS when the aggregator misses;
+    # in that path the template receives {match} (the keyword) instead of {steps}.
     "context-overflow": (
-        "Agent loop reached max_steps (steps={steps}) before producing a final "
-        "answer; the context budget was exhausted. Review the pruning hook and "
-        "the model's tendency to repeat tool calls."
+        "Agent loop hit context budget limit (matched: {match}); the model "
+        "repeated tool calls or exceeded the context window before producing a "
+        "final answer. Review the pruning hook."
     ),
 }
 
@@ -371,7 +382,7 @@ def _aggregate_context_overflow(
                         "payload": event.payload,
                     }
                 ]
-                causes = [_CLASS_CAUSE_TEMPLATES[CONTEXT_OVERFLOW_CLASS].format(steps=steps)]
+                causes = [_CLASS_CAUSE_TEMPLATES[CONTEXT_OVERFLOW_CLASS].format(match="max_steps")]
                 return FailureReport(
                     session_id=session_id,
                     summary=(
