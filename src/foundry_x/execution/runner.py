@@ -1613,7 +1613,6 @@ async def run_task(
                     hit_event_limit = True
                 raise
 
-            event_count += chunk_count
             if _check_event_limit(session_id):
                 outcome_status = "failed"
                 outcome_reason = "event_limit"
