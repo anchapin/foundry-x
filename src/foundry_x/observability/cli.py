@@ -223,6 +223,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write the report to this path instead of stdout.",
     )
+    tool_latency.add_argument(
+        "--harness-version",
+        default=None,
+        help="Only include sessions recorded with this harness version.",
+    )
     return parser
 
 
@@ -332,8 +337,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "tool-latency":
-        logger = TraceLogger(args.db)
-        report = aggregate_tool_latency(logger, since=args.since)
+        backend = _infer_backend(args.db)
+        logger = TraceLogger(args.db, backend=backend)
+        report = aggregate_tool_latency(logger, since=args.since, harness_version=args.harness_version)
         if args.format == "json":
             rendered = render_tool_latency_json(report)
         else:
