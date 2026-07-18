@@ -125,6 +125,16 @@ The "Failure-signalling subset" subsection below cross-references the
 
 ### Session lifecycle
 
+The events that bracket a single FoundryAgent task session. Every
+`fx-runner --task "..."` invocation (see `Runner.main` in
+`src/foundry_x/execution/runner.py`) opens with a `task_received` event
+and closes with exactly one terminal marker: `task_completed` on the
+success path or `task_failed` on any unhandled `Exception` (ADR-0007,
+ADR-0010). This pair is the canonical FoundryAgent session-lifecycle
+signal the Digester attributes a terminal status to; the rows below
+pin their producer, payload contract, and failure-signal classification
+(see `tests/docs/test_event_kinds_terminal_events.py`).
+
 | Kind | Producer | Payload contract | Failure signal? |
 | --- | --- | --- | --- |
 | **`session_start`** | `TraceLogger.session` (`src/foundry_x/trace/logger.py`) | JSONL marker line `{"session_id", "started_at", "harness_version", "model_id", "metadata", "kind": "session_start"}`. In the sqlite backend the same data lives on the `sessions` row, not in the `events` table; the marker is part of the persisted vocabulary either way. | no |
