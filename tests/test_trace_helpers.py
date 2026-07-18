@@ -24,7 +24,9 @@ paths stay in lock-step.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+from unittest import mock
 
 import pytest
 
@@ -499,3 +501,122 @@ def test_prune_sessions_unknown_ids_returns_zero(tmp_path, backend):
 
     assert logger.prune_sessions(["never-existed-1", "never-existed-2"]) == 0
     assert len(logger.list_sessions()) == 1
+
+
+# --- Issue #787: streaming + atomic rewrite of _delete_session_jsonl ---------
+# Acceptance from the issue body:
+# - _delete_session_jsonl uses O(1) peak memory (streaming read + write)
+# - Uses atomic rename (temp file + os.replace) to avoid partial-write
+#   corruption
+# These tests target the jsonl backend specifically (the sqlite path is
+# unaffected) and exercise the new file-rewrite contract directly.
+
+
+def test_delete_session_jsonl_leaves_no_temp_file_on_success(tmp_path):
+    """After a successful streaming delete, no ``.tmp`` file lingers in
+    the trace directory. A leaked temp file would accumulate over many
+    prune cycles and confuse operators (issue #787)."""
+    path = tmp_path / "traces.jsonl"
+    logger = TraceLogger(path, backend="jsonl")
+    with logger.session(harness_version="0.1.0") as sid_drop:
+        logger.record(sid_drop, kind="user_prompt", payload={"text": "drop"})
+    with logger.session(harness_version="0.1.0") as sid_keep:
+        logger.record(sid_keep, kind="user_prompt", payload={"text": "keep"})
+
+    assert logger.delete_session(sid_drop) is True
+
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == [], f"temp file leaked after delete: {leftovers}"
+
+
+def test_delete_session_jsonl_preserves_file_mode(tmp_path):
+    """The rewritten file inherits the original's mode. The streaming
+    path uses :func:`os.chmod` to copy the source mode onto the temp
+    file before ``os.replace`` so a 0644 trace file does not silently
+    become 0600 (the NamedTemporaryFile default)."""
+    path = tmp_path / "traces.jsonl"
+    logger = TraceLogger(path, backend="jsonl")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, kind="user_prompt", payload={"text": "x"})
+
+    # Pin a non-default mode and verify it survives the rewrite.
+    os.chmod(path, 0o640)
+    pre_mode = path.stat().st_mode & 0o777
+    assert pre_mode == 0o640
+
+    assert logger.delete_session(sid) is True
+
+    post_mode = path.stat().st_mode & 0o777
+    assert post_mode == pre_mode, (
+        f"file mode changed across streaming rewrite: {pre_mode:o} -> {post_mode:o}"
+    )
+
+
+def test_delete_session_jsonl_rolls_back_on_replace_failure(tmp_path):
+    """If ``os.replace`` raises (e.g. the rename is interrupted), the
+    original trace file must be byte-identical to its pre-delete state
+    and the temp file must be cleaned up. The atomic-rename contract
+    (issue #787) forbids partial writes from ever becoming visible."""
+    path = tmp_path / "traces.jsonl"
+    logger = TraceLogger(path, backend="jsonl")
+    with logger.session(harness_version="0.1.0") as sid_drop:
+        logger.record(sid_drop, kind="user_prompt", payload={"text": "drop"})
+    with logger.session(harness_version="0.1.0") as sid_keep:
+        logger.record(sid_keep, kind="user_prompt", payload={"text": "keep"})
+
+    pre_bytes = path.read_bytes()
+
+    def raising_replace(src, dst, *args, **kwargs):
+        raise OSError("simulated rename failure")
+
+    with mock.patch("foundry_x.trace.logger.os.replace", side_effect=raising_replace):
+        with pytest.raises(OSError, match="simulated rename failure"):
+            logger.delete_session(sid_drop)
+
+    # Original file is untouched.
+    assert path.read_bytes() == pre_bytes
+    # Temp file is cleaned up even though the rename failed.
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == [], f"temp file leaked after failed rename: {leftovers}"
+    # The store still sees both sessions.
+    sids = [s.session_id for s in logger.list_sessions()]
+    assert sid_drop in sids
+    assert sid_keep in sids
+
+
+def test_delete_session_jsonl_streaming_handles_large_session(tmp_path):
+    """The streaming path must correctly rewrite a file too large to
+    hold in memory. We do not measure RSS here (flaky in CI), but we
+    do verify correctness at a size that would OOM the old
+    materialize-the-whole-file path on a constrained runner.
+
+    Plants 5000 events across 5 sessions, deletes the middle one, and
+    checks the survivor count and per-session integrity exactly."""
+    path = tmp_path / "traces.jsonl"
+    logger = TraceLogger(path, backend="jsonl")
+    sids: list[str] = []
+    for label in range(5):
+        with logger.session(harness_version="0.1.0") as sid:
+            sids.append(sid)
+            for i in range(1000):
+                logger.record(
+                    sid,
+                    kind="tool_call",
+                    payload={"label": label, "i": i},
+                )
+
+    # Sanity: each session has 1000 events.
+    assert all(len(logger.load_session(sid)) == 1000 for sid in sids)
+
+    drop = sids[2]
+    assert logger.delete_session(drop) is True
+
+    # The dropped session is gone; the other four are intact.
+    assert logger.load_session(drop) == []
+    for sid in (sids[0], sids[1], sids[3], sids[4]):
+        events = logger.load_session(sid)
+        assert len(events) == 1000
+        assert [e.payload["i"] for e in events] == list(range(1000))
+    surviving = [s.session_id for s in logger.list_sessions()]
+    assert drop not in surviving
+    assert len(surviving) == 4

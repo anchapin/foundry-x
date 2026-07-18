@@ -13,9 +13,11 @@ cover modern token formats and the previously-untouched metadata path.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import sys
+import tempfile
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -996,25 +998,66 @@ class TraceLogger:
             self._conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
 
     def _delete_session_jsonl(self, session_id: str) -> None:
+        """Streaming rewrite of the JSONL file (issue #787, ADR-0021 §5).
+
+        Reads one line at a time and writes survivors directly to a
+        temporary file in the same directory, then atomically swaps it
+        into place via :func:`os.replace`. Peak memory is O(line)
+        rather than O(file), so pruning a multi-million-line trace no
+        longer allocates gigabytes of RSS. The atomic rename also
+        guarantees the store is never observed in a half-written
+        state: either the pre-delete file is visible or the fully
+        rewritten file is, never a partial write.
+
+        Idempotent: a missing source file is a no-op.
+        """
         if not self.path.exists():
             return
-        kept: list[str] = []
-        with self.path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if not stripped:
-                    kept.append(line)
-                    continue
-                try:
-                    record = json.loads(stripped)
-                except json.JSONDecodeError:
-                    kept.append(line)
-                    continue
-                if record.get("session_id") == session_id:
-                    continue
-                kept.append(line)
-        with self.path.open("w", encoding="utf-8") as fh:
-            fh.writelines(kept)
+        # The temp file MUST live in the same directory as the target
+        # so ``os.replace`` is an atomic rename on the same filesystem
+        # (POSIX guarantee) rather than a cross-device copy.
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=self.path.parent,
+            prefix=f".{self.path.name}.delete.",
+            suffix=".tmp",
+            delete=False,
+        )
+        try:
+            with self.path.open("r", encoding="utf-8") as src, tmp:
+                for line in src:
+                    stripped = line.strip()
+                    if not stripped:
+                        tmp.write(line)
+                        continue
+                    try:
+                        record = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        tmp.write(line)
+                        continue
+                    if record.get("session_id") == session_id:
+                        continue
+                    tmp.write(line)
+            # Preserve the original's mode so a 0644 trace file does
+            # not silently become 0600 (the NamedTemporaryFile default).
+            try:
+                os.chmod(tmp.name, self.path.stat().st_mode & 0o777)
+            except OSError:
+                pass
+            os.replace(tmp.name, self.path)
+        finally:
+            # If anything above raised before the rename, the temp
+            # file is still on disk and must be cleaned up so we do
+            # not leak ``.<name>.delete.*.tmp`` files into the trace
+            # directory. After a successful rename the name no longer
+            # exists, so FileNotFoundError is expected and swallowed.
+            try:
+                os.unlink(tmp.name)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
 
     def compact(self) -> int:
         """Rewrite the JSONL file removing orphaned session markers.
