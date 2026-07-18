@@ -94,7 +94,10 @@ def _seed_workspace(workspace: Path) -> None:
         "    return a + a\n"
         "\n"
         "if __name__ == '__main__':\n"
-        "    print(f'3*4={multiply(3, 4)}')  # expects 12\n"
+        "    result = multiply(3, 4)\n"
+        "    expected = 12\n"
+        "    if result != expected:\n"
+        "        raise SystemExit(f'3*4={result}, expected {expected} (bug: using + instead of *)')\n"
     )
     (workspace / "calculator.py").write_text(buggy_content)
 
