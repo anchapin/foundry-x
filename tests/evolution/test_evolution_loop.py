@@ -186,6 +186,32 @@ class TestRunEvolutionStep:
         assert result.verdict is not None
         assert result.verdict.edit_index == 1
 
+    def test_verdict_failure_class_from_failure_report(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """Issue #796: verdict.failure_class is wired from failure_report.proposed_class."""
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix the failure",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+
+        result = run_evolution_step("sess-failure-class", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert result.verdict is not None
+        assert result.verdict.failure_class == result.failure_report.proposed_class
+
 
 class TestEvolutionResultModel:
     def test_result_model_fields(self):
