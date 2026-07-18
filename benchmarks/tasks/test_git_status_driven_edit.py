@@ -105,7 +105,7 @@ def _git_diff_hunks(workspace: Path, filename: str) -> str:
     return result.stdout
 
 
-GOLDEN_SOLUTION = '''
+GOLDEN_SOLUTION = """
 import subprocess
 from pathlib import Path
 
@@ -147,7 +147,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-'''
+"""
 
 
 @pytest.mark.benchmark
@@ -183,8 +183,7 @@ def test_git_status_driven_edit(benchmark_workspace: Path) -> None:
     # --- Verify the seeded workspace fails when run. --------------------
     bad = _run_calculator(benchmark_workspace)
     assert bad.returncode != 0, (
-        f"task {TASK.name}: seeded calculator.py must fail before fix; "
-        f"got rc={bad.returncode}"
+        f"task {TASK.name}: seeded calculator.py must fail before fix; got rc={bad.returncode}"
     )
 
     # --- Golden fix: git status -> read -> targeted edit. ---------------
@@ -207,8 +206,7 @@ def test_git_status_driven_edit(benchmark_workspace: Path) -> None:
     # git diff should show only the intended change
     diff_hunks = _git_diff_hunks(benchmark_workspace, "calculator.py")
     assert _FIXED_LINE in diff_hunks, (
-        f"task {TASK.name}: git diff must contain the fixed line; "
-        f"got: {diff_hunks!r}"
+        f"task {TASK.name}: git diff must contain the fixed line; got: {diff_hunks!r}"
     )
 
     # The calculator must now run correctly
