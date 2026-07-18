@@ -66,6 +66,10 @@ TOKEN_BUDGET_REASON = "token_budget"
 
 
 CONTEXT_PRUNED_KIND = "context_pruned"
+# Issue #871: the runner emits ``model_retry`` whenever a transient model API
+# failure is retried (see ``execution/runner.py:1449``). Keep the kind spelling
+# centralized so KPI and session-card aggregation cannot drift.
+MODEL_RETRY_KIND = "model_retry"
 # Issue #872: the runner emits ``tool_argument_parse_error`` when the model
 # produces malformed tool-call arguments (see ``execution/runner.py:1684``).
 # The constant lives next to the other kind vocabulary strings so any future
@@ -129,6 +133,11 @@ class KpiSummary(BaseModel):
     and the total count of ``task_aborted`` events whose ``reason`` is
     ``"wall_clock"``, respectively.
 
+    Issue #871 adds ``model_retry_count``: the total number of
+    ``model_retry`` events emitted when a transient model API failure is
+    retried. A rising count signals provider flakiness or API reliability
+    degradation, so it is exposed as an auxiliary operator signal.
+
     Issue #872 adds ``tool_argument_parse_error_count``: the total number
     of ``tool_argument_parse_error`` events emitted by the runner when the
     model produces tool-call arguments that cannot be parsed as JSON. A
@@ -152,6 +161,7 @@ class KpiSummary(BaseModel):
     context_pruned_count: dict[str, int] = {}
     wall_clock_abort_count: int = 0
     failure_class_distribution: dict[str, int] = {}
+    model_retry_count: int = 0
     tool_argument_parse_error_count: int = 0
 
 
@@ -281,6 +291,7 @@ def compute_kpis(
     failure_class_distribution = _failure_class_distribution(
         logger, harness_version=harness_version
     )
+    model_retry_count = _model_retry_count(logger, harness_version=harness_version)
     tool_argument_parse_error_count = _tool_argument_parse_error_count(
         logger, harness_version=harness_version
     )
@@ -299,6 +310,7 @@ def compute_kpis(
         context_pruned_count=context_pruned_count,
         wall_clock_abort_count=wall_clock_abort_count,
         failure_class_distribution=failure_class_distribution,
+        model_retry_count=model_retry_count,
         tool_argument_parse_error_count=tool_argument_parse_error_count,
     )
 
@@ -352,6 +364,7 @@ def _compute_deltas(
         "hooks_disabled_rate": _delta(baseline.hooks_disabled_rate, candidate.hooks_disabled_rate),
         "wall_clock_abort_count": candidate.wall_clock_abort_count
         - baseline.wall_clock_abort_count,
+        "model_retry_count": candidate.model_retry_count - baseline.model_retry_count,
         "tool_argument_parse_error_count": (
             candidate.tool_argument_parse_error_count - baseline.tool_argument_parse_error_count
         ),
@@ -698,6 +711,27 @@ def _wall_clock_abort_count(
     return count
 
 
+def _model_retry_count(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> int:
+    """Count transient model API retry events emitted by the runner (issue #871).
+
+    The runner records one ``model_retry`` event for every failed model API
+    attempt that the adapter retries. The count is aggregated across matching
+    sessions so operators can spot provider instability and API reliability
+    degradation. The kind and ``harness_version`` filters are pushed down to
+    one :meth:`TraceLogger.query_events` cursor.
+    """
+    count = 0
+    for event in logger.query_events(
+        kind=MODEL_RETRY_KIND,
+        harness_version=harness_version,
+    ):
+        count += 1
+    return count
+
+
 def _tool_argument_parse_error_count(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -840,6 +874,15 @@ def _render_markdown(summary: KpiSummary) -> str:
             f"Wall-Clock Aborts: {summary.wall_clock_abort_count} session(s) "
             "were aborted by FOUNDRY_TASK_TIMEOUT."
         )
+    # Issue #871: surface model API retries when at least one retry event was
+    # recorded. A clean trace store stays compact, while any non-zero value is
+    # immediately visible as a provider/API reliability signal.
+    if summary.model_retry_count > 0:
+        lines.append("")
+        lines.append(
+            f"Model Retries: {summary.model_retry_count} "
+            "model API retry event(s) recorded by the runner."
+        )
     # Issue #872: surface tool-call argument parse-error count when at least
     # one event was recorded. A rising rate signals model output quality
     # degradation or a schema mismatch, so this is operator-visible signal
@@ -921,6 +964,10 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{baseline.wall_clock_abort_count} | "
         f"{candidate.wall_clock_abort_count} | "
         f"{_format_delta(float(baseline.wall_clock_abort_count), float(candidate.wall_clock_abort_count), higher_is_better=False)} |",
+        "| Model Retry Count | "
+        f"{baseline.model_retry_count} | "
+        f"{candidate.model_retry_count} | "
+        f"{_format_delta(float(baseline.model_retry_count), float(candidate.model_retry_count), higher_is_better=False)} |",
         "| Tool Argument Parse Error Count | "
         f"{baseline.tool_argument_parse_error_count} | "
         f"{candidate.tool_argument_parse_error_count} | "
@@ -957,13 +1004,13 @@ def append_kpi_history(
     ``token_totals``, ``streaming_quality``, and ``wall_clock_abort_count``
     excluded (the "minus per-session maps" half of the round-trip contract).
     ``hooks_disabled_count``, ``hooks_disabled_rate``,
-    ``token_budget_abort_count``, ``token_budget_hit_rate``, and
-    ``tool_argument_parse_error_count`` are scalar fields and are included
-    so the trend table can show their drift across harness edits. Then
-    ``timestamp`` and the optional ``harness_version`` are added. Parent
-    directories are created on demand so the operator does not have to
-    ``mkdir`` before the first run. ``failure_class_distribution`` is
-    included so the trend table can show per-class deltas (issue #705).
+    ``token_budget_abort_count``, ``token_budget_hit_rate``,
+    ``model_retry_count``, and ``tool_argument_parse_error_count`` are scalar
+    fields and are included so the trend table can show their drift across
+    harness edits. Then ``timestamp`` and the optional ``harness_version``
+    are added. Parent directories are created on demand so the operator does
+    not have to ``mkdir`` before the first run. ``failure_class_distribution``
+    is included so the trend table can show per-class deltas (issue #705).
 
     The file is opened in append mode and a single ``\\n``-terminated
     line is written per call, so concurrent appends from independent

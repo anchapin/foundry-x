@@ -118,6 +118,7 @@ def test_append_kpi_history_round_trips_through_kpi_summary(tmp_path):
         cycle_time_seconds=2.5,
         regression_rate=0.2,
         improvement_rate=0.8,
+        model_retry_count=4,
         # The per-session map that MUST NOT round-trip.
         injection_blocks={"session-abc": 3},
     )
@@ -129,6 +130,7 @@ def test_append_kpi_history_round_trips_through_kpi_summary(tmp_path):
     assert parsed.cycle_time_seconds == pytest.approx(2.5)
     assert parsed.regression_rate == pytest.approx(0.2)
     assert parsed.improvement_rate == pytest.approx(0.8)
+    assert parsed.model_retry_count == 4
     # Minus the per-session map: the read-back has no injection_blocks.
     assert parsed.injection_blocks == {}
 
@@ -294,8 +296,9 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     # The persisted line is the KpiSummary minus per-session map plus
     # the timestamp; harness_version is absent because --harness-version
     # was not supplied. hooks_disabled_count and hooks_disabled_rate are
-    # scalar fields and are included (issue #585). tool_argument_parse_error_count
-    # is also a scalar so it lands in the trend line (issue #872).
+    # scalar fields and are included (issue #585). model_retry_count and
+    # tool_argument_parse_error_count are also scalar fields, so they land in
+    # the trend line (issues #871 and #872).
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
@@ -308,6 +311,7 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "hooks_disabled_rate",
         "context_pruned_count",
         "failure_class_distribution",
+        "model_retry_count",
         "tool_argument_parse_error_count",
     }
     assert "injection_blocks" not in payload

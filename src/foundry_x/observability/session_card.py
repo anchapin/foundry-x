@@ -16,6 +16,11 @@ requires. Keeping the formatter pure lets the unit tests pin the
 golden-string output (issue #180 acceptance: "synthetic session yields
 the expected lines").
 
+Issue #871 — ``model_retry`` does not contain a generic failure token, so
+it is explicitly included in the failure-kind predicate. This surfaces the
+per-session retry count in ``errors_by_kind`` as an API reliability signal.
+The session-aggregate KPI lives in :mod:`foundry_x.observability.kpis`.
+
 Issue #872 — the runner emits ``tool_argument_parse_error`` events when
 the model produces malformed tool-call arguments (see
 ``src/foundry_x/execution/runner.py:1684``). The kind's ``"error"``
@@ -33,6 +38,7 @@ from datetime import datetime
 from typing import Any, Sequence
 
 from foundry_x.evolution.digester import FAILURE_KINDS, INJECTION_BLOCKED_KIND
+from foundry_x.observability.kpis import MODEL_RETRY_KIND
 from foundry_x.trace.logger import TraceEvent, TraceSession
 
 # A failure-bearing ``kind`` either matches this regex (so future kinds
@@ -102,7 +108,9 @@ def _format_duration(start: str, end: str | None) -> str:
 
 def _is_error_kind(kind: str) -> bool:
     return (
-        kind in FAILURE_KINDS or kind == INJECTION_BLOCKED_KIND or bool(_ERROR_KIND_RE.search(kind))
+        kind in FAILURE_KINDS
+        or kind in {INJECTION_BLOCKED_KIND, MODEL_RETRY_KIND}
+        or bool(_ERROR_KIND_RE.search(kind))
     )
 
 
