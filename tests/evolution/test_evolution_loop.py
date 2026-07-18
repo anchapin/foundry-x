@@ -412,6 +412,49 @@ class TestRunEvolutionStepAsync:
         assert isinstance(result.verdict, CriticVerdict)
 
     @pytest.mark.asyncio
+    async def test_verdict_failure_class_forwarded_to_critic(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Issue #891: async path forwards failure_class to critic.evaluate."""
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix the failure",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+
+        async def mock_propose_async(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit]
+
+        monkeypatch.setattr(Evolver, "propose_async", mock_propose_async)
+
+        call_records: list[str | None] = []
+
+        def mock_evaluate(self, proposed_diff, *, edit_index=None, failure_class=None):
+            call_records.append(failure_class)
+            return CriticVerdict(
+                verdict=True,
+                passed_checks=["git apply"],
+                edit_index=edit_index,
+                failure_class=failure_class,
+            )
+
+        monkeypatch.setattr("foundry_x.evolution.loop.Critic.evaluate", mock_evaluate)
+
+        result = await run_evolution_step_async("sess-async-failure-class", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert result.verdict is not None
+        assert result.verdict.failure_class == result.failure_report.proposed_class
+        assert call_records == [result.failure_report.proposed_class]
+
+    @pytest.mark.asyncio
     async def test_multiple_edits_verdict_has_last_edit_index(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -476,7 +519,7 @@ class TestRunEvolutionStepAsync:
 
         call_records: list[tuple[str, int]] = []
 
-        def mock_evaluate(self, proposed_diff, *, edit_index=None):
+        def mock_evaluate(self, proposed_diff, *, edit_index=None, failure_class=None):
             call_records.append((proposed_diff, edit_index))
             return CriticVerdict(verdict=True, passed_checks=["git apply"], edit_index=edit_index)
 
