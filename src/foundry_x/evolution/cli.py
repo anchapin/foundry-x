@@ -17,12 +17,19 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from foundry_x.evolution.critic import Critic, CriticVerdict
 from foundry_x.evolution.digester import Digester, FailureReport
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
+from foundry_x.execution.runner import resolve_harness_version
 from foundry_x.trace.logger import TraceLogger
+
+
+def _now_iso() -> str:
+    """Return a UTC ISO-8601 timestamp with offset suffix."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _infer_backend(trace_db: str) -> str:
@@ -90,42 +97,53 @@ def _run_loop(
     trace_db: str,
     harness_dir: Path,
     verbose: bool = False,
-) -> tuple[FailureReport, ProposedEdit | None, CriticVerdict | None, int]:
+) -> tuple[FailureReport, ProposedEdit | None, CriticVerdict | None, int, str]:
     """Execute the evolution loop: Digester -> Evolver -> Critic.
 
-    Returns (failure_report, proposed_edit, verdict, exit_code).
+    Returns (failure_report, proposed_edit, verdict, exit_code, harness_version).
     proposed_edit may be None if no failure was detected or Evolver is not yet
     implemented. verdict is None if no proposed_edit was produced.
     Exit code 0 = approved / no failure, 1 = rejected, 2 = error.
     """
+    harness_version = resolve_harness_version(harness_dir)
+    started_at = _now_iso()
     backend = _infer_backend(trace_db)
     logger = TraceLogger(trace_db, backend=backend)
     events = logger.load_session(session_id)
     if not events:
         sys.stderr.write(f"No events found for session {session_id}.\n")
-        return None, None, None, 2
+        return None, None, None, 2, harness_version
 
     report = Digester().digest(session_id, events)
     print(_render_failure_report(report))
     print()
 
     if report.proposed_class == "clean":
+        completed_at = _now_iso()
+        print(f"Started: {started_at} | Completed: {completed_at}")
+        print()
         print("No failure detected — evolution loop complete.")
-        return report, None, None, 0
+        return report, None, None, 0, harness_version
 
     evolver = Evolver()
     try:
         edits = evolver.propose(harness_dir=harness_dir, failure=report)
     except NotImplementedError:
+        completed_at = _now_iso()
+        print(f"Started: {started_at} | Completed: {completed_at}")
+        print()
         sys.stderr.write(
             "Evolver.propose() is not yet implemented (Phase 2). "
             "The evolution loop cannot produce a ProposedEdit yet.\n"
         )
-        return report, None, None, 2
+        return report, None, None, 2, harness_version
 
     if not edits:
+        completed_at = _now_iso()
+        print(f"Started: {started_at} | Completed: {completed_at}")
+        print()
         print("Evolver returned no ProposedEdit objects.")
-        return report, None, None, 0
+        return report, None, None, 0, harness_version
 
     edit = edits[0]
     print(_render_proposed_edit(edit, verbose=verbose))
@@ -137,7 +155,7 @@ def _run_loop(
     print()
 
     exit_code = 0 if verdict.verdict else 1
-    return report, edit, verdict, exit_code
+    return report, edit, verdict, exit_code, harness_version
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -177,7 +195,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    _report, _edit, _verdict, exit_code = _run_loop(
+    _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
         session_id=args.session_id,
         trace_db=args.trace_db,
         harness_dir=args.harness_dir,

@@ -230,7 +230,7 @@ class TestRunLoopIntegration:
         harness.mkdir()
         _write_minimal_harness(harness)
 
-        _report, _edit, _verdict, exit_code = _run_loop(
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
             session_id=sid,
             trace_db=str(db),
             harness_dir=harness,
@@ -253,7 +253,7 @@ class TestRunLoopIntegration:
         harness.mkdir()
         _write_minimal_harness(harness)
 
-        _report, _edit, _verdict, exit_code = _run_loop(
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
             session_id=sid,
             trace_db=str(db),
             harness_dir=harness,
@@ -280,7 +280,7 @@ class TestRunLoopIntegration:
         harness.mkdir()
         _write_minimal_harness(harness)
 
-        _report, _edit, _verdict, exit_code = _run_loop(
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
             session_id="does-not-exist",
             trace_db=str(db),
             harness_dir=harness,
@@ -301,7 +301,7 @@ class TestRunLoopIntegration:
         harness.mkdir()
         _write_minimal_harness(harness)
 
-        _report, _edit, _verdict, exit_code = _run_loop(
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
             session_id=sid,
             trace_db=str(db),
             harness_dir=harness,
@@ -322,7 +322,7 @@ class TestRunLoopIntegration:
         harness.mkdir()
         _write_minimal_harness(harness)
 
-        _report, _edit, _verdict, exit_code = _run_loop(
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
             session_id=sid,
             trace_db=str(db),
             harness_dir=harness,
@@ -349,7 +349,7 @@ class TestRunLoopIntegration:
         harness.mkdir()
         _write_minimal_harness(harness)
 
-        _report, _edit, _verdict, exit_code = _run_loop(
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
             session_id=sid,
             trace_db=str(db),
             harness_dir=harness,
