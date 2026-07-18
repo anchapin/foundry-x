@@ -208,17 +208,6 @@ def resolve_trace_backend(env: Mapping[str, str] | None = None) -> str:
     return backend
 
 
-# Trace-backend selection (issue #13). ``.env.example`` documents
-# ``FOUNDRY_TRACE_BACKEND`` as the way to switch the trace store between the
-# default SQLite database and the JSONL export format (ADR-0003). Keeping the
-# supported set in one place lets the runner validate the value up front
-# rather than silently falling through to a no-op backend, honoring
-# AGENTS.md §2 ("Never silently swallow an exception").
-_TRACE_BACKEND_ENV = "FOUNDRY_TRACE_BACKEND"
-_SUPPORTED_TRACE_BACKENDS: frozenset[str] = frozenset({"sqlite", "jsonl"})
-_DEFAULT_TRACE_BACKEND: str = "sqlite"
-
-
 def resolve_model_id(env: Mapping[str, str] | None = None) -> str | None:
     """Resolve the model identity to stamp into the trace session (issue #12).
 
@@ -1474,7 +1463,6 @@ async def run_task(
     # (one argument: the payload dict); the hook internally calls
     # tracer(payload) and the tracer forwards to log.record with the
     # session_id and kind wired in from the outer scope.
-<<<<<<< HEAD
     if registry is not None and hasattr(registry, "_hooks"):
         from harness.hooks.injection_firewall import InjectionFirewallHook
 
