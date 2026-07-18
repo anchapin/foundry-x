@@ -322,9 +322,7 @@ def test_cli_session_summary_respects_since_filter(tmp_path, capsys):
     db = tmp_path / "traces.db"
     _plant_four_sessions(db)
 
-    rc = cli_main(
-        ["session-summary", "--db", str(db), "--since", "2026-07-10T11:30:00+00:00"]
-    )
+    rc = cli_main(["session-summary", "--db", str(db), "--since", "2026-07-10T11:30:00+00:00"])
 
     assert rc == 0
     out = capsys.readouterr().out
