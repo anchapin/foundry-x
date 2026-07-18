@@ -119,6 +119,49 @@ class TestRateLimitHook:
         assert isinstance(hook, RateLimitHook)
         assert hook in registry._hooks
 
+    def test_rejected_call_not_appended_to_window(self) -> None:
+        hook = RateLimitHook()
+        call = ToolCall(name="evolver_propose", arguments={})
+        for _ in range(DEFAULT_MAX_PROPOSALS_PER_HOUR):
+            asyncio.run(hook.pre_tool(call))
+        with pytest.raises(RuntimeError, match="cap reached"):
+            asyncio.run(hook.pre_tool(call))
+        window = _get_window()
+        assert len(window) == DEFAULT_MAX_PROPOSALS_PER_HOUR
+        for _, allowed in window:
+            assert allowed is True
+
+    @pytest.mark.asyncio
+    async def test_concurrent_calls_respect_cap(self) -> None:
+        """Concurrent calls must not exceed the rate-limit cap (issue #731 TOCTOU race).
+
+        Two concurrent pre_tool calls can both read the same window size before
+        either has committed its append, both pass the cap check, and both
+        proceed if the append happens BEFORE the allowed check.
+        """
+        hook = RateLimitHook()
+        call = ToolCall(name="evolver_propose", arguments={})
+        cap = 3
+        _RL_STATE["max_per_hour"] = cap
+
+        async def make_call() -> bool:
+            try:
+                await hook.pre_tool(call)
+                return True
+            except RuntimeError:
+                return False
+
+        num_calls = 5
+        results = await asyncio.gather(*[make_call() for _ in range(num_calls)])
+
+        window = _get_window()
+        allowed_count = sum(1 for _, allowed in window if allowed)
+        assert allowed_count == cap, (
+            f"Expected exactly {cap} allowed entries in window, got {allowed_count}. "
+            f"This indicates the TOCTOU race allowed more calls than the cap."
+        )
+        assert sum(results) == cap
+
 
 class TestEvolverProposeReturnsEmptyOnCapBreach:
     """Test that ``Evolver.propose()`` returns ``[]`` when caps are breached.

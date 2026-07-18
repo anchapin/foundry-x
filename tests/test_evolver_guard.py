@@ -193,6 +193,7 @@ def test_propose_clean_class_returns_empty_list(tmp_path):
         "state-leak",
         "tool-error",
         "injection-attempt",
+        "context-overflow",
     ],
 )
 def test_propose_class_returns_proposed_edit(tmp_path, proposed_class: str):

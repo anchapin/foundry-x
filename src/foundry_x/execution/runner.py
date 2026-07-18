@@ -1474,11 +1474,11 @@ async def run_task(
     # (one argument: the payload dict); the hook internally calls
     # tracer(payload) and the tracer forwards to log.record with the
     # session_id and kind wired in from the outer scope.
-    if registry is not None:
+    if registry is not None and hasattr(registry, "_hooks"):
         from harness.hooks.injection_firewall import InjectionFirewallHook
 
-        def _inject_tracer(payload: dict[str, object]) -> None:
-            log.record(session_id, kind="injection_blocked", payload=payload)
+        def _inject_tracer(kind: str, payload: dict[str, object]) -> None:
+            log.record(session_id, kind=kind, payload=payload)
 
         for hook in registry._hooks:
             if isinstance(hook, InjectionFirewallHook) and hook._tracer is None:
@@ -1675,7 +1675,11 @@ async def run_task(
                 break
 
             if not response.tool_calls:
-                outcome_reason = "final_answer"
+                if response.finish_reason not in (None, "stop"):
+                    outcome_status = "truncated"
+                    outcome_reason = response.finish_reason
+                else:
+                    outcome_reason = "final_answer"
                 break
 
             for tool_call in response.tool_calls:

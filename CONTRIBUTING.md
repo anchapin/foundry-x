@@ -38,6 +38,15 @@ uv run pytest                 # smoke tests
 uv run ruff check .           # lint
 ```
 
+## Before you push
+
+Every PR must pass the full suite (unit + benchmark) before merge.
+
+```bash
+uv run ruff check .
+uv run pytest
+```
+
 ## Workflow
 
 1. **Branch** off `develop`. Naming:

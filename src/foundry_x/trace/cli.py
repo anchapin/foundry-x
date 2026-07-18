@@ -341,8 +341,7 @@ def _prune(args: argparse.Namespace) -> int:
         sys.stdout.write(f"Dry run: {count} session(s) would be deleted.\n")
         return 0
 
-    for session in to_delete:
-        logger.delete_session(session.session_id)
+    logger.prune_sessions([session.session_id for session in to_delete])
     sys.stdout.write(f"Deleted {count} session(s).\n")
     return 0
 

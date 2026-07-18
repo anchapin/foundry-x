@@ -15,11 +15,15 @@ ROCM_MIN_VERSION="${ROCM_MIN_VERSION:-5.7}"
 # before launching the server. Leave empty to skip verification.
 LLAMACPP_MODEL_SHA256="${LLAMACPP_MODEL_SHA256:-}"
 
-# Overrideable probes so the four pre-flight checks are hermetic under
+# Overrideable probes so the five pre-flight checks are hermetic under
 # test (tests/infra/test_rocm_sanity.py). On a real host the defaults
 # match the kernel/runtime layout documented in infra/llama-cpp/README.md.
 AMDGPU_PROBE="${AMDGPU_PROBE:-/sys/module/amdgpu}"
 KFD_PROBE="${KFD_PROBE:-/dev/kfd}"
+# Overrideable GPU responsiveness probe. When set to a non-empty value
+# that command is run instead of "timeout 5 rocminfo". Set to empty to
+# disable the responsiveness check entirely.
+GPU_RESPONSIVE_PROBE="${GPU_RESPONSIVE_PROBE:-}"
 
 # --- ROCm pre-flight helpers (issue #210) -------------------------
 # _version_ge <actual> <minimum>: return 0 when actual >= minimum.
@@ -62,8 +66,26 @@ _rocminfo_gfx_agents() {
     "$cmd" 2>/dev/null | grep -io 'gfx[0-9][0-9][0-9][0-9]*' | sort -u | tr '\n' ' '
 }
 
-# Run the four ROCm pre-flight checks, printing one line per check.
-# Returns 0 only if all four hold; otherwise prints a one-line hint to
+# Probe GPU responsiveness using rocminfo with a 5-second timeout.
+# A GPU that is present but in a reset/error state will cause rocminfo
+# to fail or hang; this catches that case before a build or run attempt.
+# Respects GPU_RESPONSIVE_PROBE for hermetic testing (issue #754).
+_gpu_is_responsive() {
+    local cmd=""
+    if [[ -n "$GPU_RESPONSIVE_PROBE" ]]; then
+        cmd="$GPU_RESPONSIVE_PROBE"
+    elif [[ -x "$ROCM_PATH/bin/rocminfo" ]]; then
+        cmd="timeout 5 $ROCM_PATH/bin/rocminfo"
+    elif command -v rocminfo >/dev/null 2>&1; then
+        cmd="timeout 5 rocminfo"
+    else
+        return 0
+    fi
+    $cmd >/dev/null 2>&1
+}
+
+# Run the five ROCm pre-flight checks, printing one line per check.
+# Returns 0 only if all five hold; otherwise prints a one-line hint to
 # stderr and returns 1. Used by --check-rocm (standalone) and as the
 # build gate below.
 check_rocm() {
@@ -71,6 +93,7 @@ check_rocm() {
     local rocm_version=""
     local version_ok=0 amdgpu_ok=0 kfd_ok=0 gfx_ok=0
     local gfx_agents=""
+    local responsive_ok=0
 
     # 1. ROCm installed + version >= ROCM_MIN_VERSION
     if [[ -r "$version_file" ]]; then
@@ -112,8 +135,16 @@ check_rocm() {
         printf 'gfx agents:          NONE (rocminfo reported no gfx* agent)\n'
     fi
 
+    # 5. GPU is responsive (not in a reset/error state)
+    if _gpu_is_responsive; then
+        responsive_ok=1
+        printf 'GPU responsive:      OK\n'
+    else
+        printf 'GPU responsive:      FAIL (GPU may be in a reset state)\n'
+    fi
+
     if [[ $version_ok -eq 1 && $amdgpu_ok -eq 1 \
-          && $kfd_ok -eq 1 && $gfx_ok -eq 1 ]]; then
+          && $kfd_ok -eq 1 && $gfx_ok -eq 1 && $responsive_ok -eq 1 ]]; then
         return 0
     fi
 
@@ -135,10 +166,15 @@ check_rocm() {
 LLAMACPP_SMOKE_MODEL="${LLAMACPP_SMOKE_MODEL:-}"
 SMOKE_TEST_MODEL=""
 CHECK_ROCM_ONLY=0
+CHECK_GPU_RESPONSIVE_ONLY=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --check-rocm)
             CHECK_ROCM_ONLY=1
+            shift
+            ;;
+        --check-gpu-responsive)
+            CHECK_GPU_RESPONSIVE_ONLY=1
             shift
             ;;
         --smoke-test)
@@ -151,25 +187,29 @@ while [[ $# -gt 0 ]]; do
             ;;
         -h|--help)
             cat <<'USAGE'
-usage: rocm_setup.sh [--check-rocm] [--smoke-test <gguf>]
+usage: rocm_setup.sh [--check-rocm] [--check-gpu-responsive] [--smoke-test <gguf>]
 
 Builds llama.cpp with ROCm for the RX 6600 XT. With no arguments the
 script runs the ROCm pre-flight checks, then builds and prints the run
 hint, exactly as before.
 
-  --check-rocm          Run the four ROCm pre-flight checks (ROCm
-                        version, amdgpu module, /dev/kfd, gfx agent)
-                        and exit. Does not build. Exits 0 if all
-                        preconditions hold, 1 otherwise.
-  --smoke-test <gguf>   After building, launch llama-server with the given
-                        GGUF and verify it responds (HTTP 200 + non-empty
-                        completion). Also enabled via LLAMACPP_SMOKE_MODEL.
+  --check-rocm               Run the five ROCm pre-flight checks (ROCm
+                             version, amdgpu module, /dev/kfd, gfx agent,
+                             GPU responsiveness) and exit. Does not build.
+                             Exits 0 if all preconditions hold, 1 otherwise.
+  --check-gpu-responsive     Run only the GPU responsiveness probe and
+                             exit. Does not build. Exits 0 if the GPU
+                             is responsive, 1 if it is not.
+  --smoke-test <gguf>       After building, launch llama-server with the given
+                             GGUF and verify it responds (HTTP 200 + non-empty
+                             completion). Also enabled via LLAMACPP_SMOKE_MODEL.
 
 Env vars: LLAMACPP_REF (b9957), LLAMACPP_SMOKE_MODEL,
           LLAMACPP_SMOKE_PORT (8765), LLAMACPP_SMOKE_NGL (0),
           LLAMACPP_SMOKE_TIMEOUT (60), LLAMACPP_MODEL_SHA256 (empty),
           ROCM_PATH (/opt/rocm), ROCM_MIN_VERSION (5.7),
-          AMDGPU_PROBE (/sys/module/amdgpu), KFD_PROBE (/dev/kfd)
+          AMDGPU_PROBE (/sys/module/amdgpu), KFD_PROBE (/dev/kfd),
+          GPU_RESPONSIVE_PROBE (default: "timeout 5 rocminfo")
 USAGE
             exit 0
             ;;
@@ -188,12 +228,22 @@ fi
 # --- Pre-build ROCm sanity gate (issue #210) ----------------------
 # Without ROCm the build either fails deep inside cmake with a cryptic
 # HIP error or produces a binary that silently falls back to CPU at
-# runtime. Run the four checks and refuse to build unless all hold.
+# runtime. Run the five checks and refuse to build unless all hold.
 # --check-rocm runs ONLY the checks and never builds.
 if [[ "$CHECK_ROCM_ONLY" -eq 1 ]]; then
     if check_rocm; then
         exit 0
     fi
+    exit 1
+fi
+
+# --check-gpu-responsive runs ONLY the responsiveness probe.
+if [[ "$CHECK_GPU_RESPONSIVE_ONLY" -eq 1 ]]; then
+    if _gpu_is_responsive; then
+        echo "GPU responsive: OK"
+        exit 0
+    fi
+    echo "GPU responsive: FAIL" >&2
     exit 1
 fi
 
@@ -342,6 +392,33 @@ if [[ $healthy -ne 1 ]]; then
     tail -n 20 "$SERVER_LOG" >&2 || true
     rm -f "$SERVER_LOG"
     smoke_fail "timed out waiting for /health"
+fi
+
+_check_gpu_active() {
+    if [[ "$SMOKE_NGL" -le 0 ]]; then
+        return 0
+    fi
+    if grep -iqE 'roc m|amdgpu|gfx[0-9]' "$SERVER_LOG" 2>/dev/null; then
+        return 0
+    fi
+    if [[ -n "${LLAMACPP_GPU_MARKER_FILE:-}" ]] && \
+       grep -iqE 'roc m|amdgpu|gfx[0-9]' "$LLAMACPP_GPU_MARKER_FILE" 2>/dev/null; then
+        return 0
+    fi
+    echo "error: LLAMACPP_SMOKE_NGL=${SMOKE_NGL} but no ROCm GPU agent found in server log." >&2
+    cat >&2 <<'HINT'
+
+       The server started but appears to have fallen back to CPU inference.
+       See infra/llama-cpp/README.md "ROCm pitfalls":
+         * HSA_OVERRIDE_GFX_VERSION=10.3.0 may be required on older kernels.
+         * --n-gpu-layers requires 8 GB VRAM; free it if near capacity.
+HINT
+    exit 1
+}
+
+if ! _check_gpu_active; then
+    rm -f "$SERVER_LOG"
+    exit 1
 fi
 
 # Assert a completion actually returns non-empty content.

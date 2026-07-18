@@ -89,8 +89,9 @@ Canonical implementations live in `src/foundry_x/observability/kpis.py`.
 The three PRD KPIs cannot move until the Runner and Critic are in place
 (ADR-0010).
 
-- **Cycle Time** — mean wall-clock time from the first `task_received`
-  event to the first `critic_verdict` event per session.
+- **Cycle Time** — time from "Agent Failure" to "Harness Edit Proposal"
+  (the operational proxy implemented in ``kpis.py`` measures
+  ``task_received`` → ``critic_verdict``).
 - **Regression Rate** — fraction of sessions with a `critic_verdict` in which
   a task previously seen in `passed_checks` later appears in `failed_checks`.
 - **Improvement Rate** — fraction of `critic_verdict` events whose
@@ -151,6 +152,7 @@ The "Failure-signalling subset" subsection below cross-references the
 | Kind | Producer | Payload contract | Failure signal? |
 | --- | --- | --- | --- |
 | **`injection_blocked`** | `InjectionFirewallHook` (`harness/hooks/injection_firewall.py`, one per block) | `{"markers": list[str], "tool": str, "preview": str}` — sorted unique marker names, originating tool name, and the first 120 characters of the suppressed text with newlines folded to spaces (safe to persist; never re-injected into a prompt). The Digester aggregates every block in a session into one `FailureReport` with `proposed_class == 'injection-attempt'` and one entry per block in `failed_steps` so the Evolver sees the full adversarial surface. See issue #120. | **yes** (adversarial) |
+| **`firewall_exception`** | `InjectionFirewallHook` (`harness/hooks/injection_firewall.py`, one per block) | `{"hook_name": str, "pattern_matched": str, "risk_score": int}` — hook class name, the aggregated marker name(s) that triggered the block, and a severity-weighted risk score (role-tag and unicode-confusable patterns score 2; instruction-override patterns score 1). Emitted alongside ``injection_blocked`` on every block so firewall events are queryable via ``foundry-x-trace`` independently of the Digester aggregation path. See issue #823. | **yes** (adversarial) |
 | **`context_pruned`** | `ContextPruningHook` (`harness/hooks/context_pruning.py`, opt-in via `harness/manifest.json`) | `{"dropped": int, "threshold": int, "token_threshold": int}` — number of older events the pruner dropped to bring the session back under the per-session event cap (`threshold`), plus the token threshold in effect (`token_threshold`, configurable via `harness/manifest.json` `context_pruning.token_threshold`, default 8192). See issue #106, issue #491. | no |
 
 ### Critic pipeline

@@ -41,6 +41,14 @@ _INJECTION_PATTERNS: tuple[tuple[str, str], ...] = (
     ("ignored_context", r"end\s+of\s+context\s+above"),
     # --- Issue #122 / issue #579: sync with injection_firewall.py patterns ---
     ("ignore_spanish", r"ignora\s+(?:las\s+)?instrucciones\s+anteriores"),
+    # Issue #755: sync with injection_firewall.py non-English evasion patterns
+    (
+        "ignore_french",
+        r"(?:ignorer\s+(?:les\s+)?instructions|oublier\s+(?:les\s+)?consignes)",
+    ),
+    ("ignore_german", r"ignoriere\s+(?:vorherige\s+)?(?:die\s+)?Anweisungen"),
+    ("ignore_portuguese", r"ignore\s+(?:as\s+)?instruções\s+anteriores"),
+    ("ignore_italian", r"ignora\s+(?:le\s+)?istruzioni\s+precedenti"),
     (
         "role_tag_json_escaped",
         r'\\"role\\":\\"(?:system|assistant|developer|user)',

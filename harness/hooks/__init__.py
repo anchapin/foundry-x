@@ -21,6 +21,7 @@ from .rate_limit import (
     get_default_max_diff_lines,
     get_default_max_proposals,
     get_default_rate_window_hours,
+    register_into as rate_limit_register_into,
 )
 
 # Importing this package activates the prompt-injection firewall mandated by
@@ -29,7 +30,6 @@ from .rate_limit import (
 # and TraceLogger-backed closures that only the runner can supply (issue
 # #106). The runner calls register_into(registry, ...) and
 # register_token_aware_into(registry, ...) to install it.
-
 __all__ = [
     "Hook",
     "HookRegistry",
@@ -55,4 +55,5 @@ __all__ = [
     "get_default_max_diff_lines",
     "get_default_max_proposals",
     "get_default_rate_window_hours",
+    "rate_limit_register_into",
 ]

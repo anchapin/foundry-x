@@ -47,7 +47,10 @@ def test_rocm_setup_help_exits_zero() -> None:
     result = _run_rocm_setup("--help")
 
     assert result.returncode == 0
-    assert "usage: rocm_setup.sh [--check-rocm] [--smoke-test <gguf>]" in result.stdout
+    assert (
+        "usage: rocm_setup.sh [--check-rocm] [--check-gpu-responsive] [--smoke-test <gguf>]"
+        in result.stdout
+    )
     assert "--smoke-test <gguf>" in result.stdout
     assert "--check-rocm" in result.stdout
 
