@@ -339,3 +339,186 @@ def test_cli_session_card_surfaces_tool_argument_parse_error_count(tmp_path, cap
     assert rc == 0
     out = capsys.readouterr().out
     assert "tool_argument_parse_error=2" in out
+
+
+# ---------------------------------------------------------------------------
+# Issue #902: --latest flag on fx-trace session-card.
+# ---------------------------------------------------------------------------
+
+
+def _populate_two_sessions(db_path) -> tuple[str, str]:
+    """Plant two sessions (different harness versions) so the ``--latest``
+    path has a non-trivial choice. Returns ``(sid_old, sid_new)``.
+    """
+    logger = TraceLogger(db_path)
+    with logger.session(harness_version="0.1.0") as sid_old:
+        logger.record(sid_old, "user_prompt", {"prompt": "older session"})
+        logger.record(
+            sid_old,
+            "outcome",
+            {"status": "success", "reason": "final_answer", "steps": 1},
+        )
+    with logger.session(harness_version="0.2.0") as sid_new:
+        logger.record(sid_new, "user_prompt", {"prompt": "newer session"})
+        logger.record(
+            sid_new,
+            "outcome",
+            {"status": "failed", "reason": "task_failed", "steps": 2},
+        )
+    return sid_old, sid_new
+
+
+def test_cli_session_card_latest_renders_most_recent_session(tmp_path, capsys):
+    """Issue #902: ``fx-trace session-card --latest`` renders the most
+    recent session card (no ``--session-id`` required).
+    """
+    db = tmp_path / "traces.db"
+    sid_old, sid_new = _populate_two_sessions(db)
+
+    rc = cli_main(["session-card", "--db", str(db), "--latest"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The newer session is rendered; the older one is not. The card shows
+    # the outcome line derived from the most recent ``outcome`` event, so
+    # we look there (not at the user_prompt text, which the card never
+    # surfaces) to disambiguate the two sessions.
+    assert sid_new in out
+    assert sid_old not in out
+    assert "status=failed reason=task_failed steps=2" in out
+    assert "status=success reason=final_answer steps=1" not in out
+
+
+def test_cli_session_card_latest_with_harness_version(tmp_path, capsys):
+    """Issue #902: ``--latest --harness-version X`` picks the most recent
+    session matching X. The fixture stores one 0.1.0 session and one
+    0.2.0 session.
+    """
+    db = tmp_path / "traces.db"
+    sid_old, sid_new = _populate_two_sessions(db)
+
+    rc = cli_main(
+        [
+            "session-card",
+            "--db",
+            str(db),
+            "--latest",
+            "--harness-version",
+            "0.1.0",
+        ]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Only the 0.1.0 session (the older one) qualifies; it must be
+    # rendered and the 0.2.0 session must be filtered out.
+    assert sid_old in out
+    assert sid_new not in out
+
+
+def test_cli_session_card_latest_with_session_id_errors(tmp_path, capsys):
+    """Issue #902: ``--latest`` and ``--session-id`` are mutually exclusive.
+    Passing both is a usage error: CLI exits 2 with a friendly stderr
+    message and no stdout.
+    """
+    db = tmp_path / "traces.db"
+    sid_old, _ = _populate_two_sessions(db)
+
+    rc = cli_main(
+        [
+            "session-card",
+            "--db",
+            str(db),
+            "--latest",
+            "--session-id",
+            sid_old,
+        ]
+    )
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--latest and --session-id are mutually exclusive" in captured.err
+
+
+def test_cli_session_card_neither_session_id_nor_latest_errors(tmp_path, capsys):
+    """Issue #902: missing both ``--session-id`` and ``--latest`` is a usage
+    error now that ``--session-id`` is no longer required.
+    """
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = cli_main(["session-card", "--db", str(db)])
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "either --session-id or --latest is required" in captured.err
+
+
+def test_cli_session_card_latest_empty_store_says_no_sessions(tmp_path, capsys):
+    """Issue #902: empty store + ``--latest`` exits 0 with ``no sessions``.
+    This is the friendly-operator contract; an empty store is not an
+    error, just an informative message.
+    """
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = cli_main(["session-card", "--db", str(db), "--latest"])
+
+    assert rc == 0
+    assert capsys.readouterr().out == "no sessions\n"
+
+
+def test_cli_session_card_latest_with_harness_version_no_match(tmp_path, capsys):
+    """Issue #902: ``--latest --harness-version X`` where no session matches
+    X exits 0 with ``no sessions`` — mirrors the empty-store contract.
+    """
+    db = tmp_path / "traces.db"
+    _populate_two_sessions(db)
+
+    rc = cli_main(
+        [
+            "session-card",
+            "--db",
+            str(db),
+            "--latest",
+            "--harness-version",
+            "9.9.9",
+        ]
+    )
+
+    assert rc == 0
+    assert capsys.readouterr().out == "no sessions\n"
+
+
+def test_cli_session_card_session_id_remains_backward_compatible(tmp_path, capsys):
+    """Issue #902 acceptance criterion 5: ``--session-id X`` (no ``--latest``)
+    keeps its existing behavior unchanged. This guards against an
+    accidental default flip and pins the contract for downstream callers.
+    """
+    db = tmp_path / "traces.db"
+    sid_old, _ = _populate_two_sessions(db)
+
+    rc = cli_main(["session-card", "--db", str(db), "--session-id", sid_old])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert sid_old in out
+    # ``--harness-version`` is documented to have no effect when
+    # ``--session-id`` is supplied; verify the lookup still finds the
+    # 0.1.0 session even when a different harness version is requested.
+    rc = cli_main(
+        [
+            "session-card",
+            "--db",
+            str(db),
+            "--session-id",
+            sid_old,
+            "--harness-version",
+            "9.9.9",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert sid_old in out
