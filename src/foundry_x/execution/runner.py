@@ -2126,6 +2126,7 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         model_id=model_id,
         quantization=quantization,
         harness_variant=harness_variant,
+        metadata=session_metadata,
     ) as session_id:
         logger.record(session_id, kind="task_received", payload={"prompt": args.task})
         start = time.monotonic()
