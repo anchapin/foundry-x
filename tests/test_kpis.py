@@ -43,6 +43,7 @@ def _seed_session(
     hook_registry_error: bool = False,
     wall_clock_abort: bool = False,
     tool_argument_parse_error_count: int = 0,
+    generation_exhausted_count: int = 0,
 ) -> str:
     """Create a session with task_received + optional persisted critic_verdict.
 
@@ -65,6 +66,10 @@ def _seed_session(
     ``tool_argument_parse_error`` events are planted so the KPI aggregation
     can surface the count emitted by the runner at
     ``src/foundry_x/execution/runner.py:1684``.
+
+    Issue #953 adds ``generation_exhausted_count``: when >0, that many
+    ``generation_exhausted`` events are planted so the KPI aggregation can
+    surface the evolver LLM failure count and rate.
     """
     with logger.session(harness_version=harness_version) as sid:
         logger.record(sid, kind="task_received", payload={"prompt": "do work"})
@@ -113,6 +118,15 @@ def _seed_session(
                     "name": "read_file",
                     "raw": "not-json",
                     "error": "JSONDecodeError: malformed",
+                },
+            )
+        for i in range(generation_exhausted_count):
+            logger.record(
+                sid,
+                kind="generation_exhausted",
+                payload={
+                    "max_retries": 2,
+                    "final_error": f"generation failed: {i}",
                 },
             )
     return sid
@@ -544,6 +558,8 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "event_limit_abort_count",
         "server_restart_count",
         "excluded_from_cycle_time",
+        "evolver_llm_failure_count",
+        "evolver_llm_failure_rate",
         "per_skill",
         "per_task_family",
         "per_difficulty_tier",
@@ -1744,3 +1760,239 @@ def test_append_kpi_history_excludes_slices(tmp_path):
     assert "per_task_family" not in payload
     # The history entry still parses cleanly.
     assert read_kpi_history(hist)[0].improvement_rate == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Issue #953: evolver LLM failure count and rate from generation_exhausted events.
+# ---------------------------------------------------------------------------
+
+
+def test_evolver_llm_failure_count_and_rate_zero_when_clean(tmp_path):
+    """A clean trace store reports zero failures and zero rate (issue #953)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    summary = compute_kpis(logger)
+
+    assert summary.evolver_llm_failure_count == 0
+    assert summary.evolver_llm_failure_rate == 0.0
+
+
+def test_evolver_llm_failure_count_aggregates_across_sessions(tmp_path):
+    """Total failure count sums across sessions (issue #953)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, generation_exhausted_count=2)
+    _seed_session(logger, "v1", verdict=True, generation_exhausted_count=3)
+    _seed_session(logger, "v1", verdict=True)  # session with zero failures
+
+    summary = compute_kpis(logger)
+
+    assert summary.evolver_llm_failure_count == 5
+
+
+def test_evolver_llm_failure_rate_is_fraction_of_sessions(tmp_path):
+    """Failure rate is sessions-with-exhausted / sessions-with-task-received (issue #953)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # 3 sessions total, 2 have generation_exhausted events.
+    _seed_session(logger, "v1", verdict=True, generation_exhausted_count=1)
+    _seed_session(logger, "v1", verdict=True, generation_exhausted_count=1)
+    _seed_session(logger, "v1", verdict=True)  # clean session
+
+    summary = compute_kpis(logger)
+
+    assert summary.evolver_llm_failure_count == 2
+    assert summary.evolver_llm_failure_rate == pytest.approx(2 / 3)
+
+
+def test_evolver_llm_failure_rate_is_one_when_all_sessions_fail(tmp_path):
+    """Rate is 1.0 when every session has at least one exhaustion (issue #953)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, generation_exhausted_count=1)
+    _seed_session(logger, "v1", verdict=True, generation_exhausted_count=2)
+
+    summary = compute_kpis(logger)
+
+    assert summary.evolver_llm_failure_count == 3
+    assert summary.evolver_llm_failure_rate == 1.0
+
+
+def test_evolver_llm_failure_respects_harness_version_filter(tmp_path):
+    """Harness version filter applies to both count and rate (issue #953)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, generation_exhausted_count=4)
+    _seed_session(logger, "v2", verdict=True, generation_exhausted_count=7)
+
+    summary_v1 = compute_kpis(logger, harness_version="v1")
+    summary_v2 = compute_kpis(logger, harness_version="v2")
+
+    assert summary_v1.evolver_llm_failure_count == 4
+    assert summary_v2.evolver_llm_failure_count == 7
+
+
+def test_evolver_llm_failure_round_trips_through_kpi_summary(tmp_path):
+    """New fields round-trip through KpiSummary.model_validate (issue #953)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, generation_exhausted_count=3)
+
+    summary = compute_kpis(logger)
+    round_tripped = KpiSummary.model_validate(summary.model_dump())
+    assert round_tripped == summary
+    assert round_tripped.evolver_llm_failure_count == 3
+    assert round_tripped.evolver_llm_failure_rate == 1.0
+
+
+def test_main_markdown_renders_evolver_llm_failure_section(tmp_path, capsys):
+    """Markdown output surfaces the failure count when > 0 (issue #953)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, generation_exhausted_count=3)
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    output = captured.out
+    assert "Evolver LLM Failures" in output
+    assert "3 generation_exhausted event(s)" in output
+
+
+def test_main_markdown_omits_evolver_llm_failure_when_clean(tmp_path, capsys):
+    """Clean store omits the evolver LLM failures section (issue #953)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Evolver LLM Failures" not in captured.out
+
+
+def test_main_json_includes_evolver_llm_failure_fields(tmp_path, capsys):
+    """JSON output includes both new fields (issue #953)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, generation_exhausted_count=5)
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert payload["evolver_llm_failure_count"] == 5
+    assert payload["evolver_llm_failure_rate"] == 1.0
+
+
+def test_compare_kpis_includes_evolver_llm_failure_deltas(tmp_path):
+    """Comparison includes count and rate deltas (issue #953)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # Baseline v1: zero failures.
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    # Candidate v2: 3 failures across 2 sessions.
+    _seed_session(
+        logger,
+        "v2",
+        verdict=True,
+        passed_checks=["bench"],
+        generation_exhausted_count=2,
+    )
+    _seed_session(
+        logger,
+        "v2",
+        verdict=True,
+        passed_checks=["bench"],
+        generation_exhausted_count=1,
+    )
+
+    comparison = compare_kpis(logger, "v1", "v2")
+
+    assert isinstance(comparison, KpiComparison)
+    assert comparison.baseline.evolver_llm_failure_count == 0
+    assert comparison.candidate.evolver_llm_failure_count == 3
+    assert comparison.deltas["evolver_llm_failure_count"] == 3
+    # Baseline rate 0.0, candidate rate 1.0 → delta 1.0.
+    assert comparison.deltas["evolver_llm_failure_rate"] == pytest.approx(1.0)
+
+
+def test_main_comparison_renders_evolver_llm_failure_rows(tmp_path, capsys):
+    """Comparison markdown includes both failure count and rate rows (issue #953)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(
+        logger,
+        "v2",
+        verdict=True,
+        passed_checks=["bench"],
+        generation_exhausted_count=2,
+    )
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--baseline-harness-version",
+            "v1",
+            "--candidate-harness-version",
+            "v2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    rows = captured.out.splitlines()
+    count_row = next(
+        line for line in rows if line.lstrip().startswith("| Evol LLM Failure Count")
+    )
+    rate_row = next(
+        line for line in rows if line.lstrip().startswith("| Evol LLM Failure Rate")
+    )
+    # Baseline 0, candidate 2 → delta +2 (negative/bad).
+    assert "0 | 2 | +2.00 (negative)" in count_row
+    # Baseline 0.00, candidate 1.00 → delta +1.00 (negative/bad).
+    assert "0.00 | 1.00 | +1.00 (negative)" in rate_row
+
+
+def test_main_json_format_emits_evolver_llm_failure_in_top_level_keys(tmp_path, capsys):
+    """JSON top-level keys include the new fields (issue #953)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, generation_exhausted_count=1)
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert "evolver_llm_failure_count" in payload
+    assert "evolver_llm_failure_rate" in payload
+
+
+def test_append_kpi_history_includes_evolver_llm_failure(tmp_path):
+    """History log includes the new fields (issue #953)."""
+    from foundry_x.observability.kpis import append_kpi_history, read_kpi_history
+
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, generation_exhausted_count=3)
+
+    summary = compute_kpis(logger)
+    hist = tmp_path / "hist.jsonl"
+    append_kpi_history(hist, summary, harness_version="v1")
+
+    raw = hist.read_text(encoding="utf-8").strip()
+    payload = json.loads(raw)
+    assert payload["evolver_llm_failure_count"] == 3
+    assert payload["evolver_llm_failure_rate"] == 1.0
+
+    entry = read_kpi_history(hist)[0]
+    assert entry.evolver_llm_failure_count == 3
+    assert entry.evolver_llm_failure_rate == 1.0
