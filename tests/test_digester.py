@@ -481,12 +481,12 @@ _TOOL_ERROR_KEYWORDS: tuple[str, ...] = (
     "failed",
 )
 
-# Issue #798: context-overflow keywords for direct classification fallback
+# Issue #798, #901: context-overflow keywords for direct classification fallback
 _CONTEXT_OVERFLOW_KEYWORDS: tuple[str, ...] = (
     "max_steps",
     "context overflow",
     "context limit",
-    "token budget",
+    "token_budget",
 )
 
 
@@ -546,6 +546,35 @@ def test_context_overflow_keyword_classifies_as_context_overflow(keyword: str) -
     report = Digester().digest(_SESSION, _one_failing_event(keyword))
     assert report.proposed_class == "context-overflow"
     assert any("context budget limit" in c for c in report.suspected_causes)
+
+
+def test_task_aborted_token_budget_classifies_as_context_overflow() -> None:
+    """Issue #901: a ``task_aborted(reason='token_budget')`` event must route
+    to ``context-overflow`` so the Evolver proposes system_prompt guidance.
+
+    The ``token_budget`` keyword (underscore) matches the machine-readable
+    ``reason`` enum value in the ``task_aborted`` payload contract
+    (CONTEXT.md §Event kinds). A preceding ``context_pruned`` event mirrors
+    the real session shape where pruning fires before the budget abort.
+    """
+    events = [
+        _ev("user_prompt", {"content": "do stuff", "tool_count": 8}, event_id="e1", seq=1),
+        _ev(
+            "context_pruned",
+            {"dropped": 12, "threshold": 50, "token_threshold": 8192},
+            event_id="e2",
+            seq=2,
+        ),
+        _ev(
+            "task_aborted",
+            {"reason": "token_budget", "timeout_s": None, "token_budget": 8192},
+            event_id="e3",
+            seq=3,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "context-overflow"
+    assert "token_budget" in report.summary
 
 
 # --- Specificity / precedence ----------------------------------------------
