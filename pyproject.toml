@@ -25,7 +25,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.15.22",
-    "pre-commit>=3.8",
+    "pre-commit>=4.6.1",
 ]
 
 [build-system]
