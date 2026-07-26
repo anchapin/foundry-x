@@ -4,8 +4,8 @@
 **Session:** `parallel-issue-generation`
 **Generated:** 2026-07-18
 =======
-**Session:** `parallel-issue-generation`  
-**Generated:** 2026-07-18  
+**Session:** `parallel-issue-generation`
+**Generated:** 2026-07-18
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Sub-agents:** 6 (Evolution Engine, Trace Store, Harness Layer, Runner/Model Adapter, Phase 4 Discovery, Developer Experience)
 
@@ -79,10 +79,10 @@
 **ADR Tags:** `ADR-0006`
 **Confidence:** 0.95
 =======
-**Priority:** P0  
-**KPI Tags:** `kpi-improvement-rate`, `kpi-cycle-time`  
-**ADR Tags:** `ADR-0006`  
-**Confidence:** 0.95  
+**Priority:** P0
+**KPI Tags:** `kpi-improvement-rate`, `kpi-cycle-time`
+**ADR Tags:** `ADR-0006`
+**Confidence:** 0.95
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 1 — Evolution Engine
 
@@ -115,10 +115,10 @@ ADR-0006 (pydantic at module boundary)
 **ADR Tags:** `ADR-0004`, `ADR-0012`
 **Confidence:** 0.90
 =======
-**Priority:** P0  
-**KPI Tags:** `kpi-token-budget`, `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0004`, `ADR-0012`  
-**Confidence:** 0.90  
+**Priority:** P0
+**KPI Tags:** `kpi-token-budget`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0004`, `ADR-0012`
+**Confidence:** 0.90
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 3 — Harness Layer
 
@@ -152,10 +152,10 @@ ADR-0012 (manifest.json as evolver target), ADR-0004 (Critic gate)
 **ADR Tags:** `ADR-0004`, `ADR-0010`
 **Confidence:** 0.95
 =======
-**Priority:** P0  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** `ADR-0004`, `ADR-0010`  
-**Confidence:** 0.95  
+**Priority:** P0
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0004`, `ADR-0010`
+**Confidence:** 0.95
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 1 — Evolution Engine
 
@@ -194,10 +194,10 @@ ADR-0004 (Critic gate), ADR-0010 (Runner agent loop termination)
 **ADR Tags:** `ADR-0012`
 **Confidence:** 0.90
 =======
-**Priority:** P1  
-**KPI Tags:** `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0012`  
-**Confidence:** 0.90  
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0012`
+**Confidence:** 0.90
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 1 — Evolution Engine
 
@@ -231,10 +231,10 @@ ADR-0012
 **ADR Tags:** `ADR-0010`, `ADR-0007`
 **Confidence:** 0.92
 =======
-**Priority:** P1  
-**KPI Tags:** `kpi-cycle-time`, `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0010`, `ADR-0007`  
-**Confidence:** 0.92  
+**Priority:** P1
+**KPI Tags:** `kpi-cycle-time`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0010`, `ADR-0007`
+**Confidence:** 0.92
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 2 — Trace Store
 
@@ -268,10 +268,10 @@ ADR-0010, ADR-0007
 **ADR Tags:** `ADR-0004`, `ADR-0012`
 **Confidence:** 0.90
 =======
-**Priority:** P1  
-**KPI Tags:** `kpi-improvement-rate`, `kpi-regression-rate`  
-**ADR Tags:** `ADR-0004`, `ADR-0012`  
-**Confidence:** 0.90  
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`, `kpi-regression-rate`
+**ADR Tags:** `ADR-0004`, `ADR-0012`
+**Confidence:** 0.90
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 3 — Harness Layer
 
@@ -305,10 +305,10 @@ ADR-0004, ADR-0012
 **ADR Tags:** `ADR-0013`, `ADR-0022`
 **Confidence:** 0.88
 =======
-**Priority:** P1  
-**KPI Tags:** —  
-**ADR Tags:** `ADR-0013`, `ADR-0022`  
-**Confidence:** 0.88  
+**Priority:** P1
+**KPI Tags:** —
+**ADR Tags:** `ADR-0013`, `ADR-0022`
+**Confidence:** 0.88
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 2 — Trace Store
 
@@ -342,10 +342,10 @@ ADR-0013, ADR-0022
 **ADR Tags:** `ADR-0011`, `ADR-0018`
 **Confidence:** 0.90
 =======
-**Priority:** P1  
-**KPI Tags:** `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0011`, `ADR-0018`  
-**Confidence:** 0.90  
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0011`, `ADR-0018`
+**Confidence:** 0.90
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 1 — Evolution Engine
 
@@ -379,10 +379,10 @@ ADR-0011, ADR-0018
 **ADR Tags:** `ADR-0010`
 **Confidence:** 0.95
 =======
-**Priority:** P1  
-**KPI Tags:** `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0010`  
-**Confidence:** 0.95  
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.95
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 4 — Runner/Model Adapter
 
@@ -416,10 +416,10 @@ ADR-0010
 **ADR Tags:** `ADR-0006`
 **Confidence:** 0.85
 =======
-**Priority:** P1  
-**KPI Tags:** `kpi-regression-rate`, `kpi-cycle-time`, `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0006`  
-**Confidence:** 0.85  
+**Priority:** P1
+**KPI Tags:** `kpi-regression-rate`, `kpi-cycle-time`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0006`
+**Confidence:** 0.85
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 5 — Phase 4 Discovery
 
@@ -455,10 +455,10 @@ ADR-0006
 **ADR Tags:** `ADR-0004`
 **Confidence:** 0.85
 =======
-**Priority:** P1  
-**KPI Tags:** `kpi-token-budget`, `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0004`  
-**Confidence:** 0.85  
+**Priority:** P1
+**KPI Tags:** `kpi-token-budget`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0004`
+**Confidence:** 0.85
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 3 — Harness Layer
 
@@ -493,10 +493,10 @@ ADR-0004 (Evolver must generate), PHILOSOPHY.md §6
 **ADR Tags:** `ADR-0010`
 **Confidence:** 0.78
 =======
-**Priority:** P1  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** `ADR-0010`  
-**Confidence:** 0.78  
+**Priority:** P1
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.78
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 2 — Trace Store
 
@@ -532,10 +532,10 @@ ADR-0010
 **ADR Tags:** `ADR-0005`
 **Confidence:** 0.75
 =======
-**Priority:** P1  
-**KPI Tags:** `kpi-improvement-rate`, `kpi-regression-rate`  
-**ADR Tags:** `ADR-0005`  
-**Confidence:** 0.75  
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`, `kpi-regression-rate`
+**ADR Tags:** `ADR-0005`
+**Confidence:** 0.75
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 5 — Phase 4 Discovery
 
@@ -570,10 +570,10 @@ ADR-0005
 **ADR Tags:** —
 **Confidence:** 0.80
 =======
-**Priority:** P1  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** —  
-**Confidence:** 0.80  
+**Priority:** P1
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** —
+**Confidence:** 0.80
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 5 — Phase 4 Discovery
 
@@ -609,10 +609,10 @@ None
 **ADR Tags:** `ADR-0004`, `ADR-0009`
 **Confidence:** 0.75
 =======
-**Priority:** P1  
-**KPI Tags:** `kpi-improvement-rate`, `kpi-token-budget`  
-**ADR Tags:** `ADR-0004`, `ADR-0009`  
-**Confidence:** 0.75  
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`, `kpi-token-budget`
+**ADR Tags:** `ADR-0004`, `ADR-0009`
+**Confidence:** 0.75
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 3 — Harness Layer
 
@@ -647,10 +647,10 @@ ADR-0004, ADR-0009
 **ADR Tags:** —
 **Confidence:** 0.90
 =======
-**Priority:** P1  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** —  
-**Confidence:** 0.90  
+**Priority:** P1
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** —
+**Confidence:** 0.90
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 6 — Developer Experience
 
@@ -690,10 +690,10 @@ None
 **ADR Tags:** `ADR-0007`
 **Confidence:** 0.85
 =======
-**Priority:** P2  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** `ADR-0007`  
-**Confidence:** 0.85  
+**Priority:** P2
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0007`
+**Confidence:** 0.85
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 2 — Trace Store
 
@@ -707,10 +707,10 @@ None
 **ADR Tags:** `ADR-0010`
 **Confidence:** 0.90
 =======
-**Priority:** P2  
-**KPI Tags:** `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0010`  
-**Confidence:** 0.90  
+**Priority:** P2
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.90
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 4 — Runner/Model Adapter
 
@@ -724,10 +724,10 @@ None
 **ADR Tags:** `ADR-0018`, `ADR-0004`
 **Confidence:** 0.65
 =======
-**Priority:** P2  
-**KPI Tags:** `kpi-improvement-rate`, `kpi-cycle-time`  
-**ADR Tags:** `ADR-0018`, `ADR-0004`  
-**Confidence:** 0.65  
+**Priority:** P2
+**KPI Tags:** `kpi-improvement-rate`, `kpi-cycle-time`
+**ADR Tags:** `ADR-0018`, `ADR-0004`
+**Confidence:** 0.65
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 5 — Phase 4 Discovery
 
@@ -741,10 +741,10 @@ None
 **ADR Tags:** `ADR-0010`
 **Confidence:** 0.75
 =======
-**Priority:** P2  
-**KPI Tags:** `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0010`  
-**Confidence:** 0.75  
+**Priority:** P2
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.75
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 4 — Runner/Model Adapter
 
@@ -758,10 +758,10 @@ None
 **ADR Tags:** `ADR-0010`
 **Confidence:** 0.75
 =======
-**Priority:** P2  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** `ADR-0010`  
-**Confidence:** 0.75  
+**Priority:** P2
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.75
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 6 — Developer Experience
 
@@ -775,10 +775,10 @@ None
 **ADR Tags:** `ADR-0010`
 **Confidence:** 0.70
 =======
-**Priority:** P2  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** `ADR-0010`  
-**Confidence:** 0.70  
+**Priority:** P2
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.70
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 6 — Developer Experience
 
@@ -792,10 +792,10 @@ None
 **ADR Tags:** `ADR-0007`, `ADR-0010`
 **Confidence:** 0.60
 =======
-**Priority:** P2  
-**KPI Tags:** `kpi-cycle-time`, `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0007`, `ADR-0010`  
-**Confidence:** 0.60  
+**Priority:** P2
+**KPI Tags:** `kpi-cycle-time`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0007`, `ADR-0010`
+**Confidence:** 0.60
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 4 — Runner/Model Adapter
 
@@ -813,10 +813,10 @@ None
 **ADR Tags:** `ADR-0008`
 **Confidence:** 0.85
 =======
-**Priority:** P3  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** `ADR-0008`  
-**Confidence:** 0.85  
+**Priority:** P3
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0008`
+**Confidence:** 0.85
 >>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 6 — Developer Experience
 

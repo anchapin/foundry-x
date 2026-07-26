@@ -549,6 +549,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "hooks_disabled_rate",
         "token_budget_abort_count",
         "token_budget_hit_rate",
+        "context_efficiency",
         "streaming_quality",
         "context_pruned_count",
         "wall_clock_abort_count",
@@ -1150,6 +1151,75 @@ def test_main_json_format_emits_context_pruned_in_top_level_keys(tmp_path, capsy
     assert rc == 0
     payload = json.loads(captured.out)
     assert "context_pruned_count" in payload
+
+
+# Issue #951: context_efficiency KPI is computed from context_pruned events.
+# Formula: 1 - (sum(dropped) / sum(threshold + dropped)) per session, mean across sessions.
+# ---------------------------------------------------------------------------
+
+
+def test_context_efficiency_computed_when_prunes_present(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    _seed_context_pruned(logger, "v1", prune_count=1)
+    _seed_context_pruned(logger, "v1", prune_count=1)
+
+    summary = compute_kpis(logger)
+
+    assert summary.context_efficiency is not None
+    assert 0.0 <= summary.context_efficiency <= 1.0
+
+
+def test_context_efficiency_none_when_no_prunes(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=0)
+
+    summary = compute_kpis(logger)
+
+    assert summary.context_efficiency is None
+
+
+def test_context_efficiency_respects_harness_version_filter(tmp_path):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=1)
+    _seed_context_pruned(logger, "v2", prune_count=1)
+
+    summary_v1 = compute_kpis(logger, harness_version="v1")
+    summary_v2 = compute_kpis(logger, harness_version="v2")
+
+    assert summary_v1.context_efficiency is not None
+    assert summary_v2.context_efficiency is not None
+    assert summary_v1.context_efficiency == summary_v2.context_efficiency
+
+
+def test_main_markdown_renders_context_efficiency(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=1)
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    output = captured.out
+    assert "Context Efficiency" in output
+
+
+def test_main_json_includes_context_efficiency(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=1)
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert "context_efficiency" in payload
+    assert payload["context_efficiency"] is not None
 
 
 # Issue #621: --cycle-time-alert-threshold exits non-zero when
@@ -1971,19 +2041,20 @@ def test_main_comparison_renders_evolver_llm_failure_rows(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 0
     output = captured.out
-    assert "Evolver LLM Failures" in output
-    assert "evolver_llm_failure_count" in output
+    assert "Evol LLM Failure Count" in output
+    assert "Evol LLM Failure Rate" in output
 
 
 def test_kpi_history_file_includes_evolver_llm_failure_fields(tmp_path):
     """History file round-trips the new fields (issue #953)."""
+    from foundry_x.observability.kpis import read_kpi_history
+
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     _seed_session(logger, "v1", verdict=True, generation_exhausted_count=3)
-
-    main(["--db", str(db)])
-
     hist = tmp_path / "kpi_history.json"
+
+    main(["--db", str(db), "--log-to", str(hist)])
     assert hist.exists()
     raw = hist.read_text(encoding="utf-8").strip()
     payload = json.loads(raw)
