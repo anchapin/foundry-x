@@ -1008,16 +1008,16 @@ def test_hook_registry_error_vocabulary_is_pinned_in_failure_kinds() -> None:
 
 
 def test_model_error_kind_triggers_first_failure_classification() -> None:
-    """Issue #952: a ``model_error`` event with ``error_type`` is classified via
-    structured payload inspection (not keyword fallback) as ``model_error`` class.
-    The acceptance criterion is: ``model_error.error_type`` → ``model_error``.
+    """Issue #952/#1009: a ``model_error`` event with ``error_type`` is classified via
+    structured payload inspection (not keyword fallback) as ``tool-error`` class
+    per ADR-0011.
     """
     events = [
         *_CLEAN_EVENTS,
         _model_error_event(message="synthetic model fault"),
     ]
     report = Digester().digest(_SESSION, events)
-    assert report.proposed_class == "model_error"
+    assert report.proposed_class == "tool-error"
     assert len(report.failed_steps) == 1
     step = report.failed_steps[0]
     assert step["kind"] == "model_error"
@@ -1108,9 +1108,10 @@ def test_hook_registry_error_precedes_tool_error_in_first_failure_walk() -> None
 # ---------------------------------------------------------------------------
 
 
-def test_model_error_with_error_type_classifies_as_model_error_structured() -> None:
-    """Issue #952: ``model_error`` with ``error_type`` field uses structured
-    classification (not keyword matching), routing to ``model_error`` class.
+def test_model_error_with_error_type_classifies_as_tool_error_structured() -> None:
+    """Issue #952/#1009: ``model_error`` with ``error_type`` field uses structured
+    classification (not keyword matching), routing to ``tool-error`` class
+    per ADR-0011.
     """
     events = [
         *_CLEAN_EVENTS,
@@ -1122,7 +1123,7 @@ def test_model_error_with_error_type_classifies_as_model_error_structured() -> N
         ),
     ]
     report = Digester().digest(_SESSION, events)
-    assert report.proposed_class == "model_error"
+    assert report.proposed_class == "tool-error"
     step = report.failed_steps[0]
     assert step["kind"] == "model_error"
     assert step["signal"] == "kind:model_error"
@@ -1131,7 +1132,7 @@ def test_model_error_with_error_type_classifies_as_model_error_structured() -> N
 
 
 def test_model_error_with_ambiguous_in_message_not_misclassified_as_bad_prompt() -> None:
-    """Issue #952: ``model_error`` with ``error_type`` does not fall through to
+    """Issue #952/#1009: ``model_error`` with ``error_type`` does not fall through to
     keyword matching. The word ``ambiguous`` in the message must not misclassify
     as ``bad-prompt`` when the event has a structured error_type field.
     """
@@ -1145,7 +1146,7 @@ def test_model_error_with_ambiguous_in_message_not_misclassified_as_bad_prompt()
         ),
     ]
     report = Digester().digest(_SESSION, events)
-    assert report.proposed_class == "model_error"
+    assert report.proposed_class == "tool-error"
     assert report.failed_steps[0]["kind"] == "model_error"
 
 

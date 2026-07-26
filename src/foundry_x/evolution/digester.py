@@ -292,7 +292,7 @@ def _classify(event: TraceEvent, signal: str) -> tuple[str, list[str]]:
         error_type = _get_error_type(event)
         if error_type:
             return (
-                "model_error",
+                "tool-error",
                 [
                     _CLASS_CAUSE_TEMPLATES["tool-error"].format(match=error_type),
                     f"error_type={error_type}",
