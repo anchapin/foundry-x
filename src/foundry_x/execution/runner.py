@@ -784,6 +784,9 @@ async def _bash_skill_executor(
     Per ``harness/skills/bash.json``:
     - ``command`` is split with ``shlex.split`` and passed as argv (no shell)
     - ``cwd`` defaults to ``workspace_dir`` if not provided
+    - ``cwd`` is confined to ``workspace_dir`` via ``_resolve_path`` (issue #935);
+      a ``cwd`` that resolves outside the workspace returns an error result
+      instead of executing, mirroring the file-operation skill confinement
     - ``timeout_seconds`` defaults to 30; on timeout exit_code=-1 and truncated=True
     - ``max_output_bytes`` defaults to 32768; output is truncated at newline boundary
     """
@@ -794,7 +797,19 @@ async def _bash_skill_executor(
 
     cwd: Path | None = None
     if cwd_arg:
-        cwd = Path(cwd_arg)
+        if workspace_dir is not None:
+            try:
+                cwd = _resolve_path(cwd_arg, workspace_dir)
+            except ValueError as exc:
+                return {
+                    "stdout": "",
+                    "stderr": "",
+                    "exit_code": -1,
+                    "truncated": False,
+                    "error": str(exc),
+                }
+        else:
+            cwd = Path(cwd_arg)
     elif workspace_dir:
         cwd = workspace_dir
 
