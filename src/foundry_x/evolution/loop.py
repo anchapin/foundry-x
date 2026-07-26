@@ -20,7 +20,7 @@ from foundry_x.evolution.critic import Critic, CriticVerdict
 from foundry_x.evolution.digester import Digester, FailureReport
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
 from foundry_x.execution.runner import resolve_harness_version
-from foundry_x.trace.logger import TraceEvent
+from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 
 class EvolutionResult(BaseModel):
@@ -78,6 +78,7 @@ def run_evolution_step(
     critic: Critic | None = None,
     evolver: Evolver | None = None,
     no_verify: bool = False,
+    trace_logger: TraceLogger | None = None,
 ) -> EvolutionResult:
     """Run one iteration of the evolution loop over a session's trace events.
 
@@ -112,6 +113,12 @@ def run_evolution_step(
         ``CriticVerdict(verdict=None, notes="--no-verify: skipped")`` for the
         last proposed edit (issue #888). The audit trail still records a
         verdict event; downstream consumers treat ``None`` as a non-approval.
+    trace_logger:
+        Optional :class:`TraceLogger` passed to the default
+        :class:`Evolver` so template-fallback failures (e.g. unknown failure
+        class) emit ``generation_attempt`` / ``generation_exhausted`` trace
+        events instead of returning ``[]`` silently (issue #974). Ignored
+        when ``evolver`` is explicitly provided.
 
     Returns
     -------
@@ -137,7 +144,7 @@ def run_evolution_step(
         )
 
     if evolver is None:
-        evolver = Evolver()
+        evolver = Evolver(trace_logger=trace_logger, session_id=session_id)
 
     evolver_duration_ms: float | None = None
     try:
@@ -208,6 +215,7 @@ async def run_evolution_step_async(
     critic: Critic | None = None,
     evolver: Evolver | None = None,
     no_verify: bool = False,
+    trace_logger: TraceLogger | None = None,
 ) -> EvolutionResult:
     """Async variant of :func:`run_evolution_step`.
 
@@ -218,6 +226,9 @@ async def run_evolution_step_async(
     When ``no_verify=True`` the Critic is skipped and a synthetic
     ``CriticVerdict(verdict=None, notes="--no-verify: skipped")`` is returned
     for the last proposed edit (issue #888).
+
+    ``trace_logger`` is passed to the default :class:`Evolver` so
+    template-fallback failures emit trace events (issue #974).
     """
     harness_version = resolve_harness_version(harness_dir)
     started_at = _now_iso()
@@ -237,7 +248,7 @@ async def run_evolution_step_async(
         )
 
     if evolver is None:
-        evolver = Evolver()
+        evolver = Evolver(trace_logger=trace_logger, session_id=session_id)
 
     evolver_duration_ms: float | None = None
     try:
