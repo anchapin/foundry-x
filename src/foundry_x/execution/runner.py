@@ -1957,8 +1957,17 @@ async def run_task(
                 break
 
             if step + 1 >= max_steps and response.tool_calls:
-                outcome_status = "truncated"
-                outcome_reason = "max_steps"
+                # Issue #971: only classify as max_steps when no
+                # higher-priority abort reason (token_budget, event_limit,
+                # model_error) has already been set on this step. Those
+                # checks fire earlier in the loop body and break before we
+                # reach here, but the guard is defensive: a future
+                # reordering must not silently overwrite a specific abort
+                # reason with the generic ``"max_steps"`` label, which
+                # would mislead the Digester's failure classification.
+                if outcome_reason is None:
+                    outcome_status = "truncated"
+                    outcome_reason = "max_steps"
                 break
 
             step += 1

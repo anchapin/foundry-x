@@ -600,3 +600,94 @@ async def test_run_task_unset_budget_does_not_enforce(tmp_path):
     outcome = next(event for event in events if event.kind == "outcome")
     assert outcome.payload["status"] == "success"
     assert outcome.payload["tokens_total"] == 20
+
+
+@pytest.mark.asyncio
+async def test_token_budget_survives_collision_with_max_steps(tmp_path, monkeypatch):
+    """Issue #971: when ``token_budget`` and ``max_steps`` would both fire on
+    the same agent step, ``outcome.reason`` must be ``"token_budget"`` (the
+    specific abort reason), not ``"max_steps"``.
+
+    Setup: ``max_steps=2`` (via ``FOUNDRY_MAX_AGENT_STEPS``),
+    ``token_budget=150``. Two tool-call responses, each carrying 100 tokens.
+    After step 1 the running total is 200 (> 150), so ``token_budget`` fires.
+    At that same step ``step + 1 = 2 >= max_steps = 2`` is also true, so the
+    ``max_steps`` guard (``runner.py:~1959``) would unconditionally overwrite
+    ``outcome_reason`` if it weren't guarded.
+
+    The ``task_aborted`` event carries ``reason="token_budget"`` (existing
+    signal, must be preserved), and ``outcome.reason`` must also be
+    ``"token_budget"`` so the Digester classifies the failure correctly.
+    """
+    monkeypatch.setenv("FOUNDRY_MAX_AGENT_STEPS", "2")
+
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+    db = tmp_path / "traces.db"
+
+    def _step_response(step_index: int) -> ModelResponse:
+        tool_call = ModelToolCall(
+            id=f"call_step_{step_index}",
+            type="function",
+            function=ToolCallFunction(
+                name="bash",
+                arguments=json.dumps({"command": "true"}),
+            ),
+        )
+        return ModelResponse(
+            message=ModelMessage(role="assistant", content=None, tool_calls=[tool_call]),
+            tool_calls=[tool_call],
+            finish_reason="tool_calls",
+            usage=ModelUsage(prompt_tokens=40, completion_tokens=60, total_tokens=100),
+        )
+
+    # Two tool-call responses (100 tokens each). After step 1 the running
+    # total is 200, exceeding the 150 budget. A third response is stashed
+    # so the adapter raises loudly if the loop fails to break on either
+    # guard.
+    responses = [
+        _step_response(0),
+        _step_response(1),
+        ModelResponse(
+            message=ModelMessage(role="assistant", content="unreached"),
+            finish_reason=None,
+            usage=ModelUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
+        ),
+    ]
+    adapter = _ScriptedAdapter(responses)
+    limits = RunLimits(token_budget=150)
+
+    async def noop_executor(name, arguments):
+        return {"status": "ok"}
+
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as session_id:
+        await run_task(
+            "collision-971",
+            harness_dir,
+            logger,
+            session_id,
+            model_adapter=adapter,
+            skill_executor=noop_executor,
+            limits=limits,
+        )
+
+    events = logger.load_session(session_id)
+
+    # task_aborted must carry reason="token_budget" (existing signal).
+    aborted = [event for event in events if event.kind == "task_aborted"]
+    assert len(aborted) == 1
+    assert aborted[0].payload["reason"] == "token_budget"
+
+    # outcome.reason must be "token_budget", NOT "max_steps" — the fix.
+    outcome = next(event for event in events if event.kind == "outcome")
+    assert outcome.payload["status"] == "failed"
+    assert outcome.payload["reason"] == "token_budget", (
+        f"outcome.reason corrupted to {outcome.payload['reason']!r}; "
+        "max_steps guard overwrote the token_budget abort reason"
+    )
+    assert outcome.payload["steps"] == 2
+    assert outcome.payload["tokens_total"] == 200
+
+    # The loop must NOT have asked the adapter for a third round-trip.
+    assert adapter.calls == 2
