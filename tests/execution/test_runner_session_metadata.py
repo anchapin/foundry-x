@@ -159,7 +159,7 @@ def test_main_cli_harness_variant_overrides_env(tmp_path, monkeypatch):
 
 def test_main_session_metadata_empty_when_no_tags_set(tmp_path, monkeypatch):
     """When neither quantization nor harness_variant is set (CLI or env),
-    the session metadata dict is empty."""
+    the session metadata contains only ``harness_version_source``."""
     db = tmp_path / "traces.db"
     for key in (
         "FOUNDRY_QUANTIZATION",
@@ -190,4 +190,4 @@ def test_main_session_metadata_empty_when_no_tags_set(tmp_path, monkeypatch):
 
     sessions = TraceLogger(db).list_sessions()
     assert len(sessions) == 1
-    assert sessions[0].metadata == {}
+    assert sessions[0].metadata == {"harness_version_source": "fallback"}

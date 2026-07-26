@@ -217,7 +217,7 @@ def _run_loop(
     """
     if no_verify:
         sys.stderr.write(_NO_VERIFY_WARNING)
-    harness_version = resolve_harness_version(harness_dir)
+    harness_version = resolve_harness_version(harness_dir).version
     started_at = _now_iso()
     backend = _infer_backend(trace_db)
     logger = TraceLogger(trace_db, backend=backend)
@@ -315,7 +315,7 @@ async def _run_loop_async(
     """
     if no_verify:
         sys.stderr.write(_NO_VERIFY_WARNING)
-    harness_version = resolve_harness_version(harness_dir)
+    harness_version = resolve_harness_version(harness_dir).version
     started_at = _now_iso()
     backend = _infer_backend(trace_db)
     logger = TraceLogger(trace_db, backend=backend)

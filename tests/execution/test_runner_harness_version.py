@@ -6,6 +6,7 @@ from unittest import mock
 
 from foundry_x.execution.runner import (
     _FALLBACK_HARNESS_VERSION,
+    HarnessVersionSource,
     resolve_harness_version,
 )
 
@@ -15,7 +16,9 @@ def test_resolve_reads_version_file_and_trims_whitespace(tmp_path: Path):
     trimmed) is returned verbatim — the default path."""
     (tmp_path / "VERSION").write_text("  1.2.3-rc4\n", encoding="utf-8")
 
-    assert resolve_harness_version(tmp_path) == "1.2.3-rc4"
+    result = resolve_harness_version(tmp_path)
+    assert result.version == "1.2.3-rc4"
+    assert result.source == HarnessVersionSource.VERSION_FILE
 
 
 def test_resolve_ignores_blank_version_file_and_falls_back(tmp_path: Path):
@@ -26,8 +29,9 @@ def test_resolve_ignores_blank_version_file_and_falls_back(tmp_path: Path):
 
     with mock.patch("subprocess.run") as fake_run:
         fake_run.side_effect = OSError("no git")
-        # Blank file + no git -> literal fallback.
-        assert resolve_harness_version(tmp_path) == _FALLBACK_HARNESS_VERSION
+        result = resolve_harness_version(tmp_path)
+    assert result.version == _FALLBACK_HARNESS_VERSION
+    assert result.source == HarnessVersionSource.FALLBACK
 
 
 def test_resolve_falls_back_to_git_when_version_file_absent(tmp_path: Path):
@@ -42,8 +46,8 @@ def test_resolve_falls_back_to_git_when_version_file_absent(tmp_path: Path):
     with mock.patch("subprocess.run", return_value=completed) as fake_run:
         result = resolve_harness_version(tmp_path)
 
-    assert result == "v0.4.2-3-gabc1234"
-    # git must be invoked *inside* the harness directory.
+    assert result.version == "v0.4.2-3-gabc1234"
+    assert result.source == HarnessVersionSource.GIT_DESCRIBE
     assert fake_run.call_args.kwargs["cwd"] == str(tmp_path)
 
 
@@ -51,7 +55,9 @@ def test_resolve_falls_back_to_constant_when_neither_available(tmp_path: Path):
     """Issue #11 (c): no VERSION file and a git failure (e.g. git missing or
     not a repo) yields the literal fallback so the run can still proceed."""
     with mock.patch("subprocess.run", side_effect=OSError("git not installed")):
-        assert resolve_harness_version(tmp_path) == _FALLBACK_HARNESS_VERSION
+        result = resolve_harness_version(tmp_path)
+    assert result.version == _FALLBACK_HARNESS_VERSION
+    assert result.source == HarnessVersionSource.FALLBACK
 
 
 def test_resolve_falls_back_to_constant_on_subprocess_error(tmp_path: Path):
@@ -59,4 +65,21 @@ def test_resolve_falls_back_to_constant_on_subprocess_error(tmp_path: Path):
     the literal rather than crashing the runner."""
     err = subprocess.CalledProcessError(128, ["git", "describe"])
     with mock.patch("subprocess.run", side_effect=err):
-        assert resolve_harness_version(tmp_path) == _FALLBACK_HARNESS_VERSION
+        result = resolve_harness_version(tmp_path)
+    assert result.version == _FALLBACK_HARNESS_VERSION
+    assert result.source == HarnessVersionSource.FALLBACK
+
+
+def test_resolve_emits_fallback_source_on_empty_git_output(tmp_path: Path):
+    """When git describe succeeds but returns empty output (e.g. brand-new repo
+    with no commits), the fallback fires and ``source`` is ``fallback``."""
+    completed = subprocess.CompletedProcess(
+        args=["git", "describe", "--tags", "--always"],
+        returncode=0,
+        stdout="\n",
+        stderr="",
+    )
+    with mock.patch("subprocess.run", return_value=completed):
+        result = resolve_harness_version(tmp_path)
+    assert result.version == _FALLBACK_HARNESS_VERSION
+    assert result.source == HarnessVersionSource.FALLBACK

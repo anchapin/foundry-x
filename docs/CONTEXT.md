@@ -137,7 +137,7 @@ pin their producer, payload contract, and failure-signal classification
 
 | Kind | Producer | Payload contract | Failure signal? |
 | --- | --- | --- | --- |
-| **`session_start`** | `TraceLogger.session` (`src/foundry_x/trace/logger.py`) | JSONL marker line `{"session_id", "started_at", "harness_version", "model_id", "metadata", "kind": "session_start"}`. In the sqlite backend the same data lives on the `sessions` row, not in the `events` table; the marker is part of the persisted vocabulary either way. | no |
+| **`session_start`** | `TraceLogger.session` (`src/foundry_x/trace/logger.py`) | JSONL marker line `{"session_id", "started_at", "harness_version", "model_id", "metadata", "kind": "session_start"}`. In the sqlite backend the same data lives on the `sessions` row, not in the `events` table; the marker is part of the persisted vocabulary either way. ``metadata`` always contains ``harness_version_source`` whose value is ``"version_file"`` (VERSION file had content), ``"git_describe"`` (git described a tag), or ``"fallback"`` (fabricated ``"0.1.0"`` because VERSION was absent/blank and git failed or returned empty output). | no |
 | **`session_end`** | `TraceLogger._end_session` (`src/foundry_x/trace/logger.py`) | JSONL marker line `{"session_id", "ended_at", "kind": "session_end"}`. In sqlite it updates `sessions.ended_at`. | no |
 | **`task_received`** | `Runner.main` (`src/foundry_x/execution/runner.py`) | `{"prompt": str}` — the raw `--task` argument before the agent loop is opened. | no |
 | **`task_completed`** | `Runner.main` (terminal, success path) | `{"duration_ms": int}` — wall-clock time of the entire `run_task` awaitable. | no |
