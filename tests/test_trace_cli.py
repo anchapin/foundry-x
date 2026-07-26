@@ -1216,3 +1216,79 @@ def test_seed_sample_trace_is_visible_to_existing_subcommands(tmp_path, capsys):
     timeline = capsys.readouterr().out
     for required_kind in _REQUIRED_SEED_KINDS:
         assert required_kind in timeline
+
+
+# --- Issue #959: info -------------------------------------------------------
+# ``foundry-trace info`` prints WAL size, DB size, and session count so
+# operators can detect WAL bloat before it becomes problematic.
+
+
+def test_info_sqlite_shows_sizes_and_session_count(tmp_path, capsys):
+    """Info command reports backend, DB size, WAL size, and session count."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db, backend="sqlite")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    rc = main(["info", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Backend: sqlite" in out
+    assert "DB size:" in out
+    assert "WAL size:" in out
+    assert "Sessions: 1" in out
+
+
+def test_info_jsonl_shows_file_size_and_session_count(tmp_path, capsys):
+    """Info command on JSONL backend reports file size and session count."""
+    db = tmp_path / "traces.jsonl"
+    logger = TraceLogger(db, backend="jsonl")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    rc = main(["info", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Backend: jsonl" in out
+    assert "File size:" in out
+    assert "Sessions: 1" in out
+
+
+def test_info_sqlite_warns_when_wal_exceeds_100mb(tmp_path, capsys):
+    """When WAL exceeds 100 MB, info prints a warning to stderr."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db, backend="sqlite")
+
+    with logger.session(harness_version="0.1.0") as sid:
+        blob = "x" * 1024
+        for _ in range(500):
+            logger.record(sid, "tool_call", {"name": "read_file", "blob": blob})
+
+    wal_path = db.with_suffix(db.suffix + "-wal")
+    original_size = wal_path.stat().st_size if wal_path.exists() else 0
+
+    import os
+
+    if original_size < 100 * 1024 * 1024:
+        os.truncate(str(wal_path), 100 * 1024 * 1024 + 1)
+
+    rc = main(["info", "--db", str(db)])
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "100 MB" in err or "exceeds" in err.lower()
+
+
+def test_info_empty_db_shows_zero_sessions(tmp_path, capsys):
+    """Info on an empty database shows 0 sessions."""
+    db = tmp_path / "traces.db"
+    TraceLogger(db, backend="sqlite")
+
+    rc = main(["info", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Sessions: 0" in out

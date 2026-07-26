@@ -554,6 +554,44 @@ def _seed_sample_trace(args: argparse.Namespace) -> int:
     return 0
 
 
+def _info(args: argparse.Namespace) -> int:
+    """Implement ``info`` (issue #959).
+
+    Prints WAL size, DB size, and session count for operators to detect
+    WAL bloat before it becomes problematic.
+    """
+    logger = _logger_for(args.db)
+    sessions = list(logger.list_sessions())
+
+    if logger.backend == "sqlite":
+        db_path = Path(args.db)
+        wal_path = db_path.with_suffix(db_path.suffix + "-wal")
+        wal_size = wal_path.stat().st_size if wal_path.exists() else 0
+        db_size = db_path.stat().st_size if db_path.exists() else 0
+        session_count = len(sessions)
+
+        sys.stdout.write("Backend: sqlite\n")
+        sys.stdout.write(f"DB size: {db_size} bytes\n")
+        sys.stdout.write(f"WAL size: {wal_size} bytes\n")
+        sys.stdout.write(f"Sessions: {session_count}\n")
+
+        if wal_size > 100 * 1024 * 1024:
+            sys.stderr.write(
+                f"WARNING: WAL size ({wal_size} bytes) exceeds 100 MB threshold. "
+                f"Run `foundry-trace prune --vacuum` to reclaim WAL space.\n"
+            )
+    else:
+        db_path = Path(args.db)
+        db_size = db_path.stat().st_size if db_path.exists() else 0
+        session_count = len(sessions)
+
+        sys.stdout.write("Backend: jsonl\n")
+        sys.stdout.write(f"File size: {db_size} bytes\n")
+        sys.stdout.write(f"Sessions: {session_count}\n")
+
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="foundry-trace",
@@ -780,11 +818,25 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "After pruning, run VACUUM and wal_checkpoint(TRUNCATE) on the "
-            "SQLite database to reclaim WAL/free space (issue #896). No-op "
-            "on the JSONL backend."
+            "SQLite database to reclaim WAL/free space (issue #896). "
+            "Recommended when the trace store is not being written to, e.g. "
+            "after a batch prune of old sessions. Without this, the WAL "
+            "sidecar grows unboundedly and can reach several GB. "
+            "No-op on the JSONL backend."
         ),
     )
     prune_parser.set_defaults(func=_prune)
+
+    info_parser = sub.add_parser(
+        "info",
+        help="Show WAL size, DB size, and session count for the trace store (issue #959).",
+    )
+    info_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    info_parser.set_defaults(func=_info)
 
     compact_parser = sub.add_parser(
         "compact",

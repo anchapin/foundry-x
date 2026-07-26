@@ -1,0 +1,203 @@
+# Observability Gap Proposals for FoundryX
+# Generated from evidence-based analysis of the codebase on 2026-07-18
+# Area: observability
+# Reviewer: AI agent
+
+proposals:
+  - id: OBS-001
+    area: observability
+    title: "Add model_error to Digester FAILURE_KINDS"
+    problem: |
+      The runner emits `model_error` (runner.py:1592) when `adapter.complete`
+      raises an exception, and CONTEXT.md documents it as a failure signal.
+      However, the Digester's `FAILURE_KINDS` constant (digester.py:61-69)
+      does not include `model_error`. The event's payload keys (`error_type`,
+      `message`) also do not match `FAILURE_PAYLOAD_KEYS` (`error`,
+      `traceback`, `exception`). This means the Digester's failure-walk
+      ignores `model_error` as a first-failure marker.
+
+      While `model_error` is always paired with a `task_failed` terminal
+      marker (because the exception is re-raised), the Digester reports
+      `task_failed` as the root cause instead of the actual `model_error`.
+      If a session has `model_error` at step 3 followed by a `tool_error`
+      at step 5, the Digester would report the `tool_error` as the first
+      failure, misclassifying the root cause.
+    evidence:
+      - file: src/foundry_x/execution/runner.py
+        line: 1592
+        code: 'kind="model_error"'
+        artifact: "runner emits model_error with payload {step, error_type, message}"
+      - file: src/foundry_x/evolution/digester.py
+        line: 61
+        code: 'FAILURE_KINDS: frozenset[str] = frozenset({"tool_error", "task_failed", "run_failed", "agent_error", "error"})'
+        artifact: "model_error absent from FAILURE_KINDS"
+      - file: docs/CONTEXT.md
+        line: null
+        code: null
+        artifact: "CONTEXT.md documents model_error as a failure signal"
+    impact: "Misclassification of root cause when model_error precedes other failures in the same session"
+    effort: size-s
+    confidence: high
+    related_issues: []
+
+  - id: OBS-002
+    area: observability
+    title: "Add hook_registry_error to Digester FAILURE_KINDS"
+    problem: |
+      The runner emits `hook_registry_error` (runner.py:675) when
+      `harness.hooks.get_registry()` raises, silently disabling ALL hooks
+      including the security-critical `InjectionFirewallHook`. KPIs track the
+      count and session-fraction (#585), but the Digester's `FAILURE_KINDS`
+      does not include `hook_registry_error`. Sessions that ran with no
+      injection firewall protection are not flagged as structural failures
+      in the Digester's classification, even though they pose a security
+      concern.
+    evidence:
+      - file: src/foundry_x/execution/runner.py
+        line: 675
+        code: 'kind="hook_registry_error"'
+        artifact: "runner emits hook_registry_error with payload {error_type, message}"
+      - file: src/foundry_x/evolution/digester.py
+        line: 61
+        code: 'FAILURE_KINDS: frozenset[str] = frozenset({"tool_error", "task_failed", "run_failed", "agent_error", "error"})'
+        artifact: "hook_registry_error absent from FAILURE_KINDS"
+      - file: src/foundry_x/observability/kpis.py
+        line: 506
+        code: '_hook_registry_errors()'
+        artifact: "KPI surface tracks count and rate but Digester ignores it"
+    impact: "Sessions with disabled security hooks pass Digester without security classification; root cause analysis misses hook failures"
+    effort: size-s
+    confidence: medium
+    related_issues:
+      - "#585"
+
+  - id: OBS-003
+    area: observability
+    title: "Track model_retry events in KPIs and session card"
+    problem: |
+      The runner emits `model_retry` (runner.py:1449) when a model API call
+      fails and is retried, but no observability surface counts or reports
+      these events. A rising retry rate signals API flakiness or rate
+      limiting that operators should be able to detect from trace data
+      without grepping raw events.
+    evidence:
+      - file: src/foundry_x/execution/runner.py
+        line: 1449
+        code: 'kind="model_retry"'
+        artifact: "runner emits model_retry on API retry"
+      - file: src/foundry_x/observability/kpis.py
+        line: null
+        code: null
+        artifact: "no query_events(kind='model_retry') call exists in any observability module"
+      - file: src/foundry_x/observability/session_card.py
+        line: null
+        code: null
+        artifact: "session card does not surface retry count"
+    impact: "Operators cannot detect API reliability degradation from KPIs or session cards; must manually grep raw trace events"
+    effort: size-m
+    confidence: high
+    related_issues: []
+
+  - id: OBS-004
+    area: observability
+    title: "Track tool_argument_parse_error events in KPIs and session card"
+    problem: |
+      The runner emits `tool_argument_parse_error` (runner.py:1684) when the
+      model produces malformed tool call arguments that cannot be parsed.
+      No observability surface counts or reports these events. A rising rate
+      signals model output quality degradation or a mismatch between the
+      tool schema and the model's capabilities.
+    evidence:
+      - file: src/foundry_x/execution/runner.py
+        line: 1684
+        code: 'kind="tool_argument_parse_error"'
+        artifact: "runner emits tool_argument_parse_error on parse failure"
+      - file: src/foundry_x/observability/kpis.py
+        line: null
+        code: null
+        artifact: "no query_events(kind='tool_argument_parse_error') call exists"
+      - file: src/foundry_x/observability/session_card.py
+        line: null
+        code: null
+        artifact: "session card does not surface parse error count"
+    impact: "Operators cannot detect model output quality trends; malformed arguments silently reduce effective tool-call throughput"
+    effort: size-m
+    confidence: high
+    related_issues: []
+
+  - id: OBS-005
+    area: observability
+    title: "Track event_limit aborts as a separate KPI"
+    problem: |
+      The runner emits `task_aborted(reason="event_limit")` when the
+      per-session event cap is exceeded. KPIs already track
+      `token_budget_abort_count` (#466), `token_budget_hit_rate` (#551),
+      and `wall_clock_abort_count` (#626 area), but event_limit aborts are
+      invisible. An operator reviewing KPIs cannot distinguish
+      event-limit-driven failures from other abort reasons.
+    evidence:
+      - file: src/foundry_x/execution/runner.py
+        line: 1658
+        code: 'kind="task_aborted"'
+        artifact: "runner emits task_aborted with reason='event_limit' when event cap hit"
+      - file: src/foundry_x/observability/kpis.py
+        line: null
+        code: null
+        artifact: "token_budget_abort_count and wall_clock_abort_count exist but no event_limit counter"
+    impact: "Event-limit aborts are indistinguishable from other failure modes in KPI output; operators cannot size the event cap correctly"
+    effort: size-s
+    confidence: high
+    related_issues: []
+
+  - id: OBS-006
+    area: observability
+    title: "Add windowed trend analysis to tool latency report"
+    problem: |
+      `tool_latency.py` computes aggregate p50/p95/p99 percentiles across
+      all sessions (or a time window), but does not support per-session
+      or per-window trend analysis. An operator looking at aggregate
+      numbers cannot tell if a tool's latency is improving or degrading
+      over time (e.g., "has tool X latency gotten worse over the last
+      10 sessions?").
+    evidence:
+      - file: src/foundry_x/observability/tool_latency.py
+        line: null
+        code: "aggregate_tool_latency()"
+        artifact: "function computes single aggregate over all sessions; no trend view"
+      - file: src/foundry_x/observability/tool_latency.py
+        line: null
+        code: "render_tool_latency_markdown()"
+        artifact: "renderer outputs single table, no trend columns"
+    impact: "Operators cannot detect latency regression trends; only aggregate snapshots are visible"
+    effort: size-l
+    confidence: medium
+    related_issues:
+      - "#181"
+
+  - id: OBS-007
+    area: observability
+    title: "Add threshold-based alerting for observability metrics"
+    problem: |
+      The observability module computes metrics but has no mechanism to
+      flag when thresholds are breached (e.g., p95 latency > 30s,
+      hooks_disabled_rate > 0, regression count > 0). All outputs are
+      informational only. The `regression-report --fail-on-regression`
+      flag partially covers regressions, but no equivalent exists for
+      KPI thresholds or tool latency anomalies.
+    evidence:
+      - file: src/foundry_x/observability/cli.py
+        line: null
+        code: null
+        artifact: "CLI renders reports but none evaluate thresholds or return non-zero exit codes based on metric values"
+      - file: src/foundry_x/observability/kpis.py
+        line: null
+        code: "compute_kpis()"
+        artifact: "returns KpiSummary with all metrics but no threshold evaluation"
+      - file: src/foundry_x/observability/tool_latency.py
+        line: null
+        code: "aggregate_tool_latency()"
+        artifact: "returns ToolLatencyReport but no threshold check"
+    impact: "Operators must manually inspect output to detect problems; no programmatic CI gate for latency or KPI thresholds"
+    effort: size-l
+    confidence: low
+    related_issues: []
