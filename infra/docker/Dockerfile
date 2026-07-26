@@ -35,7 +35,7 @@
 # ---- Stage 1: builder -------------------------------------------------------
 # Carries the toolchain required to install uv and resolve the lockfile.
 # This stage is NOT the published image.
-FROM python:3.11-slim@sha256:a7bce671c71744cd4dcef2bc9cd9c5eff3d7cfa6b55eca30759765047184bcdb AS builder
+FROM python:3.14-slim@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6 AS builder
 # was: python:3.11-slim (2026-07-10) — 3.11.15-slim-trixie per issue #124
 #      Resolved from registry-1.docker.io/v2/library/python/manifests/3.11-slim
 
@@ -91,7 +91,7 @@ COPY tests ./tests
 # No compiler, no VCS, no HTTP client — only ca-certificates (needed for
 # outbound TLS to llama-server). The .venv created in the builder is
 # copied wholesale; uv itself is NOT installed here.
-FROM python:3.11-slim@sha256:a7bce671c71744cd4dcef2bc9cd9c5eff3d7cfa6b55eca30759765047184bcdb AS runtime
+FROM python:3.14-slim@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6 AS runtime
 # was: python:3.11-slim (2026-07-10)
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
