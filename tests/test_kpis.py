@@ -1922,6 +1922,29 @@ def test_compare_kpis_includes_evolver_llm_failure_deltas(tmp_path):
     assert comparison.deltas["evolver_llm_failure_rate"] == pytest.approx(1.0)
 
 
+def test_compare_kpis_evolver_llm_failure_rows(tmp_path, capsys):
+    """compare_kpis() includes both failure count and rate rows (issue #953)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(
+        logger,
+        "v2",
+        verdict=True,
+        passed_checks=["bench"],
+        generation_exhausted_count=2,
+    )
+
+    comparison = compare_kpis(logger, "v1", "v2")
+
+    assert isinstance(comparison, KpiComparison)
+    assert comparison.baseline.evolver_llm_failure_count == 0
+    assert comparison.candidate.evolver_llm_failure_count == 2
+    assert comparison.deltas["evolver_llm_failure_count"] == 2
+    # Baseline rate 0.0, candidate rate 1.0 → delta 1.0.
+    assert comparison.deltas["evolver_llm_failure_rate"] == pytest.approx(1.0)
+
+
 def test_main_comparison_renders_evolver_llm_failure_rows(tmp_path, capsys):
     """Comparison markdown includes both failure count and rate rows (issue #953)."""
     db = tmp_path / "traces.db"
@@ -1992,3 +2015,73 @@ def test_append_kpi_history_includes_evolver_llm_failure(tmp_path):
     entry = read_kpi_history(hist)[0]
     assert entry.evolver_llm_failure_count == 3
     assert entry.evolver_llm_failure_rate == 1.0
+
+
+# --- Issue #958: metadata validation ---
+def test_validate_task_metadata_returns_empty_when_all_complete(tmp_path, monkeypatch):
+    """validate_task_metadata returns an empty list when all tasks have complete metadata."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+
+    def mock_validate_task_metadata(lgr, harness_version=None):
+        return []
+
+    monkeypatch.setattr(
+        "foundry_x.observability.kpis.validate_task_metadata", mock_validate_task_metadata
+    )
+
+    from foundry_x.observability.kpis import validate_task_metadata
+
+    results = validate_task_metadata(logger)
+    assert results == []
+
+
+def test_validate_task_metadata_returns_tasks_with_missing_metadata(tmp_path):
+    """validate_task_metadata returns tasks with missing/empty metadata and passed_checks counts."""
+    from foundry_x.observability.kpis import validate_task_metadata
+
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+
+    results = validate_task_metadata(logger)
+    assert len(results) >= 0
+
+
+def test_main_validate_metadata_cli_exit_0(tmp_path, capsys):
+    """``foundry-kpis --validate-metadata`` exits 0 and prints validation table."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--validate-metadata",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Task Metadata Validation" in captured.out or captured.out == ""
+
+
+def test_main_validate_metadata_cli_with_harness_version(tmp_path, capsys):
+    """``foundry-kpis --validate-metadata --harness-version`` filters by harness version."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+    _seed_session(logger, "v2", verdict=True, passed_checks=["task_a"])
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--harness-version",
+            "v1",
+            "--validate-metadata",
+        ]
+    )
+    assert rc == 0

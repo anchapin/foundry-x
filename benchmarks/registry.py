@@ -35,6 +35,8 @@ when it merely imports ``foundry_x.evolution.critic``.
 from __future__ import annotations
 
 import importlib
+import warnings
+from dataclasses import dataclass
 from pathlib import Path
 
 from benchmarks.models import BenchmarkTask
@@ -43,6 +45,24 @@ from benchmarks.models import BenchmarkTask
 #: (``benchmarks/tasks/``). Exposed so callers (and tests) can iterate
 #: the same files the registry scans without re-implementing the glob.
 TASKS_DIR: Path = Path(__file__).resolve().parent / "tasks"
+
+#: Default difficulty tier value used when not explicitly set
+_DEFAULT_DIFFICULTY_TIER: str = "easy"
+
+
+@dataclass(frozen=True)
+class TaskValidationWarning:
+    """A warning about a task's metadata completeness (issue #958)."""
+
+    task_name: str
+    missing_skills: bool
+    missing_tags: bool
+    missing_difficulty_tier: bool
+
+    @property
+    def is_missing_any_metadata(self) -> bool:
+        """Return True if any metadata field is missing/empty."""
+        return self.missing_skills or self.missing_tags or self.missing_difficulty_tier
 
 
 def load_all_tasks() -> list[BenchmarkTask]:
@@ -96,3 +116,42 @@ def get_task(name: str) -> BenchmarkTask | None:
         if task.name == name:
             return task
     return None
+
+
+def get_task_validation_warnings() -> list[TaskValidationWarning]:
+    """Return validation warnings for all tasks with missing/incomplete metadata (issue #958).
+
+    Warns (via ``warnings.warn``) when a task has:
+    - Empty ``requires_skills`` (no skills declared)
+    - Empty ``tags`` (no task family labels)
+    - ``difficulty_tier`` equal to the default value "easy" (not explicitly set)
+
+    These warnings indicate tasks whose verdicts will be invisible to slice
+    breakdowns when using ``foundry-kpis --group-by`` because the grouping
+    fields are empty/default.
+
+    Returns:
+        A list of :class:`TaskValidationWarning` objects, one per task
+        that has at least one missing metadata field. The list is sorted
+        by task name.
+    """
+    warnings.warn(
+        "Task metadata validation is deprecated; use --validate-metadata instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    warnings_list: list[TaskValidationWarning] = []
+    for task in load_all_tasks():
+        missing_skills = len(task.requires_skills) == 0
+        missing_tags = len(task.tags) == 0
+        missing_difficulty_tier = task.difficulty_tier == _DEFAULT_DIFFICULTY_TIER
+        if missing_skills or missing_tags or missing_difficulty_tier:
+            warnings_list.append(
+                TaskValidationWarning(
+                    task_name=task.name,
+                    missing_skills=missing_skills,
+                    missing_tags=missing_tags,
+                    missing_difficulty_tier=missing_difficulty_tier,
+                )
+            )
+    return sorted(warnings_list, key=lambda w: w.task_name)
