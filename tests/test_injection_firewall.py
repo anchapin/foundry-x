@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import base64
 
+import pytest
+
 from harness.hooks import get_registry
 from harness.hooks.base import ToolCall, ToolResult
 from harness.hooks.injection_firewall import (
@@ -677,3 +679,57 @@ def test_firewall_exception_risk_score_accumulates():
     fw = captured[1][1]
     # ignore_previous (1) + role_tag_colon (2) = 3 minimum.
     assert fw["risk_score"] >= 3
+
+
+# ---------------------------------------------------------------------------
+# Issue #936: drift guard for firewall <-> Critic injection-pattern parity.
+#
+# The runtime firewall (``INJECTION_PATTERNS`` in
+# ``harness/hooks/injection_firewall.py``) and the Critic's diff-scanner
+# (``_INJECTION_PATTERNS`` in ``src/foundry_x/evolution/critic.py``) are the
+# two SECURITY.md threat-#2 defense layers. They MUST carry the same set of
+# pattern NAMES so that a marker caught at evolution time (Critic) is also
+# caught at runtime (firewall). When a new pattern is added to one layer it
+# must be back-propagated to the other — issues #646 and #807 did this, but
+# later Critic additions were never mirrored to the firewall and the drift
+# re-emerged with no guard against it. This is that guard.
+#
+# As of #936 the sets are OUT OF SYNC: the firewall (14 patterns) is missing
+# ``role_tag_brackets`` and ``ignored_context`` that the Critic (16 patterns)
+# already has. Closing that gap is a HARNESS edit, so it MUST be produced by
+# the Evolver -> Critic pipeline as a ``ProposedEdit`` (ADR-0004), not a
+# hand-edit. Until that ProposedEdit lands this parity assertion is marked
+# ``xfail``: it documents the drift precisely (the failure reason lists the
+# exact missing/extra names) without breaking CI. Once the Evolver syncs the
+# firewall the assertion will xpass; remove the ``xfail`` marker to convert
+# it into a hard regression guard that blocks any future desynchronization.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    reason=(
+        "drift tracked in #936: firewall missing role_tag_brackets and "
+        "ignored_context; harness sync via Evolver->Critic pipeline (ADR-0004)"
+    ),
+    strict=False,
+)
+def test_firewall_and_critic_injection_pattern_names_in_sync() -> None:
+    """Firewall and Critic injection-pattern NAME sets must be identical.
+
+    This is the structural parity drift guard requested in #936 (AC1/AC2).
+    The assertion message reports the exact missing/extra names so the drift
+    is actionable when it surfaces.
+    """
+    from foundry_x.evolution.critic import _INJECTION_PATTERNS
+
+    firewall_names = {name for name, _ in INJECTION_PATTERNS}
+    critic_names = {name for name, _ in _INJECTION_PATTERNS}
+
+    missing_from_firewall = sorted(critic_names - firewall_names)
+    extra_in_firewall = sorted(firewall_names - critic_names)
+    assert firewall_names == critic_names, (
+        "injection-pattern drift between firewall and Critic: "
+        f"missing-from-firewall={missing_from_firewall}, "
+        f"extra-in-firewall={extra_in_firewall}. "
+        "Sync the harness via the Evolver->Critic pipeline (ADR-0004, #936)."
+    )
