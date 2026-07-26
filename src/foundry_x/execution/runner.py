@@ -1061,8 +1061,8 @@ async def _exec_list_dir(arguments: dict[str, Any], workspace_root: Path) -> dic
     raw_entries: list[tuple[str, str, int]] = []
     try:
         scan_iter = os.scandir(resolved)
-    except OSError:
-        return {"entries": [], "truncated": False}
+    except OSError as exc:
+        return {"entries": [], "truncated": False, "error": str(exc)}
 
     with scan_iter:
         for entry in scan_iter:
@@ -1133,8 +1133,8 @@ async def _exec_grep_search(arguments: dict[str, Any], workspace_root: Path) -> 
 
     try:
         sorted_files = sorted(resolved.rglob("*"), key=lambda p: (str(p.parent), p.name))
-    except OSError:
-        return {"matches": [], "truncated": False}
+    except OSError as exc:
+        return {"matches": [], "truncated": False, "error": str(exc)}
 
     for file_path in sorted_files:
         if not include_hidden and any(part.startswith(".") for part in file_path.parts):
