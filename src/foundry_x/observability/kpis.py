@@ -1237,36 +1237,35 @@ def _wall_clock_abort_count(
     logger: TraceLogger,
     harness_version: str | None = None,
 ) -> int:
-    """Count sessions aborted by the FOUNDRY_TASK_TIMEOUT wall-clock cap (issue #711).
+    """Count sessions aborted by the FOUNDRY_TASK_TIMEOUT wall-clock cap (issue #711, #1005).
 
-    Counts every ``task_aborted`` event whose ``reason`` is ``"wall_clock"``,
-    fired by :func:`foundry_x.execution.runner.run_with_limits` when
-    ``asyncio.wait_for`` raises :class:`asyncio.TimeoutError`. Each session
-    contributes at most one such event (the runner records it once per abort).
+    Counts sessions that recorded at least one ``task_aborted`` event with
+    ``reason="wall_clock"``, fired by :func:`foundry_x.execution.runner.run_with_limits`
+    when ``asyncio.wait_for`` raises :class:`asyncio.TimeoutError`. Sessions are
+    counted once regardless of how many times the abort fires within them.
     """
-    count = 0
+    sessions_with_abort: set[str] = set()
     for event in logger.query_events(
         kind="task_aborted",
         harness_version=harness_version,
     ):
         if event.payload.get("reason") == "wall_clock":
-            count += 1
-    return count
+            sessions_with_abort.add(event.session_id)
+    return len(sessions_with_abort)
 
 
 def _event_limit_abort_count(
     logger: TraceLogger,
     harness_version: str | None = None,
 ) -> int:
-    """Count sessions aborted by the FOUNDRY_MAX_EVENTS_PER_SESSION event cap (issue #869).
+    """Count sessions aborted by the FOUNDRY_MAX_EVENTS_PER_SESSION event cap (issue #869, #1005).
 
-    Counts every ``task_aborted`` event whose ``reason`` is ``"event_limit"``,
-    fired by :func:`foundry_x.execution.runner.run_task` when the accumulated
-    event count reaches the per-session cap (see
-    ``foundry_x.execution.runner._check_event_limit``). Each session
-    contributes at most one such event (the runner records it once per
-    abort before terminating with ``outcome.status="failed"`` and
-    ``outcome.reason="event_limit"``).
+    Counts sessions that recorded at least one ``task_aborted`` event with
+    ``reason="event_limit"``, fired by :func:`foundry_x.execution.runner.run_task`
+    when the accumulated event count reaches the per-session cap (see
+    ``foundry_x.execution.runner._check_event_limit``). Sessions are counted
+    once regardless of how many times the abort fires within them, matching
+    the pattern used by :func:`_token_budget_aborts`.
 
     A non-zero count signals a session that exceeded the configured event
     budget — typically a runaway loop where the agent keeps producing
@@ -1278,14 +1277,14 @@ def _event_limit_abort_count(
     Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
     kind and ``harness_version`` filters pushed down.
     """
-    count = 0
+    sessions_with_abort: set[str] = set()
     for event in logger.query_events(
         kind=TASK_ABORTED_KIND,
         harness_version=harness_version,
     ):
         if event.payload.get("reason") == EVENT_LIMIT_REASON:
-            count += 1
-    return count
+            sessions_with_abort.add(event.session_id)
+    return len(sessions_with_abort)
 
 
 def _model_retry_count(
