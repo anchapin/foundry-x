@@ -1008,15 +1008,16 @@ def test_hook_registry_error_vocabulary_is_pinned_in_failure_kinds() -> None:
 
 
 def test_model_error_kind_triggers_first_failure_classification() -> None:
-    """A ``model_error`` event without any recognisable keyword falls back to the ``tool-error`` catch-all
-    via ``kind:<value>`` signal — acceptance: model fault is recognised as the session's first failure.
+    """Issue #952: a ``model_error`` event with ``error_type`` is classified via
+    structured payload inspection (not keyword fallback) as ``model_error`` class.
+    The acceptance criterion is: ``model_error.error_type`` → ``model_error``.
     """
     events = [
         *_CLEAN_EVENTS,
         _model_error_event(message="synthetic model fault"),
     ]
     report = Digester().digest(_SESSION, events)
-    assert report.proposed_class == "tool-error"
+    assert report.proposed_class == "model_error"
     assert len(report.failed_steps) == 1
     step = report.failed_steps[0]
     assert step["kind"] == "model_error"
@@ -1024,9 +1025,8 @@ def test_model_error_kind_triggers_first_failure_classification() -> None:
     # The payload is preserved so the Evolver can re-derive error_type / message
     # without re-parsing the original transport exception.
     assert step["payload"]["error_type"] == "RuntimeError"
-    # The summary carries the model_error kind name and the message text
-    # (digester._detail falls back to the flattened blob when no payload key in
-    # FAILURE_PAYLOAD_KEYS matches — payload uses ``message``, not ``error``).
+    # The structured path adds error_type as a cause indicator.
+    assert any("error_type=RuntimeError" in c for c in report.suspected_causes)
     assert "kind=model_error" in report.summary
     assert "synthetic model fault" in report.summary
 
@@ -1097,3 +1097,94 @@ def test_hook_registry_error_precedes_tool_error_in_first_failure_walk() -> None
     assert len(report.failed_steps) == 1
     assert report.failed_steps[0]["event_id"] == "e-hook-err"
     assert report.failed_steps[0]["kind"] == "hook_registry_error"
+
+
+# ---------------------------------------------------------------------------
+# Issue #952: structured-payload-aware classification
+# Replaces _flatten_text + _CLASS_KEYWORDS keyword matching with structured
+# payload field inspection. The FAILURE_PAYLOAD_KEYS constant already signals
+# intent (classify by payload shape, not raw text). Structured checks are
+# tried before keyword fallback, which is kept only for opaque string payloads.
+# ---------------------------------------------------------------------------
+
+
+def test_model_error_with_error_type_classifies_as_model_error_structured() -> None:
+    """Issue #952: ``model_error`` with ``error_type`` field uses structured
+    classification (not keyword matching), routing to ``model_error`` class.
+    """
+    events = [
+        *_CLEAN_EVENTS,
+        _model_error_event(
+            event_id="e-model-structured",
+            seq=4,
+            error_type="ContextOverflowError",
+            message="context limit exceeded",
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "model_error"
+    step = report.failed_steps[0]
+    assert step["kind"] == "model_error"
+    assert step["signal"] == "kind:model_error"
+    assert any("ContextOverflowError" in c for c in report.suspected_causes)
+    assert any("error_type=ContextOverflowError" in c for c in report.suspected_causes)
+
+
+def test_model_error_with_ambiguous_in_message_not_misclassified_as_bad_prompt() -> None:
+    """Issue #952: ``model_error`` with ``error_type`` does not fall through to
+    keyword matching. The word ``ambiguous`` in the message must not misclassify
+    as ``bad-prompt`` when the event has a structured error_type field.
+    """
+    events = [
+        *_CLEAN_EVENTS,
+        _model_error_event(
+            event_id="e-model-ambig",
+            seq=4,
+            error_type="ValueError",
+            message="prompt is ambiguous: missing context",
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "model_error"
+    assert report.failed_steps[0]["kind"] == "model_error"
+
+
+def test_tool_result_with_error_classifies_as_tool_error_via_structured_path() -> None:
+    """Issue #952: ``tool_result`` with non-null ``error`` field uses structured
+    classification (not keyword matching), routing to ``tool-error`` class.
+    The ``error`` key is in FAILURE_PAYLOAD_KEYS so _is_failure fires.
+    """
+    events = [
+        *_CLEAN_EVENTS,
+        _ev(
+            "tool_result",
+            {"ok": False, "error": "some tool failed with exit code 1"},
+            event_id="e-tool-result-err",
+            seq=4,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "tool-error"
+    step = report.failed_steps[0]
+    assert step["kind"] == "tool_result"
+    assert step["signal"] == "payload_key:error"
+    assert any("payload key present: error" in c for c in report.suspected_causes)
+
+
+def test_tool_result_error_with_ambiguous_not_misclassified_as_bad_prompt() -> None:
+    """Issue #952: ``tool_result.error`` containing ``ambiguous`` must not
+    misclassify as ``bad-prompt`` — the structured tool_result path routes
+    to ``tool-error`` before keyword matching runs.
+    """
+    events = [
+        *_CLEAN_EVENTS,
+        _ev(
+            "tool_result",
+            {"ok": False, "error": "ambiguous tool name: expected 1 got 3"},
+            event_id="e-tool-result-ambig",
+            seq=4,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "tool-error"
+    assert report.failed_steps[0]["kind"] == "tool_result"
