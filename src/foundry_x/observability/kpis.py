@@ -227,11 +227,14 @@ class KpiSummary(BaseModel):
     only when at least one ``model_response`` event carries timing data.
 
     Issue #951 adds ``context_efficiency``: mean per-session
-    ``1 - (sum(dropped) / sum(threshold + dropped))`` across sessions,
-    sourced from the ``dropped`` and ``threshold`` fields of
-    ``context_pruned`` events. ``None`` when no ``context_pruned``
-    events are present (graceful degradation). Near 1.0 means pruning
-    rarely fired; near 0.0 means heavy pruning throughout sessions.
+    ``1 - (sum(dropped) / sum(threshold + dropped))`` across all sessions
+    (ADR-0021 §6), sourced from the ``dropped`` and ``threshold`` fields
+    of ``context_pruned`` events. Issue #979 fixes a survivorship-bias bug:
+    a session that never pruned (zero ``context_pruned`` events) now
+    contributes ``1.0`` (perfect efficiency — nothing was dropped) instead
+    of being silently excluded. ``None`` only when the trace store has no
+    sessions. Near 1.0 means pruning rarely fired; near 0.0 means heavy
+    pruning throughout sessions.
 
     Issue #626 adds ``context_pruned_count``: a ``session_id -> count`` map
     of ``context_pruned`` events per session, sourced from the pruning hook.
@@ -1179,16 +1182,25 @@ def _context_efficiency(
     logger: TraceLogger,
     harness_version: str | None = None,
 ) -> float | None:
-    """Mean per-session context efficiency (issue #951).
+    """Mean per-session context efficiency (issue #951, issue #979).
 
-    Per-session efficiency = 1 - (sum(dropped) / sum(threshold + dropped)).
-    Sessions with no ``context_pruned`` events are excluded from the mean.
-    Returns ``None`` when no session has any ``context_pruned`` events
-    (graceful degradation, matching the ``cycle_time_seconds`` contract).
+    Per-session efficiency = 1 - (sum(dropped) / sum(threshold + dropped))
+    per the ADR-0021 §6 formula. A session that never pruned has
+    ``dropped=0`` and therefore contributes ``1.0`` (perfect efficiency —
+    nothing was dropped). Returns ``None`` only when the trace store has
+    no sessions for the (optional) ``harness_version``.
 
-    Uses one :meth:`TraceLogger.query_events` cursor with the kind and
-    ``harness_version`` filters pushed down.
+    Issue #979 — previously sessions with zero ``context_pruned`` events
+    were excluded from the mean, creating survivorship bias (only sessions
+    that actually pruned were counted). They are now included as ``1.0``
+    so the mean reflects the full session population.
+
+    Uses one :meth:`TraceLogger.list_sessions` call and one
+    :meth:`TraceLogger.query_events` cursor, both with the
+    ``harness_version`` filter pushed down.
     """
+    all_sessions = {s.session_id for s in logger.list_sessions(harness_version=harness_version)}
+
     session_dropped: dict[str, int] = {}
     session_threshold: dict[str, int] = {}
     for event in logger.query_events(
@@ -1201,19 +1213,21 @@ def _context_efficiency(
         session_dropped[sid] = session_dropped.get(sid, 0) + dropped
         session_threshold[sid] = session_threshold.get(sid, 0) + threshold
 
-    if not session_dropped:
+    if not all_sessions:
         return None
 
     efficiencies: list[float] = []
-    for sid, dropped in session_dropped.items():
-        threshold = session_threshold[sid]
+    for sid in all_sessions:
+        dropped = session_dropped.get(sid, 0)
+        threshold = session_threshold.get(sid, 0)
         denominator = threshold + dropped
         if denominator > 0:
             efficiency = 1.0 - (dropped / denominator)
-            efficiencies.append(efficiency)
+        else:
+            # Zero pruning (dropped=0, threshold=0) → perfect efficiency.
+            efficiency = 1.0
+        efficiencies.append(efficiency)
 
-    if not efficiencies:
-        return None
     return sum(efficiencies) / len(efficiencies)
 
 

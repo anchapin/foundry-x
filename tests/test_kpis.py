@@ -1171,14 +1171,44 @@ def test_context_efficiency_computed_when_prunes_present(tmp_path):
     assert 0.0 <= summary.context_efficiency <= 1.0
 
 
-def test_context_efficiency_none_when_no_prunes(tmp_path):
+def test_context_efficiency_includes_zero_prune_sessions_as_one(tmp_path):
+    """Issue #979: a session with zero context_pruned events contributes 1.0."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     _seed_context_pruned(logger, "v1", prune_count=0)
 
     summary = compute_kpis(logger)
 
+    assert summary.context_efficiency == 1.0
+
+
+def test_context_efficiency_none_when_no_sessions(tmp_path):
+    """No sessions at all → None (graceful degradation)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    summary = compute_kpis(logger)
+
     assert summary.context_efficiency is None
+
+
+def test_context_efficiency_mixed_zero_and_nonzero_prune_sessions(tmp_path):
+    """Issue #979: zero-pruning sessions included as 1.0 in the mean.
+
+    One session prunes (dropped=1, threshold=200 → 1 - 1/201), one session
+    never prunes (→ 1.0). Mean = (1 - 1/201 + 1.0) / 2.
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=1)
+    _seed_context_pruned(logger, "v1", prune_count=0)
+
+    summary = compute_kpis(logger)
+
+    assert summary.context_efficiency is not None
+    pruned_efficiency = 1.0 - (1.0 / 201.0)
+    expected = (pruned_efficiency + 1.0) / 2.0
+    assert summary.context_efficiency == pytest.approx(expected)
 
 
 def test_context_efficiency_respects_harness_version_filter(tmp_path):
