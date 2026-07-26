@@ -118,6 +118,7 @@ mirrors the way our product works:
 ## 4. Tooling you are expected to use
 
 - **Package manager:** `uv` (ADR-0002). Never `pip install` directly.
+  After `git clone`, run `uv sync` to install dependencies.
 - **Pre-commit hooks:** installed via `uv run pre-commit install`.
   Run on demand with `uv run pre-commit run --all-files`. Hooks
   include ruff, ruff-format, gitleaks (secret scan), and standard
