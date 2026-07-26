@@ -169,6 +169,10 @@ class TestLlmEvolverProducesEditsThatPassCriticGate:
         )
         (hooks_dir / "my_hook.py").write_text("# existing\n", encoding="utf-8")
 
+        manifest = json.loads((harness / "manifest.json").read_text(encoding="utf-8"))
+        manifest["hooks"] = ["my_hook"]
+        (harness / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
         diff = _hooks_diff("harness/hooks/my_hook.py", "# new hook guidance\n")
         mock_response = _make_llm_response(
             "harness/hooks/my_hook.py",
