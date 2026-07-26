@@ -668,3 +668,68 @@ def test_close_releases_reused_connection(tmp_path):
     assert logger._conn is None
     # Idempotent: a second close must not raise.
     logger.close()
+
+
+# --- JSONL corruption resilience (issue #932) --------------------------------
+
+
+def test_jsonl_read_paths_skip_corrupted_line(tmp_path):
+    """All five JSONL read paths skip a corrupted line instead of crashing.
+
+    Issue #932 — a partial write (SIGKILL, OOM, disk-full mid-append) can
+    leave a truncated JSONL line in the trace store. Before this fix, that
+    single bad line raised ``JSONDecodeError`` in every read path
+    (``list_sessions``, ``load_session``, ``iter_events``, ``query_events``,
+    ``redact_event``), making the entire store unreadable and the three PRD
+    KPIs unmeasurable. The write-side methods (``_prune_jsonl``,
+    ``_delete_session_jsonl``, ``compact``) already skipped bad lines; this
+    test pins the same resilience on the read side. The corrupted line is
+    skipped, never deleted.
+    """
+    path = tmp_path / "traces.jsonl"
+    logger = TraceLogger(path, backend="jsonl")
+    with logger.session(harness_version="0.1.0", model_id="m") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "first"})
+        logger.record(sid, kind="tool_call", payload={"name": "second"})
+
+    # Inject a corrupted/partial line between the two valid events, matching
+    # the real failure mode: a truncated append that never reached a closing
+    # brace. The line deliberately carries this session's id + an event-like
+    # kind so we prove the skip is driven by the decode failure, not by a
+    # missing-field filter.
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    assert len(lines) >= 4  # session_start, event1, event2, session_end
+    corrupted = '{"kind": "tool_call", "session_id": "' + sid + '", "payload":'
+    injected = lines[:2] + [corrupted + "\n"] + lines[2:]
+    path.write_text("".join(injected), encoding="utf-8")
+
+    reader = TraceLogger(path, backend="jsonl")
+
+    # 1. list_sessions — the session is still discoverable.
+    sessions = reader.list_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].session_id == sid
+
+    # 2. load_session — both valid events survive; the bad line is skipped.
+    loaded = reader.load_session(sid)
+    assert [e.kind for e in loaded] == ["task_received", "tool_call"]
+
+    # 3. iter_events — streams the two valid events in order.
+    iterated = list(reader.iter_events(sid))
+    assert _by_event_id(iterated) == _by_event_id(loaded)
+    assert len(iterated) == 2
+
+    # 4. query_events — the cross-session stream skips the bad line too.
+    queried = list(reader.query_events())
+    assert len(queried) == 2
+    assert {e.kind for e in queried} == {"task_received", "tool_call"}
+
+    # 5. redact_event — succeeds against the first valid event (index 0 by
+    # timestamp), never touching the corrupted line.
+    assert reader.redact_event(sid, 0, "prompt") is True
+    first = reader.load_session(sid)[0]
+    assert first.kind == "task_received"
+    assert first.payload["prompt"] == "[REDACTED]"
+
+    # The corrupted line is still on disk — read paths skip, never delete.
+    assert corrupted in path.read_text(encoding="utf-8")
