@@ -906,7 +906,10 @@ class Evolver:
 
         This method first attempts to generate edits via an LLM call using the
         failure report context. If the LLM call fails or returns invalid output,
-        it falls back to the template-based approach.
+        it falls back to the template-based approach, emitting a
+        ``generation_attempt`` trace event with ``error="llm_fallback"`` so an
+        operator can distinguish template-derived ``proposed_edit`` events from
+        LLM-derived ones (issue #977).
         """
         try:
             self._check_rate_limit()
@@ -918,8 +921,11 @@ class Evolver:
         if self._model_adapter is not None:
             try:
                 return await self.generate_edits(self._model_adapter, harness_dir, failure)
-            except EvolverLLMError:
-                pass
+            except EvolverLLMError as exc:
+                # Mark the LLM→template fallback in the trace so an operator
+                # can distinguish template-derived proposed_edit events from
+                # LLM-derived ones (issue #977).
+                self._record_generation_attempt(attempt=1, error=f"llm_fallback: {exc}")
 
         return self._propose_from_template(harness_dir, failure)
 
@@ -933,7 +939,8 @@ class Evolver:
 
         First attempts LLM-driven edit generation if a ModelAdapter is configured.
         Falls back to template-based proposals if the LLM call fails or is
-        unavailable.
+        unavailable, emitting a ``generation_attempt`` trace event with
+        ``error="llm_fallback"`` so the fallback is observable (issue #977).
         """
         try:
             self._check_rate_limit()
@@ -945,8 +952,10 @@ class Evolver:
         if self._model_adapter is not None:
             try:
                 return asyncio.run(self.generate_edits(self._model_adapter, harness_dir, failure))
-            except EvolverLLMError:
-                pass
+            except EvolverLLMError as exc:
+                # See propose_async: mark the fallback for trace observability
+                # (issue #977).
+                self._record_generation_attempt(attempt=1, error=f"llm_fallback: {exc}")
 
         return self._propose_from_template(harness_dir, failure)
 
