@@ -2,6 +2,10 @@ name: audit
 
 on:
   pull_request:
+    paths:
+      - "pyproject.toml"
+      - "uv.lock"
+      - "**/requirements*.txt"
   schedule:
     # Weekly: Mondays 06:00 UTC.
     - cron: "0 6 * * 1"
