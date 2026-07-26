@@ -232,6 +232,7 @@ def test_long_context_retention(
         cwd=benchmark_workspace,
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 0, (
         f"golden solution failed: rc={result.returncode}, stderr={result.stderr!r}"

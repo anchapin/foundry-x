@@ -12,7 +12,8 @@ from foundry_x.execution.model_adapter import (
     ModelUsage,
     ToolCallFunctionChunk,
 )
-from foundry_x.execution.runner import RunLimits, run_task as real_run_task
+from foundry_x.execution.runner import RunLimits
+from foundry_x.execution.runner import run_task as real_run_task
 from foundry_x.trace.logger import TraceLogger
 
 
@@ -29,7 +30,7 @@ class _ScriptedAdapter:
     def __init__(self) -> None:
         self._turn = 0
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         self._turn += 1
         if self._turn == 1:
             yield ModelResponseChunk(
@@ -50,14 +51,14 @@ class _ScriptedAdapter:
         yield ModelResponseChunk(content="done")
         yield ModelResponseChunk(finish_reason="stop")
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def complete(self, messages, tools=None, **kwargs):
         raise AssertionError("run_task must call stream()")
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         raise AssertionError("run_task must call stream()")
 
 
-async def _executor(name: str, arguments: dict) -> dict:  # noqa: ANN001
+async def _executor(name: str, arguments: dict) -> dict:
     return {"status": "ok"}
 
 
@@ -178,7 +179,7 @@ class _FiveChunksPerResponseAdapter:
     def __init__(self) -> None:
         self._turn = 0
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         self._turn += 1
         usage = ModelUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2)
         if self._turn == 1:
@@ -203,10 +204,10 @@ class _FiveChunksPerResponseAdapter:
             yield ModelResponseChunk(content="done", usage=usage)
         yield ModelResponseChunk(finish_reason="stop", usage=usage)
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def complete(self, messages, tools=None, **kwargs):
         raise AssertionError("run_task must call stream()")
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         raise AssertionError("run_task must call stream()")
 
 
@@ -270,18 +271,18 @@ class _NeverCalledAdapter:
     so the model adapter must not be asked for a response.
     """
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         raise AssertionError(
             "run_task must not invoke the adapter on the pre-loop event_limit path"
         )
         yield  # pragma: no cover - generator marker for type checkers
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def complete(self, messages, tools=None, **kwargs):
         raise AssertionError(
             "run_task must not invoke the adapter on the pre-loop event_limit path"
         )
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def chat(self, messages, tools=None, **kwargs):
         raise AssertionError(
             "run_task must not invoke the adapter on the pre-loop event_limit path"
         )

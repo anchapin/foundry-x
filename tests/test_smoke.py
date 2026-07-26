@@ -88,4 +88,4 @@ def test_context_pruning_hook_loads_via_manifest():
         tracer=lambda *a, **k: None,
     )
     assert isinstance(hook, ContextPruningHook)
-    assert hook in registry._hooks  # noqa: SLF001 — intentional inspection
+    assert hook in registry._hooks

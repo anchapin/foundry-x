@@ -125,6 +125,7 @@ def _run_pytest(workspace: Path) -> subprocess.CompletedProcess[str]:
         cwd=workspace,
         capture_output=True,
         text=True,
+        check=False,
     )
 
 
@@ -135,6 +136,7 @@ def _run_driver(workspace: Path) -> subprocess.CompletedProcess[str]:
         cwd=workspace,
         capture_output=True,
         text=True,
+        check=False,
     )
 
 

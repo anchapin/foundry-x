@@ -13,7 +13,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 
@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_proposed_edits_status ON proposed_edits(status);
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class ProposedEditStore:

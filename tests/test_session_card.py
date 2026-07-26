@@ -12,7 +12,7 @@ Acceptance pinned by this module:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from foundry_x.observability.cli import main as cli_main
 from foundry_x.observability.session_card import format_session_card
@@ -27,7 +27,7 @@ def _format_line(label: str, value: str) -> str:
 
 
 def _event(kind: str, offset: timedelta, payload: dict) -> TraceEvent:
-    base = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 10, 12, 0, 0, tzinfo=UTC)
     return TraceEvent(
         event_id=f"evt-{kind}",
         session_id="sess-test",

@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -39,8 +39,7 @@ from foundry_x.evolution.evolver import (
 from foundry_x.trace.logger import TraceLogger
 from tests._harness_fixture import install_load_check_prerequisites
 
-
-_BASE_TS = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+_BASE_TS = datetime(2026, 7, 10, 12, 0, 0, tzinfo=UTC)
 
 
 class MockModelAdapter:

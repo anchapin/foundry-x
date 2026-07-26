@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -155,7 +155,7 @@ def test_rate_limit_below_cap_passes():
 
 def test_old_proposals_purged_after_window():
     e = Evolver(max_proposals_per_hour=2, max_diff_lines=200)
-    stale = datetime.now(timezone.utc) - timedelta(hours=2)
+    stale = datetime.now(UTC) - timedelta(hours=2)
     e._proposal_times.append(stale)
     e._proposal_times.append(stale)
     e._check_rate_limit()
@@ -163,7 +163,7 @@ def test_old_proposals_purged_after_window():
 
 def test_partial_window_keeps_recent_only():
     e = Evolver(max_proposals_per_hour=2, max_diff_lines=200)
-    stale = datetime.now(timezone.utc) - timedelta(hours=2)
+    stale = datetime.now(UTC) - timedelta(hours=2)
     e._proposal_times.append(stale)
     e._record_proposals(2)
     with pytest.raises(EvolverGuardError, match="rate limit exceeded"):

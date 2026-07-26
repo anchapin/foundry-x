@@ -21,9 +21,9 @@ from foundry_x.evolution.digester import FailureReport
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
 from harness.hooks.base import ToolCall, ToolResult
 from harness.hooks.rate_limit import (
+    _RL_STATE,
     DEFAULT_MAX_PROPOSALS_PER_HOUR,
     RateLimitHook,
-    _RL_STATE,
     _get_window,
     register_into,
 )
@@ -61,7 +61,7 @@ class TestRateLimitHook:
         assert result is call
         window = _get_window()
         assert len(window) == 1
-        ts, allowed = window[0]
+        _ts, allowed = window[0]
         assert allowed is True
 
     def test_pre_tool_rejects_after_cap(self) -> None:

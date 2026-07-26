@@ -5,18 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from foundry_x.evolution.critic import (
-    QuantizationResult,
-    QuantizationVerdict,
-    DEFAULT_REGRESSION_THRESHOLD_PP,
-    TaskResult,
-)
 from foundry_x.evolution.cli import (
     _build_sweep_parser,
     _build_sweep_subparser,
     _render_quantization_result,
     _render_quantization_verdict,
     sweep_main,
+)
+from foundry_x.evolution.critic import (
+    DEFAULT_REGRESSION_THRESHOLD_PP,
+    QuantizationResult,
+    QuantizationVerdict,
+    TaskResult,
 )
 from tests._harness_fixture import install_load_check_prerequisites
 
@@ -542,7 +542,7 @@ class TestComputeTokenMetrics:
             )
 
         critic = Critic(harness_dir=Path("/tmp/nonexistent"))
-        total_tokens, avg_cycle_time_s = critic._compute_token_metrics(model_id, str(trace_path))
+        _total_tokens, avg_cycle_time_s = critic._compute_token_metrics(model_id, str(trace_path))
 
         assert avg_cycle_time_s is not None
         assert avg_cycle_time_s >= 0.01

@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = REPO_ROOT / "harness" / "manifest.json"
 
@@ -35,8 +34,8 @@ def manifest_hooks(manifest: dict) -> list[str]:
 
 def test_context_pruning_imports() -> None:
     from harness.hooks import (
-        ContextPruningHook,
         DEFAULT_THRESHOLD,
+        ContextPruningHook,
         Pruner,
         Tracer,
         register_into,
@@ -51,10 +50,10 @@ def test_context_pruning_imports() -> None:
 
 def test_rate_limit_imports() -> None:
     from harness.hooks import (
-        RateLimitHook,
         DEFAULT_MAX_DIFF_LINES,
         DEFAULT_MAX_PROPOSALS_PER_HOUR,
         DEFAULT_RATE_WINDOW_HOURS,
+        RateLimitHook,
         get_default_max_diff_lines,
         get_default_max_proposals,
         get_default_rate_window_hours,

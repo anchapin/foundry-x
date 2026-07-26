@@ -82,7 +82,7 @@ class _ScriptedAdapter:
         self._responses = list(responses)
         self.calls = 0
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def complete(self, messages, tools=None, **kwargs):
         self.calls += 1
         if not self._responses:
             raise RuntimeError(
@@ -90,10 +90,10 @@ class _ScriptedAdapter:
             )
         return self._responses.pop(0)
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         return await self.complete(messages, tools, **kwargs)
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         self.calls += 1
         if not self._responses:
             raise RuntimeError(
@@ -249,7 +249,7 @@ def test_max_steps_caps_loop(tmp_path, monkeypatch):
     responses = [_tool_call_response(f"call_step_{i}") for i in range(max_steps_cap + 1)]
     adapter = _ScriptedAdapter(responses)
 
-    async def drive(task, harness_dir, log, session_id):  # noqa: ANN001, ARG001
+    async def drive(task, harness_dir, log, session_id):
         await runner_mod.run_task(
             task,
             harness_dir,
@@ -328,15 +328,15 @@ def test_wall_clock_caps_loop(tmp_path, monkeypatch):
         def __init__(self) -> None:
             self.calls = 0
 
-        async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+        async def complete(self, messages, tools=None, **kwargs):
             self.calls += 1
             await asyncio.sleep(0.5)
             return _tool_call_response(f"call_slow_{self.calls}")
 
-        async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        async def chat(self, messages, tools=None, **kwargs):
             return await self.complete(messages, tools, **kwargs)
 
-        async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+        async def stream(self, messages, tools=None, **kwargs):
             self.calls += 1
             await asyncio.sleep(0.5)
             response = _tool_call_response(f"call_slow_{self.calls}")
@@ -359,7 +359,7 @@ def test_wall_clock_caps_loop(tmp_path, monkeypatch):
 
     adapter = _SlowAdapter()
 
-    async def drive(task, harness_dir, log, session_id):  # noqa: ANN001, ARG001
+    async def drive(task, harness_dir, log, session_id):
         await runner_mod.run_task(
             task,
             harness_dir,
@@ -454,7 +454,7 @@ def test_benign_terminates(tmp_path, monkeypatch):
     ]
     adapter = _ScriptedAdapter(responses)
 
-    async def drive(task, harness_dir, log, session_id):  # noqa: ANN001, ARG001
+    async def drive(task, harness_dir, log, session_id):
         await runner_mod.run_task(
             task,
             harness_dir,

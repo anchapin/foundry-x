@@ -35,4 +35,5 @@ def run_module(workspace: Path, module_name: str) -> subprocess.CompletedProcess
         cwd=workspace,
         capture_output=True,
         text=True,
+        check=False,
     )

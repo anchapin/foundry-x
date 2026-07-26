@@ -56,7 +56,7 @@ def test_main_stamps_quantization_and_harness_variant_into_session_metadata(tmp_
         ],
     )
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)
@@ -87,7 +87,7 @@ def test_main_stamps_harness_variant_from_env_into_session_metadata(tmp_path, mo
         ],
     )
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)
@@ -116,7 +116,7 @@ def test_main_stamps_quantization_from_env_into_session_metadata(tmp_path, monke
         ],
     )
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)
@@ -147,7 +147,7 @@ def test_main_cli_harness_variant_overrides_env(tmp_path, monkeypatch):
         ],
     )
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)
@@ -183,7 +183,7 @@ def test_main_session_metadata_empty_when_no_tags_set(tmp_path, monkeypatch):
         ],
     )
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)

@@ -175,8 +175,8 @@ class TestExecWriteFile:
         )
 
         assert "error" not in result
-        assert result["bytes_written"] == len("hello world\n".encode("utf-8"))
-        assert result["sha256"] == hashlib.sha256("hello world\n".encode("utf-8")).hexdigest()
+        assert result["bytes_written"] == len(b"hello world\n")
+        assert result["sha256"] == hashlib.sha256(b"hello world\n").hexdigest()
         assert (workspace / "new.txt").read_text(encoding="utf-8") == "hello world\n"
 
     @pytest.mark.asyncio
@@ -189,7 +189,7 @@ class TestExecWriteFile:
             workspace,
         )
 
-        assert result["bytes_written"] == len("new content\n".encode("utf-8"))
+        assert result["bytes_written"] == len(b"new content\n")
         assert target.read_text(encoding="utf-8") == "new content\n"
 
     @pytest.mark.asyncio

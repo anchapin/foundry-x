@@ -12,7 +12,6 @@ import re
 import sys
 from pathlib import Path
 
-
 IDEAS_DIR = Path("docs/ideas")
 README_PATH = Path("docs/ideas/README.md")
 INDEX_START = "<!-- entries inserted by scripts/update_ideas_index.py -->"

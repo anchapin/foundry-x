@@ -33,7 +33,6 @@ import pytest
 from benchmarks.models import BenchmarkTask
 from foundry_x.evolution.critic import Critic
 
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _REAL_LOAD_CHECK = _REPO_ROOT / "harness" / "scripts" / "load_check.py"
 
@@ -449,12 +448,12 @@ def test_critic_rejects_oversized_diff(tmp_path) -> None:
     harness_dir.mkdir()
     (harness_dir / "system_prompt.txt").write_text("original\n")
 
-    large_diff_lines = ["+line {}".format(i) for i in range(250)]
+    large_diff_lines = [f"+line {i}" for i in range(250)]
     large_diff = (
         "--- a/system_prompt.txt\n"
         "+++ b/system_prompt.txt\n"
         "@@ -1 +1 @@\n"
-        "-original\n" + "".join("{}\n".format(line) for line in large_diff_lines)
+        "-original\n" + "".join(f"{line}\n" for line in large_diff_lines)
     )
 
     verdict = Critic(harness_dir=harness_dir).evaluate(large_diff)
@@ -483,12 +482,12 @@ def test_critic_accepts_sized_diff(tmp_path) -> None:
     tests_dir.mkdir()
     (tests_dir / "test_bench.py").write_text("def test_true():\n    assert True\n")
 
-    small_diff_lines = ["+line {}".format(i) for i in range(50)]
+    small_diff_lines = [f"+line {i}" for i in range(50)]
     small_diff = (
         "--- a/harness/system_prompt.txt\n"
         "+++ b/harness/system_prompt.txt\n"
         "@@ -1 +1 @@\n"
-        "-original\n" + "".join("{}\n".format(line) for line in small_diff_lines)
+        "-original\n" + "".join(f"{line}\n" for line in small_diff_lines)
     )
 
     verdict = Critic(harness_dir=harness_dir, pytest_args=["-q", "tests/test_bench.py"]).evaluate(

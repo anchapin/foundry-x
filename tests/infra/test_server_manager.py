@@ -29,9 +29,9 @@ from foundry_x.infra.server_manager import (
     FOUNDRY_SERVER_BIN_ENV,
     FOUNDRY_SERVER_CTX_SIZE_ENV,
     FOUNDRY_SERVER_N_GPU_LAYERS_ENV,
-    FoundryServerManager,
     LLAMACPP_HOST_ENV,
     LLAMACPP_MODEL_PATH_ENV,
+    FoundryServerManager,
     ServerConfig,
     ServerLaunchError,
     ServerNotManagedError,
@@ -50,14 +50,14 @@ def _config(
     **overrides: Any,
 ) -> ServerConfig:
     """Build a :class:`ServerConfig` with sensible defaults for tests."""
-    base = dict(
-        host=host,
-        model_path=model_path,
-        n_gpu_layers=n_gpu_layers,
-        ctx_size=ctx_size,
-        autostart=autostart,
-        server_bin=server_bin,
-    )
+    base = {
+        "host": host,
+        "model_path": model_path,
+        "n_gpu_layers": n_gpu_layers,
+        "ctx_size": ctx_size,
+        "autostart": autostart,
+        "server_bin": server_bin,
+    }
     base.update(overrides)
     return ServerConfig(**base)
 

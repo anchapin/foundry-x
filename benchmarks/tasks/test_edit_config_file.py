@@ -94,6 +94,7 @@ def _run_validate(workspace: Path) -> subprocess.CompletedProcess[str]:
         cwd=workspace,
         capture_output=True,
         text=True,
+        check=False,
     )
 
 

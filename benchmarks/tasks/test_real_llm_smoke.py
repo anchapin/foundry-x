@@ -141,7 +141,7 @@ def test_real_llm_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
         pytest.skip(f"harness directory {HARNESS_DIR} is not present")
     try:
         validate_harness_layout(HARNESS_DIR)
-    except Exception as exc:  # HarnessValidationError or OSError
+    except Exception as exc:  # HarnessValidationError or OSError  # noqa: BLE001
         pytest.skip(f"harness layout at {HARNESS_DIR} is invalid: {exc}")
 
     # Honour the runner's documented default so the test mirrors `main()`.

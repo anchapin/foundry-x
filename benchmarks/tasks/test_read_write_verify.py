@@ -45,6 +45,7 @@ import csv
 import subprocess
 import sys
 from pathlib import Path
+
 import pytest
 
 from benchmarks.models import BenchmarkTask
@@ -87,6 +88,7 @@ def _run_transform(workspace: Path) -> subprocess.CompletedProcess[str]:
         cwd=workspace,
         capture_output=True,
         text=True,
+        check=False,
     )
 
 
@@ -194,12 +196,8 @@ def test_transform_called_per_row(benchmark_workspace: Path) -> None:
 
     module.transform_row = counting_transform_row
 
-    input_rows = []
     with open(benchmark_workspace / "input.csv", newline="") as f:
-        reader = csv.DictReader(f)
-        for r in reader:
-            input_rows.append(r)
-
+        input_rows = list(csv.DictReader(f))
     for row in input_rows:
         module.transform_row(row)
 

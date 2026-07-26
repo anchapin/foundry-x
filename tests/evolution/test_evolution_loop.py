@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -13,8 +13,7 @@ from foundry_x.evolution.loop import EvolutionResult, run_evolution_step, run_ev
 from foundry_x.trace.logger import TraceEvent
 from tests._harness_fixture import install_load_check_prerequisites
 
-
-_BASE_TS = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+_BASE_TS = datetime(2026, 7, 10, 12, 0, 0, tzinfo=UTC)
 
 
 def _event(kind: str, offset: float, payload: dict, *, event_id: str) -> TraceEvent:
@@ -545,7 +544,7 @@ class TestRunEvolutionStepAsync:
             _event("error", 1.0, {"error": "oops"}, event_id="e2"),
         ]
 
-        large_diff_lines = ["+line{}".format(i) for i in range(250)]
+        large_diff_lines = [f"+line{i}" for i in range(250)]
         large_diff = "--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n{}\n".format(
             "\n".join(large_diff_lines)
         )

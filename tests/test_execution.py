@@ -31,11 +31,14 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
 from foundry_x.execution.harness_layout import (
     HarnessValidationError,
+)
+from foundry_x.execution.harness_layout import (
     validate as validate_harness_layout,
 )
 from foundry_x.execution.model_adapter import (
@@ -124,7 +127,7 @@ def test_main_accepts_all_documented_cli_flags(tmp_path, monkeypatch):
     monkeypatch.delenv("FOUNDRY_HARNESS_DIR", raising=False)
     monkeypatch.delenv("FOUNDRY_TRACE_PATH", raising=False)
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)
@@ -157,7 +160,7 @@ def test_main_harness_dir_falls_back_to_foundry_harness_dir_env(tmp_path, monkey
 
     captured: dict[str, Path] = {}
 
-    async def capture_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def capture_run_task(task, harness_dir, log, session_id):
         captured["harness_dir"] = Path(harness_dir)
 
     main(run_task_fn=capture_run_task)
@@ -182,7 +185,7 @@ def test_main_trace_path_falls_back_to_foundry_trace_path_env(tmp_path, monkeypa
         ["fx-runner", "--task", "x", "--harness-dir", str(harness_dir)],
     )
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)
@@ -213,7 +216,7 @@ def test_main_cli_harness_dir_overrides_env(tmp_path, monkeypatch):
 
     captured: dict[str, Path] = {}
 
-    async def capture_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def capture_run_task(task, harness_dir, log, session_id):
         captured["harness_dir"] = Path(harness_dir)
 
     main(run_task_fn=capture_run_task)
@@ -241,7 +244,7 @@ def test_main_inserts_resolved_harness_dir_into_sys_path(tmp_path, monkeypatch):
     # Remove any prior occurrence so we observe a fresh insertion.
     sys.path[:] = [p for p in sys.path if p != expected]
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)
@@ -262,7 +265,7 @@ def test_main_session_lifecycle_records_received_then_completed(tmp_path, monkey
     _stub_harness(harness_dir)
     monkeypatch.setattr(sys, "argv", _argv("happy", db, harness_dir))
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)
@@ -276,11 +279,11 @@ def test_main_session_lifecycle_records_received_then_completed(tmp_path, monkey
     assert "task_failed" not in kinds
 
     # The task prompt is preserved on the received event for traceability.
-    received = [e for e in events if e.kind == "task_received"][0]
+    received = next(e for e in events if e.kind == "task_received")
     assert received.payload["prompt"] == "happy"
 
     # The terminal event carries a non-negative duration.
-    completed = [e for e in events if e.kind == "task_completed"][0]
+    completed = next(e for e in events if e.kind == "task_completed")
     assert completed.payload["duration_ms"] >= 0
 
 
@@ -304,7 +307,7 @@ def test_main_records_task_failed_when_run_task_fn_raises(tmp_path, monkeypatch)
     _stub_harness(harness_dir)
     monkeypatch.setattr(sys, "argv", _argv("injected-stub", db, harness_dir))
 
-    async def raising_run_task(task, harness_dir, log, session_id):  # noqa: ANN001, ARG001
+    async def raising_run_task(task, harness_dir, log, session_id):
         raise NotImplementedError("Phase 1 wiring not yet connected")
 
     with pytest.raises(NotImplementedError) as exc_info:
@@ -331,7 +334,7 @@ def test_main_records_task_failed_when_run_task_fn_raises(tmp_path, monkeypatch)
     assert kinds.count("task_failed") == 1
     assert "task_completed" not in kinds
 
-    failed = [e for e in events if e.kind == "task_failed"][0]
+    failed = next(e for e in events if e.kind == "task_failed")
     assert failed.payload["error_type"] == "NotImplementedError"
     # The full original message survives redaction-free into the trace.
     assert "Phase 1 wiring" in failed.payload["message"]
@@ -354,7 +357,7 @@ def test_run_task_fn_injection_replaces_default(tmp_path, monkeypatch):
     captured: dict[str, object] = {}
     invocation_count = 0
 
-    async def stub_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def stub_run_task(task, harness_dir, log, session_id):
         nonlocal invocation_count
         invocation_count += 1
         captured["task"] = task
@@ -383,7 +386,7 @@ def test_run_task_fn_receives_logger_within_active_session(tmp_path, monkeypatch
     _stub_harness(harness_dir)
     monkeypatch.setattr(sys, "argv", _argv("logger-check", db, harness_dir))
 
-    async def stub_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def stub_run_task(task, harness_dir, log, session_id):
         log.record(session_id, kind="tool_call", payload={"name": "stub_event"})
 
     main(run_task_fn=stub_run_task)
@@ -415,7 +418,7 @@ def test_run_task_records_tool_call_duration_ms(tmp_path):
         def __init__(self) -> None:
             self.calls = 0
 
-        async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+        async def complete(self, messages, tools=None, **kwargs):
             self.calls += 1
             if self.calls == 1:
                 return ModelResponse(
@@ -432,10 +435,10 @@ def test_run_task_records_tool_call_duration_ms(tmp_path):
                 finish_reason="stop",
             )
 
-        async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        async def chat(self, messages, tools=None, **kwargs):
             return await self.complete(messages, tools, **kwargs)
 
-        async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+        async def stream(self, messages, tools=None, **kwargs):
             response = await self.complete(messages, tools, **kwargs)
             if response.message.content:
                 yield ModelResponseChunk(content=response.message.content)
@@ -456,7 +459,7 @@ def test_run_task_records_tool_call_duration_ms(tmp_path):
             if response.finish_reason:
                 yield ModelResponseChunk(finish_reason=response.finish_reason)
 
-    async def executor(name, arguments):  # noqa: ANN001, ARG001
+    async def executor(name, arguments):
         return {"status": "ok"}
 
     async def drive() -> None:
@@ -509,7 +512,7 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
         def __init__(self) -> None:
             self.calls = 0
 
-        async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+        async def complete(self, messages, tools=None, **kwargs):
             self.calls += 1
             if self.calls == 1:
                 return ModelResponse(
@@ -526,10 +529,10 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
                 finish_reason="stop",
             )
 
-        async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        async def chat(self, messages, tools=None, **kwargs):
             return await self.complete(messages, tools, **kwargs)
 
-        async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+        async def stream(self, messages, tools=None, **kwargs):
             response = await self.complete(messages, tools, **kwargs)
             if response.message.content:
                 yield ModelResponseChunk(content=response.message.content)
@@ -550,11 +553,11 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
             if response.finish_reason:
                 yield ModelResponseChunk(finish_reason=response.finish_reason)
 
-    async def executor(name, arguments):  # noqa: ANN001, ARG001
+    async def executor(name, arguments):
         return {"status": "ok"}
 
     # Case 1: No hooks - mock _resolve_hook_registry to return None
-    def mock_resolve_none(log, session_id):  # noqa: ANN001
+    def mock_resolve_none(log, session_id):
         return None
 
     monkeypatch.setattr(runner, "_resolve_hook_registry", mock_resolve_none)
@@ -588,7 +591,7 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
     hook_delay_ms = 50
 
     class MockRegistryOneHook:
-        _hooks: list = []
+        _hooks: ClassVar[list] = []
 
         async def run_pre(self, call):
             await asyncio.sleep(hook_delay_ms / 1000.0)
@@ -597,7 +600,7 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
         async def run_post(self, call, result):
             return result
 
-    def mock_resolve_one(log, session_id):  # noqa: ANN001
+    def mock_resolve_one(log, session_id):
         return MockRegistryOneHook()
 
     monkeypatch.setattr(runner, "_resolve_hook_registry", mock_resolve_one)
@@ -633,7 +636,7 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
     hook2_delay_ms = 40
 
     class MockRegistryTwoHooks:
-        _hooks: list = []
+        _hooks: ClassVar[list] = []
 
         async def run_pre(self, call):
             await asyncio.sleep(hook1_delay_ms / 1000.0)
@@ -643,7 +646,7 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
         async def run_post(self, call, result):
             return result
 
-    def mock_resolve_two(log, session_id):  # noqa: ANN001
+    def mock_resolve_two(log, session_id):
         return MockRegistryTwoHooks()
 
     monkeypatch.setattr(runner, "_resolve_hook_registry", mock_resolve_two)
@@ -707,7 +710,7 @@ def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monk
         def __init__(self) -> None:
             self.calls = 0
 
-        async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+        async def complete(self, messages, tools=None, **kwargs):
             self.calls += 1
             if self.calls == 1:
                 return ModelResponse(
@@ -724,10 +727,10 @@ def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monk
                 finish_reason="stop",
             )
 
-        async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        async def chat(self, messages, tools=None, **kwargs):
             return await self.complete(messages, tools, **kwargs)
 
-        async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+        async def stream(self, messages, tools=None, **kwargs):
             response = await self.complete(messages, tools, **kwargs)
             if response.message.content:
                 yield ModelResponseChunk(content=response.message.content)
@@ -748,11 +751,11 @@ def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monk
             if response.finish_reason:
                 yield ModelResponseChunk(finish_reason=response.finish_reason)
 
-    async def executor(name, arguments):  # noqa: ANN001, ARG001
+    async def executor(name, arguments):
         return {"status": "ok"}
 
     # Case 1: No hooks - mock _resolve_hook_registry to return None
-    def mock_resolve_none(log, session_id):  # noqa: ANN001
+    def mock_resolve_none(log, session_id):
         return None
 
     monkeypatch.setattr(runner, "_resolve_hook_registry", mock_resolve_none)
@@ -786,7 +789,7 @@ def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monk
     post_hook_delay_ms = 50
 
     class MockRegistrySlowPost:
-        _hooks: list = []
+        _hooks: ClassVar[list] = []
 
         async def run_pre(self, call):
             return call
@@ -795,7 +798,7 @@ def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monk
             await asyncio.sleep(post_hook_delay_ms / 1000.0)
             return result
 
-    def mock_resolve_slow_post(log, session_id):  # noqa: ANN001
+    def mock_resolve_slow_post(log, session_id):
         return MockRegistrySlowPost()
 
     monkeypatch.setattr(runner, "_resolve_hook_registry", mock_resolve_slow_post)
@@ -832,7 +835,7 @@ def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monk
     post_hook2_delay_ms = 40
 
     class MockRegistryTwoSlowPost:
-        _hooks: list = []
+        _hooks: ClassVar[list] = []
 
         async def run_pre(self, call):
             return call
@@ -842,7 +845,7 @@ def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monk
             await asyncio.sleep(post_hook2_delay_ms / 1000.0)
             return result
 
-    def mock_resolve_two_post(log, session_id):  # noqa: ANN001
+    def mock_resolve_two_post(log, session_id):
         return MockRegistryTwoSlowPost()
 
     monkeypatch.setattr(runner, "_resolve_hook_registry", mock_resolve_two_post)
@@ -917,7 +920,7 @@ def test_run_task_emits_exactly_one_tool_call_event_per_call_per_step(tmp_path, 
         def __init__(self) -> None:
             self.calls = 0
 
-        async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+        async def complete(self, messages, tools=None, **kwargs):
             self.calls += 1
             if self.calls == 1:
                 return ModelResponse(
@@ -944,10 +947,10 @@ def test_run_task_emits_exactly_one_tool_call_event_per_call_per_step(tmp_path, 
                 finish_reason="stop",
             )
 
-        async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        async def chat(self, messages, tools=None, **kwargs):
             return await self.complete(messages, tools, **kwargs)
 
-        async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+        async def stream(self, messages, tools=None, **kwargs):
             response = await self.complete(messages, tools, **kwargs)
             if response.message.content:
                 yield ModelResponseChunk(content=response.message.content)
@@ -968,7 +971,7 @@ def test_run_task_emits_exactly_one_tool_call_event_per_call_per_step(tmp_path, 
             if response.finish_reason:
                 yield ModelResponseChunk(finish_reason=response.finish_reason)
 
-    async def executor(name, arguments):  # noqa: ANN001, ARG001
+    async def executor(name, arguments):
         return {"status": "ok"}
 
     # No hooks: keeps the test deterministic and isolates the consolidation
@@ -1199,6 +1202,7 @@ def test_fx_runner_help_prints_documented_argparse_surface(tmp_path):
         [runner, "--help"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 0
     for flag in ("--task", "--harness-dir", "--trace-path"):
@@ -1241,6 +1245,7 @@ def test_fx_runner_console_script_lands_session_in_trace_store(tmp_path):
             str(db),
         ],
         capture_output=True,
+        check=False,
         text=True,
         env={**os.environ, "PYTHONPATH": "."},
     )

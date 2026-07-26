@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -18,7 +18,7 @@ from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 
 def _event(kind: str, offset: timedelta, payload: dict) -> TraceEvent:
-    base = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 10, 12, 0, 0, tzinfo=UTC)
     return TraceEvent(
         event_id=f"evt-{kind}",
         session_id="sess-test",
@@ -77,7 +77,7 @@ def test_format_timeline_error_marker():
     output = format_timeline(events, highlight_errors=True)
     # The 4th event is the error; its line carries the leading marker.
     error_line = next(ln for ln in output.splitlines() if "#4" in ln)
-    assert error_line.startswith("!") or error_line.startswith("\u2717")
+    assert error_line.startswith(("!", "✗"))
 
 
 def test_format_timeline_tool_name_summary():

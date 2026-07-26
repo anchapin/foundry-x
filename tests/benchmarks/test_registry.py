@@ -131,9 +131,10 @@ def test_registry_module_does_not_import_pytest_at_top_level() -> None:
             for alias in node.names:
                 if alias.name == "pytest" or alias.name.startswith("pytest."):
                     offenders.append(f"line {node.lineno}: import {alias.name}")
-        elif isinstance(node, ast.ImportFrom):
-            if node.module == "pytest" or node.module.startswith("pytest."):
-                offenders.append(f"line {node.lineno}: from {node.module} import ...")
+        elif isinstance(node, ast.ImportFrom) and (
+            node.module == "pytest" or node.module.startswith("pytest.")
+        ):
+            offenders.append(f"line {node.lineno}: from {node.module} import ...")
 
     assert not offenders, (
         "benchmarks/registry.py must not import pytest at module top level "
@@ -163,13 +164,12 @@ def test_every_registry_entry_maps_to_a_benchmark_test_file() -> None:
             ):
                 if any(_is_pytest_mark_benchmark(deco) for deco in node.decorator_list):
                     has_benchmark_marker = True
-            elif isinstance(node, ast.Assign):
-                if (
-                    len(node.targets) == 1
-                    and isinstance(node.targets[0], ast.Name)
-                    and node.targets[0].id == "TASK"
-                ):
-                    has_task_attribute = True
+            elif isinstance(node, ast.Assign) and (
+                len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "TASK"
+            ):
+                has_task_attribute = True
 
         if has_benchmark_marker:
             files_with_benchmark_marker.add(task_file)
@@ -201,17 +201,25 @@ def test_load_all_tasks_names_are_unique() -> None:
 def _is_pytest_mark_benchmark(node: ast.expr) -> bool:
     """Return True if ``node`` is ``@pytest.mark.benchmark`` (with or without call)."""
     # @pytest.mark.benchmark (attribute chain, no call)
-    if isinstance(node, ast.Attribute) and node.attr == "benchmark":
-        cur = node.value
-        if isinstance(cur, ast.Attribute) and cur.attr == "mark":
-            if isinstance(cur.value, ast.Name) and cur.value.id == "pytest":
-                return True
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr == "benchmark"
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "mark"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "pytest"
+    ):
+        return True
     # @pytest.mark.benchmark(...) (call wrapping the chain)
     if isinstance(node, ast.Call):
         func = node.func
-        if isinstance(func, ast.Attribute) and func.attr == "benchmark":
-            cur = func.value
-            if isinstance(cur, ast.Attribute) and cur.attr == "mark":
-                if isinstance(cur.value, ast.Name) and cur.value.id == "pytest":
-                    return True
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "benchmark"
+            and isinstance(func.value, ast.Attribute)
+            and func.value.attr == "mark"
+            and isinstance(func.value.value, ast.Name)
+            and func.value.value.id == "pytest"
+        ):
+            return True
     return False

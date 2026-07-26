@@ -54,8 +54,8 @@ from foundry_x.evaluation.correlation import (
 from foundry_x.evaluation.humaneval_plus import (
     HumanEvalExecutionError,
     load_humaneval_slice,
-    run_canonical_solution,
     run_candidate_solution,
+    run_canonical_solution,
     slice_pass_rates,
 )
 

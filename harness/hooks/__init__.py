@@ -1,26 +1,28 @@
+from . import token_aware_pruning
 from .base import Hook, HookRegistry, get_registry, register_hook
 from .context_pruning import (
-    ContextPruningHook,
     DEFAULT_THRESHOLD,
     DEFAULT_TOKEN_THRESHOLD,
+    ContextPruningHook,
     Pruner,
-    Tracer,
-    TokenCounter,
     TokenAwarePruningHook,
+    TokenCounter,
+    Tracer,
     register_into,
     register_token_aware_into,
     resolve_context_tokens_threshold,
 )
-from . import token_aware_pruning
-from .injection_firewall import InjectionFirewallHook, INJECTION_PATTERNS
+from .injection_firewall import INJECTION_PATTERNS, InjectionFirewallHook
 from .rate_limit import (
-    RateLimitHook,
     DEFAULT_MAX_DIFF_LINES,
     DEFAULT_MAX_PROPOSALS_PER_HOUR,
     DEFAULT_RATE_WINDOW_HOURS,
+    RateLimitHook,
     get_default_max_diff_lines,
     get_default_max_proposals,
     get_default_rate_window_hours,
+)
+from .rate_limit import (
     register_into as rate_limit_register_into,
 )
 
@@ -31,29 +33,29 @@ from .rate_limit import (
 # #106). The runner calls register_into(registry, ...) and
 # register_token_aware_into(registry, ...) to install it.
 __all__ = [
-    "Hook",
-    "HookRegistry",
-    "get_registry",
-    "register_hook",
-    "ContextPruningHook",
+    "DEFAULT_MAX_DIFF_LINES",
+    "DEFAULT_MAX_PROPOSALS_PER_HOUR",
+    "DEFAULT_RATE_WINDOW_HOURS",
     "DEFAULT_THRESHOLD",
     "DEFAULT_TOKEN_THRESHOLD",
+    "INJECTION_PATTERNS",
+    "ContextPruningHook",
+    "Hook",
+    "HookRegistry",
+    "InjectionFirewallHook",
     "Pruner",
-    "Tracer",
-    "TokenCounter",
+    "RateLimitHook",
     "TokenAwarePruningHook",
+    "TokenCounter",
+    "Tracer",
+    "get_default_max_diff_lines",
+    "get_default_max_proposals",
+    "get_default_rate_window_hours",
+    "get_registry",
+    "rate_limit_register_into",
+    "register_hook",
     "register_into",
     "register_token_aware_into",
     "resolve_context_tokens_threshold",
     "token_aware_pruning",
-    "InjectionFirewallHook",
-    "INJECTION_PATTERNS",
-    "RateLimitHook",
-    "DEFAULT_MAX_DIFF_LINES",
-    "DEFAULT_MAX_PROPOSALS_PER_HOUR",
-    "DEFAULT_RATE_WINDOW_HOURS",
-    "get_default_max_diff_lines",
-    "get_default_max_proposals",
-    "get_default_rate_window_hours",
-    "rate_limit_register_into",
 ]

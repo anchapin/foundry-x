@@ -65,7 +65,7 @@ class _ScriptedAdapter:
         self.calls: list[list[ModelMessage]] = []
         self.tool_surfaces: list[list[object]] = []
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def complete(self, messages, tools=None, **kwargs):
         self.calls.append([ModelMessage.model_validate(m) for m in messages])
         self.tool_surfaces.append(list(tools) if tools else [])
         if not self._responses:
@@ -74,10 +74,10 @@ class _ScriptedAdapter:
             )
         return self._responses.pop(0)
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         return await self.complete(messages, tools, **kwargs)
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         self.calls.append([ModelMessage.model_validate(m) for m in messages])
         self.tool_surfaces.append(list(tools) if tools else [])
         if not self._responses:
@@ -128,9 +128,9 @@ def _reset_default_registry() -> None:
     registry.
     """
     try:
+        from harness.hooks import register_hook
         from harness.hooks.base import reset_default_registry
         from harness.hooks.injection_firewall import InjectionFirewallHook
-        from harness.hooks import register_hook
     except ImportError:
         return
     reset_default_registry()
@@ -410,7 +410,7 @@ def test_agent_loop_executor_errors_surface_as_failed_tool_results(tmp_path, mon
 
     call_count = {"n": 0}
 
-    async def failing_executor(name, arguments):  # noqa: ANN001
+    async def failing_executor(name, arguments):
         call_count["n"] += 1
         raise RuntimeError(f"boom from skill {name}")
 
@@ -441,7 +441,7 @@ def test_agent_loop_executor_errors_surface_as_failed_tool_results(tmp_path, mon
     monkeypatch.setattr(runner_mod, "build_model_adapter", lambda: adapter)
     monkeypatch.setattr(sys, "argv", _argv("errored-loop", db, REPO_HARNESS_DIR))
 
-    async def _run_with_executor(task, harness_dir, log, session_id, **kwargs):  # noqa: ANN001
+    async def _run_with_executor(task, harness_dir, log, session_id, **kwargs):
         await runner_mod.run_task(
             task,
             harness_dir,

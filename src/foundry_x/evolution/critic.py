@@ -104,7 +104,7 @@ def _scan_diff_for_injection(diff: str) -> list[str]:
             continue
         try:
             decoded_bytes = base64.b64decode(candidate, validate=True)
-        except Exception:
+        except ValueError:
             continue
         try:
             decoded = decoded_bytes.decode("utf-8")
@@ -411,6 +411,7 @@ class Critic:
                 capture_output=True,
                 text=True,
                 timeout=self.gate_timeout_s,
+                check=False,
             )
         except subprocess.TimeoutExpired as exc:
             # gate_timeout_s killed the sweep subprocess — return a
@@ -536,7 +537,7 @@ class Critic:
 
         try:
             logger = TraceLogger(trace_path)
-        except Exception:
+        except Exception:  # Defensive: trace_path may be corrupt or locked  # noqa: BLE001
             return 0, None
 
         sessions = logger.list_sessions()
@@ -687,6 +688,7 @@ class Critic:
                         capture_output=True,
                         text=True,
                         timeout=self.gate_timeout_s,
+                        check=False,
                     )
                 except subprocess.TimeoutExpired as exc:
                     return CriticVerdict(
@@ -724,6 +726,7 @@ class Critic:
                     capture_output=True,
                     text=True,
                     timeout=self.gate_timeout_s,
+                    check=False,
                 )
             except subprocess.TimeoutExpired as exc:
                 return CriticVerdict(
@@ -750,9 +753,10 @@ class Critic:
             # via FOUNDRY_TOKEN_BUDGET so the Runner enforces it.
             token_budget: int | None = None
             for task in self.benchmark_tasks:
-                if task.token_budget is not None:
-                    if token_budget is None or task.token_budget < token_budget:
-                        token_budget = task.token_budget
+                if task.token_budget is not None and (
+                    token_budget is None or task.token_budget < token_budget
+                ):
+                    token_budget = task.token_budget
             pytest_env = os.environ.copy()
             if token_budget is not None:
                 pytest_env["FOUNDRY_TOKEN_BUDGET"] = str(token_budget)
@@ -764,6 +768,7 @@ class Critic:
                     text=True,
                     env=pytest_env,
                     timeout=self.gate_timeout_s,
+                    check=False,
                 )
             except subprocess.TimeoutExpired as exc:
                 return CriticVerdict(

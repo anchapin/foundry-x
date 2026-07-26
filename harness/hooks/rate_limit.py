@@ -39,7 +39,7 @@ Out of scope (issue #206)
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from .base import HookRegistry, register_hook
@@ -84,7 +84,7 @@ def _get_window() -> deque[tuple[datetime, bool]]:
 
 
 def _purge_old(window: deque[tuple[datetime, bool]], hours: int) -> None:
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
     while window and window[0][0] < cutoff:
         window.popleft()
 
@@ -154,7 +154,7 @@ class RateLimitHook:
                 f"RateLimitHook: {DEFAULT_MAX_PROPOSALS_PER_HOUR} proposals per "
                 f"hour cap reached; rejecting {call.name}"
             )
-        window.append((datetime.now(timezone.utc), True))
+        window.append((datetime.now(UTC), True))
         return call
 
     async def post_tool(self, call: ToolCall, result: ToolResult) -> ToolResult:

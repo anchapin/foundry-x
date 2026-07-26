@@ -8,7 +8,6 @@ import pytest
 
 from foundry_x.execution.runner import main, resolve_trace_backend
 
-
 # --- resolve_trace_backend unit tests ----------------------------------------
 
 
@@ -95,7 +94,7 @@ def test_jsonl_backend_writes_jsonl_file(tmp_path, monkeypatch):
     _stub_harness(tmp_path)
     _argv("noop task", trace_path, tmp_path, monkeypatch)
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)
@@ -117,7 +116,7 @@ def test_sqlite_default_creates_sqlite_db(tmp_path, monkeypatch):
     _stub_harness(tmp_path)
     _argv("noop task", db, tmp_path, monkeypatch)
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)
@@ -135,7 +134,7 @@ def test_invalid_backend_aborts_main(tmp_path, monkeypatch):
     _stub_harness(tmp_path)
     _argv("noop task", trace_path, tmp_path, monkeypatch)
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     with pytest.raises(ValueError):

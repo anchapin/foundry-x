@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 
 from foundry_x.evolution.critic import CriticVerdict
+from foundry_x.observability.cli import main as cli_main
 from foundry_x.observability.regression_report import (
     RegressionAnalysis,
     analyze_regressions,
     generate_regression_report,
     record_verdict,
 )
-from foundry_x.observability.cli import main as cli_main
 from foundry_x.trace.logger import TraceLogger
 
 
@@ -285,7 +285,7 @@ def _plant_mixed_sessions(logger: TraceLogger) -> tuple[str, str, str]:
 
 def test_analyze_regressions_filters_by_task(tmp_path):
     logger = TraceLogger(tmp_path / "traces.db")
-    sid_a, sid_b, sid_c = _plant_mixed_sessions(logger)
+    _sid_a, _sid_b, _sid_c = _plant_mixed_sessions(logger)
 
     full = analyze_regressions(logger)
     assert {r.task for r in full.regressions} == {"task-A", "task-B"}
@@ -579,7 +579,7 @@ def _mixed_harness_versions(logger: TraceLogger) -> tuple[str, str, str, str, st
 
 def test_analyze_regressions_filters_by_harness_version(tmp_path):
     logger = TraceLogger(tmp_path / "traces.db")
-    sid_v1_a, sid_v1_b, sid_v2_c, sid_v2_d, sid_v1_e = _mixed_harness_versions(logger)
+    _sid_v1_a, _sid_v1_b, _sid_v2_c, _sid_v2_d, _sid_v1_e = _mixed_harness_versions(logger)
 
     full = analyze_regressions(logger)
     assert {r.task for r in full.regressions} == {"task-A"}
@@ -616,7 +616,7 @@ def test_generate_regression_report_filters_by_harness_version(tmp_path):
 def test_cli_regression_report_harness_version_filter(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    sid_v1_a, sid_v1_b, sid_v2_c, sid_v2_d, sid_v1_e = _mixed_harness_versions(logger)
+    _sid_v1_a, _sid_v1_b, _sid_v2_c, _sid_v2_d, _sid_v1_e = _mixed_harness_versions(logger)
 
     rc = cli_main(["regression-report", "--db", str(db), "--harness-version", "v2"])
     captured = capsys.readouterr()

@@ -39,15 +39,15 @@ class _ScriptedAdapter:
     def __init__(self, responses: list[ModelResponse]) -> None:
         self._responses = list(responses)
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def complete(self, messages, tools=None, **kwargs):
         if not self._responses:
             raise RuntimeError("_ScriptedAdapter exhausted")
         return self._responses.pop(0)
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         return await self.complete(messages, tools, **kwargs)
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         if not self._responses:
             raise RuntimeError("_ScriptedAdapter exhausted")
         response = self._responses.pop(0)
@@ -221,18 +221,21 @@ def test_hook_registry_error_is_recorded_and_returns_none(
     before the record call fails one of the assertions.
     """
     import unittest.mock
+
     import harness.hooks
 
     def _failing_get_registry() -> object:
         raise RuntimeError("registry unavailable: disk full")
 
-    with tmp_trace_logger.session(harness_version="test") as session_id:
-        with unittest.mock.patch.object(
+    with (
+        tmp_trace_logger.session(harness_version="test") as session_id,
+        unittest.mock.patch.object(
             harness.hooks,
             "get_registry",
             side_effect=_failing_get_registry,
-        ):
-            result = _resolve_hook_registry(tmp_trace_logger, session_id)
+        ),
+    ):
+        result = _resolve_hook_registry(tmp_trace_logger, session_id)
 
     assert result is None, (
         "_resolve_hook_registry must return None when get_registry() raises "

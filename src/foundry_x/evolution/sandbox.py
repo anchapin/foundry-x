@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Self
 
 import pydantic
 
@@ -85,6 +85,7 @@ class DockerSandbox:
             exec_argv,
             capture_output=True,
             text=True,
+            check=False,
         )
 
     def teardown(self) -> None:
@@ -93,10 +94,12 @@ class DockerSandbox:
             subprocess.run(
                 ["docker", "stop", "-t=10", self._container_name],
                 capture_output=True,
+                check=False,
             )
             subprocess.run(
                 ["docker", "rm", "-f", self._container_name],
                 capture_output=True,
+                check=False,
             )
             self._container_name = None
 
@@ -104,11 +107,11 @@ class DockerSandbox:
     # Context manager
     # -------------------------------------------------------------------------
 
-    def __enter__(self) -> DockerSandbox:
+    def __enter__(self) -> Self:
         self._start()
         return self
 
-    def __exit__(self, *exc_info: Any) -> None:
+    def __exit__(self, *exc_info: object) -> None:
         self.teardown()
 
     # -------------------------------------------------------------------------
@@ -142,7 +145,7 @@ class DockerSandbox:
             "sleep",
             "infinity",  # Keep container alive for subsequent exec calls
         ]
-        result = subprocess.run(run_argv, capture_output=True, text=True)
+        result = subprocess.run(run_argv, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             self._container_name = None
             raise SandboxRuntimeError(

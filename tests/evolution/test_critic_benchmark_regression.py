@@ -33,7 +33,6 @@ from benchmarks.models import BenchmarkTask
 from foundry_x.evolution.critic import Critic
 from tests._harness_fixture import install_load_check_prerequisites
 
-
 _BASELINE_SOURCE = """
 def test_task_A():
     assert True

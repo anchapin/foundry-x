@@ -30,7 +30,6 @@ from foundry_x.evolution.evolver import (
 )
 from foundry_x.trace.logger import TraceLogger
 
-
 TASK = BenchmarkTask(
     name="evolver_few_shot_learning",
     description=(

@@ -100,6 +100,7 @@ def test_write_file_basic(benchmark_workspace: Path) -> None:
         cwd=benchmark_workspace,
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 0, (
         f"task {TASK.name}: python hello.py must exit 0; "

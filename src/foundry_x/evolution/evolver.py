@@ -6,10 +6,10 @@ import json
 import random
 import re
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -426,7 +426,7 @@ def _apply_json_merge_patch(original_text: str, patch: dict[str, Any]) -> str:
     """
     doc = json.loads(original_text)
     if not isinstance(doc, dict):
-        raise ValueError(f"JSON target must be a top-level object, got {type(doc).__name__}")
+        raise TypeError(f"JSON target must be a top-level object, got {type(doc).__name__}")
     _deep_merge(doc, patch)
     return json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
 
@@ -558,8 +558,8 @@ class Evolver:
     approach.
     """
 
-    _llm_call_times: deque[datetime] = deque()
-    _llm_call_costs: deque[tuple[datetime, float]] = deque()
+    _llm_call_times: ClassVar[deque[datetime]] = deque()
+    _llm_call_costs: ClassVar[deque[tuple[datetime, float]]] = deque()
 
     def __init__(
         self,
@@ -590,7 +590,7 @@ class Evolver:
 
     def _purge_old(self, now: datetime | None = None) -> None:
         """Drop proposal timestamps that have fallen outside the rate window."""
-        cutoff = (now or datetime.now(timezone.utc)) - _RATE_WINDOW
+        cutoff = (now or datetime.now(UTC)) - _RATE_WINDOW
         while self._proposal_times and self._proposal_times[0] < cutoff:
             self._proposal_times.popleft()
 
@@ -606,7 +606,7 @@ class Evolver:
     def _record_proposals(
         self, count: int = 1, edit: ProposedEdit | None = None, failure_class: str = ""
     ) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for _ in range(count):
             self._proposal_times.append(now)
         if edit is not None and self._trace_logger is not None and self._session_id is not None:
@@ -643,7 +643,7 @@ class Evolver:
                 try:
                     edit = ProposedEdit(**event.payload)
                     edits.append(edit)
-                except Exception:
+                except Exception:  # Defensive: malformed events are skipped; no logging to avoid noise  # noqa: BLE001, S112
                     continue
         edits.sort(key=lambda e: e.target_file)
         unique: dict[str, ProposedEdit] = {}
@@ -654,7 +654,7 @@ class Evolver:
 
     def _purge_llm_state(self, now: datetime | None = None) -> None:
         """Drop LLM timestamps and costs that have fallen outside their windows."""
-        utc_now = now or datetime.now(timezone.utc)
+        utc_now = now or datetime.now(UTC)
         call_cutoff = utc_now - _LLM_RATE_WINDOW
         while self._llm_call_times and self._llm_call_times[0] < call_cutoff:
             self._llm_call_times.popleft()
@@ -683,7 +683,7 @@ class Evolver:
         Call this before each LLM invocation. The cost is expressed in dollars
         (e.g., 0.02 for two cents) and accumulated against the daily cost budget.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self._llm_call_times.append(now)
         self._llm_call_costs.append((now, cost))
 
@@ -735,8 +735,10 @@ class Evolver:
                 [
                     "PREVIOUSLY SUCCESSFUL EDITS FOR THIS FAILURE CLASS",
                     "=" * 50,
-                    "The following edits have successfully addressed similar failures. "
-                    "Use them as guidance when proposing new edits:",
+                    (
+                        "The following edits have successfully addressed similar failures. "
+                        "Use them as guidance when proposing new edits:"
+                    ),
                     "",
                 ]
             )
@@ -1055,7 +1057,7 @@ class Evolver:
             self.record_llm_call()
             try:
                 response = await adapter.complete(messages)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._record_generation_attempt(
                     attempt=attempt,
                     error=f"model call failed: {exc}",

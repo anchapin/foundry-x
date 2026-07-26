@@ -90,6 +90,7 @@ def _run_pytest(workspace: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         env=env,
+        check=False,
     )
 
 

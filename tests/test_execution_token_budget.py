@@ -69,7 +69,7 @@ class _ScriptedAdapter:
             # receive the same list object (the runner never rebinds it).
             self.captured_messages = messages
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def complete(self, messages, tools=None, **kwargs):
         self.calls += 1
         self._capture(messages)
         if not self._responses:
@@ -79,10 +79,10 @@ class _ScriptedAdapter:
             )
         return self._responses.pop(0)
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         return await self.complete(messages, tools, **kwargs)
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         self.calls += 1
         self._capture(messages)
         if not self._responses:
@@ -210,7 +210,7 @@ async def test_run_task_records_usage_and_running_total_on_model_response(tmp_pa
     ]
     adapter = _ScriptedAdapter(responses)
 
-    async def noop_executor(name, arguments):  # noqa: ANN001, ARG001
+    async def noop_executor(name, arguments):
         return {"status": "ok"}
 
     logger = TraceLogger(db)
@@ -297,7 +297,7 @@ async def test_run_task_aborts_when_running_total_exceeds_token_budget(tmp_path)
     adapter = _ScriptedAdapter(responses)
     limits = RunLimits(token_budget=150)
 
-    async def noop_executor(name, arguments):  # noqa: ANN001, ARG001
+    async def noop_executor(name, arguments):
         return {"status": "ok"}
 
     logger = TraceLogger(db)
@@ -418,7 +418,7 @@ async def test_run_task_warns_and_zero_tokens_when_usage_missing(tmp_path):
     ]
     adapter = _ScriptedAdapter(responses)
 
-    async def noop_executor(name, arguments):  # noqa: ANN001, ARG001
+    async def noop_executor(name, arguments):
         return {"status": "ok"}
 
     logger = TraceLogger(db)
@@ -505,7 +505,7 @@ async def test_run_task_token_budget_check_runs_before_message_append(tmp_path):
     adapter = _ScriptedAdapter([_safe_step_response(0), over_budget_response])
     limits = RunLimits(token_budget=150)
 
-    async def noop_executor(name, arguments):  # noqa: ANN001, ARG001
+    async def noop_executor(name, arguments):
         return {"status": "ok"}
 
     logger = TraceLogger(db)

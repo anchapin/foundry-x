@@ -39,10 +39,10 @@ import pytest
 from benchmarks.models import BenchmarkTask
 from harness.hooks.base import HookRegistry, ToolCall, ToolResult
 from harness.hooks.rate_limit import (
+    _RL_STATE,
     DEFAULT_MAX_PROPOSALS_PER_HOUR,
     DEFAULT_RATE_WINDOW_HOURS,
     RateLimitHook,
-    _RL_STATE,
     _get_window,
 )
 

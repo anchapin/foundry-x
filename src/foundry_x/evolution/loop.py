@@ -11,7 +11,7 @@ unless the upstream stage emitted a non-clean signal.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -67,7 +67,7 @@ def _now_iso() -> str:
     ``datetime.fromisoformat`` (Python 3.11+) accepts the ``+00:00``
     suffix without modification.
     """
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def run_evolution_step(

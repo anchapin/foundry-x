@@ -314,4 +314,4 @@ def test_global_registry_firewall_still_runs() -> None:
 
 # ``pytest`` is imported late so the helper-style code above matches the
 # project's other test files (which keep their top-level imports light).
-import pytest  # noqa: E402
+import pytest

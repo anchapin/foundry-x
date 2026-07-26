@@ -21,7 +21,7 @@ benchmark and blocks the harness edit at PR review (ADR-0004).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -32,7 +32,6 @@ from foundry_x.evolution.evolver import (
     EvolverGuardError,
     ProposedEdit,
 )
-
 
 TASK = BenchmarkTask(
     name="evolver_guardrail",
@@ -269,7 +268,7 @@ def test_evolver_old_proposals_purge_outside_window() -> None:
     surfaces as a stale timestamp counting toward today's cap.
     """
     evolver = Evolver(max_proposals_per_hour=2, max_diff_lines=200)
-    stale = datetime.now(timezone.utc) - timedelta(hours=2)
+    stale = datetime.now(UTC) - timedelta(hours=2)
     evolver._proposal_times.append(stale)
     evolver._proposal_times.append(stale)
     # Both stale entries must be purged before the cap check; the test

@@ -44,7 +44,6 @@ from foundry_x.execution.model_adapter import (
 from foundry_x.execution.runner import run_task
 from foundry_x.trace.logger import TraceLogger
 
-
 TASK = BenchmarkTask(
     name="injection_blocked_trace_persistence",
     description=(
@@ -111,16 +110,16 @@ class _InjectionScriptedAdapter:
             )
         )
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def complete(self, messages, tools=None, **kwargs):
         self.calls += 1
         if not self._responses:
             raise RuntimeError(f"_InjectionScriptedAdapter exhausted after {self.calls} calls")
         return self._responses.pop(0)
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         return await self.complete(messages, tools, **kwargs)
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         response = await self.complete(messages, tools, **kwargs)
         if response.message.content:
             yield ModelResponseChunk(content=response.message.content)
@@ -178,16 +177,16 @@ class _CleanScriptedAdapter:
             )
         )
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def complete(self, messages, tools=None, **kwargs):
         self.calls += 1
         if not self._responses:
             raise RuntimeError(f"_CleanScriptedAdapter exhausted after {self.calls} calls")
         return self._responses.pop(0)
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         return await self.complete(messages, tools, **kwargs)
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         response = await self.complete(messages, tools, **kwargs)
         if response.message.content:
             yield ModelResponseChunk(content=response.message.content)

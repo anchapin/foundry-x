@@ -118,7 +118,7 @@ class _StreamingScriptedAdapter:
         self._responses = list(responses)
         self.calls = 0
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         self.calls += 1
         if not self._responses:
             raise RuntimeError(
@@ -146,14 +146,14 @@ class _StreamingScriptedAdapter:
         if response.usage is not None:
             yield ModelResponseChunk(usage=response.usage)
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def complete(self, messages, tools=None, **kwargs):
         raise AssertionError("run_task must call stream()")
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def chat(self, messages, tools=None, **kwargs):
         raise AssertionError("run_task must call stream()")
 
 
-async def _noop_executor(name: str, arguments: dict) -> dict:  # noqa: ANN001, ARG001
+async def _noop_executor(name: str, arguments: dict) -> dict:
     return {"status": "ok"}
 
 

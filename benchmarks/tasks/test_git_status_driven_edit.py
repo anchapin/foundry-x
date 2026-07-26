@@ -77,16 +77,24 @@ def _seed_workspace(workspace: Path) -> None:
     shutil.copytree(_FIXTURE_DIR, workspace, dirs_exist_ok=True)
 
     # Initialize a git repo and make an initial commit
-    subprocess.run(["git", "init"], cwd=workspace, capture_output=True)
+    subprocess.run(["git", "init"], cwd=workspace, capture_output=True, check=False)
     subprocess.run(
-        ["git", "config", "user.email", "test@foundryx.dev"], cwd=workspace, capture_output=True
+        ["git", "config", "user.email", "test@foundryx.dev"],
+        cwd=workspace,
+        capture_output=True,
+        check=False,
     )
     subprocess.run(
-        ["git", "config", "user.name", "FoundryX Test"], cwd=workspace, capture_output=True
+        ["git", "config", "user.name", "FoundryX Test"],
+        cwd=workspace,
+        capture_output=True,
+        check=False,
     )
     # Stage and commit the initial (correct) version
-    subprocess.run(["git", "add", "calculator.py"], cwd=workspace, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=workspace, capture_output=True)
+    subprocess.run(["git", "add", "calculator.py"], cwd=workspace, capture_output=True, check=False)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"], cwd=workspace, capture_output=True, check=False
+    )
     # Overwrite with the buggy version so git diff shows changes
     buggy_content = (
         "def multiply(a, b):\n"
@@ -109,6 +117,7 @@ def _run_calculator(workspace: Path) -> subprocess.CompletedProcess[str]:
         cwd=workspace,
         capture_output=True,
         text=True,
+        check=False,
     )
 
 
@@ -119,6 +128,7 @@ def _git_diff_names(workspace: Path) -> list[str]:
         cwd=workspace,
         capture_output=True,
         text=True,
+        check=False,
     )
     return [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
 
@@ -130,6 +140,7 @@ def _git_diff_hunks(workspace: Path, filename: str) -> str:
         cwd=workspace,
         capture_output=True,
         text=True,
+        check=False,
     )
     return result.stdout
 

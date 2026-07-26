@@ -98,6 +98,7 @@ def _apply_diff(parent_dir: Path, diff: str) -> None:
         cwd=parent_dir,
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 0, (
         f"git apply failed: stderr={result.stderr!r} stdout={result.stdout!r}"
@@ -243,6 +244,7 @@ def test_context_overflow_template_passes_load_check(tmp_path: Path) -> None:
         cwd=sandbox_harness,
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 0, (
         f"load_check failed after context-overflow edit:\n"

@@ -30,9 +30,9 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Iterable
 
 from pydantic import BaseModel, Field
 

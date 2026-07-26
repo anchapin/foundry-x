@@ -20,7 +20,8 @@ import pytest
 from foundry_x.execution.model_adapter import (
     ModelResponseChunk,
 )
-from foundry_x.execution.runner import RunLimits, run_task as real_run_task
+from foundry_x.execution.runner import RunLimits
+from foundry_x.execution.runner import run_task as real_run_task
 from foundry_x.infra.server_manager import (
     FoundryServerManager,
     ServerConfig,
@@ -39,14 +40,14 @@ def _stub_harness(harness_dir: Path) -> None:
 class _FinalAnswerAdapter:
     """Adapter that yields a final-answer turn (no tool calls)."""
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         yield ModelResponseChunk(content="done")
         yield ModelResponseChunk(finish_reason="stop")
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def complete(self, messages, tools=None, **kwargs):
         raise AssertionError("run_task must call stream()")
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         raise AssertionError("run_task must call stream()")
 
 
@@ -258,7 +259,7 @@ async def test_runner_surfaces_serverlauncherror_as_model_error(tmp_path: Path) 
     """
 
     class _RaisingManager(_FakeServerManager):
-        async def restart(self) -> bool:  # noqa: D401
+        async def restart(self) -> bool:
             self.restart_calls += 1
             raise ServerLaunchError("binary missing")
 

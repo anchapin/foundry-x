@@ -45,14 +45,13 @@ from foundry_x.execution.model_adapter import (
 )
 from foundry_x.execution.runner import (
     ModelResponseChunkEvent,
-    _StreamingToolCallAccumulator,
     _assemble_streamed_response,
     _consume_model_stream,
+    _StreamingToolCallAccumulator,
     main,
 )
 from foundry_x.execution.runner import run_task as real_run_task
 from foundry_x.trace.logger import TraceLogger
-
 
 # A faithful capture of llama.cpp's ``/v1/chat/completions`` SSE output
 # (``stream:true``). The fixture mirrors the field order documented in
@@ -110,15 +109,15 @@ class _StubAdapter:
         self._chunks = list(chunks)
         self.stream_calls = 0
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         self.stream_calls += 1
         for chunk in self._chunks:
             yield chunk
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def complete(self, messages, tools=None, **kwargs):
         raise AssertionError("run_task must call stream(), not complete() (#199)")
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         raise AssertionError("run_task must call stream(), not chat() (#199)")
 
 
@@ -228,7 +227,7 @@ async def test_consume_model_stream_emits_chunk_events_with_monotone_index(tmp_p
     adapter = _StubAdapter(chunks)
     log = TraceLogger(db)
     with log.session(harness_version="test") as session_id:
-        response, ttft_ms, chunk_count, total_stream_ms = await _consume_model_stream(
+        response, ttft_ms, chunk_count, _total_stream_ms = await _consume_model_stream(
             adapter,
             [ModelMessage(role="user", content="ping")],
             [],
@@ -451,7 +450,7 @@ async def test_openai_adapter_parses_llama_server_sse_end_to_end():
         await adapter.aclose()
 
     assert seen["url"] == "http://127.0.0.1:8080/v1/chat/completions"
-    assert seen["payload"]["stream"] is True  # noqa: S104 — wire contract check
+    assert seen["payload"]["stream"] is True
     assert seen["payload"]["model"] == "codellama-7b"
 
     contents = [chunk.content for chunk in chunks if chunk.content]
@@ -484,7 +483,7 @@ def test_run_task_aggregates_ttft_p50_across_turns(tmp_path, monkeypatch):
         def __init__(self) -> None:
             self._turn = 0
 
-        async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+        async def stream(self, messages, tools=None, **kwargs):
             self._turn += 1
             if self._turn == 1:
                 yield ModelResponseChunk(
@@ -505,13 +504,13 @@ def test_run_task_aggregates_ttft_p50_across_turns(tmp_path, monkeypatch):
             yield ModelResponseChunk(content="done")
             yield ModelResponseChunk(finish_reason="stop")
 
-        async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        async def complete(self, messages, tools=None, **kwargs):
             raise AssertionError("run_task must call stream() (#199)")
 
-        async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        async def chat(self, messages, tools=None, **kwargs):
             raise AssertionError("run_task must call stream() (#199)")
 
-    async def executor(name, arguments):  # noqa: ANN001, ARG001
+    async def executor(name, arguments):
         return {"status": "ok"}
 
     monkeypatch.setattr(runner_mod, "build_model_adapter", ScriptedAdapter)
@@ -556,16 +555,16 @@ def test_run_task_emits_chunk_events_per_sse_delta(tmp_path, monkeypatch):
     _stub_harness(harness_dir)
 
     class Adapter:
-        async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+        async def stream(self, messages, tools=None, **kwargs):
             yield ModelResponseChunk(content="Hel")
             yield ModelResponseChunk(content="lo")
             yield ModelResponseChunk(content=" world")
             yield ModelResponseChunk(finish_reason="stop")
 
-        async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        async def complete(self, messages, tools=None, **kwargs):
             raise AssertionError("run_task must call stream() (#199)")
 
-        async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        async def chat(self, messages, tools=None, **kwargs):
             raise AssertionError("run_task must call stream() (#199)")
 
     monkeypatch.setattr(runner_mod, "build_model_adapter", Adapter)

@@ -37,8 +37,7 @@ import json
 import sys
 import warnings
 from pathlib import Path
-from typing import Any
-
+from typing import Any, ClassVar
 
 # Required keys on every harness/skills/*.json document. Names match the
 # convention in harness/skills/example_skill.json plus the original #3 layer.
@@ -164,7 +163,7 @@ def _check_manifest(harness_dir: Path) -> list[str]:
     hooks = doc["hooks"]
     if isinstance(hooks, list):
         for entry in hooks:
-            hook_path = hooks_dir / f"{str(entry)}.py"
+            hook_path = hooks_dir / f"{entry!s}.py"
             if not hook_path.exists():
                 failures.append(
                     f"{manifest}: hook entry {entry!r} not found on disk at {hook_path}"
@@ -221,7 +220,7 @@ class HookManifestValidator:
     (per ADR-0019).
     """
 
-    _HOOK_CLASSES: dict[str, type] = {
+    _HOOK_CLASSES: ClassVar[dict[str, type | None]] = {
         "injection_firewall": None,  # filled in lazily
         "context_pruning": None,
         "rate_limit": None,

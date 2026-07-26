@@ -65,7 +65,7 @@ class _BashAdapter:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def complete(self, messages, tools=None, **kwargs):
         self.calls += 1
         if self.calls == 1:
             tool_call = ModelToolCall(
@@ -95,10 +95,10 @@ class _BashAdapter:
             f"complete() {self.calls} times (possible runaway loop)"
         )
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         return await self.complete(messages, tools, **kwargs)
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         response = await self.complete(messages, tools, **kwargs)
         if response.message.content:
             yield ModelResponseChunk(content=response.message.content)

@@ -494,7 +494,7 @@ def _compute_backoff_ms(attempt: int) -> int:
     concurrent retry bursts do not synchronise.
     """
     ceiling = min(_BASE_BACKOFF_MS * (2**attempt), _MAX_BACKOFF_MS)
-    return random.randint(0, ceiling)  # noqa: S311 — jitter, not crypto
+    return random.randint(0, ceiling)
 
 
 def _is_retryable_status(status_code: int) -> bool:

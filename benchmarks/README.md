@@ -60,9 +60,9 @@ selected or excluded without touching `tests/`:
 ```python
 import pytest
 
+
 @pytest.mark.benchmark
-def test_sort_a_list(benchmark_workspace):
-    ...
+def test_sort_a_list(benchmark_workspace): ...
 ```
 
 The marker is registered in the pytest configuration alongside
@@ -121,6 +121,7 @@ Save as `benchmarks/tasks/test_<your_task>.py`:
 
 ```python
 """Benchmark task: <one-line description of what the agent must do>."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -140,9 +141,7 @@ TASK = BenchmarkTask(
 def test_sort_a_list(benchmark_workspace: Path) -> None:
     """Deterministic pass/fail check for TASK."""
     fixture_dir = Path(__file__).parent.parent / "fixtures" / "sort_a_list"
-    (benchmark_workspace / "input.txt").write_text(
-        (fixture_dir / "input.txt").read_text()
-    )
+    (benchmark_workspace / "input.txt").write_text((fixture_dir / "input.txt").read_text())
 
     # 1. Hand the task + workspace to the Runner / agent under test.
     #    (Replace this comment with the real invocation.)

@@ -30,7 +30,6 @@ Scope notes:
   they live under ``tests/`` (out of scope per the issue acceptance).
 """
 
-# ruff: noqa: E402  -- pytest_plugins must precede imports (pytest contract).
 from __future__ import annotations
 
 # pytester is an opt-in plugin starting in pytest 8.x; declare it locally so
@@ -72,19 +71,27 @@ _FORBIDDEN_IMPORT_RE = re.compile(
 def _is_benchmark_decorator(node: ast.expr) -> bool:
     """Return True if ``node`` is ``@pytest.mark.benchmark`` (with or without a call)."""
     # @pytest.mark.benchmark (attribute chain, no call)
-    if isinstance(node, ast.Attribute) and node.attr == "benchmark":
-        cur = node.value
-        if isinstance(cur, ast.Attribute) and cur.attr == "mark":
-            if isinstance(cur.value, ast.Name) and cur.value.id == "pytest":
-                return True
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr == "benchmark"
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "mark"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "pytest"
+    ):
+        return True
     # @pytest.mark.benchmark(...) (call wrapping the chain)
     if isinstance(node, ast.Call):
         func = node.func
-        if isinstance(func, ast.Attribute) and func.attr == "benchmark":
-            cur = func.value
-            if isinstance(cur, ast.Attribute) and cur.attr == "mark":
-                if isinstance(cur.value, ast.Name) and cur.value.id == "pytest":
-                    return True
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "benchmark"
+            and isinstance(func.value, ast.Attribute)
+            and func.value.attr == "mark"
+            and isinstance(func.value.value, ast.Name)
+            and func.value.value.id == "pytest"
+        ):
+            return True
     return False
 
 

@@ -137,8 +137,8 @@ def _run_with_mock_curl(
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run script with a mocked curl that returns predefined responses per URL."""
-    import tempfile
     import json
+    import tempfile
 
     with tempfile.TemporaryDirectory() as tmpdir:
         mock_curl = Path(tmpdir) / "curl"

@@ -24,7 +24,7 @@ The `QuantizationResult` model (per `benchmarks/models.py` and `src/foundry_x/ev
 
 ```python
 class QuantizationResult(BaseModel):
-    quantization: str              # e.g. "Q4_K_M", "Q5_K_M", "Q8_K_M"
+    quantization: str  # e.g. "Q4_K_M", "Q5_K_M", "Q8_K_M"
     model_path: str
     model_id: str
     total_tasks: int
