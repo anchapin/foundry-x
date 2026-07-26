@@ -7,7 +7,7 @@
 #
 #   1. GitHub Actions — the SHA-pinned `uses:` lines in
 #      .github/workflows/* (e.g. actions/checkout@<sha> # v4).
-#   2. Docker base image — the digest-pinned python:3.11-slim@sha256:...
+#   2. Docker base image — the digest-pinned python:3.14-slim@sha256:...
 #      in infra/docker/Dockerfile, present in BOTH the builder stage
 #      (line 38) and the runtime stage (line 94). Digest was introduced
 #      by issue #124; Dependabot keeps it current.
@@ -39,7 +39,7 @@ updates:
     labels:
       - "dependencies"
 
-  # Docker base image — bumps the digest-pinned python:3.11-slim in
+  # Docker base image — bumps the digest-pinned python:3.14-slim in
   # infra/docker/Dockerfile (builder + runtime stages, issue #124).
   - package-ecosystem: "docker"
     directory: "/infra/docker"
