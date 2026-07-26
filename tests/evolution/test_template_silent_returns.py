@@ -301,3 +301,84 @@ class TestKnownClassesRegression:
         assert GENERATION_EXHAUSTED_KIND not in kinds, (
             f"Success path for {failure_class!r} should not emit generation_exhausted"
         )
+
+
+class TestRateLimitTraceEvents:
+    """Rate-limit guard must emit generation_attempt before returning [] (issue #1008)."""
+
+    def test_propose_rate_limit_emits_generation_attempt(self, tmp_path: Path) -> None:
+        """propose() emits generation_attempt with error=rate_limit_exceeded on guard."""
+        harness_dir = _build_harness(tmp_path)
+        trace_logger = MagicMock()
+        evolver = Evolver(
+            trace_logger=trace_logger,
+            session_id="sess-1008",
+            max_proposals_per_hour=1,
+            max_diff_lines=200,
+        )
+        failure = _make_failure("wrong-tool")
+        evolver._record_proposals(1)
+        result = evolver.propose(harness_dir, failure)
+
+        assert result == []
+        kinds = [call.args[1] for call in trace_logger.record.call_args_list]
+        assert GENERATION_ATTEMPT_KIND in kinds
+        attempt_call = next(
+            c for c in trace_logger.record.call_args_list if c.args[1] == GENERATION_ATTEMPT_KIND
+        )
+        assert attempt_call.args[2]["error"] == "rate_limit_exceeded"
+        assert GENERATION_EXHAUSTED_KIND not in kinds
+
+    @pytest.mark.asyncio
+    async def test_propose_async_rate_limit_emits_generation_attempt(self, tmp_path: Path) -> None:
+        """propose_async() emits generation_attempt with error=rate_limit_exceeded on guard."""
+        harness_dir = _build_harness(tmp_path)
+        trace_logger = MagicMock()
+        evolver = Evolver(
+            trace_logger=trace_logger,
+            session_id="sess-1008",
+            max_proposals_per_hour=1,
+            max_diff_lines=200,
+        )
+        failure = _make_failure("wrong-tool")
+        evolver._record_proposals(1)
+        result = await evolver.propose_async(harness_dir, failure)
+
+        assert result == []
+        kinds = [call.args[1] for call in trace_logger.record.call_args_list]
+        assert GENERATION_ATTEMPT_KIND in kinds
+        attempt_call = next(
+            c for c in trace_logger.record.call_args_list if c.args[1] == GENERATION_ATTEMPT_KIND
+        )
+        assert attempt_call.args[2]["error"] == "rate_limit_exceeded"
+        assert GENERATION_EXHAUSTED_KIND not in kinds
+
+    def test_rate_limit_no_logger_still_returns_empty(self, tmp_path: Path) -> None:
+        """Without a trace_logger, rate-limit still returns [] (no-op)."""
+        harness_dir = _build_harness(tmp_path)
+        evolver = Evolver(max_proposals_per_hour=1, max_diff_lines=200)
+        evolver._record_proposals(1)
+        failure = _make_failure("wrong-tool")
+        result = evolver.propose(harness_dir, failure)
+        assert result == []
+
+    def test_rate_limit_emits_with_real_trace_logger(self, tmp_path: Path) -> None:
+        """End-to-end: real TraceLogger persists the rate-limit generation_attempt event."""
+        harness_dir = _build_harness(tmp_path)
+        db_path = tmp_path / "trace.db"
+        logger = TraceLogger(db_path)
+        with logger.session("sess-rate-limit") as session_id:
+            evolver = Evolver(
+                trace_logger=logger,
+                session_id=session_id,
+                max_proposals_per_hour=1,
+                max_diff_lines=200,
+            )
+            evolver._record_proposals(1)
+            failure = _make_failure("wrong-tool")
+            result = evolver.propose(harness_dir, failure)
+
+        assert result == []
+        events = list(logger.query_events(kind=GENERATION_ATTEMPT_KIND))
+        assert len(events) == 1
+        assert events[0].payload["error"] == "rate_limit_exceeded"

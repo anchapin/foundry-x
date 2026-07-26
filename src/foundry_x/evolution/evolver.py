@@ -914,6 +914,7 @@ class Evolver:
         try:
             self._check_rate_limit()
         except EvolverGuardError:
+            self._record_generation_attempt(attempt=1, error="rate_limit_exceeded")
             return []
         if failure.proposed_class == "clean":
             return []
@@ -945,6 +946,7 @@ class Evolver:
         try:
             self._check_rate_limit()
         except EvolverGuardError:
+            self._record_generation_attempt(attempt=1, error="rate_limit_exceeded")
             return []
         if failure.proposed_class == "clean":
             return []
