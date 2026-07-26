@@ -353,8 +353,13 @@ def _parse_edits_from_response(text: str) -> list[ProposedEdit]:
         except Exception as exc:  # noqa: BLE001 — pydantic raises ValueError
             errors.append(f"item[{i}] validation failed: {exc}")
 
-    if not edits and errors:
-        raise EvolverGenerationError(f"no valid ProposedEdit objects found: {'; '.join(errors)}")
+    if not edits:
+        # An empty-but-valid array (``[]``) is treated as a generation
+        # failure too: silently returning ``[]`` would short-circuit the
+        # retry/template-fallback path in ``generate_edits`` and emit no
+        # ``generation_attempt`` trace event (issue #973).
+        detail = "; ".join(errors) if errors else "LLM returned zero ProposedEdit objects"
+        raise EvolverGenerationError(f"no valid ProposedEdit objects found: {detail}")
 
     return edits
 
@@ -1116,4 +1121,11 @@ class Evolver:
                 )
             await asyncio.sleep(_jittered_backoff(attempt))
 
-        return []
+        # Unreachable for ``max_retries >= 1``: the loop's final iteration
+        # always either returns ``validated`` or raises ``EvolverLLMError``.
+        # Reaching here implies ``max_retries < 1`` (empty range), which we
+        # treat as a hard failure rather than a silent no-op ``return []``
+        # so the caller still falls back to the template path (issue #973).
+        raise EvolverLLMError(
+            f"generation loop exited without producing edits (max_retries={max_retries})"
+        )

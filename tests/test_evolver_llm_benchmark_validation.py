@@ -621,6 +621,46 @@ class TestLlmEvolverFallbackBehavior:
         assert len(edits) == 1
         assert edits[0].rationale == "address wrong-tool failure: reinforce tool list adherence"
 
+    def test_falls_back_to_template_when_llm_returns_bare_empty_array(self, tmp_path: Path) -> None:
+        """A bare ``[]`` array triggers template fallback and a trace event.
+
+        Regression test for issue #973: previously ``_parse_edits_from_response``
+        returned ``[]`` for a bare empty array. ``generate_edits`` then exhausted
+        retries without ever recording a ``generation_attempt`` event, and the
+        failure class was unobservable. Now the empty array raises so the
+        template path produces an edit and the attempt is traced.
+        """
+        logger = TraceLogger(tmp_path / "trace.db")
+        harness = _make_harness_with_tests(tmp_path)
+
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value=MagicMock(message=MagicMock(content="[]")))
+
+        with logger.session("sess-bare-empty") as session_id:
+            evolver = Evolver(
+                max_proposals_per_hour=10,
+                max_diff_lines=200,
+                trace_logger=logger,
+                session_id=session_id,
+                model_adapter=mock_adapter,
+            )
+            failure = FailureReport(
+                session_id=session_id,
+                summary="bare empty array fallback",
+                proposed_class="wrong-tool",
+            )
+            edits = evolver.propose(harness, failure=failure)
+
+            assert len(edits) == 1
+            assert edits[0].rationale == "address wrong-tool failure: reinforce tool list adherence"
+
+        # Acceptance criterion 2: at least one generation_attempt trace event.
+        events = list(logger.iter_events(session_id, kind=GENERATION_ATTEMPT_KIND))
+        assert len(events) >= 1, (
+            "Expected at least one generation_attempt event for the empty-array failure"
+        )
+        assert "zero ProposedEdit objects" in events[0].payload["error"]
+
     def test_falls_back_when_adapter_not_configured(self, tmp_path: Path) -> None:
         """Without a model adapter, Evolver uses the template-based approach."""
         harness = _make_harness_with_tests(tmp_path)

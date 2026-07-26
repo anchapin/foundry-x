@@ -8,6 +8,7 @@ import pytest
 
 from foundry_x.evolution.digester import FailureReport
 from foundry_x.evolution.evolver import (
+    GENERATION_ATTEMPT_KIND,
     Evolver,
     EvolverGenerationError,
     EvolverLLMError,
@@ -96,6 +97,16 @@ class TestParseEditsFromResponse:
         raw = json.dumps([{"not": "a valid ProposedEdit"}])
         with pytest.raises(EvolverGenerationError, match="no valid ProposedEdit"):
             _parse_edits_from_response(raw)
+
+    def test_raises_on_empty_array(self) -> None:
+        """A bare empty JSON array ``[]`` is a generation failure, not a silent no-op.
+
+        Regression test for issue #973: previously ``[]`` returned ``[]``
+        silently, bypassing the retry/template-fallback path in
+        ``generate_edits`` and emitting no ``generation_attempt`` event.
+        """
+        with pytest.raises(EvolverGenerationError, match="zero ProposedEdit objects"):
+            _parse_edits_from_response("[]")
 
     def test_confines_target_file_to_harness(self) -> None:
         raw = json.dumps(
@@ -194,3 +205,26 @@ class TestGenerateEdits:
         edits = await evolver.generate_edits(mock_adapter, tmp_path, failure_report)
         assert len(edits) == 1
         assert len(evolver._proposal_times) == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_array_raises_and_records_generation_attempt(
+        self, mock_adapter: MagicMock, failure_report: FailureReport, tmp_path: Path
+    ) -> None:
+        """A bare ``[]`` LLM response exhausts retries and raises ``EvolverLLMError``.
+
+        Each attempt records a ``generation_attempt`` trace event so the
+        failure class is observable (issue #973 acceptance criterion 2).
+        """
+        mock_adapter.complete.return_value = MagicMock(message=MagicMock(content="[]"))
+        trace_logger = MagicMock()
+        evolver = Evolver(trace_logger=trace_logger, session_id="sess-empty-array")
+        with pytest.raises(EvolverLLMError, match="no valid ProposedEdit"):
+            await evolver.generate_edits(mock_adapter, tmp_path, failure_report, max_retries=2)
+        attempt_calls = [
+            call
+            for call in trace_logger.record.call_args_list
+            if call.args[1] == GENERATION_ATTEMPT_KIND
+        ]
+        assert len(attempt_calls) == 2, (
+            f"Expected one generation_attempt event per retry (2), got {len(attempt_calls)}"
+        )
