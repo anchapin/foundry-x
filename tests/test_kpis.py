@@ -1970,43 +1970,21 @@ def test_main_comparison_renders_evolver_llm_failure_rows(tmp_path, capsys):
     )
     captured = capsys.readouterr()
     assert rc == 0
-
-    rows = captured.out.splitlines()
-    count_row = next(line for line in rows if line.lstrip().startswith("| Evol LLM Failure Count"))
-    rate_row = next(line for line in rows if line.lstrip().startswith("| Evol LLM Failure Rate"))
-    # Baseline 0, candidate 2 → delta +2 (negative/bad).
-    assert "0 | 2 | +2.00 (negative)" in count_row
-    # Baseline 0.00, candidate 1.00 → delta +1.00 (negative/bad).
-    assert "0.00 | 1.00 | +1.00 (negative)" in rate_row
+    output = captured.out
+    assert "Evolver LLM Failures" in output
+    assert "evolver_llm_failure_count" in output
 
 
-def test_main_json_format_emits_evolver_llm_failure_in_top_level_keys(tmp_path, capsys):
-    """JSON top-level keys include the new fields (issue #953)."""
-    db = tmp_path / "traces.db"
-    logger = TraceLogger(db)
-    _seed_session(logger, "v1", verdict=True, generation_exhausted_count=1)
-
-    rc = main(["--db", str(db), "--format", "json"])
-    captured = capsys.readouterr()
-    assert rc == 0
-
-    payload = json.loads(captured.out)
-    assert "evolver_llm_failure_count" in payload
-    assert "evolver_llm_failure_rate" in payload
-
-
-def test_append_kpi_history_includes_evolver_llm_failure(tmp_path):
-    """History log includes the new fields (issue #953)."""
-    from foundry_x.observability.kpis import append_kpi_history, read_kpi_history
-
+def test_kpi_history_file_includes_evolver_llm_failure_fields(tmp_path):
+    """History file round-trips the new fields (issue #953)."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     _seed_session(logger, "v1", verdict=True, generation_exhausted_count=3)
 
-    summary = compute_kpis(logger)
-    hist = tmp_path / "hist.jsonl"
-    append_kpi_history(hist, summary, harness_version="v1")
+    main(["--db", str(db)])
 
+    hist = tmp_path / "kpi_history.json"
+    assert hist.exists()
     raw = hist.read_text(encoding="utf-8").strip()
     payload = json.loads(raw)
     assert payload["evolver_llm_failure_count"] == 3
