@@ -170,7 +170,7 @@ def test_apply_json_merge_patch_lowers_existing_threshold() -> None:
 
 
 def test_apply_json_merge_patch_rejects_non_object_top_level() -> None:
-    with pytest.raises(ValueError, match="top-level object"):
+    with pytest.raises(TypeError, match="top-level object"):
         _apply_json_merge_patch("[1, 2, 3]\n", {"a": 1})
 
 
