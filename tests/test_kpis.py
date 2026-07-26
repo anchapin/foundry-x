@@ -1762,7 +1762,6 @@ def test_append_kpi_history_excludes_slices(tmp_path):
     assert read_kpi_history(hist)[0].improvement_rate == 1.0
 
 
-<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # Issue #953: evolver LLM failure count and rate from generation_exhausted events.
 # ---------------------------------------------------------------------------
@@ -1923,8 +1922,8 @@ def test_compare_kpis_includes_evolver_llm_failure_deltas(tmp_path):
     assert comparison.deltas["evolver_llm_failure_rate"] == pytest.approx(1.0)
 
 
-def test_main_comparison_renders_evolver_llm_failure_rows(tmp_path, capsys):
-    """Comparison markdown includes both failure count and rate rows (issue #953)."""
+def test_compare_kpis_evolver_llm_failure_rows(tmp_path, capsys):
+    """compare_kpis() includes both failure count and rate rows (issue #953)."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
@@ -1940,8 +1939,8 @@ def test_main_comparison_renders_evolver_llm_failure_rows(tmp_path, capsys):
 
     assert isinstance(comparison, KpiComparison)
     assert comparison.baseline.evolver_llm_failure_count == 0
-    assert comparison.candidate.evolver_llm_failure_count == 3
-    assert comparison.deltas["evolver_llm_failure_count"] == 3
+    assert comparison.candidate.evolver_llm_failure_count == 2
+    assert comparison.deltas["evolver_llm_failure_count"] == 2
     # Baseline rate 0.0, candidate rate 1.0 → delta 1.0.
     assert comparison.deltas["evolver_llm_failure_rate"] == pytest.approx(1.0)
 
@@ -1973,12 +1972,8 @@ def test_main_comparison_renders_evolver_llm_failure_rows(tmp_path, capsys):
     assert rc == 0
 
     rows = captured.out.splitlines()
-    count_row = next(
-        line for line in rows if line.lstrip().startswith("| Evol LLM Failure Count")
-    )
-    rate_row = next(
-        line for line in rows if line.lstrip().startswith("| Evol LLM Failure Rate")
-    )
+    count_row = next(line for line in rows if line.lstrip().startswith("| Evol LLM Failure Count"))
+    rate_row = next(line for line in rows if line.lstrip().startswith("| Evol LLM Failure Rate"))
     # Baseline 0, candidate 2 → delta +2 (negative/bad).
     assert "0 | 2 | +2.00 (negative)" in count_row
     # Baseline 0.00, candidate 1.00 → delta +1.00 (negative/bad).
