@@ -302,6 +302,83 @@ def test_load_check_fails_when_manifest_references_missing_hook(tmp_path: Path) 
     )
 
 
+@pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
+def test_load_check_fails_when_skill_file_on_disk_not_in_manifest(tmp_path: Path) -> None:
+    """A skill file on disk that is not declared in manifest.json must trip the
+    Critic gate (issue #1010). This is the reverse of issue #277: instead of
+    manifest→disk drift we catch disk→manifest drift."""
+    harness = _make_fixture_harness(
+        tmp_path,
+        skills={
+            "real.json": _VALID_SKILL,
+            "undeclared_skill.json": _VALID_SKILL,
+        },
+        include_hooks=True,
+        hooks_init="",
+        hooks_base=_MINIMAL_HOOKS_BASE,
+        manifest={
+            "version": "0.1.0",
+            "model_target": "test/model",
+            "hooks": ["base"],
+            "skills": ["real.json"],
+        },
+    )
+    proc = subprocess.run(
+        [sys.executable, str(LOAD_CHECK), "--harness-dir", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+        check=False,
+    )
+    assert proc.returncode != 0, (
+        f"load_check should fail on disk→manifest drift; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "undeclared_skill.json" in proc.stderr, (
+        f"stderr must name the undeclared skill file (issue #1010); got {proc.stderr!r}"
+    )
+    assert "issue #1010" in proc.stderr, f"stderr must reference issue #1010; got {proc.stderr!r}"
+
+
+@pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
+def test_load_check_fails_when_hook_file_on_disk_not_in_manifest(tmp_path: Path) -> None:
+    """A hook file on disk that is not declared in manifest.json must trip the
+    Critic gate (issue #1010). This is the reverse of issue #277 for hooks."""
+    harness = _make_fixture_harness(
+        tmp_path,
+        skills={"real.json": _VALID_SKILL},
+        include_hooks=True,
+        hooks_init="",
+        hooks_base=_MINIMAL_HOOKS_BASE,
+        manifest={
+            "version": "0.1.0",
+            "model_target": "test/model",
+            "hooks": ["base"],
+            "skills": ["real.json"],
+        },
+    )
+    extra_hook = tmp_path / "harness" / "hooks" / "undeclared_hook.py"
+    extra_hook.write_text("class UndeclaredHook:\n    pass\n", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(LOAD_CHECK), "--harness-dir", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+        check=False,
+    )
+    assert proc.returncode != 0, (
+        f"load_check should fail on disk→manifest drift; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "undeclared_hook.py" in proc.stderr, (
+        f"stderr must name the undeclared hook file (issue #1010); got {proc.stderr!r}"
+    )
+    assert "issue #1010" in proc.stderr, f"stderr must reference issue #1010; got {proc.stderr!r}"
+
+
 # ---------------------------------------------------------------------------
 # Hook-order validation tests (issue #567)
 # ---------------------------------------------------------------------------
