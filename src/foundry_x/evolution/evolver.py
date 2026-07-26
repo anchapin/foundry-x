@@ -939,9 +939,17 @@ class Evolver:
         ending in ``.json`` are patched via :func:`_apply_json_merge_patch`
         so the result remains syntactically valid JSON (issue #892);
         plain-text targets get ``extra_lines`` appended.
+
+        Every early-return path emits a ``generation_attempt`` trace event
+        followed by a ``generation_exhausted`` event so the failure is
+        observable in KPI rollups (issue #974). Previously these paths
+        returned ``[]`` silently.
         """
         template = _PROPOSED_CLASS_EDIT_TEMPLATES.get(failure.proposed_class)
         if template is None:
+            self._emit_template_failure(
+                f"no template defined for failure class: {failure.proposed_class!r}"
+            )
             return []
         relative_target, rationale, extra_lines, json_patch = template
         file_path = harness_dir / relative_target
@@ -951,13 +959,21 @@ class Evolver:
             # Critic's load_check gate does not false-negative on a valid
             # context-overflow edit (issue #892, ADR-0012).
             if not json_patch:
+                self._emit_template_failure(
+                    f"template for {failure.proposed_class!r} targets JSON file "
+                    f"{relative_target!r} but has no json_patch"
+                )
                 return []
             try:
                 modified = _apply_json_merge_patch(original, json_patch)
-            except (ValueError, json.JSONDecodeError):
+            except (ValueError, json.JSONDecodeError) as exc:
                 # A corrupt fixture or non-object manifest should not crash
                 # the evolution loop; surface it as a no-op proposal so the
-                # Critic gate still runs the rest of the suite.
+                # Critic gate still runs the rest of the suite. Emit a trace
+                # event so the failure is observable (issue #974).
+                self._emit_template_failure(
+                    f"JSON merge patch failed for {relative_target!r}: {exc}"
+                )
                 return []
         else:
             modified = original.rstrip("\n") + "\n" + "\n".join(extra_lines) + "\n"
@@ -973,6 +989,10 @@ class Evolver:
         )
         unified_diff = "".join(diff_lines)
         if not unified_diff:
+            self._emit_template_failure(
+                f"template for {failure.proposed_class!r} produced an empty diff "
+                f"(content already matches the template output)"
+            )
             return []
         edit = ProposedEdit(
             target_file=confined_target,
@@ -981,10 +1001,24 @@ class Evolver:
         )
         try:
             self._validate_edit(edit)
-        except EvolverGuardError:
+        except EvolverGuardError as exc:
+            self._emit_template_failure(
+                f"template edit for {failure.proposed_class!r} failed validation: {exc}"
+            )
             return []
         self._record_proposals(edit=edit, failure_class=failure.proposed_class)
         return [edit]
+
+    def _emit_template_failure(self, error: str) -> None:
+        """Emit generation_attempt + generation_exhausted for a template-path failure.
+
+        Template generation is a single attempt (no retries), so each
+        early-return path in :meth:`_propose_from_template` records both
+        a ``generation_attempt`` and a ``generation_exhausted`` event so
+        the ``evolver_llm_failure`` KPI increments (issue #974).
+        """
+        self._record_generation_attempt(attempt=1, error=error)
+        self._record_generation_exhausted(max_retries=1, final_error=error)
 
     def _record_generation_attempt(
         self,
