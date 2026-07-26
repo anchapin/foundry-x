@@ -260,14 +260,53 @@ def _flatten_text(event: TraceEvent) -> str:
     return " ".join((event.kind, *_walk_strings(event.payload))).lower()
 
 
+_STRUCTURED_ERROR_KINDS: frozenset[str] = frozenset({"model_error"})
+
+
+def _get_error_type(event: TraceEvent) -> str | None:
+    """Extract structured error_type from event.payload for known kinds.
+
+    Returns the ``error_type`` string when the event kind is in
+    ``_STRUCTURED_ERROR_KINDS`` and the payload carries that field,
+    otherwise ``None``.
+    """
+    if event.kind not in _STRUCTURED_ERROR_KINDS:
+        return None
+    error_type = event.payload.get("error_type")
+    if isinstance(error_type, str) and error_type:
+        return error_type
+    return None
+
+
 def _classify(event: TraceEvent, signal: str) -> tuple[str, list[str]]:
     """Map a failing event to ``(proposed_class, suspected_causes)``.
 
-    ``proposed_class`` is always one of the four named classes. The
-    most-specific keyword match wins (see ``_CLASS_KEYWORDS`` precedence);
-    when only a structural signal (``kind`` / payload key) is present with no
-    recognisable keyword, the class defaults to ``tool-error``.
+    Structured classification takes precedence over keyword matching:
+    - ``model_error.error_type`` → dedicated class
+    - ``tool_result.error`` non-null → tool-error class
+    Keyword matching is kept as fallback only for ``tool_error`` events
+    with opaque string payloads (no structured error_type field).
     """
+    if event.kind == "model_error":
+        error_type = _get_error_type(event)
+        if error_type:
+            return (
+                "model_error",
+                [
+                    _CLASS_CAUSE_TEMPLATES["tool-error"].format(match=error_type),
+                    f"error_type={error_type}",
+                ],
+            )
+
+    if event.kind == "tool_result" and "error" in event.payload:
+        return (
+            "tool-error",
+            [
+                _CLASS_CAUSE_TEMPLATES["tool-error"].format(match="tool_result.error"),
+                "Failing payload key present: error.",
+            ],
+        )
+
     text = _flatten_text(event)
     matched_class = ""
     matched_keyword = ""
