@@ -68,8 +68,8 @@ def test_event_limit_abort_count_aggregates_across_sessions(tmp_path):
     guard ensures correct counting even if multiple are emitted (issue #1005).
     """
     logger = TraceLogger(tmp_path / "traces.db")
-    _seed_event_limit_aborts(logger, "v1", 2)   # 1 session, 2 events → counts as 1
-    _seed_event_limit_aborts(logger, "v1", 3)   # 1 session, 3 events → counts as 1
+    _seed_event_limit_aborts(logger, "v1", 2)  # 1 session, 2 events → counts as 1
+    _seed_event_limit_aborts(logger, "v1", 3)  # 1 session, 3 events → counts as 1
     _seed_event_limit_aborts(logger, "v1", 0)  # clean session contributes nothing
 
     summary = compute_kpis(logger)
@@ -161,7 +161,7 @@ def test_event_limit_abort_count_is_in_comparison_aggregates(tmp_path):
     Sessions are counted once regardless of how many abort events they emitted.
     """
     logger = TraceLogger(tmp_path / "traces.db")
-    _seed_event_limit_aborts(logger, "baseline", 1)   # 1 session with 1 event → counts as 1
+    _seed_event_limit_aborts(logger, "baseline", 1)  # 1 session with 1 event → counts as 1
     _seed_event_limit_aborts(logger, "candidate", 4)  # 1 session with 4 events → counts as 1
 
     comparison = compare_kpis(logger, "baseline", "candidate")
@@ -175,7 +175,7 @@ def test_event_limit_abort_count_appears_in_comparison_markdown(tmp_path, capsys
     """The baseline/candidate CLI comparison renders the new row."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_event_limit_aborts(logger, "baseline", 1)   # 1 session with 1 event → counts as 1
+    _seed_event_limit_aborts(logger, "baseline", 1)  # 1 session with 1 event → counts as 1
     _seed_event_limit_aborts(logger, "candidate", 2)  # 1 session with 2 events → counts as 1
 
     rc = kpi_main(
