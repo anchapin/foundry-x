@@ -40,6 +40,12 @@ Before you write code in this repo, read in this order:
     - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
     - Module-boundary models → ADR-0006 | `src/foundry_x/execution/` → ADR-0010
     - `src/foundry_x/evolution/` → ADR-0010 | `evolution/loop.py` → ADR-0010
+    - Newer subsystems map to higher-numbered ADRs (0008–0023); e.g.
+      Conventional Commits → ADR-0008, security-eval benchmarks → ADR-0009,
+      manifest as evolver target → ADR-0012, model abstraction → ADR-0014/0015,
+      review state machine → ADR-0017, context pruning at scale → ADR-0021.
+      Run `ls docs/adr/` for the current set before assuming a subsystem
+      has no governing decision.
 11. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
@@ -62,6 +68,9 @@ and ask the human.
   edits against the full pytest suite *plus* the benchmark suite
   (`benchmarks/tasks/`, marked `@pytest.mark.benchmark`). Regressing a
   previously-passing benchmark blocks the gate. See ADR-0004.
+  `foundry-evolve evolve --no-verify` skips the gate locally and records
+  a synthetic "skipped" `CriticVerdict` (documented in SECURITY.md) — it
+  cannot ship a harness edit to `main`.
 - **Never run destructive commands** (`rm -rf`, `git reset --hard`,
   force-push to a branch other than your own throwaway, dropping a
   database) without an explicit rollback path stated in the response.
