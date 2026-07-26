@@ -351,23 +351,28 @@ class KpiComparison(BaseModel):
 class KpiHistoryEntry(BaseModel):
     """One line in the append-only KPI history log (issue #183).
 
-    Carries the three PRD-KPI fields from :class:`KpiSummary` plus a
-    ``timestamp`` (ISO-8601, stamped at append time) and an optional
-    ``harness_version`` (preserved when the operator filtered the
-    run with ``--harness-version``). The per-session ``injection_blocks``
-    map is intentionally absent — the history is a one-row-per-run
-    summary, and per-session inventory is the trace store's job.
+    Mirrors the scalar fields that :func:`append_kpi_history` writes to
+    disk: the three PRD-KPI fields from :class:`KpiSummary`, a
+    ``timestamp`` (ISO-8601, stamped at append time), an optional
+    ``harness_version`` (preserved when the operator filtered the run
+    with ``--harness-version``), and the scalar auxiliary reliability
+    signals.  Per-session maps (``injection_blocks``, ``token_totals``,
+    ``streaming_quality``, ``context_pruned_count``) and recomputed
+    coverage / slice fields are intentionally absent — the history is a
+    one-row-per-run summary, and per-session inventory is the trace
+    store's job.
 
-    Issue #585 adds ``hooks_disabled_count`` and ``hooks_disabled_rate``:
-    these scalar fields are included in the history log (unlike the per-
-    session maps) because they represent aggregate KPI signal, not per-
-    session inventory.
+    Issue #585 adds ``hooks_disabled_count`` and ``hooks_disabled_rate``.
 
-    The serialized JSON line round-trips through :class:`KpiSummary`
-    because pydantic's default ``extra='ignore'`` policy silently
-    drops ``timestamp`` and ``harness_version`` on parse, leaving
-    only the three numeric KPIs. That round-trip — minus the per-
-    session map — is the on-disk contract the trend table relies on.
+    Issue #933 adds the six auxiliary signals that were previously
+    written by :func:`append_kpi_history` but silently dropped on
+    read-back (pydantic ``extra='ignore'``): ``model_retry_count``,
+    ``tool_argument_parse_error_count``, ``event_limit_abort_count``,
+    ``server_restart_count``, ``token_budget_abort_count``, and
+    ``token_budget_hit_rate``.  Two dead fields (``injection_blocks``
+    and ``wall_clock_abort_count``) were removed because they are in
+    the exclude set and never appear in the JSONL line; any consumer
+    already sees their defaults.
     """
 
     timestamp: str
@@ -375,10 +380,14 @@ class KpiHistoryEntry(BaseModel):
     cycle_time_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
-    injection_blocks: dict[str, int] = {}
     hooks_disabled_count: int = 0
     hooks_disabled_rate: float = 0.0
-    wall_clock_abort_count: int = 0
+    token_budget_abort_count: int = 0
+    token_budget_hit_rate: float = 0.0
+    model_retry_count: int = 0
+    tool_argument_parse_error_count: int = 0
+    event_limit_abort_count: int = 0
+    server_restart_count: int = 0
     failure_class_distribution: dict[str, int] = {}
 
 
@@ -1666,6 +1675,10 @@ def append_kpi_history(
             "token_totals",
             "streaming_quality",
             "wall_clock_abort_count",
+            # Issue #933: ``context_pruned_count`` is a per-session dict,
+            # not a scalar trend metric — exclude it so the JSONL history
+            # line stays compact and its key set stable.
+            "context_pruned_count",
             # Issue #895: ``excluded_from_cycle_time`` is an auxiliary
             # coverage signal recomputed from the trace store on demand
             # (like the per-slice fields below), not a trend metric — keep
@@ -1740,6 +1753,22 @@ def _sparkline(values: list[float | None]) -> str:
     return "".join(_char(v) for v in values)
 
 
+# Auxiliary reliability signals surfaced in the history trend table
+# (issue #933).  Each tuple is (field_name, display_label).  The section
+# appears only when at least one entry has a non-zero value, keeping the
+# output compact when the harness is clean.
+_RELIABILITY_SIGNALS: list[tuple[str, str]] = [
+    ("model_retry_count", "Model Retries"),
+    ("tool_argument_parse_error_count", "Tool Arg Parse Errors"),
+    ("event_limit_abort_count", "Event-Limit Aborts"),
+    ("server_restart_count", "Server Restarts"),
+    ("token_budget_abort_count", "Token Budget Aborts"),
+    ("token_budget_hit_rate", "Token Budget Hit Rate"),
+    ("hooks_disabled_count", "Hooks Disabled"),
+    ("hooks_disabled_rate", "Hooks Disabled Rate"),
+]
+
+
 def render_history_markdown(
     entries: Sequence[KpiHistoryEntry],
     *,
@@ -1794,6 +1823,26 @@ def render_history_markdown(
             si = sparkline_imp[idx] if sparkline_imp else " "
             row += f" {sc} | {sr} | {si} |"
         lines.append(row)
+    # Reliability Signals section (issue #933): surface the auxiliary
+    # signals that are persisted but were previously invisible in the
+    # trend table.  The section appears only when at least one entry
+    # carries a non-zero value so the default output stays byte-identical
+    # to the pre-fix table when the harness is clean.
+    if any(getattr(e, field, 0) for e in entries for field, _ in _RELIABILITY_SIGNALS):
+        lines.append("")
+        lines.append("### Reliability Signals")
+        lines.append("")
+        lines.append("| Signal | " + " | ".join(e.timestamp[:10] for e in entries) + " |")
+        lines.append("| --- | " + " | ".join("---" for _ in entries) + " |")
+        for field, label in _RELIABILITY_SIGNALS:
+            row_parts = [f"| {label} |"]
+            for entry in entries:
+                value = getattr(entry, field, 0)
+                if isinstance(value, float):
+                    row_parts.append(f" {value:.2f} |")
+                else:
+                    row_parts.append(f" {value} |")
+            lines.append("".join(row_parts))
     if any(entry.failure_class_distribution for entry in entries):
         lines.append("")
         lines.append("### Failure Class Distribution")

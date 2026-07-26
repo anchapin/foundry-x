@@ -299,7 +299,8 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     # scalar fields and are included (issue #585). model_retry_count and
     # tool_argument_parse_error_count are also scalar fields, so they land in
     # the trend line (issues #871 and #872). server_restart_count is a
-    # scalar field introduced for issue #899.
+    # scalar field introduced for issue #899. context_pruned_count is a
+    # per-session dict excluded by issue #933.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
@@ -310,7 +311,6 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "evolver_duration_ms",
         "hooks_disabled_count",
         "hooks_disabled_rate",
-        "context_pruned_count",
         "failure_class_distribution",
         "model_retry_count",
         "tool_argument_parse_error_count",
@@ -319,6 +319,7 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     }
     assert "injection_blocks" not in payload
     assert "token_totals" not in payload
+    assert "context_pruned_count" not in payload
 
 
 def test_main_log_to_persists_harness_version_when_filtered(tmp_path):
@@ -802,3 +803,130 @@ def test_main_alert_threshold_from_history_is_not_supported(tmp_path, capsys):
 
     assert rc == 0
     assert "[ALERT]" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Issue #933: auxiliary KPI signals retained through read_kpi_history.
+# ---------------------------------------------------------------------------
+
+
+def test_read_kpi_history_preserves_all_auxiliary_signals(tmp_path):
+    """Issue #933: read_kpi_history must retain all 6 auxiliary signals.
+
+    ``append_kpi_history`` persists the full ``KpiSummary`` dump, but
+    ``KpiHistoryEntry`` previously omitted six scalar fields.  Pydantic's
+    ``extra='ignore'`` policy silently dropped them on read-back.  This
+    test exercises the actual CLI path (``read_kpi_history`` →
+    ``KpiHistoryEntry``), not the raw-JSONL-as-``KpiSummary`` shortcut
+    that masked the bug.
+    """
+    path = tmp_path / "kpi-history.jsonl"
+    summary = KpiSummary(
+        cycle_time_seconds=2.5,
+        regression_rate=0.2,
+        improvement_rate=0.8,
+        model_retry_count=7,
+        tool_argument_parse_error_count=2,
+        event_limit_abort_count=3,
+        server_restart_count=1,
+        token_budget_abort_count=4,
+        token_budget_hit_rate=0.5,
+    )
+    append_kpi_history(path, summary, harness_version="v1")
+
+    entries = read_kpi_history(path)
+    assert len(entries) == 1
+    entry = entries[0]
+    # Acceptance criteria #1 and #2.
+    assert entry.model_retry_count == 7
+    assert entry.event_limit_abort_count == 3
+    # Acceptance criterion #3: all 6 auxiliary fields survive.
+    assert entry.tool_argument_parse_error_count == 2
+    assert entry.server_restart_count == 1
+    assert entry.token_budget_abort_count == 4
+    assert entry.token_budget_hit_rate == pytest.approx(0.5)
+
+
+def test_read_kpi_history_defaults_auxiliary_signals_to_zero_for_old_entries(
+    tmp_path,
+):
+    """Old JSONL entries without the new fields default to 0 / 0.0."""
+    path = tmp_path / "kpi-history.jsonl"
+    # Simulate a pre-issue-#933 line: only the original scalar fields.
+    old_line = json.dumps(
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "harness_version": "v0",
+            "cycle_time_seconds": 1.0,
+            "regression_rate": 0.1,
+            "improvement_rate": 0.9,
+            "hooks_disabled_count": 0,
+            "hooks_disabled_rate": 0.0,
+            "failure_class_distribution": {},
+        }
+    )
+    path.write_text(old_line + "\n", encoding="utf-8")
+
+    entries = read_kpi_history(path)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.model_retry_count == 0
+    assert entry.token_budget_hit_rate == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Issue #933: Reliability Signals section in render_history_markdown.
+# ---------------------------------------------------------------------------
+
+
+def test_render_history_markdown_reliability_signals_shown_when_nonzero(tmp_path):
+    """Issue #933, criterion #4: section appears when a signal is non-zero."""
+    path = tmp_path / "kpi-history.jsonl"
+    append_kpi_history(
+        path,
+        KpiSummary(
+            improvement_rate=0.5,
+            model_retry_count=7,
+            event_limit_abort_count=3,
+        ),
+    )
+    entries = read_kpi_history(path)
+    table = render_history_markdown(entries)
+
+    assert "### Reliability Signals" in table
+    assert "Model Retries" in table
+    assert "Event-Limit Aborts" in table
+    # The non-zero values appear in the section.
+    assert "| 7 |" in table
+    assert "| 3 |" in table
+
+
+def test_render_history_markdown_reliability_signals_omitted_when_all_zero(tmp_path):
+    """Issue #933, criterion #5: section omitted when all signals are zero."""
+    path = tmp_path / "kpi-history.jsonl"
+    append_kpi_history(path, KpiSummary(improvement_rate=0.5))
+    entries = read_kpi_history(path)
+    table = render_history_markdown(entries)
+
+    assert "### Reliability Signals" not in table
+
+
+def test_render_history_markdown_byte_identical_when_all_aux_zero(tmp_path):
+    """Issue #933, criterion #7: output is byte-identical to pre-fix when clean."""
+    path = tmp_path / "kpi-history.jsonl"
+    append_kpi_history(
+        path,
+        KpiSummary(
+            cycle_time_seconds=1.5,
+            regression_rate=0.1,
+            improvement_rate=0.9,
+        ),
+        harness_version="v1",
+    )
+    entries = read_kpi_history(path)
+    table = render_history_markdown(entries)
+    lines = table.splitlines()
+
+    # header + separator + 1 data row — no extra sections.
+    assert len(lines) == 3
+    assert "Reliability Signals" not in table
