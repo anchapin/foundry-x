@@ -126,7 +126,7 @@ def run_evolution_step(
         A pydantic model containing the failure report, proposed edits (if any),
         and the critic verdict (if the full chain ran).
     """
-    harness_version = resolve_harness_version(harness_dir)
+    harness_version = resolve_harness_version(harness_dir).version
     started_at = _now_iso()
     failure_report = Digester().digest(session_id, events)
 
@@ -230,7 +230,7 @@ async def run_evolution_step_async(
     ``trace_logger`` is passed to the default :class:`Evolver` so
     template-fallback failures emit trace events (issue #974).
     """
-    harness_version = resolve_harness_version(harness_dir)
+    harness_version = resolve_harness_version(harness_dir).version
     started_at = _now_iso()
     failure_report = Digester().digest(session_id, events)
 

@@ -15,6 +15,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -68,6 +69,19 @@ DEFAULT_TASK_TIMEOUT_S: float = 600.0
 # stamped into trace sessions so each trace is attributable to the harness
 # revision that produced it.
 _FALLBACK_HARNESS_VERSION: str = "0.1.0"
+
+
+class HarnessVersionSource(str, Enum):
+    VERSION_FILE = "version_file"
+    GIT_DESCRIBE = "git_describe"
+    FALLBACK = "fallback"
+
+
+@dataclass(frozen=True)
+class HarnessVersion:
+    version: str
+    source: HarnessVersionSource
+
 
 # Env-var names consulted for model identity (issue #12). ``FOUNDRY_MODEL_ID``
 # is the explicit, foundry-owned override; the other two already exist in
@@ -386,7 +400,7 @@ def build_model_adapter_with_overrides(
     )
 
 
-def resolve_harness_version(harness_dir: Path) -> str:
+def resolve_harness_version(harness_dir: Path) -> HarnessVersion:
     """Return the version of the harness rooted at ``harness_dir``.
 
     Resolution order (issue #11):
@@ -405,6 +419,10 @@ def resolve_harness_version(harness_dir: Path) -> str:
     directory) fall through silently to the next source rather than
     aborting the run; a missing version stamp is preferable to a run that
     cannot start.
+
+    Returns a :class:`HarnessVersion` containing the resolved version string
+    and a ``source`` field identifying which resolution step succeeded:
+    ``version_file``, ``git_describe``, or ``fallback``.
     """
     version_file = harness_dir / "VERSION"
     try:
@@ -412,7 +430,7 @@ def resolve_harness_version(harness_dir: Path) -> str:
     except (FileNotFoundError, OSError, UnicodeDecodeError):
         text = ""
     if text.strip():
-        return text.strip()
+        return HarnessVersion(version=text.strip(), source=HarnessVersionSource.VERSION_FILE)
 
     try:
         completed = subprocess.run(
@@ -424,9 +442,13 @@ def resolve_harness_version(harness_dir: Path) -> str:
             check=True,
         )
     except (OSError, subprocess.SubprocessError):
-        return _FALLBACK_HARNESS_VERSION
+        return HarnessVersion(
+            version=_FALLBACK_HARNESS_VERSION, source=HarnessVersionSource.FALLBACK
+        )
     candidate = completed.stdout.strip()
-    return candidate or _FALLBACK_HARNESS_VERSION
+    if candidate:
+        return HarnessVersion(version=candidate, source=HarnessVersionSource.GIT_DESCRIBE)
+    return HarnessVersion(version=_FALLBACK_HARNESS_VERSION, source=HarnessVersionSource.FALLBACK)
 
 
 class RunLimits(BaseModel):
@@ -2058,7 +2080,9 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
     workspace_root = Path(args.workspace_root).resolve() if args.workspace_root else None
 
     logger = TraceLogger(args.trace_path, backend=resolve_trace_backend())
-    harness_version = resolve_harness_version(harness_dir)
+    resolved_hv = resolve_harness_version(harness_dir)
+    harness_version = resolved_hv.version
+    harness_version_source = resolved_hv.source.value
     model_id_override = args.model_id if args.model_id is not None else None
     quantization_override = args.quantization if args.quantization is not None else None
     path_or_endpoint_override = args.path_or_endpoint if args.path_or_endpoint is not None else None
@@ -2091,11 +2115,18 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
     # degradation even when no restart is attempted.
     server_manager = FoundryServerManager()
 
+    session_metadata: dict[str, Any] = {}
+    if quantization is not None:
+        session_metadata["quantization"] = quantization
+    if harness_variant is not None:
+        session_metadata["harness_variant"] = harness_variant
+    session_metadata["harness_version_source"] = harness_version_source
     with logger.session(
         harness_version=harness_version,
         model_id=model_id,
         quantization=quantization,
         harness_variant=harness_variant,
+        metadata=session_metadata,
     ) as session_id:
         logger.record(session_id, kind="task_received", payload={"prompt": args.task})
         start = time.monotonic()
