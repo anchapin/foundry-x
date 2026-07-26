@@ -151,7 +151,7 @@ pin their producer, payload contract, and failure-signal classification
 | **`user_prompt`** | `Runner.run_task` (issue #89, ADR-0010) | `{"content": str, "tool_count": int}` — the task as fed into the model plus the size of the tool surface the agent sees. | no |
 | **`model_request`** | `Runner.run_task` (one per round-trip) | `{"step": int, "message_count": int, "tool_count": int}` — loop index, conversation length, and tool-surface size at request time. | no |
 | **`model_response`** | `Runner.run_task` (one per round-trip) | `{"step": int, "finish_reason": str | null, "message": dict, "tool_calls": list[dict], "time_to_first_token_ms": int | null, "chunk_count": int, "total_stream_ms": int, "token_usage": dict | null, "tokens_used": int}` — the assistant message plus any tool calls the model emitted, plus streaming timing fields (issue #580). `time_to_first_token_ms` is measured from stream start to the first delta carrying text content OR a tool-call fragment — a tool-call-only response still counts as a payload delta (issue #905); the value is `null` only when the stream produced zero payload deltas of either kind. | no |
-| **`model_error`** | `Runner.run_task` (on `adapter.complete` exception) | `{"step": int, "error_type": str, "message": str}` — loop index plus exception class name and `str(exc)`. Paired with a `task_failed` terminal marker. | **yes** |
+| **`model_error`** | `Runner.run_task` (on `adapter.complete` exception, and on the empty-response degenerate path) | `{"step": int, "error_type": str, "message": str}` — loop index plus exception class name and `str(exc)`. Paired with a `task_failed` terminal marker. Issue #931 added a second trigger: when the model stream returns no content, no tool calls, and `finish_reason=None` (e.g. `max_tokens=0`, content filter, premature connection close after HTTP 200), the Runner emits a `model_error` event with `error_type="EmptyResponse"` before classifying the outcome as `status="failed"`/`reason="model_error"`; the condition explicitly checks `finish_reason is None`, so `finish_reason="stop"` with empty content is unaffected. | **yes** |
 | **`tool_call`** | `Runner.run_task` (exactly one per emitted tool call) | `{"step": int, "call_id": str, "name": str, "arguments": dict, "duration_ms": int, "hook_overhead_ms": int | null, "hook_post_overhead_ms": int | null}` — added in issue #173; per-tool-call latency for KPI slicing. `hook_overhead_ms` (issue #709) is wall-clock milliseconds spent in `HookRegistry.run_pre` before the tool executes; `null` when no hooks are registered. `hook_post_overhead_ms` (issue #903) is wall-clock milliseconds spent in `HookRegistry.run_post` after the tool executes (this includes the security-critical `InjectionFirewallHook` scan on the result before it is sent back to the model); `null` when no hooks are registered. Issue #893 consolidated the previous two-event emission (a pre-execution marker with `duration_ms=0` plus a post-execution event with the real duration) into this single event emitted after `run_post`, so per-call latency percentiles no longer see phantom zero-duration rows; the event carries the actual `duration_ms` plus both hook overheads. See ADR-0010 for the agent-loop structure. | no |
 | **`tool_result`** | `Runner.run_task` (one per tool execution) | `{"step": int, "call_id": str, "name": str, "duration_ms": int, "output": Any \| null, "error": str \| null}` — non-null `error` flips the event onto the Digester's failure path via `FAILURE_PAYLOAD_KEYS`. | when `error` is non-null |
 | **`outcome`** | `Runner.run_task` (always emitted in `finally`) | `{"status": "success" \| "truncated" \| "failed", "reason": "final_answer" \| "model_error" \| "max_steps", "steps": int}` — terminal status the Digester attributes to the session. | when `status == "failed"` |
@@ -189,9 +189,15 @@ subset of the broader kind vocabulary above.
   `task_aborted` when the wall-clock cap fires (reason=`wall_clock`)
   or the token budget is exceeded (reason=`token_budget`). The remaining
   four are reserved vocabulary recognized by the Digester for
-  compatibility with legacy producers and tests. `model_error` (issue
-  #867) is emitted by the Runner when `adapter.complete` raises, paired
-  with `outcome.reason="model_error"`; `hook_registry_error` (issue
+   compatibility with legacy producers and tests. `model_error` (issue
+   #867) is emitted by the Runner when `adapter.complete` raises, paired
+   with `outcome.reason="model_error"`; issue #931 added a second trigger
+   on the empty-response degenerate path (no content, no tool calls,
+   `finish_reason=None`) — the Runner emits `model_error` with
+   `error_type="EmptyResponse"` and classifies the outcome as
+   `status="failed"`/`reason="model_error"` so the first-failure walk sees
+   sessions that previously silently landed in `"success"`;
+   `hook_registry_error` (issue
   #867) is emitted by `Runner._resolve_hook_registry` when
   `harness.hooks.get_registry()` raises after a successful lazy import,
   leaving the session with every hook (including the

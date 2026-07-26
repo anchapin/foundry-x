@@ -91,6 +91,20 @@ def _final_response(total_tokens: int | None = None) -> ModelResponse:
     )
 
 
+def _empty_response() -> ModelResponse:
+    """Issue #931: degenerate response — no content, no tool calls, and
+    ``finish_reason=None``. The ``_StreamingScriptedAdapter`` yields zero
+    payload chunks for this (content is falsy, finish_reason is falsy, no
+    tool calls, no usage), exercising the empty-response path through
+    ``run_task`` end to end."""
+    return ModelResponse(
+        message=ModelMessage(role="assistant", content=None),
+        tool_calls=[],
+        finish_reason=None,
+        usage=None,
+    )
+
+
 class _StreamingScriptedAdapter:
     """Adapter that yields chunks matching a sequence of ``ModelResponse``s.
 
@@ -470,3 +484,52 @@ async def test_outcome_reason_preserved_from_abort_path(
     )
     assert outcome["reason"] == expected_reason
     assert outcome["status"] == expected_status
+
+
+# --- issue #931: empty-response degenerate path -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_empty_model_response_classified_as_failure(tmp_path):
+    """Issue #931: when the model stream produces zero payload deltas — no
+    content, no tool calls, and ``finish_reason=None`` — ``run_task`` must
+    classify the outcome as ``status="failed"`` / ``reason="model_error"``
+    and emit a ``model_error`` trace event with ``error_type="EmptyResponse"``
+    before the outcome event.
+
+    Previously this degenerate case fell through to the ``final_answer``
+    branch while ``outcome_status`` stayed ``None`` (coerced to
+    ``"success"`` in the finally block), so a session that returned nothing
+    was silently classified as a successful answer and the Digester's
+    ``FAILURE_KINDS`` first-failure walk never saw it."""
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+    db = tmp_path / "traces.db"
+
+    adapter = _StreamingScriptedAdapter([_empty_response()])
+
+    logger = TraceLogger(db)
+    with logger.session(harness_version="0.1.0") as session_id:
+        await run_task(
+            "issue-931-empty-response",
+            harness_dir,
+            logger,
+            session_id,
+            model_adapter=adapter,
+            skill_executor=_noop_executor,
+        )
+
+    events = logger.load_session(session_id)
+
+    outcome = _outcome(events)
+    assert outcome["status"] == "failed"
+    assert outcome["reason"] == "model_error"
+
+    model_errors = [e for e in events if e.kind == "model_error"]
+    assert len(model_errors) == 1, f"expected 1 model_error event, got {len(model_errors)}"
+    assert model_errors[0].payload["error_type"] == "EmptyResponse"
+    assert model_errors[0].payload["step"] == 0
+
+    # The model_error event must precede the outcome event in trace order.
+    kinds_in_order = [e.kind for e in events]
+    assert kinds_in_order.index("model_error") < kinds_in_order.index("outcome")
