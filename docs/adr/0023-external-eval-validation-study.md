@@ -141,10 +141,10 @@ such move must re-run the full study.
   records the agent configuration in session metadata so the
   aggregator can group `critic_verdict` events per configuration.
 - **Follow-ups** (to be filed as separate issues, not bundled here):
-  1. Runner-side session-metadata tagging: record model id,
-     quantization, and harness-variant label on each session so the
-     aggregator can recover per-configuration groupings from
-     `logs/traces.db`.
+  1. ~~Runner-side session-metadata tagging~~ **(Done, issue #1007)**:
+     record model id, quantization, and harness-variant label on each
+     session so the aggregator can recover per-configuration
+     groupings from `logs/traces.db`.
   2. Run the study: 30+ configurations, real llama.cpp endpoint,
      produce the Pearson number, and update this ADR's "Status" with
      the result. If the result is `weak_proxy` or `invalid_proxy`,

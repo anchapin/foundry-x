@@ -237,8 +237,8 @@ class TraceSession(BaseModel):
     started_at: str
     harness_version: str
     model_id: str | None = None
-    # ``Any`` per ADR-0006 serialization-boundary carve-out (same rationale
-    # as TraceEvent.payload).
+    quantization: str | None = None
+    harness_variant: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     ended_at: str | None = None
 
@@ -262,6 +262,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     started_at TEXT NOT NULL,
     harness_version TEXT NOT NULL,
     model_id TEXT,
+    quantization TEXT,
+    harness_variant TEXT,
     metadata TEXT,
     ended_at TEXT
 );
@@ -473,6 +475,8 @@ class TraceLogger:
         self,
         harness_version: str,
         model_id: str | None = None,
+        quantization: str | None = None,
+        harness_variant: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Iterator[str]:
         # Issue #121: scrub the metadata dict before either backend writes it.
@@ -491,6 +495,8 @@ class TraceLogger:
                             "started_at": _now(),
                             "harness_version": harness_version,
                             "model_id": model_id,
+                            "quantization": quantization,
+                            "harness_variant": harness_variant,
                             "metadata": redacted_metadata,
                             "kind": "session_start",
                         }
@@ -502,13 +508,15 @@ class TraceLogger:
             with self._conn:
                 self._conn.execute(
                     "INSERT INTO sessions "
-                    "(session_id, started_at, harness_version, model_id, metadata) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "(session_id, started_at, harness_version, model_id, quantization, harness_variant, metadata) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         session_id,
                         _now(),
                         harness_version,
                         model_id,
+                        quantization,
+                        harness_variant,
                         json.dumps(redacted_metadata),
                     ),
                 )
@@ -722,6 +730,10 @@ class TraceLogger:
             "model_id",
             "metadata",
         ]
+        if "quantization" in columns:
+            selected.append("quantization")
+        if "harness_variant" in columns:
+            selected.append("harness_variant")
         if "ended_at" in columns:
             selected.append("ended_at")
         query = "SELECT " + ", ".join(selected) + " FROM sessions"
@@ -740,6 +752,8 @@ class TraceLogger:
                     started_at=values["started_at"],
                     harness_version=values["harness_version"],
                     model_id=values.get("model_id"),
+                    quantization=values.get("quantization"),
+                    harness_variant=values.get("harness_variant"),
                     metadata=json.loads(values.get("metadata") or "{}"),
                     ended_at=values.get("ended_at"),
                 )
@@ -779,6 +793,8 @@ class TraceLogger:
                         "started_at": record["started_at"],
                         "harness_version": record["harness_version"],
                         "model_id": record.get("model_id"),
+                        "quantization": record.get("quantization"),
+                        "harness_variant": record.get("harness_variant"),
                         "metadata": record.get("metadata") or {},
                         "ended_at": None,
                     }
