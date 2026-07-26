@@ -1097,7 +1097,9 @@ def test_context_efficiency_token_aware_session(tmp_path):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
 
-    _seed_context_pruned_token_aware(logger, "v1", dropped=100, threshold_tokens=8192, session_tokens=8292)
+    _seed_context_pruned_token_aware(
+        logger, "v1", dropped=100, threshold_tokens=8192, session_tokens=8292
+    )
 
     summary = compute_kpis(logger)
 
