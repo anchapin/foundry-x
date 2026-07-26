@@ -8,6 +8,7 @@ acceptance criteria from issue #259 against a synthetic fixture.
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -158,6 +159,19 @@ class TestExecListDir:
 
         names = [e["name"] for e in result["entries"]]
         assert names == sorted(names)
+
+    @pytest.mark.asyncio
+    async def test_scandir_oserror_includes_error_key(self, workspace: Path, monkeypatch) -> None:
+        def raise_oserror(*args, **kwargs):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(os, "scandir", raise_oserror)
+        result = await _exec_list_dir({"path": str(workspace)}, workspace)
+
+        assert result["entries"] == []
+        assert result["truncated"] is False
+        assert "error" in result
+        assert "permission denied" in result["error"]
 
 
 class TestExecWriteFile:
@@ -453,6 +467,19 @@ class TestExecGrepSearch:
         match = result["matches"][0]
         assert match["file"] == "subdir/nested.py"
         assert not match["file"].startswith("/")
+
+    @pytest.mark.asyncio
+    async def test_rglob_oserror_includes_error_key(self, workspace: Path, monkeypatch) -> None:
+        def raise_oserror(self, *args, **kwargs):
+            raise OSError("I/O error")
+
+        monkeypatch.setattr(Path, "rglob", raise_oserror)
+        result = await _exec_grep_search({"pattern": "def", "path": str(workspace)}, workspace)
+
+        assert result["matches"] == []
+        assert result["truncated"] is False
+        assert "error" in result
+        assert "I/O error" in result["error"]
 
 
 class TestWorkspaceRootResolution:
