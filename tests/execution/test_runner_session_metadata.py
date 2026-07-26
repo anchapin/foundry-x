@@ -64,8 +64,8 @@ def test_main_stamps_quantization_and_harness_variant_into_session_metadata(tmp_
     sessions = TraceLogger(db).list_sessions()
     assert len(sessions) == 1
     assert sessions[0].model_id == "codellama-7b"
-    assert sessions[0].metadata.get("quantization") == "Q5_K_M"
-    assert sessions[0].metadata.get("harness_variant") == "q5km"
+    assert sessions[0].quantization == "Q5_K_M"
+    assert sessions[0].harness_variant == "q5km"
 
 
 def test_main_stamps_harness_variant_from_env_into_session_metadata(tmp_path, monkeypatch):
@@ -94,7 +94,7 @@ def test_main_stamps_harness_variant_from_env_into_session_metadata(tmp_path, mo
 
     sessions = TraceLogger(db).list_sessions()
     assert len(sessions) == 1
-    assert sessions[0].metadata.get("harness_variant") == "q4km"
+    assert sessions[0].harness_variant == "q4km"
 
 
 def test_main_stamps_quantization_from_env_into_session_metadata(tmp_path, monkeypatch):
@@ -123,7 +123,7 @@ def test_main_stamps_quantization_from_env_into_session_metadata(tmp_path, monke
 
     sessions = TraceLogger(db).list_sessions()
     assert len(sessions) == 1
-    assert sessions[0].metadata.get("quantization") == "Q8_0"
+    assert sessions[0].quantization == "Q8_0"
 
 
 def test_main_cli_harness_variant_overrides_env(tmp_path, monkeypatch):
@@ -154,7 +154,7 @@ def test_main_cli_harness_variant_overrides_env(tmp_path, monkeypatch):
 
     sessions = TraceLogger(db).list_sessions()
     assert len(sessions) == 1
-    assert sessions[0].metadata.get("harness_variant") == "cli-variant"
+    assert sessions[0].harness_variant == "cli-variant"
 
 
 def test_main_session_metadata_empty_when_no_tags_set(tmp_path, monkeypatch):

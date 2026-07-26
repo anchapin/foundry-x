@@ -2091,16 +2091,11 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
     # degradation even when no restart is attempted.
     server_manager = FoundryServerManager()
 
-    session_metadata: dict[str, Any] = {}
-    if quantization is not None:
-        session_metadata["quantization"] = quantization
-    if harness_variant is not None:
-        session_metadata["harness_variant"] = harness_variant
-
     with logger.session(
         harness_version=harness_version,
         model_id=model_id,
-        metadata=session_metadata if session_metadata else None,
+        quantization=quantization,
+        harness_variant=harness_variant,
     ) as session_id:
         logger.record(session_id, kind="task_received", payload={"prompt": args.task})
         start = time.monotonic()
