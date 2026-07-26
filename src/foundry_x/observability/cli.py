@@ -11,7 +11,7 @@ from foundry_x.observability.render import render_failure_report
 from foundry_x.observability.session_card import format_session_card
 from foundry_x.observability.session_summary import (
     SessionSummaryReport,
-    _failure_class_distribution,
+    _failure_class_distribution_from_rows,
     build_session_summary,
     render_session_summary,
 )
@@ -377,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
             harness_version=args.harness_version,
             since=args.since,
         )
-        failure_class_distribution = _failure_class_distribution(rows)
+        failure_class_distribution = _failure_class_distribution_from_rows(rows)
         # Issue #902: --latest limits the roll-up to the single most recent
         # row after newest-first sorting. Mutually exclusive with --limit
         # because the semantics (single newest row vs. up-to-N rows) are

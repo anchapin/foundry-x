@@ -179,7 +179,7 @@ class SessionSummaryReport(BaseModel):
     rows: list[SessionSummaryRow] = []
 
 
-def _failure_class_distribution(
+def _failure_class_distribution_from_rows(
     rows: Sequence[SessionSummaryRow],
 ) -> dict[str, int]:
     """Compute ``failure_class_distribution`` from session summary rows (issue #737).

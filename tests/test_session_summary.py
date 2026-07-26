@@ -631,14 +631,14 @@ def test_build_session_summary_includes_failure_class(tmp_path):
 
 
 def test_failure_class_distribution_computed_from_rows(tmp_path):
-    """Issue #737: _failure_class_distribution aggregates failure classes from rows."""
-    from foundry_x.observability.session_summary import _failure_class_distribution
+    """Issue #737: _failure_class_distribution_from_rows aggregates failure classes from rows."""
+    from foundry_x.observability.session_summary import _failure_class_distribution_from_rows
 
     db = tmp_path / "traces.db"
     _plant_sessions_with_verdicts(db)
 
     rows = build_session_summary(TraceLogger(db))
-    distribution = _failure_class_distribution(rows)
+    distribution = _failure_class_distribution_from_rows(rows)
 
     assert distribution == {"bad-prompt": 2, "tool-error": 1}
 
