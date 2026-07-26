@@ -1776,6 +1776,40 @@ async def run_task(
                 if response.finish_reason not in (None, "stop"):
                     outcome_status = "truncated"
                     outcome_reason = response.finish_reason
+                elif response.finish_reason is None and not response.message.content:
+                    # Issue #931: degenerate empty response — the stream
+                    # produced no content deltas and no tool calls, and
+                    # ``finish_reason`` is ``None`` (max_tokens=0, content
+                    # filter, premature connection close after HTTP 200, or
+                    # an API quirk). Previously this fell through to the
+                    # ``final_answer`` path while ``outcome_status`` stayed
+                    # ``None`` (coerced to ``"success"`` in the finally
+                    # block at :1904), so a session that returned nothing
+                    # was classified as a successful answer. Classify it as
+                    # a failure and emit a ``model_error`` event so the
+                    # Digester's ``FAILURE_KINDS`` first-failure walk sees
+                    # the session and the evolution loop gets a signal. The
+                    # condition explicitly checks ``finish_reason is None``
+                    # so ``finish_reason="stop"`` with empty content stays a
+                    # successful final answer (issue #750 residual slice).
+                    outcome_status = "failed"
+                    outcome_reason = "model_error"
+                    _record_and_count(
+                        session_id,
+                        kind="model_error",
+                        payload={
+                            "step": step,
+                            "error_type": "EmptyResponse",
+                            "message": (
+                                "model stream produced no content and no "
+                                "tool calls (finish_reason=None)"
+                            ),
+                        },
+                    )
+                    if _check_event_limit(session_id):
+                        outcome_status = "failed"
+                        outcome_reason = "event_limit"
+                        hit_event_limit = True
                 else:
                     outcome_reason = "final_answer"
                 break
