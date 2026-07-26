@@ -1949,12 +1949,8 @@ def test_main_comparison_renders_evolver_llm_failure_rows(tmp_path, capsys):
     assert rc == 0
 
     rows = captured.out.splitlines()
-    count_row = next(
-        line for line in rows if line.lstrip().startswith("| Evol LLM Failure Count")
-    )
-    rate_row = next(
-        line for line in rows if line.lstrip().startswith("| Evol LLM Failure Rate")
-    )
+    count_row = next(line for line in rows if line.lstrip().startswith("| Evol LLM Failure Count"))
+    rate_row = next(line for line in rows if line.lstrip().startswith("| Evol LLM Failure Rate"))
     # Baseline 0, candidate 2 → delta +2 (negative/bad).
     assert "0 | 2 | +2.00 (negative)" in count_row
     # Baseline 0.00, candidate 1.00 → delta +1.00 (negative/bad).
