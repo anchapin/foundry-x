@@ -26,4 +26,8 @@ jobs:
       - name: uv pip audit
         # `uv pip audit` was removed in uv 0.9.x; use `uvx pip-audit`
         # which runs the canonical PyPA tool via uv's ephemeral env.
-        run: uvx pip-audit
+        # Pinned to 0.13 (2026-07-26): without a pin, `uvx` resolves the
+        # latest pip-audit on every run, so a breaking release could
+        # silently flip which advisories fire or exit non-zero and block
+        # legitimate PRs. See issue #983 and ADR-0002.
+        run: uvx --from "pip-audit==0.13" pip-audit
