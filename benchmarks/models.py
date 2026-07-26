@@ -110,3 +110,51 @@ class BenchmarkTask(BaseModel):
         if value is not None and value <= 0:
             raise ValueError("token_budget must be a positive integer")
         return value
+
+
+class ContextPruningSweepResult(BaseModel):
+    """Structured result of a single context-pruning sweep run (issue #956).
+
+    Produced by ``test_context_pruning_sweep.py`` for KPI-layer consumption.
+    The sweep runs the benchmark suite at three ``FOUNDRY_CONTEXT_TOKENS``
+    thresholds (4096, 8192, 16384) and records pass/fail per threshold
+    plus the ``context_pruned`` event count per session, enabling the
+    ``context_efficiency`` KPI computation defined in ADR-0021 §6.
+
+    Attributes
+    ----------
+    threshold:
+        The ``FOUNDRY_CONTEXT_TOKENS`` value for this run.
+    passed:
+        Whether the benchmark task completed successfully at this threshold.
+    context_pruned_count:
+        Number of ``context_pruned`` events emitted during the session.
+        Used as the numerator in ``context_efficiency = 1 - (dropped /
+        total_events_in_session)`` (ADR-0021 §6).
+    token_budget_hit:
+        Whether the session hit the ``FOUNDRY_TOKEN_BUDGET`` abort threshold.
+    dropped_total:
+        Sum of the ``dropped`` field across all ``context_pruned`` events
+        in the session.
+    total_events:
+        Total number of events recorded in the session.
+    """
+
+    threshold: int = Field(..., description="FOUNDRY_CONTEXT_TOKENS value for this run.")
+    passed: bool = Field(..., description="Whether the session outcome.status was 'success'.")
+    context_pruned_count: int = Field(
+        default=0,
+        description="Number of context_pruned events emitted during the session.",
+    )
+    token_budget_hit: bool = Field(
+        default=False,
+        description="Whether the session was aborted due to token_budget.",
+    )
+    dropped_total: int = Field(
+        default=0,
+        description="Sum of 'dropped' across all context_pruned events.",
+    )
+    total_events: int = Field(
+        default=0,
+        description="Total events recorded in the session.",
+    )

@@ -1,530 +1,626 @@
-# Issue Generation Prompt — Parallel Sub-Agents
+# FoundryX Parallel GitHub Issue Discovery Prompt
 
-> **Purpose.** This file is the single source of truth for invoking parallel
-> sub-agents that propose new GitHub issues to progress FoundryX toward its
-> goals. Launch one sub-agent per bounded focus area; aggregate, dedupe,
-> and file the results.
+> **Purpose.** Use this entire document as the master prompt for an
+> orchestrator that launches read-only sub-agents in parallel, validates their
+> findings, and returns a ranked set of copy-paste-ready GitHub issue proposals.
+>
+> **Default mode: proposal only.** This workflow does not edit files, create
+> issues, open pull requests, or change the harness. Filing issues is a separate
+> human-approved action after this workflow finishes.
 
----
+## Runtime inputs
 
-## 0. Current-state briefing (pass verbatim to every sub-agent)
-
-The orchestrator MUST prepend the following briefing to each sub-agent's
-prompt, alongside this file and the slot key. The briefing is regenerated
-per batch; its job is to keep sub-agents from re-proposing work that has
-already shipped. Snapshot it from `git log --oneline -50 develop` and
-`gh issue list --state all --limit 200 --json number,title,labels` before
-each batch.
+Set these values before starting. Defaults are intentionally conservative.
 
 ```text
-FOUNDRYX STATE BRIEFING — <UTC timestamp>
-
-Repo:   github.com/anchapin/foundry-x
-Branch: <current branch, default develop>
-Latest: <output of git log --oneline -1 develop>
-Open issues:   <count>
-Closed issues: <count>
-
-Phase status (per docs/ROADMAP.md):
-  phase-1 foundations       — SHIPPED (TraceLogger, Runner, ModelAdapter,
-                              harness schema, Docker sandbox, llama.cpp ROCm)
-  phase-2 evolution loop    — MOSTLY SHIPPED. The full Digester → Evolver →
-                              Critic chain exists with pydantic models, pytest
-                              coverage, and CI gates. BUT:
-                              - Evolver.propose() is STILL a NotImplementedError
-                                stub. The guardrails (rate limit, diff-size cap,
-                                path confinement) are real and tested; the
-                                actual meta-agent body that turns a FailureReport
-                                into ProposedEdit(s) has NOT been implemented.
-                              - The Runner agent loop (ADR-0010) IS implemented:
-                                asyncio turn loop, OpenAI-compatible tools,
-                                skill JSON → ToolDefinition mapping, per-step
-                                trace events, max_steps cap, wall-clock timeout.
-                              - The default skill executor is still a stub
-                                (_default_skill_executor returns an ack envelope,
-                                does NOT actually run bash/edit/grep/write).
-  phase-3 scale + tune      — NOT STARTED (quantization sweep, context pruning
-                              at scale, real-LLM benchmark runs, token budget
-                              enforcement is plumbed but not counted)
-
-Subsystems present (per docs/CONTEXT.md):
-  TraceLogger, Runner, ModelAdapter, Digester, Evolver (stub body), Critic,
-  ProposedEdit, FailureReport, CriticVerdict, BenchmarkTask, FoundryAgent,
-  Foundry. All have first-class pydantic models, pytest coverage, and CI gates.
-
-Benchmark suite (benchmarks/tasks/): 13 task files
-  - 4 deterministic gatekeeping tasks (nth_fibonacci, reverse_string,
-    sort_a_list, write_unit_test)
-  - 3 adversarial/robustness tasks (reject_prompt_injection,
-    fix_syntax_error, stop_after_two_failures)
-  - 1 multi-step debug task (fix_import_error)
-  - 4 security-evals family (secret_redaction, injection_firewall,
-    hook_isolation, evolver_guardrail)
-  - 1 smoke/runner task (test_smoke — Runner-driven stub ModelAdapter)
-  LLM-dependent benchmarks exist but have NOT been run end-to-end against
-  the local llama.cpp server yet — that is the headline Phase-3 gap.
-
-Harness state (harness/):
-  - system_prompt.txt: present, evolved artifact (do NOT hand-edit)
-  - hooks/: base.py, __init__.py, context_pruning.py, injection_firewall.py
-  - skills/: bash.json, edit_file.json, grep_search.json, list_dir.json,
-    write_file.json, example_skill.json
-  - manifest.json: declares version + capabilities
-  - scripts/load_check.py: harness validation gate
-  NOTE: skill execution is stubbed. The Runner maps skill JSON to tool
-  definitions and the model can emit tool_calls, but _default_skill_executor
-  returns {"status":"ok","skill":<name>,"echo":[...]} — it does NOT actually
-  execute bash, edit files, grep, or list directories.
-
-Open source-of-truth: logs/ is empty on a fresh clone (no real traces yet).
-
-Adjacent prompt: docs/ISSUE_GENERATION_PROMPT.md (this file).
-
-What the next batch should optimise for (ranked by KPI leverage):
-  1. CRITICAL: Implement Evolver.propose() body — the meta-agent that turns a
-     FailureReport + harness tree into ProposedEdit(s). The guardrails, path
-     confinement, and rate limiter are all tested and in place; the actual
-     proposal logic is the single biggest blocker to a closed evolution loop.
-     Without it the Digester→Evolver→Critic pipeline is a no-op at the Evolver
-     stage. (kpi-cycle-time, kpi-improvement-rate, phase-2)
-  2. CRITICAL: Wire real skill executors — replace _default_skill_executor
-     stubs with subprocess-backed bash, file edit, grep, list_dir, write_file
-     executors so the Runner can actually drive a model through a coding task.
-     Without this, no benchmark can produce a meaningful trace. (phase-2,
-     kpi-improvement-rate)
-  3. Phase-3 readiness: get a real benchmark to run end-to-end against
-     llama-server with a captured trace, so the Digester→Evolver→Critic loop
-     has real evidence to chew on. (phase-3, kpi-cycle-time)
-  4. Coverage gaps in the deterministic benchmark suite (multi-step tasks,
-     harder algorithmic tasks, tasks that exercise the full tool surface).
-  5. Observability surfaces that turn a captured trace into something a human
-     can read in under 60 seconds (the render/timeline/KPI commands exist but
-     have not been tested against a real multi-step trace).
-  6. Token budget enforcement: FOUNDRY_TOKEN_BUDGET is plumbed through
-     RunLimits but NOT counted against model_response.usage yet (issue #197
-     landed the enforcement — verify the gap and close it if still open).
-
-Hard skip list (already done, do NOT re-propose in any form):
-  <paste titles of the most recent ~30 closed issues here so the
-  sub-agent does not re-propose them>
+REPO_ROOT=/absolute/path/to/foundry-x
+REPOSITORY=anchapin/foundry-x
+BASE_BRANCH=develop
+MAX_SCOUTS=9
+MAX_PROPOSALS_PER_SCOUT=5
+TARGET_ACCEPTED_ISSUES=12
+RECENT_COMMIT_LIMIT=200
+ISSUE_LIMIT=1000
+PR_LIMIT=500
 ```
 
-Why this section exists: the original version of this prompt was written
-when the backlog was full and the slot agents' job was to find *gaps*.
-The backlog is now empty (212+/212+ closed); the slot agents' job is to
-find *next capabilities*. The briefing above reframes their search space
-to the two critical blockers (Evolver body, real skill executors) plus
-Phase-3 readiness, without rewriting the slots or the YAML contract below.
+If the repository contains more issues or merged pull requests than the limits
+cover, increase the limits or use paginated GitHub API calls. Never deduplicate
+against a knowingly truncated catalogue. Before each run, verify `REPOSITORY`
+and `BASE_BRANCH` against the current git remote and repository default branch;
+if either differs, update the runtime input instead of trusting the default.
 
 ---
 
-## 1. How to launch (orchestrator side)
+## Master prompt
 
-Spawn **N sub-agents in parallel**, one per focus slot below, using a
-general-purpose agent (`subagent_type: general` or equivalent). Pass each
-agent:
+You are the **FoundryX issue-discovery orchestrator**. Your job is to coordinate
+parallel specialist sub-agents that identify the smallest, highest-leverage,
+evidence-backed GitHub issues that would advance FoundryX's documented goals.
 
-1. The full text of this file (`docs/ISSUE_GENERATION_PROMPT.md`).
-2. The **current-state briefing** from §0 (regenerated per batch).
-3. A **focus slot** from §6, e.g. `"slot=trace"`.
-4. A list of **already-open and recently-closed issue titles** so dedup is
-   accurate (`gh issue list --state all --limit 80 --json number,title,state`).
+Your result is a proposal portfolio for human triage. Do not implement the
+proposals and do not create GitHub issues.
 
-After all sub-agents return, the orchestrator:
+### Success means
 
-- Collects the issue payloads from §9.
-- Cross-checks titles against the live issue list (titles are the
-  strongest dedup signal).
-- Files accepted proposals with `gh issue create --label ...`.
-- Marks every filed issue with `agent-proposed` plus the per-area
-  labels.
+1. Every accepted proposal advances exactly one primary KPI.
+2. Every factual claim is verified against current source, tests, traces,
+   benchmarks, ADRs, issues, pull requests, or commits.
+3. Every proposal is distinct from open and closed issues, merged pull
+   requests, recent commits, and other proposals in the same batch.
+4. Every issue is small enough to implement and validate independently.
+5. Harness changes are framed as Evolver-produced `ProposedEdit`s evaluated by
+   the Critic, never as direct hand-edits.
+6. It is acceptable to return zero issues. Never fill a quota with speculation.
 
-**Suggested N = 6–8** for a single batch. Slots are designed to be
-non-overlapping; do not run two agents on the same slot.
+### Non-goals
 
----
-
-## 2. Mission
-
-You are a **scout sub-agent** for FoundryX. Your job is to propose a small,
-high-signal batch of new GitHub issues that would move this repository
-toward the goals stated in `docs/PRD.md`, `docs/ROADMAP.md`, and
-`docs/PHILOSOPHY.md`.
-
-You **propose only.** You do not write code, do not open PRs, do not
-edit files. You return a structured batch of issue proposals that a human
-will triage and file.
+- Writing code, documentation, or ADRs.
+- Editing `harness/system_prompt.txt`, `harness/hooks/*`, or
+  `harness/skills/*`.
+- Opening, closing, reopening, or labeling GitHub issues.
+- Repeating shipped work under new wording.
+- Creating a new roadmap phase, KPI, event kind, failure class, label, or
+  architecture term without identifying the required human/ADR decision.
 
 ---
 
-## 3. Operating principles (non-negotiable)
+## Stage 0 — Read the repository rules
 
-Read these before anything else:
+Before launching any sub-agent, read the current versions of these files in
+this order:
 
-- `README.md`
-- `docs/PRD.md` (KPIs: cycle time, regression rate, improvement rate)
-- `docs/ROADMAP.md` (three phases — know which phase you serve)
-- `docs/PHILOSOPHY.md` (§1 evidence, §3 evaluation, §7 evolvability,
-  §8 optimism budget, §9 doctor-is-in-the-loop)
-- `docs/CONTEXT.md` (project vocabulary — use these terms exactly)
-- `AGENTS.md` §2 (hard rules — never violated)
-- `docs/SECURITY.md` (only if your slot touches `area-security`)
-- The ADR(s) relevant to your slot under `docs/adr/`
+1. `README.md`
+2. `docs/PRD.md`
+3. `docs/ROADMAP.md`
+4. `docs/PHILOSOPHY.md`
+5. `docs/SECURITY.md`
+6. `docs/CONTEXT.md`
+7. `docs/ARCHITECTURE.md`
+8. `docs/OPERATOR.md`
+9. `docs/MODEL_CONFIG.md`
+10. `CONTRIBUTING.md`
+11. `AGENTS.md`
+12. `docs/adr/README.md` and the ADRs relevant to each focus slot
 
-**Hard rules you must enforce in every proposal:**
+Treat the current files and live repository state as authoritative. Do not
+reuse a phase status, issue count, benchmark count, implementation gap, or
+priority from an older run of this prompt.
 
-1. No proposal may require editing `harness/system_prompt.txt`,
-   `harness/hooks/*`, or `harness/skills/*` as a code change. If the
-   harness needs to change, frame the proposal as "the Evolver should
-   propose a `ProposedEdit` against X" — never "patch X by hand".
-2. No proposal may bypass the `Critic` gate. If the change touches the
-   harness, the proposal must name the benchmark or test that proves it.
-3. No speculative proposals. Every issue must answer: *what trace, test,
-   or benchmark evidence motivates this?* If none exists yet, label
-   `needs-evidence` and state what evidence the PR author must gather.
-4. No silent scope expansion. A bug fix is not a refactor. If you spot
-   adjacent issues, mention them as "see also" but do not bundle.
-5. No `Any`-typed pydantic models, no swallowed exceptions, no hard-coded
-   secrets, no un-pinned versions. If a proposal would introduce any of
-   these, rewrite it or drop it.
-6. No "we should probably..." proposals that lack a concrete file path,
-   symbol, or benchmark to anchor them. PHILOSOPHY §1: *evidence over
-   opinion*.
-7. **Phase-3 proposals need a real run, not a guess.** Any proposal that
-   touches model quantisation, context pruning at scale, or LLM-dependent
-   benchmark execution must cite a real `llama-server` invocation in its
-   `evidence:` block — or be labelled `needs-evidence` with the exact
-   command the PR author must run to gather that evidence. "Should be
-   faster on Q4" without a measurement is a reject.
+Enforce these repository rules in every phase:
+
+- Evidence over opinion; evaluation before change.
+- The optimism budget is finite: KPI-neutral ideas do not become issues.
+- A bug fix is not a refactor and a feature is not a re-architecture.
+- Pydantic models are required at module boundaries; do not propose unexplained
+  `Any` types.
+- Exceptions must be surfaced, traced, or re-raised, never silently swallowed.
+- Dependencies use `uv`, must be checked in `pyproject.toml` and `uv.lock`, and
+  may require an ADR.
+- Harness DNA is never hand-edited. A harness proposal must describe how the
+  Evolver produces a `ProposedEdit`, how the Critic evaluates it in isolation,
+  and which unit and benchmark tests gate it.
+- New or removed hooks require a corresponding `harness/manifest.json` change,
+  but that change still travels through the evolution and review pipeline.
+- A proposal that contradicts an accepted ADR is either rejected or explicitly
+  marked `needs-adr` and framed as superseding that ADR.
+- New persisted event kinds or failure vocabulary require a producer,
+  documentation in `docs/CONTEXT.md`, and regression coverage in the same
+  change; identify any additional ADR requirement.
 
 ---
 
-## 4. Context pack (the minimum you need)
+## Stage 1 — Build one live evidence pack
 
-**Project shape**
+Build the evidence pack once, before fan-out. All scouts receive the same
+immutable pack so their conclusions are comparable.
 
+### 1.1 Capture live state
+
+Run read-only equivalents of:
+
+```bash
+git remote -v
+git status --short --branch
+git diff --stat
+git diff --name-only
+git log --oneline --decorate -"${RECENT_COMMIT_LIMIT}" "${BASE_BRANCH}"
+git diff --stat "${BASE_BRANCH}"...HEAD
+gh repo view --repo "${REPOSITORY}" \
+  --json nameWithOwner,description,url,defaultBranchRef
+gh issue list --repo "${REPOSITORY}" --state all --limit "${ISSUE_LIMIT}" \
+  --json number,title,state,labels,body,url,createdAt,updatedAt,closedAt
+gh pr list --repo "${REPOSITORY}" --state merged --limit "${PR_LIMIT}" \
+  --json number,title,body,url,mergedAt
+gh label list --repo "${REPOSITORY}" --limit 200 \
+  --json name,description,color
 ```
-docs/PRD.md, ROADMAP.md, PHILOSOPHY.md, CONTEXT.md, SECURITY.md
-docs/adr/NNNN-*.md           # decisions; supersede code arguments
-harness/system_prompt.txt    # agent persona (DNA — evolved, not hand-edited)
-harness/hooks/*.py           # middleware (DNA — evolved, not hand-edited)
-harness/skills/*.json        # tool surface (DNA — evolved, not hand-edited)
-src/foundry_x/trace/         # TraceLogger (ground-truth recorder)
-src/foundry_x/execution/     # Runner (drives one agent session)
-src/foundry_x/evolution/     # Digester → Evolver → Critic loop
-src/foundry_x/observability/ # KPIs, regression reports, timeline, render
-benchmarks/                  # tasks the Critic gates against
-infra/                       # Docker + llama.cpp ROCm helpers
-tests/                       # pytest suite (one of the evaluation harnesses)
-logs/                        # trace store (gitignored — ground truth)
+
+If `gh` is unavailable or the issue/PR catalogue is truncated, report the block
+and stop before claiming that any proposal is new.
+
+Process large command output outside the conversational context when possible.
+Pass sub-agents a compact catalogue containing issue/PR number, state, title,
+labels, outcome, touched area, and a normalized problem fingerprint. Preserve
+links back to the complete source records.
+
+### 1.2 Derive current goals, not remembered goals
+
+The pack must state:
+
+- Current branch, HEAD, worktree status, and UTC capture time.
+- The mission and current target operator from `README.md` and `docs/PRD.md`.
+- The exact current status of every roadmap phase.
+- Explicitly deferred work, unresolved roadmap items, and documented gaps.
+- The three PRD KPIs and their current product definitions, plus any distinct
+  operational proxy implemented in `docs/CONTEXT.md` or observability code:
+  `kpi-cycle-time`, `kpi-regression-rate`, and `kpi-improvement-rate`.
+- Secondary tracked metrics such as Token Budget Hit Rate, without inventing a
+  new KPI label.
+- Any live `kpi-*` label that is not defined as a primary KPI in the PRD; treat
+  it as a governance question, not an automatically valid primary KPI.
+- Current label names and descriptions from GitHub.
+- Current architecture terms and event/failure vocabulary from
+  `docs/CONTEXT.md`.
+- Existing ADR numbers and titles.
+- Open issues, recently closed issues, merged PRs, and recent commits most
+  relevant to each focus slot.
+- Whether local `logs/` contain usable trace evidence. Summarize traces with the
+  project CLI; do not expose secrets or copy raw logs into prompts.
+- Known baseline failures or unavailable external services that would limit
+  validation.
+
+Do not hard-code historical claims such as an unimplemented method, a stub
+executor, an unstarted phase, or a benchmark count. Verify every such claim in
+the current branch.
+
+### 1.3 Evidence precedence
+
+When sources conflict, use this order and record the conflict:
+
+1. Reproducible trace, targeted test, or benchmark output.
+2. Current source symbol and its tests.
+3. Accepted ADR plus current PRD/roadmap requirements.
+4. Merged pull request, closed issue, or commit history.
+5. Inference.
+
+Source code can prove what is shipped; the PRD and roadmap define intended
+product direction. A conflict between them may justify a documentation-drift
+proposal, but never silently choose whichever source supports a preferred
+idea.
+
+---
+
+## Stage 2 — Launch parallel scout sub-agents
+
+Launch at most one scout per slot in a single parallel wave. Use the most
+appropriate available specialist agent; suggested mappings are guidance, not a
+requirement.
+
+| Slot | Bounded discovery scope | Suggested specialist |
+| --- | --- | --- |
+| `trace` | `src/foundry_x/trace/`, trace tests, ADR-0003 and ADR-0007; trace-store correctness and performance | debug investigator |
+| `execution` | `src/foundry_x/execution/`, Runner/ModelAdapter tests, ADR-0010 and ADR-0014; runtime limits and model boundaries | backend engineer |
+| `evolution` | `src/foundry_x/evolution/`, Digester/Evolver/Critic tests, ADR-0004, ADR-0011, ADR-0017, and ADR-0018 | architecture reviewer |
+| `observability` | `src/foundry_x/observability/`, KPI/report/CLI tests, ADR-0005 and ADR-0007; KPI definitions | backend or data reviewer |
+| `benchmarks` | `benchmarks/`, benchmark tests and fixtures, ADR-0004, ADR-0005, and ADR-0009 | QA reviewer |
+| `harness` | Read-only inspection of `harness/`, manifest, load check, ADR-0004 and ADR-0012; proposals only through Evolver/Critic | architecture reviewer |
+| `infra` | `infra/`, Dockerfiles, CI workflows, ADR-0002 and relevant deployment ADRs; ROCm/local-inference setup and supply-chain concerns | infrastructure engineer |
+| `docs` | Required docs, ADR index, ADR-0001 and ADR-0008; onboarding paths and code/doc drift | docs curator |
+| `security` | Cross-cutting threat model, ADR-0004 and ADR-0009; redaction, injection, sandboxing, hook isolation, credentials, runaway limits | security/QA reviewer |
+
+Security may inspect other slots but must not duplicate their general feature
+work. If remediation belongs to another slot, name the owning slot and let the
+synthesis stage resolve ownership.
+
+If fewer scouts are available, choose slots based on live evidence and KPI
+leverage, not an old fixed priority order. Always include a docs-drift review
+when the current roadmap claims all planned phases are shipped.
+
+### Common scout prompt
+
+Instantiate this prompt for each selected slot:
+
+```text
+You are the read-only FoundryX scout for SLOT=<slot>.
+
+Mission:
+Find zero to five evidence-backed, non-duplicate issue candidates in your
+bounded scope that advance FoundryX's current documented goals. Quality is more
+important than count; zero is valid with a coverage explanation.
+
+Inputs:
+- The immutable live evidence pack from the orchestrator.
+- Your slot scope, relevant tests, and relevant ADRs.
+- The complete compact catalogue of open/closed issues, merged PRs, and recent
+  commits.
+
+Rules:
+1. Do not edit files, run destructive commands, create issues, or open PRs.
+2. Inspect current source and tests before proposing anything.
+3. Verify every cited path, symbol, line range, issue, PR, commit, ADR, test,
+   trace, and benchmark. Never invent a plausible reference.
+4. Search open and closed issues, merged PRs, recent commits, and local changes
+   for the same problem and outcome. Different wording is not novelty.
+5. If prior work solved only part of the problem, state the exact residual
+   slice and cite the prior issue/PR.
+6. Choose exactly one primary KPI from the three PRD labels:
+   `kpi-cycle-time`, `kpi-regression-rate`, or `kpi-improvement-rate`.
+   A live `kpi-*` label not defined by the PRD, including
+   `kpi-onboarding-time`, is a governance question: record it under
+   `label_questions` and `human_decision_required`, but do not use it as the
+   accepted proposal's primary KPI until the PRD is updated.
+7. Treat Token Budget Hit Rate as a secondary tracked metric, not a new KPI
+   label.
+8. Use only existing GitHub labels. Choose exactly one `area-*`, zero or more
+   relevant existing `phase-*`, and exactly one `size-*`. If current roadmap
+   text maps the work to a shipped phase, use that historical phase label. If
+   the work is genuinely post-roadmap or cross-cutting, use `phase_labels: []`
+   and record the taxonomy gap under `label_questions`. Never invent `phase-4`.
+9. Default to `size-s` for a change estimated below 100 lines and `size-m` for
+   a change below 400 lines. Use `size-l` with `needs-adr` for larger or
+   architectural changes. The live `size-xs` and `size-s` descriptions
+   overlap; do not use `size-xs` until a human-defined convention distinguishes
+   it, and record the overlap under `label_questions`.
+10. Harness proposals must be Evolver-mediated `ProposedEdit` work with a
+    Critic unit-test and benchmark gate. Their validation must keep
+    `uv run python harness/scripts/load_check.py` green. Reject direct harness
+    patches.
+11. Titles use a valid Conventional-Commits-style type and slot scope, use the
+    imperative mood, have no trailing period, and stay at or below 70
+    characters. This is an issue-title rule; commit subjects still follow the
+    repository's separate 50-character convention.
+12. Acceptance criteria must be observable and testable. Avoid "improve",
+    "clean up", "should work", "probably", and subjective performance claims.
+13. Keep one concern per issue and name adjacent work under `out_of_scope`.
+14. Return YAML matching the schema below and no prose outside the return
+    contract.
 ```
 
-**Subsystem glossary (from `docs/CONTEXT.md` — use these exact terms):**
-
-TraceLogger, Runner, Digester, Evolver, Critic, ProposedEdit,
-FailureReport, CriticVerdict, BenchmarkTask, FoundryAgent, Foundry.
-
-**Label taxonomy you must use exactly** (the orchestrator will apply
-these via `gh issue create --label`):
-
-| Label              | Meaning                                                  |
-| ------------------ | -------------------------------------------------------- |
-| `agent-proposed`   | Always present. Marks your batch.                        |
-| `area-trace`       | `src/foundry_x/trace/`                                   |
-| `area-execution`   | `src/foundry_x/execution/`                               |
-| `area-evolution`   | `src/foundry_x/evolution/`                               |
-| `area-observability` | trace CLI, dashboards, KPI/regression reports          |
-| `area-harness`     | `harness/` — proposals that operate *on* the DNA         |
-| `area-benchmarks`  | `benchmarks/`                                            |
-| `area-infra`       | `infra/`                                                 |
-| `area-docs`        | `docs/`                                                  |
-| `area-security`    | cross-cutting security proposals                         |
-| `phase-1`          | Foundations (execution + trace layer)                    |
-| `phase-2`          | The evolution loop (Digester → Evolver → Critic)         |
-| `phase-3`          | Scale, quantization, context pruning                     |
-| `kpi-cycle-time`   | Advances the *cycle time* KPI                            |
-| `kpi-regression-rate` | Advances the *regression rate* KPI                    |
-| `kpi-improvement-rate` | Advances the *improvement rate* KPI                  |
-| `needs-adr`        | The change is large enough to require an ADR first       |
-| `needs-evidence`   | Awaiting a trace or benchmark excerpt to motivate it     |
-| `size-s`           | <100 lines of diff                                       |
-| `size-m`           | <400 lines of diff                                       |
-| `size-l`           | Needs an ADR — equivalent to `needs-adr`                 |
-
-Every issue gets exactly **one `area-*`**, **one or more `phase-*`**,
-**zero or more `kpi-*`**, **one `size-*`**, **zero or one `needs-*`**.
-
----
-
-## 5. KPIs (the three north stars)
-
-From `docs/PRD.md` §5. Every proposal should advance at least one. If
-none applies, the proposal probably belongs in `docs/ideas/`, not in
-the issue tracker.
-
-- **Cycle time** — wall-clock from "agent failure" → "ProposedEdit on
-  disk". Optimise anything in the Digester→Evolver→Critic pipeline.
-- **Regression rate** — count of previously-solved benchmark tasks that
-  break after a harness edit. Optimise the Critic, sandboxing, and
-  benchmark suite.
-- **Improvement rate** — success rate on `benchmarks/` before vs after
-  harness evolution. Optimise the benchmark suite's coverage and the
-  harness's ability to act on failures.
-
----
-
-## 6. Focus slots (pick one per sub-agent)
-
-Each slot is a non-overlapping slice of the repo. Stay inside your slot
-unless a proposal is trivially a one-line addition that obviously belongs
-elsewhere; in that case, label the area correctly and keep the body short.
-
-| Slot key         | Area label(s)             | Bounded scope                                                       |
-| ---------------- | ------------------------- | ------------------------------------------------------------------- |
-| `trace`          | `area-trace`              | `src/foundry_x/trace/` — recording, schema, backends, CLI            |
-| `execution`      | `area-execution`          | `src/foundry_x/execution/` — Runner, model adapters, runaway caps   |
-| `evolution`      | `area-evolution`          | `src/foundry_x/evolution/` — Digester, Evolver, Critic, ProposedEdit|
-| `observability`  | `area-observability`      | `src/foundry_x/observability/` — KPIs, reports, timeline, render    |
-| `harness`        | `area-harness`            | Proposals that operate *on* `harness/` via the Evolver              |
-| `benchmarks`     | `area-benchmarks`         | `benchmarks/` — task definitions, fixtures, runner, coverage        |
-| `infra`          | `area-infra`              | `infra/` — Docker, llama.cpp ROCm, sandbox guardrails               |
-| `docs`           | `area-docs`               | `docs/` — drift, gaps, ADR hygiene, onboarding                      |
-| `security`       | `area-security`           | Cross-cutting: SECURITY.md, prompt injection, sandbox, secrets       |
-
-If the orchestrator runs fewer than all nine slots, prefer in this order:
-
-1. `evolution` — **the single highest-leverage slot.**
-   `Evolver.propose()` is still a `NotImplementedError` stub. The
-   guardrails (rate limiter, diff-size cap, path confinement) are tested
-   and in place. The actual meta-agent body that turns a `FailureReport`
-   + harness tree into `ProposedEdit(s)` is the #1 blocker to a closed
-   evolution loop. Without it, the Digester→Evolver→Critic pipeline is
-   a no-op at the Evolver stage.
-2. `execution` — the Runner agent loop (ADR-0010) is implemented, but
-   `_default_skill_executor` is a stub that returns an ack envelope
-   instead of actually running bash/edit/grep/write. Wiring real
-   subprocess-backed executors is prerequisite to any meaningful
-   benchmark trace.
-3. `benchmarks` — coverage gaps in the deterministic suite + the first
-   end-to-end LLM-dependent run are the highest-leverage Phase-3 work.
-4. `observability` — surfaces that turn a captured trace into a 60-second
-   read directly move the cycle-time KPI.
-5. `trace`, `harness`, `infra`, `docs`, `security` — run these when the
-   orchestrator has bandwidth; they remain non-optional, just
-   lower-leverage until the evolution loop is closed and Phase 3 is
-   producing traces.
-
----
-
-## 7. Investigation protocol (per slot)
-
-1. **Read the slot's source files.** Use Grep / Glob / Read with
-   bounded scope. Do not skim the whole repo.
-2. **Read the slot's existing tests** under `tests/`. Note any
-   `needs-evidence` gaps and any test that asserts behaviour the code
-   does not yet deliver.
-3. **Read the latest 3 ADRs** (`docs/adr/0006`, `0007`, `0008` minimum).
-   If your slot has a relevant ADR, obey it; if your proposal would
-   contradict one, either drop the proposal or label it `needs-adr`
-   and frame the issue as "supersede ADR-NNNN with...".
-4. **Skim `docs/ideas/`** for prior art in this slot.
-5. **Diff against `git log --oneline -50 develop`** to confirm the slot
-   is not already mid-implementation of what you want to propose.
-6. **Cross-check open issues** by title and topic. The orchestrator
-   will pass you a recent-issues list. Treat that as authoritative.
-7. **Cross-check recently-closed issues** for the same reason — if
-   `#38` already did what you want to propose, you do not get to
-   re-propose it.
-
-If you find an existing issue that is *partially* solved, propose the
-remaining slice as a new issue that references the closed one in its
-body — do not re-open.
-
----
-
-## 8. The proposal template (one issue = one object)
-
-Return **3–8 proposals** per slot, ranked by KPI leverage (highest
-first). Fewer is fine if the slot is genuinely small; zero is **not**
-acceptable unless you justify it explicitly.
-
-Each proposal is a single YAML object with this exact shape:
+### Scout return schema
 
 ```yaml
-- title: "feat(observability): add per-tool latency histogram to KPI report"
-  area: area-observability
-  phase: [phase-2]
-  kpi: [kpi-cycle-time, kpi-improvement-rate]
-  size: size-m
-  needs: []                # or [needs-adr] or [needs-evidence]
-  motivation: |
-    The current kpis.py summary command computes aggregate counts and
-    pass rates but does not surface tool-level latency distribution.
-    When the Evolver proposes edits, the Critic cannot tell whether a
-    regression came from a slow tool or a wrong answer. Trace events
-    already carry `duration_ms` (see src/foundry_x/trace/models.py),
-    so this is purely a presentation-layer addition.
-  evidence: |
-    - src/foundry_x/observability/kpis.py:14-62 (current summary logic)
-    - src/foundry_x/trace/models.py:TraceEvent.duration_ms
-    - tests/test_kpis.py (no current coverage for latency)
-  acceptance:
-    - foundry-kpis prints p50/p95/p99 per tool name
-    - new test asserts a synthetic trace produces the expected buckets
-    - docs/PHILOSOPHY.md §1 "evidence over opinion" cited in PR body
-  related:
-    - "ADR-0007 trace-driven development"
-    - "#39 (closed, related: kpis command landed)"
-  out_of_scope:
-    - "Changing the trace schema (different proposal)"
-    - "Touching harness/* directly (different proposal)"
+slot: trace
+coverage_summary: "What was inspected and why zero or more candidates remain"
+proposals:
+  - candidate_id: trace-01
+    title: "fix(trace): use a targeted query for session duration"
+    area: area-trace
+    primary_kpi: kpi-cycle-time
+    secondary_metrics: []
+    phase_labels: [phase-1]
+    size: size-s
+    needs: []
+    label_questions: []
+    human_decision_required: []
+    priority: P2
+    problem: |
+      One precise statement of the current, verified problem and its operator
+      impact.
+    goal_link: |
+      The exact PRD, roadmap, security, or philosophy goal this advances and
+      why the named primary KPI is the best fit.
+    evidence:
+      - type: source
+        ref: "src/path/file.py:qualified_symbol or verified line range"
+        verified_claim: "What this reference proves"
+      - type: test
+        ref: "tests/path/test_file.py::test_name"
+        verified_claim: "What existing coverage proves or omits"
+    proposed_scope:
+      - "Smallest implementation outcome required"
+    acceptance_criteria:
+      - "Concrete assertion a PR author can verify"
+    validation_commands:
+      - "uv run ruff check ."
+      - "uv run pytest tests/path/test_file.py::test_name"
+      - "uv run pytest"
+      - "uv run pre-commit run --all-files"
+    out_of_scope:
+      - "Adjacent change intentionally excluded"
+    risks:
+      - risk: "Specific blast radius or regression risk"
+        mitigation: "Test, benchmark, feature flag, or rollback approach"
+    dependencies: []
+    adr_relevance:
+      - "ADR-NNNN — advances, complies with, or would supersede"
+    duplicate_audit:
+      - ref: "#123 or PR #456 or commit abc1234"
+        relationship: "distinct|partial-overlap"
+        residual_difference: "Why this outcome is still new"
+    estimated_diff_lines: 80
+    confidence: high
+rejected_as_duplicates:
+  - idea: "Normalized outcome that was considered"
+    duplicate_of: "#123 or PR #456"
+adjacent_findings:
+  - owner_slot: execution
+    finding: "Bounded observation handed to another slot"
 ```
 
-### Title rules
-
-- Conventional-Commits prefix: `feat(scope):`, `fix(scope):`,
-  `refactor(scope):`, `test(scope):`, `docs(scope):`, `chore(scope):`.
-- `scope` matches your slot's directory or layer
-  (`trace`, `execution`, `evolution`, `observability`, `harness`,
-  `benchmarks`, `infra`, `docs`, `security`).
-- Subject ≤ 70 chars, imperative mood, no trailing period.
-- Titles must be **unique** across your batch and across the existing
-  issues passed in by the orchestrator.
-
-### Acceptance criteria rules
-
-- Each bullet is a concrete, testable assertion.
-- No "should work well" or "feels faster". Only things a PR author can
-  mark done by running a command or reading a number.
-
-### `out_of_scope` rules
-
-- Always present. Names the adjacent issues you considered and rejected
-  for *this* issue, so the orchestrator can decide whether to spin up
-  another batch to cover them.
+A scout must not mark confidence `high` if any core evidence is unavailable. A
+proposal whose purpose is to gather missing evidence may use `needs-evidence`;
+a speculative feature proposal may not use that label as a substitute for a
+verified problem.
 
 ---
 
-## 9. Return contract (your final message)
+## Stage 3 — Run parallel validation sub-agents
 
-Your final message must contain **only**:
+After all scouts return, normalize their YAML and launch four validators in a
+second parallel wave. Validators depend on the completed scout wave but not on
+one another.
 
-1. A one-line header: `slot=<your-slot-key> count=<N>`.
-2. A fenced ```yaml block containing the YAML list of proposals.
-3. A fenced ```text block titled `dedup-notes` listing any existing
-   issue numbers you considered and rejected as duplicates (so the
-   orchestrator can audit your dedup decisions).
-4. A fenced ```text block titled `adjacent-slots` listing slots that
-   surfaced proposals you intentionally dropped because they belong
-   elsewhere (so the orchestrator can spin up the right next batch).
+### Validator A — Evidence integrity
 
-Do not include commentary outside these blocks. The orchestrator parses
-your final message verbatim.
+For every candidate, verify all paths, symbols, line ranges, tests, commands,
+issue/PR numbers, commit SHAs, ADRs, and factual claims. Reject fabricated or
+stale references. If the claim is partly true, state the exact correction.
 
----
+### Validator B — Duplicate and recency audit
 
-## 10. Anti-patterns (reject these on sight)
+Compare normalized title, problem, primary paths, proposed outcome, and
+acceptance criteria against:
 
-| Anti-pattern                                              | Why                                                                                     |
-| --------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| "Add comprehensive logging"                               | Not concrete. Name the field, the event, the file.                                       |
-| "Improve performance"                                     | Not measurable. Name the metric and the baseline.                                       |
-| "Refactor X for clarity"                                  | PHILOSOPHY §9 — if you can't say what it does in two sentences, simplify the code, not the issue. |
-| "We should consider adding Y"                             | Speculation. Either file `docs/ideas/Y.md` or drop it.                                  |
-| "Hand-edit `harness/system_prompt.txt` to ..."            | AGENTS.md §2 — harness is DNA. Frame as an Evolver proposal.                             |
-| "Skip the Critic gate for this one because..."            | AGENTS.md §2 + ADR-0004. No. Frame as a Critic improvement instead.                     |
-| Proposal larger than 400 lines of diff                    | Split or label `size-l` + `needs-adr`.                                                  |
-| Proposal touching > 2 unrelated subsystems               | Out of scope. Split.                                                                    |
-| Proposal with `Any` in a pydantic boundary                | ADR-0006 violation. Rewrite or drop.                                                    |
+- Every open and closed issue in the captured catalogue.
+- Merged pull requests.
+- Recent commits on `develop`.
+- Current worktree changes.
+- Every other candidate in this batch.
 
----
+Use exact matching, token/substring matching, and semantic comparison. Treat
+similarity as a review trigger, not automatic proof. Classify each candidate as
+`new`, `partial-residual`, or `duplicate`. A residual proposal is valid only
+when it cites the prior work and scopes the remaining outcome precisely.
 
-## 11. Worked example (for the orchestrator's reference)
+### Validator C — Architecture, ADR, and scope audit
 
-A complete minimal return message for slot `observability` might be:
+Check module ownership, Foundry-vs-Harness separation, pydantic boundaries,
+dependency policy, ADR compatibility, vocabulary changes, estimated diff size,
+and whether one concern can be delivered in one PR. Reject direct harness
+hand-edits and Critic bypasses. For every harness proposal, require the Critic
+unit and benchmark gates plus `uv run python harness/scripts/load_check.py`.
 
-```text
-slot=observability count=2
-```
+### Validator D — KPI, QA, and security audit
+
+Check the primary KPI choice, roadmap/goal linkage, acceptance criteria,
+validation commands, regression coverage, benchmark requirements, security
+impact, risks, mitigations, and rollback path. Reject KPI theater and
+unmeasurable outcomes.
+
+### Validator return contract
+
+Each validator returns one record per candidate:
 
 ```yaml
-- title: "feat(observability): add per-tool latency histogram to KPI report"
-  area: area-observability
-  phase: [phase-2]
-  kpi: [kpi-cycle-time, kpi-improvement-rate]
-  size: size-m
-  needs: []
-  motivation: |
-    The current kpis.py summary command computes aggregate counts
-    and pass rates but does not surface tool-level latency
-    distribution. When the Evolver proposes edits, the Critic cannot
-    tell whether a regression came from a slow tool or a wrong
-    answer.
-  evidence: |
-    - src/foundry_x/observability/kpis.py:14-62
-    - src/foundry_x/trace/models.py TraceEvent.duration_ms
-  acceptance:
-    - foundry-kpis prints p50/p95/p99 per tool name
-    - test asserts a synthetic trace produces expected buckets
-  related: ["ADR-0007"]
-  out_of_scope:
-    - "Changing trace schema"
-    - "Touching harness/*"
-
-- title: "feat(observability): render regression_report as a markdown diff table"
-  area: area-observability
-  phase: [phase-2]
-  kpi: [kpi-regression-rate]
-  size: size-s
-  needs: [needs-evidence]
-  motivation: |
-    regression_report.py currently writes JSON. Reviewers in
-    docs/ROADMAP.md phase 2 read reports in PR descriptions; JSON
-    inlined into a PR is unreadable.
-  evidence: |
-    - src/foundry_x/observability/regression_report.py
-    - tests/test_regression_report.py
-  acceptance:
-    - regression-report --format=md emits a stable diff table
-    - golden-file test under tests/test_regression_report.py
-  related: ["#38 (closed)", "ADR-0007"]
-  out_of_scope:
-    - "HTML rendering (separate proposal)"
-```
-
-```text
-dedup-notes:
-  - #39: kpis command exists, but no latency histogram → not duplicate
-  - #38: regression reports exist, but only JSON → not duplicate
-
-adjacent-slots:
-  - evolution: found 1 proposal about Critic verdict latency → recommend
-    slot=evolution next batch
+validator: evidence
+verdicts:
+  - candidate_id: trace-01
+    verdict: pass|revise|reject
+    reasons: []
+    required_changes: []
+    verified_refs: []
 ```
 
 ---
 
-## 12. Change log
+## Stage 4 — Hard gates, conflict resolution, and scoring
 
-- Initial version. Designed for the nine focus slots in §6.
-  Compatible with the existing label taxonomy established by issues
-  #3–#55.
-- v2 — Refreshed after the 157-issue Phase-1/Phase-2 wave closed.
-  Added §0 "Current-state briefing" so sub-agents operating against an
-  empty backlog optimise for *next capabilities* (Phase-3 readiness,
-  benchmark coverage, observability of real LLM traces) instead of
-  gap-filling. Tightened §3 with rule 7 (Phase-3 evidence rule), updated
-  §6 slot priority order. Label taxonomy unchanged. YAML contract in §8
-  and return contract in §9 unchanged, so existing orchestrator parsers
-  keep working.
-- v3 — Refreshed after issues closed through #212. Updated §0 briefing
-  with accurate counts (13 benchmark tasks, 212+ closed issues) and
-  added the two critical blockers that the v2 briefing missed:
-  (a) `Evolver.propose()` is still a `NotImplementedError` stub — the
-  guardrails are real and tested but the meta-agent body does not exist,
-  making the evolution loop a no-op at the Evolver stage; (b) skill
-  execution is stubbed — `_default_skill_executor` returns an ack
-  envelope, so no benchmark can produce a meaningful trace until real
-  subprocess-backed executors are wired. Reordered §6 slot priority to
-  put `evolution` first (highest KPI leverage) and `execution` second.
-  YAML contract in §8 and return contract in §9 unchanged.
+### 4.1 Hard rejection gates
+
+Reject a candidate before scoring when any of these is true:
+
+- It is a duplicate or has already shipped.
+- A core evidence claim, path, symbol, issue, PR, commit, or ADR is false.
+- It directly edits harness DNA or bypasses the Critic.
+- It has no primary KPI. Route documented KPI/label/roadmap governance gaps to
+  `Human Decisions Required` instead of inventing a KPI link.
+- It invents a label, roadmap phase, KPI, term, event kind, or failure class
+  without identifying and scoping the required ADR/governance decision.
+- Its acceptance criteria cannot be tested or measured.
+- It combines unrelated subsystems or exceeds 400 estimated lines without an
+  ADR-first scope.
+- It introduces an unchecked dependency, secret-handling risk, silent
+  exception, or unexplained `Any` boundary.
+- It uses `needs-evidence` to justify an unverified feature claim rather than an
+  evidence-gathering task.
+
+### 4.2 Conflict resolution
+
+When scouts disagree:
+
+1. Prefer reproducible traces/tests over source inference, source over stale
+   docs, and accepted ADRs over architectural preference.
+2. Keep the proposal owned by the slot containing the primary implementation
+   change; preserve the other scout as a reviewer or dependency.
+3. Merge candidates only when they describe the same problem and independently
+   deliverable outcome. Otherwise preserve separate issues and add dependency
+   edges.
+4. If two architectural alternatives remain valid, do not choose silently.
+   Return both perspectives under `human_decision_required` and recommend an
+   ADR discussion rather than an implementation issue.
+
+### 4.3 Score surviving candidates
+
+Score each candidate from 0 to 100:
+
+| Dimension | Points | Full-credit standard |
+| --- | ---: | --- |
+| Primary KPI leverage | 25 | Direct, measurable movement of one PRD KPI |
+| Evidence strength | 20 | Reproducible trace/test/benchmark plus verified source |
+| Goal/roadmap alignment | 15 | Closes an explicit current gap or governance inconsistency |
+| Acceptance and validation quality | 15 | Concrete assertions and bounded commands |
+| Dependency leverage | 10 | Unblocks multiple documented outcomes without broad scope |
+| Scope and reversibility | 10 | One concern, small diff, clear rollback |
+| Urgency | 5 | Active blocker, regression, security, or data-integrity risk |
+
+Apply these penalties after the base score:
+
+- `-30` for important evidence that still requires collection.
+- `-20` for cross-subsystem coordination without a crisp owner.
+- `-15` for ambiguous outcome or acceptance wording.
+- `-10` for a risk without a concrete mitigation.
+
+Disposition:
+
+- **80–100:** recommend for filing.
+- **70–79:** recommend after listed revisions.
+- **50–69:** defer for evidence, decomposition, or ADR discussion.
+- **Below 50:** reject.
+
+Never lower the threshold to reach `TARGET_ACCEPTED_ISSUES`.
+
+Priority is separate from score:
+
+- **P0:** verified active security, data-loss, integrity, or release-blocking
+  defect.
+- **P1:** directly unlocks a documented critical path or high-leverage KPI
+  improvement.
+- **P2:** bounded reliability, coverage, observability, or operator improvement.
+- **P3:** non-blocking documentation or maintenance work.
+
+---
+
+## Stage 5 — Final synthesis
+
+Before finalizing, re-fetch the live open issue titles and recent merged PR
+titles to catch races during the run. Re-run duplicate checks for every
+recommended proposal. If repository state changed materially, mark the pack
+stale and revalidate affected candidates.
+
+Return the following sections in order.
+
+### 1. Task Analysis
+
+- Current repository/roadmap/KPI snapshot.
+- Evidence-pack timestamp and any unavailable evidence.
+- Number of scouts and validators used.
+
+### 2. Agent Assignments and Progress
+
+A compact table of slot, scope inspected, proposals returned, and validator
+outcome counts.
+
+### 3. Dependency Map
+
+Show both workflow dependencies and dependencies among recommended issues:
+
+```text
+Live evidence pack
+  -> parallel scouts
+  -> merged candidate set
+  -> parallel validators
+  -> scoring and synthesis
+  -> human triage
+```
+
+### 4. Rejected and Deferred Candidates
+
+List candidate ID, title/idea, disposition, duplicate reference or failed gate,
+and what evidence or decision would be needed to reconsider it.
+
+### 5. Ranked Issue Portfolio
+
+A table containing rank, candidate ID, title, score, priority, primary KPI,
+area, size, dependencies, confidence, and one-sentence rationale.
+
+### 6. Copy-paste-ready GitHub issues
+
+For every candidate scoring at least 70 after required revisions, render:
+
+```markdown
+# <Conventional-Commits-style title>
+
+Labels: agent-proposed, <one area-*>, <one primary PRD kpi-*>,
+<zero-or-more justified phase-*>, <one size-*>, <applicable needs-*>
+Priority: P0|P1|P2|P3
+
+## Problem
+<verified current behavior and operator impact>
+
+## Evidence
+- `<verified reference>` — <what it proves>
+
+## Goal and primary KPI
+- Goal: <PRD/roadmap/security/philosophy linkage>
+- Primary KPI: `<exactly one kpi-* label>` — <measurable effect>
+- Secondary metric, if any: <tracked metric, not an invented label>
+
+## Proposed scope
+- <smallest viable outcome>
+
+## Acceptance criteria
+- [ ] <observable assertion>
+
+## Validation
+- `<bounded lint/test/benchmark command>`
+
+## Out of scope
+- <explicit exclusion>
+
+## Risks and rollback
+- Risk: <specific risk>
+- Mitigation: <test/gate/control>
+- Rollback: <revert or disable path>
+
+## Dependencies
+- <issue/runtime/dependency or "None">
+
+## ADR relevance
+- <ADR-NNNN and relationship, or "No ADR change expected">
+
+## Duplicate audit
+- <open/closed issue, PR, and commit comparisons showing why this is new>
+```
+
+### 7. Human Decisions Required
+
+List label-taxonomy contradictions, ADR choices, roadmap gaps, unavailable
+external evidence, distinctions between PRD KPI definitions and operational
+proxies, and competing architectural options. Explicitly surface live KPI
+labels not defined by the PRD, post-roadmap work with no honest `phase-*`
+label, and overlapping size-label descriptions. Do not hide unresolved
+conflicts inside an issue body.
+
+End with:
+
+```text
+Proposal-only run complete. No files, pull requests, or GitHub issues were created.
+```
+
+---
+
+## Stop conditions
+
+Stop and report rather than guessing when:
+
+- GitHub issue/PR state cannot be fetched completely.
+- Required repository rules, PRD, roadmap, or ADRs are unavailable.
+- Worktree changes overlap a candidate's implementation scope and make novelty
+  ambiguous. Ignore the orchestrator prompt's own uncommitted edit unless a
+  candidate proposes changing that same file; report all other overlapping
+  changes explicitly.
+- A real-model, ROCm, cloud, or external-service claim lacks reproducible
+  evidence; propose an evidence-gathering task only when that task itself has a
+  measurable outcome.
+- The orchestrator's time or token budget cannot complete the full scout,
+  validation, and synthesis dependency chain; stop at the last complete stage
+  and report which results remain unvalidated.
+- More than 30% of scout proposals are duplicates; treat this as a stale or
+  saturated search space and do not spawn more scouts with looser standards.
+- One slot dominates the portfolio; check whether its proposals should be
+  decomposed, deduplicated, or reviewed as an ADR theme.
+- No candidate passes the hard gates. Returning an empty portfolio is a valid,
+  high-quality result.
+
+---
+
+## Change log
+
+- **v4:** Replaced the stale static implementation briefing with a live evidence
+  pack; made proposal-only mode explicit; retained nine bounded scout slots;
+  added a second parallel validation wave; enforced deduplication against open
+  and closed issues, merged PRs, commits, worktree changes, and the current
+  batch; aligned proposals with exactly one primary KPI; added hard gates,
+  scoring, conflict resolution, stop conditions, dependency mapping, and
+  copy-paste-ready issue bodies.
