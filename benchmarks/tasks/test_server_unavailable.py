@@ -126,7 +126,7 @@ TASK = BenchmarkTask(
         "stub server manager that reports is_healthy=False to verify the "
         "server_unavailable event path and session abort."
     ),
-    difficulty_tier="easy",
+    difficulty_tier="smoke",
     expected_outcome=(
         "With a stub manager that reports is_healthy=False and restart() raising "
         "ServerLaunchError, the Runner records exactly one server_unavailable event "
