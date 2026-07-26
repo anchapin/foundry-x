@@ -84,7 +84,7 @@ def test_ecosystem_targets_correct_directory(config: dict, ecosystem: str, direc
     """Each ecosystem must watch the directory that holds its manifest.
 
     docker points at ``/infra/docker`` (the Dockerfile with the
-    digest-pinned python:3.11-slim@sha256, issues #124 / #283); the
+    digest-pinned python:3.14-slim@sha256, issues #124 / #283); the
     other two watch the repo root where workflows and pyproject.toml
     live.
     """
