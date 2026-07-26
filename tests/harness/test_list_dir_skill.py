@@ -33,7 +33,6 @@ from pathlib import Path
 
 from harness.hooks.base import HookRegistry, ToolCall, ToolResult
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIST_DIR_SKILL_PATH = REPO_ROOT / "harness" / "skills" / "list_dir.json"
 

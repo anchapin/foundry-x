@@ -6,8 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from foundry_x.evolution.store import ProposedEditStore, TrackedProposedEdit, ProposedEditStatus
-
+from foundry_x.evolution.store import ProposedEditStatus, ProposedEditStore, TrackedProposedEdit
 
 _DIFF = (
     "--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n"
@@ -227,6 +226,7 @@ class TestCliIntegration:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert result.returncode == 0
         assert "No pending ProposedEdits" in result.stdout
@@ -248,6 +248,7 @@ class TestCliIntegration:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert result.returncode == 0
         assert saved.id in result.stdout
@@ -276,6 +277,7 @@ class TestCliIntegration:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert result.returncode == 0
         assert "Approved" in result.stdout
@@ -296,6 +298,7 @@ class TestCliIntegration:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert result.returncode == 1
 
@@ -319,6 +322,7 @@ class TestCliIntegration:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert result.returncode == 0
         assert "Rejected" in result.stdout
@@ -348,6 +352,7 @@ class TestCliIntegration:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert result.returncode == 0
         assert "Applied" in result.stdout
@@ -376,6 +381,7 @@ class TestCliIntegration:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert result.returncode == 1
         assert "pending" in result.stderr.lower() or "must be approved" in result.stderr.lower()

@@ -21,7 +21,8 @@ even when a downstream ``tool_error`` event also occurs.
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Sequence
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 from pydantic import BaseModel, Field
 

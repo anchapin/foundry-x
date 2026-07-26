@@ -68,10 +68,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -314,7 +315,7 @@ class KpiSummary(BaseModel):
     token_budget_abort_count: int = 0
     token_budget_hit_rate: float = 0.0
     context_efficiency: float | None = None
-    streaming_quality: dict[str, "StreamingQualityData"] = {}
+    streaming_quality: dict[str, StreamingQualityData] = {}
     context_pruned_count: dict[str, int] = {}
     wall_clock_abort_count: int = 0
     failure_class_distribution: dict[str, int] = {}
@@ -834,7 +835,7 @@ class _SliceAcc:
     regression for the groups it actually belongs to).
     """
 
-    __slots__ = ("total", "approved", "sessions", "regression_sessions", "prior_passed")
+    __slots__ = ("approved", "prior_passed", "regression_sessions", "sessions", "total")
 
     def __init__(self) -> None:
         self.total = 0
@@ -1204,8 +1205,7 @@ def _context_efficiency(
         return None
 
     efficiencies: list[float] = []
-    for sid in session_dropped:
-        dropped = session_dropped[sid]
+    for sid, dropped in session_dropped.items():
         threshold = session_threshold[sid]
         denominator = threshold + dropped
         if denominator > 0:
@@ -1650,7 +1650,7 @@ def _load_task_metadata(path: Path) -> dict[str, TaskKpiMetadata]:
     """
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError(f"--task-metadata JSON must be an object, got {type(data).__name__}")
+        raise TypeError(f"--task-metadata JSON must be an object, got {type(data).__name__}")
     metadata: dict[str, TaskKpiMetadata] = {}
     for name, fields in data.items():
         if not isinstance(fields, dict):
@@ -1677,66 +1677,94 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
     lines = [
         "| KPI | Baseline | Candidate | Delta |",
         "| --- | --- | --- | --- |",
-        "| Cycle Time (seconds) | "
-        f"{_format_value(baseline.cycle_time_seconds)} | "
-        f"{_format_value(candidate.cycle_time_seconds)} | "
-        f"{_format_delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds, higher_is_better=False)} |",
-        "| Regression Rate | "
-        f"{_format_value(baseline.regression_rate)} | "
-        f"{_format_value(candidate.regression_rate)} | "
-        f"{_format_delta(baseline.regression_rate, candidate.regression_rate, higher_is_better=False)} |",
-        "| Improvement Rate | "
-        f"{_format_value(baseline.improvement_rate)} | "
-        f"{_format_value(candidate.improvement_rate)} | "
-        f"{_format_delta(baseline.improvement_rate, candidate.improvement_rate, higher_is_better=True)} |",
-        "| Token Budget Hit Rate | "
-        f"{_format_value(baseline.token_budget_hit_rate)} | "
-        f"{_format_value(candidate.token_budget_hit_rate)} | "
-        f"{_format_delta(baseline.token_budget_hit_rate, candidate.token_budget_hit_rate, higher_is_better=False)} |",
-        "| Context Efficiency | "
-        f"{_format_value(baseline.context_efficiency)} | "
-        f"{_format_value(candidate.context_efficiency)} | "
-        f"{_format_delta(baseline.context_efficiency, candidate.context_efficiency, higher_is_better=True)} |",
-        "| Hooks Disabled Rate | "
-        f"{_format_value(baseline.hooks_disabled_rate)} | "
-        f"{_format_value(candidate.hooks_disabled_rate)} | "
-        f"{_format_delta(baseline.hooks_disabled_rate, candidate.hooks_disabled_rate, higher_is_better=False)} |",
-        "| Wall Clock Abort Count | "
-        f"{baseline.wall_clock_abort_count} | "
-        f"{candidate.wall_clock_abort_count} | "
-        f"{_format_delta(float(baseline.wall_clock_abort_count), float(candidate.wall_clock_abort_count), higher_is_better=False)} |",
-        "| Model Retry Count | "
-        f"{baseline.model_retry_count} | "
-        f"{candidate.model_retry_count} | "
-        f"{_format_delta(float(baseline.model_retry_count), float(candidate.model_retry_count), higher_is_better=False)} |",
-        "| Tool Argument Parse Error Count | "
-        f"{baseline.tool_argument_parse_error_count} | "
-        f"{candidate.tool_argument_parse_error_count} | "
-        f"{_format_delta(float(baseline.tool_argument_parse_error_count), float(candidate.tool_argument_parse_error_count), higher_is_better=False)} |",
-        "| Event Limit Abort Count | "
-        f"{baseline.event_limit_abort_count} | "
-        f"{candidate.event_limit_abort_count} | "
-        f"{_format_delta(float(baseline.event_limit_abort_count), float(candidate.event_limit_abort_count), higher_is_better=False)} |",
-        "| Server Restart Count | "
-        f"{baseline.server_restart_count} | "
-        f"{candidate.server_restart_count} | "
-        f"{_format_delta(float(baseline.server_restart_count), float(candidate.server_restart_count), higher_is_better=False)} |",
+        (
+            "| Cycle Time (seconds) | "
+            f"{_format_value(baseline.cycle_time_seconds)} | "
+            f"{_format_value(candidate.cycle_time_seconds)} | "
+            f"{_format_delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds, higher_is_better=False)} |"
+        ),
+        (
+            "| Regression Rate | "
+            f"{_format_value(baseline.regression_rate)} | "
+            f"{_format_value(candidate.regression_rate)} | "
+            f"{_format_delta(baseline.regression_rate, candidate.regression_rate, higher_is_better=False)} |"
+        ),
+        (
+            "| Improvement Rate | "
+            f"{_format_value(baseline.improvement_rate)} | "
+            f"{_format_value(candidate.improvement_rate)} | "
+            f"{_format_delta(baseline.improvement_rate, candidate.improvement_rate, higher_is_better=True)} |"
+        ),
+        (
+            "| Token Budget Hit Rate | "
+            f"{_format_value(baseline.token_budget_hit_rate)} | "
+            f"{_format_value(candidate.token_budget_hit_rate)} | "
+            f"{_format_delta(baseline.token_budget_hit_rate, candidate.token_budget_hit_rate, higher_is_better=False)} |"
+        ),
+        (
+            "| Context Efficiency | "
+            f"{_format_value(baseline.context_efficiency)} | "
+            f"{_format_value(candidate.context_efficiency)} | "
+            f"{_format_delta(baseline.context_efficiency, candidate.context_efficiency, higher_is_better=True)} |"
+        ),
+        (
+            "| Hooks Disabled Rate | "
+            f"{_format_value(baseline.hooks_disabled_rate)} | "
+            f"{_format_value(candidate.hooks_disabled_rate)} | "
+            f"{_format_delta(baseline.hooks_disabled_rate, candidate.hooks_disabled_rate, higher_is_better=False)} |"
+        ),
+        (
+            "| Wall Clock Abort Count | "
+            f"{baseline.wall_clock_abort_count} | "
+            f"{candidate.wall_clock_abort_count} | "
+            f"{_format_delta(float(baseline.wall_clock_abort_count), float(candidate.wall_clock_abort_count), higher_is_better=False)} |"
+        ),
+        (
+            "| Model Retry Count | "
+            f"{baseline.model_retry_count} | "
+            f"{candidate.model_retry_count} | "
+            f"{_format_delta(float(baseline.model_retry_count), float(candidate.model_retry_count), higher_is_better=False)} |"
+        ),
+        (
+            "| Tool Argument Parse Error Count | "
+            f"{baseline.tool_argument_parse_error_count} | "
+            f"{candidate.tool_argument_parse_error_count} | "
+            f"{_format_delta(float(baseline.tool_argument_parse_error_count), float(candidate.tool_argument_parse_error_count), higher_is_better=False)} |"
+        ),
+        (
+            "| Event Limit Abort Count | "
+            f"{baseline.event_limit_abort_count} | "
+            f"{candidate.event_limit_abort_count} | "
+            f"{_format_delta(float(baseline.event_limit_abort_count), float(candidate.event_limit_abort_count), higher_is_better=False)} |"
+        ),
+        (
+            "| Server Restart Count | "
+            f"{baseline.server_restart_count} | "
+            f"{candidate.server_restart_count} | "
+            f"{_format_delta(float(baseline.server_restart_count), float(candidate.server_restart_count), higher_is_better=False)} |"
+        ),
         # Issue #895: exclusion count is an auxiliary signal (lower is
         # better — fewer sessions lost to pre-Critic failures means less
         # survivorship bias in ``cycle_time_seconds``).
-        "| Excluded From Cycle Time | "
-        f"{baseline.excluded_from_cycle_time} | "
-        f"{candidate.excluded_from_cycle_time} | "
-        f"{_format_delta(float(baseline.excluded_from_cycle_time), float(candidate.excluded_from_cycle_time), higher_is_better=False)} |",
+        (
+            "| Excluded From Cycle Time | "
+            f"{baseline.excluded_from_cycle_time} | "
+            f"{candidate.excluded_from_cycle_time} | "
+            f"{_format_delta(float(baseline.excluded_from_cycle_time), float(candidate.excluded_from_cycle_time), higher_is_better=False)} |"
+        ),
         # Issue #953: evolver LLM failure count and rate.
-        "| Evol LLM Failure Count | "
-        f"{baseline.evolver_llm_failure_count} | "
-        f"{candidate.evolver_llm_failure_count} | "
-        f"{_format_delta(float(baseline.evolver_llm_failure_count), float(candidate.evolver_llm_failure_count), higher_is_better=False)} |",
-        "| Evol LLM Failure Rate | "
-        f"{_format_value(baseline.evolver_llm_failure_rate)} | "
-        f"{_format_value(candidate.evolver_llm_failure_rate)} | "
-        f"{_format_delta(baseline.evolver_llm_failure_rate, candidate.evolver_llm_failure_rate, higher_is_better=False)} |",
+        (
+            "| Evol LLM Failure Count | "
+            f"{baseline.evolver_llm_failure_count} | "
+            f"{candidate.evolver_llm_failure_count} | "
+            f"{_format_delta(float(baseline.evolver_llm_failure_count), float(candidate.evolver_llm_failure_count), higher_is_better=False)} |"
+        ),
+        (
+            "| Evol LLM Failure Rate | "
+            f"{_format_value(baseline.evolver_llm_failure_rate)} | "
+            f"{_format_value(candidate.evolver_llm_failure_rate)} | "
+            f"{_format_delta(baseline.evolver_llm_failure_rate, candidate.evolver_llm_failure_rate, higher_is_better=False)} |"
+        ),
     ]
     return "\n".join(lines)
 
@@ -1789,7 +1817,7 @@ def _now_iso() -> str:
     across multiple regions; ``datetime.fromisoformat`` (Python 3.11+)
     accepts the ``+00:00`` suffix without modification.
     """
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def append_kpi_history(

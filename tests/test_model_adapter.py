@@ -36,7 +36,7 @@ class FakeAdapter:
         self.messages: list[ModelMessage] = []
         self.tools: list[ToolDefinition] | None = None
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def complete(self, messages, tools=None, **kwargs):
         self.messages = [ModelMessage.model_validate(message) for message in messages]
         self.tools = [ToolDefinition.model_validate(tool) for tool in tools] if tools else []
         return ModelResponse(
@@ -44,10 +44,10 @@ class FakeAdapter:
             finish_reason="stop",
         )
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         return await self.complete(messages, tools, **kwargs)
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         response = await self.complete(messages, tools, **kwargs)
         if response.message.content:
             yield ModelResponseChunk(content=response.message.content)
@@ -154,11 +154,11 @@ async def test_run_task_raises_TypeError_for_non_protocol_model_adapter(tmp_path
     class NotAnAdapter:
         pass
 
-    with logger.session(harness_version="test-0.0") as session_id:
-        with pytest.raises(TypeError, match="ModelAdapter"):
-            await run_task(
-                "do the task", tmp_path, logger, session_id, model_adapter=NotAnAdapter()
-            )
+    with (
+        logger.session(harness_version="test-0.0") as session_id,
+        pytest.raises(TypeError, match="ModelAdapter"),
+    ):
+        await run_task("do the task", tmp_path, logger, session_id, model_adapter=NotAnAdapter())
 
 
 @pytest.mark.asyncio
@@ -166,11 +166,11 @@ async def test_run_task_raises_TypeError_for_dict_model_adapter(tmp_path):
     (tmp_path / "system_prompt.txt").write_text("system rules", encoding="utf-8")
     logger = TraceLogger(tmp_path / "traces.db")
 
-    with logger.session(harness_version="test-0.0") as session_id:
-        with pytest.raises(TypeError, match="ModelAdapter"):
-            await run_task(
-                "do the task", tmp_path, logger, session_id, model_adapter={"wrong": "keys"}
-            )
+    with (
+        logger.session(harness_version="test-0.0") as session_id,
+        pytest.raises(TypeError, match="ModelAdapter"),
+    ):
+        await run_task("do the task", tmp_path, logger, session_id, model_adapter={"wrong": "keys"})
 
 
 @pytest.mark.asyncio
@@ -263,7 +263,7 @@ async def test_complete_posts_request_and_parses_response():
         )
 
     assert seen["url"] == "http://model.test/v1/chat/completions"
-    assert seen["authorization"] == " ".join(["Bearer", "test-token"])
+    assert seen["authorization"] == "Bearer test-token"
     assert seen["payload"] == {
         "model": "foundry-test",
         "messages": [{"role": "user", "content": "hello"}],

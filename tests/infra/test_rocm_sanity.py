@@ -377,6 +377,7 @@ class _FakeLlamaServer:
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
         )
         _subprocess.run(
             ["git", "config", "user.email", "test@test.test"],
@@ -384,6 +385,7 @@ class _FakeLlamaServer:
             text=True,
             timeout=5,
             cwd=str(self.server_dir),
+            check=False,
         )
         _subprocess.run(
             ["git", "config", "user.name", "test"],
@@ -391,6 +393,7 @@ class _FakeLlamaServer:
             text=True,
             timeout=5,
             cwd=str(self.server_dir),
+            check=False,
         )
         readme = self.server_dir / "README"
         readme.write_text("mock", encoding="utf-8")
@@ -400,6 +403,7 @@ class _FakeLlamaServer:
             text=True,
             timeout=5,
             cwd=str(self.server_dir),
+            check=False,
         )
         _subprocess.run(
             ["git", "commit", "-q", "-m", "init"],
@@ -407,6 +411,7 @@ class _FakeLlamaServer:
             text=True,
             timeout=5,
             cwd=str(self.server_dir),
+            check=False,
         )
         _subprocess.run(
             ["git", "tag", "b9957", "HEAD"],
@@ -414,6 +419,7 @@ class _FakeLlamaServer:
             text=True,
             timeout=5,
             cwd=str(self.server_dir),
+            check=False,
         )
         _subprocess.run(
             ["git", "remote", "add", "origin", str(self.server_dir)],
@@ -421,6 +427,7 @@ class _FakeLlamaServer:
             text=True,
             timeout=5,
             cwd=str(self.server_dir),
+            check=False,
         )
 
         self.build_dir.mkdir(parents=True, exist_ok=True)

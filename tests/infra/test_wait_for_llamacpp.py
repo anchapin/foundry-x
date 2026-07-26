@@ -50,7 +50,7 @@ def _run(
 class _StubHandler(http.server.BaseHTTPRequestHandler):
     """Always respond 200 OK on any GET — mimics llama-server /health."""
 
-    def do_GET(self) -> None:  # noqa: N802 – required by BaseHTTPRequestHandler
+    def do_GET(self) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()

@@ -44,7 +44,7 @@ def test_main_records_task_failed_and_reraises(tmp_path, monkeypatch):
     _stub_harness(tmp_path)
     _argv("do something risky", db, tmp_path, monkeypatch)
 
-    async def failing_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def failing_run_task(task, harness_dir, log, session_id):
         raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError):
@@ -58,7 +58,7 @@ def test_main_records_task_failed_and_reraises(tmp_path, monkeypatch):
     assert kinds.count("task_received") == 1
     assert "task_failed" in kinds
 
-    failed = [e for e in events if e.kind == "task_failed"][0]
+    failed = next(e for e in events if e.kind == "task_failed")
     assert failed.payload["error_type"] == "RuntimeError"
     assert failed.payload["message"] == "boom"
     assert failed.payload["duration_ms"] >= 0
@@ -71,7 +71,7 @@ def test_main_records_task_completed_on_success(tmp_path, monkeypatch):
     _stub_harness(tmp_path)
     _argv("no-op task", db, tmp_path, monkeypatch)
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)
@@ -84,7 +84,7 @@ def test_main_records_task_completed_on_success(tmp_path, monkeypatch):
     assert kinds.count("task_received") == 1
     assert "task_failed" not in kinds
 
-    completed = [e for e in events if e.kind == "task_completed"][0]
+    completed = next(e for e in events if e.kind == "task_completed")
     assert completed.payload["duration_ms"] >= 0
 
 
@@ -96,7 +96,7 @@ def test_main_terminal_event_after_timeout(tmp_path, monkeypatch):
     monkeypatch.setenv("FOUNDRY_TASK_TIMEOUT", "0.05")
     _argv("slow task", db, tmp_path, monkeypatch)
 
-    async def slow_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def slow_run_task(task, harness_dir, log, session_id):
         import asyncio
 
         await asyncio.sleep(1.0)
@@ -110,5 +110,5 @@ def test_main_terminal_event_after_timeout(tmp_path, monkeypatch):
     kinds = [e.kind for e in events]
     assert "task_aborted" in kinds
     assert "task_failed" in kinds
-    failed = [e for e in events if e.kind == "task_failed"][0]
+    failed = next(e for e in events if e.kind == "task_failed")
     assert failed.payload["error_type"] == "TimeoutError"

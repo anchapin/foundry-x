@@ -56,7 +56,9 @@ def test_add_missing_docstring(benchmark_workspace: Path) -> None:
 
     try:
         spec.loader.exec_module(module)
-    except Exception as e:
+    except (
+        Exception  # noqa: BLE001
+    ) as e:  # Could be ImportError, SyntaxError, etc. during module load
         pytest.fail(f"task {TASK.name}: module import failed: {e}")
 
     functions = [("add", module.add), ("subtract", module.subtract), ("multiply", module.multiply)]

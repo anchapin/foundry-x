@@ -381,12 +381,14 @@ def generate_quantization_comparison_report(
     best_cost = None
 
     for result in verdict.quantizations:
-        if result.token_efficiency is not None:
-            if best_eff is None or result.token_efficiency > best_eff:
-                best_eff = result.token_efficiency
-        if result.cost_per_task is not None:
-            if best_cost is None or result.cost_per_task < best_cost:
-                best_cost = result.cost_per_task
+        if result.token_efficiency is not None and (
+            best_eff is None or result.token_efficiency > best_eff
+        ):
+            best_eff = result.token_efficiency
+        if result.cost_per_task is not None and (
+            best_cost is None or result.cost_per_task < best_cost
+        ):
+            best_cost = result.cost_per_task
 
     report_lines: list[str] = [
         "# Quantization Comparison Report",

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -42,7 +42,7 @@ from foundry_x.observability.tool_latency import (
 )
 from foundry_x.trace.logger import TraceLogger
 
-_BASE = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+_BASE = datetime(2026, 7, 10, 12, 0, 0, tzinfo=UTC)
 
 
 def _ts(offset_seconds: float) -> str:
@@ -510,7 +510,7 @@ def _plant_windowed_with_custom_timestamps(
     the inserts run.
     """
     conn = sqlite3.connect(db_path)
-    base = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     session_id_for_offset: dict[int, str] = {}
     for event_idx, (session_offset, duration_ms, event_offset) in enumerate(per_event):
         session_id = session_id_for_offset.setdefault(

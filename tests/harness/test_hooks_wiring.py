@@ -31,7 +31,6 @@ from pathlib import Path
 
 from foundry_x.evolution.evolver import ProposedEdit
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROPOSAL_PATH = REPO_ROOT / "harness" / "proposed_edits" / "issue-578-context-pruning-export.json"
 LIVE_INIT = REPO_ROOT / "harness" / "hooks" / "__init__.py"
@@ -127,6 +126,7 @@ def _apply_and_import(tmp_path: Path) -> set[str]:
         cwd=str(tmp_path),
         capture_output=True,
         text=True,
+        check=False,
     )
     if result.returncode != 0:
         # DNA already patched — verify the live __all__ contains the exports.
@@ -148,6 +148,7 @@ def _apply_and_import(tmp_path: Path) -> set[str]:
                 text=True,
                 timeout=30,
                 env={"PYTHONPATH": str(tmp_path), "PATH": ""},
+                check=False,
             )
             assert proc.returncode == 0, (
                 f"Patched harness.hooks failed to import: stdout={proc.stdout!r} stderr={proc.stderr!r}"
@@ -171,6 +172,7 @@ def _apply_and_import(tmp_path: Path) -> set[str]:
         text=True,
         timeout=30,
         env={"PYTHONPATH": str(tmp_path), "PATH": ""},
+        check=False,
     )
     assert proc.returncode == 0, (
         f"Patched harness.hooks failed to import: stdout={proc.stdout!r} stderr={proc.stderr!r}"
@@ -210,6 +212,7 @@ def test_diff_exposes_context_pruning_module(tmp_path: Path) -> None:
         cwd=str(tmp_path),
         capture_output=True,
         text=True,
+        check=False,
     )
     # If DNA was already patched, git apply fails — but we can still test the live module.
     if result.returncode != 0:
@@ -232,6 +235,7 @@ def test_diff_exposes_context_pruning_module(tmp_path: Path) -> None:
         text=True,
         timeout=30,
         env={"PYTHONPATH": str(tmp_path), "PATH": ""},
+        check=False,
     )
     assert proc.returncode == 0, (
         f"Cannot access harness.hooks.context_pruning after patch: "
@@ -256,6 +260,7 @@ def test_diff_does_not_self_register(tmp_path: Path) -> None:
         cwd=str(tmp_path),
         capture_output=True,
         text=True,
+        check=False,
     )
     # If DNA was already patched, git apply fails — verify live DNA is not self-registering.
     if result.returncode != 0:
@@ -279,6 +284,7 @@ def test_diff_does_not_self_register(tmp_path: Path) -> None:
         text=True,
         timeout=30,
         env={"PYTHONPATH": str(tmp_path), "PATH": ""},
+        check=False,
     )
     assert proc.returncode == 0, f"stderr={proc.stderr!r}"
     registered = [n for n in proc.stdout.strip().split(",") if n]

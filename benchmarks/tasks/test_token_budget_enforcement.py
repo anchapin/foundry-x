@@ -40,7 +40,6 @@ from foundry_x.execution.model_adapter import (
 from foundry_x.execution.runner import RunLimits, run_task
 from foundry_x.trace.logger import TraceLogger
 
-
 _TASK_TOKEN_BUDGET = 150
 
 TASK = BenchmarkTask(
@@ -89,7 +88,7 @@ class _ScriptedTokenBudgetAdapter:
             usage=ModelUsage(prompt_tokens=40, completion_tokens=60, total_tokens=total_tokens),
         )
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def complete(self, messages, tools=None, **kwargs):
         self.calls += 1
         if self.calls == 1:
             return self._step_response(0, 100)
@@ -100,10 +99,10 @@ class _ScriptedTokenBudgetAdapter:
             f"loop called complete() {self.calls} times (possible runaway loop)"
         )
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         return await self.complete(messages, tools, **kwargs)
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         response = await self.complete(messages, tools, **kwargs)
         for i, tc in enumerate(response.tool_calls):
             yield ModelResponseChunk(

@@ -23,6 +23,8 @@ from pydantic import BaseModel, Field
 
 from foundry_x.execution.harness_layout import (
     HarnessValidationError,
+)
+from foundry_x.execution.harness_layout import (
     validate as validate_harness_layout,
 )
 from foundry_x.execution.model_adapter import (
@@ -39,8 +41,8 @@ from foundry_x.execution.model_adapter import (
     resolve_adapter_max_retries,
 )
 from foundry_x.infra.server_manager import (
-    FoundryServerManager,
     SERVER_UNAVAILABLE_KIND,
+    FoundryServerManager,
     ServerLaunchError,
     ServerNotManagedError,
 )
@@ -413,7 +415,7 @@ def resolve_harness_version(harness_dir: Path) -> str:
         return text.strip()
 
     try:
-        completed = subprocess.run(  # noqa: S603 — args are a literal list
+        completed = subprocess.run(
             ["git", "describe", "--tags", "--always"],
             cwd=str(harness_dir),
             capture_output=True,
@@ -514,7 +516,7 @@ async def run_with_limits(
         return await awaitable
     try:
         return await asyncio.wait_for(awaitable, timeout=limits.task_timeout_s)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.record(
             session_id,
             kind="task_aborted",
@@ -612,7 +614,7 @@ def _load_tool_definitions(skills_dir: Path) -> list[ToolDefinition]:
         description = doc.get("description") or None
         parameters = doc.get("input_schema") or {}
         if not isinstance(parameters, dict):
-            raise ValueError(f"{path}: skill 'input_schema' must be a JSON object")
+            raise TypeError(f"{path}: skill 'input_schema' must be a JSON object")
         definitions.append(
             ToolDefinition(
                 type="function",
@@ -649,7 +651,7 @@ def _inject_skill_list(harness_dir: Path, system_prompt: str) -> str:
     skill_inventory: list[dict[str, str]] | None = manifest.get("skill_inventory")
     if not skill_inventory:
         skills: list[str] = manifest.get("skills", [])
-        skill_names = sorted({s[:-5] if s.endswith(".json") else s for s in skills})
+        skill_names = sorted({s.removesuffix(".json") for s in skills})
         if not skill_names:
             return system_prompt.replace("{{ SKILL_LIST }}", "")
         bullet_list = "\n".join(f"- {name}" for name in skill_names)
@@ -690,7 +692,9 @@ def _resolve_hook_registry(log: TraceLogger, session_id: str) -> Any | None:
         return None
     try:
         return get_registry()
-    except Exception as exc:
+    except (
+        Exception  # noqa: BLE001
+    ) as exc:  # Defensive: registry errors should not crash the runner
         log.record(
             session_id,
             kind="hook_registry_error",
@@ -1530,12 +1534,11 @@ async def run_task(
         ModelMessage(role="user", content=task),
     ]
     created_adapter = model_adapter is None
-    if model_adapter is not None:
-        if not isinstance(model_adapter, ModelAdapter):
-            raise TypeError(
-                f"model_adapter must implement the ModelAdapter protocol; "
-                f"got {type(model_adapter).__name__!r}"
-            )
+    if model_adapter is not None and not isinstance(model_adapter, ModelAdapter):
+        raise TypeError(
+            f"model_adapter must implement the ModelAdapter protocol; "
+            f"got {type(model_adapter).__name__!r}"
+        )
     adapter = model_adapter or build_model_adapter()
 
     # Wire retry trace events (issue #200). Only `OpenAICompatibleAdapter`
@@ -1888,7 +1891,9 @@ async def run_task(
                 error: str | None = None
                 try:
                     output = await _execute_skill(call.name, dict(call.arguments))
-                except Exception as exc:
+                except (
+                    Exception  # noqa: BLE001
+                ) as exc:  # Skills may raise any exception; capture gracefully
                     output = None
                     error = f"{type(exc).__name__}: {exc}"
                 duration_ms = int((time.monotonic() - start) * 1000)

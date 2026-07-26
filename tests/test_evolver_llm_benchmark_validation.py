@@ -34,7 +34,6 @@ from foundry_x.evolution.evolver import (
 from foundry_x.trace.logger import TraceLogger
 from tests._harness_fixture import install_load_check_prerequisites
 
-
 _SANITY_TEST = """\
 def test_pass():
     assert True

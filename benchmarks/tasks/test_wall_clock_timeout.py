@@ -49,7 +49,7 @@ class _SlowAdapter:
         self.delay = delay
         self.calls = 0
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def complete(self, messages, tools=None, **kwargs):
         self.calls += 1
         await asyncio.sleep(self.delay)
         return ModelResponse(
@@ -57,10 +57,10 @@ class _SlowAdapter:
             finish_reason="stop",
         )
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         return await self.complete(messages, tools, **kwargs)
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         self.calls += 1
         await asyncio.sleep(self.delay)
         response = ModelResponse(
@@ -178,7 +178,7 @@ def test_wall_clock_timeout_fires(tmp_path, monkeypatch):
 
     adapter = _SlowAdapter(delay=7.0)
 
-    async def drive(task, harness_dir, log, session_id):  # noqa: ANN001, ARG001
+    async def drive(task, harness_dir, log, session_id):
         await runner_mod.run_task(
             task,
             harness_dir,

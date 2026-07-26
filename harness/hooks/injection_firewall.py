@@ -22,6 +22,7 @@ links back to SECURITY.md:48 so a future Evolver knows why it exists.
 from __future__ import annotations
 
 import base64
+import binascii
 import logging
 import re
 import unicodedata
@@ -197,7 +198,7 @@ def _coerce_text(output: Any) -> str:
         return unicodedata.normalize("NFKC", output)
     try:
         return repr(output)
-    except Exception:  # pragma: no cover - defensive, never swallow silently
+    except Exception:  # pragma: no cover - defensive, never swallow silently  # noqa: BLE001
         # Re-raise as RuntimeError so the trace pipeline surfaces it; bare
         # ``except: pass`` is forbidden by AGENTS.md §2.
         raise RuntimeError("injection_firewall: failed to coerce tool output") from None
@@ -222,7 +223,7 @@ def _scan_base64_payloads(text: str) -> list[InjectionMatch]:
             continue
         try:
             decoded_bytes = base64.b64decode(candidate, validate=True)
-        except Exception:
+        except (binascii.Error, ValueError):
             continue
         try:
             decoded = decoded_bytes.decode("utf-8")
@@ -353,7 +354,7 @@ class InjectionFirewallHook:
         try:
             text = _coerce_text(result.output)
             scan = scan_for_injection(text)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             _log.exception(
                 "injection_firewall: scan of tool %r failed; treating result as "
                 "potentially unsafe (fail-closed): %r",
@@ -448,14 +449,14 @@ class InjectionFirewallHook:
 
         try:
             self._tracer("injection_blocked", injection_payload)
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.exception(
                 "injection_firewall: tracer raised injection_payload on block of tool %r; isolating and continuing",
                 tool_name,
             )
         try:
             self._tracer("firewall_exception", firewall_payload)
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.exception(
                 "injection_firewall: tracer raised firewall_payload on block of tool %r; isolating and continuing",
                 tool_name,
@@ -472,9 +473,11 @@ class InjectionFirewallHook:
             return 0
         score = 0
         for match in matches:
-            if match.name in ("role_tag_colon", "chatml_tag", "role_tag_json_escaped"):
-                score += 2
-            elif match.name in ("unicode_confusable", "base64_payload"):
+            if match.name in (
+                "role_tag_colon",
+                "chatml_tag",
+                "role_tag_json_escaped",
+            ) or match.name in ("unicode_confusable", "base64_payload"):
                 score += 2
             else:
                 score += 1

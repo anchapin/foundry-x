@@ -42,12 +42,12 @@ import os
 import shlex
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-
 
 # Env-var names. Centralized so callers (Runner wiring, tests, docs)
 # spell them identically.

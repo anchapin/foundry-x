@@ -33,7 +33,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from foundry_x.evolution.critic import (
@@ -45,8 +45,8 @@ from foundry_x.evolution.critic import (
 from foundry_x.evolution.digester import Digester, FailureReport
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
 from foundry_x.evolution.loop import run_evolution_step_async
+from foundry_x.evolution.store import ProposedEditStatus, ProposedEditStore, TrackedProposedEdit
 from foundry_x.execution.runner import resolve_harness_version
-from foundry_x.evolution.store import ProposedEditStore, TrackedProposedEdit, ProposedEditStatus
 from foundry_x.observability.regression_report import record_verdict
 from foundry_x.trace.logger import TraceLogger
 
@@ -72,7 +72,7 @@ _ASYNC_DEPRECATED_MSG = (
 
 def _now_iso() -> str:
     """Return a UTC ISO-8601 timestamp with offset suffix."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _infer_backend(trace_db: str) -> str:
@@ -82,7 +82,7 @@ def _infer_backend(trace_db: str) -> str:
 
 def _now_iso() -> str:
     """Return a UTC ISO-8601 timestamp with offset suffix."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _render_failure_report(report: FailureReport) -> str:
@@ -444,6 +444,7 @@ def _apply(args: argparse.Namespace) -> int:
         cwd=git_apply_dir,
         capture_output=True,
         text=True,
+        check=False,
     )
     if result.returncode != 0:
         sys.stderr.write(f"apply: git apply failed:\n{result.stderr}\n")

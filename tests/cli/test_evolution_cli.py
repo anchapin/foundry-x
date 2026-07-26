@@ -78,7 +78,7 @@ class _CapturedSubprocess:
         self.spawned: list[list[str]] = []
         self.pids = iter([4242, 4243, 4244, 4245])
 
-    def __call__(self, cmd, **kwargs):  # noqa: ANN001 - matches Popen signature
+    def __call__(self, cmd, **kwargs):
         self.spawned.append(list(cmd))
         proc = mock.MagicMock()
         proc.pid = next(self.pids)

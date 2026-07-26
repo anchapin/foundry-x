@@ -19,10 +19,11 @@ import sqlite3
 import sys
 import tempfile
 import uuid
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -1073,48 +1074,48 @@ class TraceLogger:
         # The temp file MUST live in the same directory as the target
         # so ``os.replace`` is an atomic rename on the same filesystem
         # (POSIX guarantee) rather than a cross-device copy.
-        tmp = tempfile.NamedTemporaryFile(
+        with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
             dir=self.path.parent,
             prefix=f".{self.path.name}.delete.",
             suffix=".tmp",
             delete=False,
-        )
-        try:
-            with self.path.open("r", encoding="utf-8") as src, tmp:
-                for line in src:
-                    stripped = line.strip()
-                    if not stripped:
-                        tmp.write(line)
-                        continue
-                    try:
-                        record = json.loads(stripped)
-                    except json.JSONDecodeError:
-                        tmp.write(line)
-                        continue
-                    if record.get("session_id") == session_id:
-                        continue
-                    tmp.write(line)
-            # Preserve the original's mode so a 0644 trace file does
-            # not silently become 0600 (the NamedTemporaryFile default).
+        ) as tmp:
             try:
-                os.chmod(tmp.name, self.path.stat().st_mode & 0o777)
-            except OSError:
-                pass
-            os.replace(tmp.name, self.path)
-        finally:
-            # If anything above raised before the rename, the temp
-            # file is still on disk and must be cleaned up so we do
-            # not leak ``.<name>.delete.*.tmp`` files into the trace
-            # directory. After a successful rename the name no longer
-            # exists, so FileNotFoundError is expected and swallowed.
-            try:
-                os.unlink(tmp.name)
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
+                with self.path.open("r", encoding="utf-8") as src:
+                    for line in src:
+                        stripped = line.strip()
+                        if not stripped:
+                            tmp.write(line)
+                            continue
+                        try:
+                            record = json.loads(stripped)
+                        except json.JSONDecodeError:
+                            tmp.write(line)
+                            continue
+                        if record.get("session_id") == session_id:
+                            continue
+                        tmp.write(line)
+                # Preserve the original's mode so a 0644 trace file does
+                # not silently become 0600 (the NamedTemporaryFile default).
+                try:
+                    os.chmod(tmp.name, self.path.stat().st_mode & 0o777)
+                except OSError:
+                    pass
+                os.replace(tmp.name, self.path)
+            finally:
+                # If anything above raised before the rename, the temp
+                # file is still on disk and must be cleaned up so we do
+                # not leak ``.<name>.delete.*.tmp`` files into the trace
+                # directory. After a successful rename the name no longer
+                # exists, so FileNotFoundError is expected and swallowed.
+                try:
+                    os.unlink(tmp.name)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
 
     def compact(self) -> int:
         """Rewrite the JSONL file removing orphaned session markers.
@@ -1327,4 +1328,4 @@ class TraceLogger:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

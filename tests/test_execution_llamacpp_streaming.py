@@ -40,6 +40,8 @@ import pytest
 from foundry_x.execution.model_adapter import OpenAICompatibleAdapter
 from foundry_x.execution.runner import (
     RunLimits,
+)
+from foundry_x.execution.runner import (
     run_task as real_run_task,
 )
 from foundry_x.trace.logger import TraceLogger
@@ -131,7 +133,7 @@ def _spawn_llama_server(
     binary directly) keeps the resolved argv identical between the test
     and the operator's Phase-3 sweeps.
     """
-    return subprocess.Popen(  # noqa: S603 — args are a controlled literal list
+    return subprocess.Popen(
         [
             "bash",
             str(LAUNCH_SCRIPT),
@@ -159,7 +161,7 @@ def _wait_for_ready(port: int, timeout_s: int) -> None:
     Raises :class:`RuntimeError` on timeout so the caller can clean up the
     subprocess and surface the failure with the wrapper script's stderr.
     """
-    result = subprocess.run(  # noqa: S603 — args are a controlled literal list
+    result = subprocess.run(
         [
             "bash",
             str(WAIT_SCRIPT),
@@ -256,9 +258,9 @@ def _reset_default_registry() -> None:
     still observe the default hook contract (issue #5 self-registration).
     """
     try:
+        from harness.hooks import register_hook
         from harness.hooks.base import reset_default_registry
         from harness.hooks.injection_firewall import InjectionFirewallHook
-        from harness.hooks import register_hook
     except ImportError:
         return
     reset_default_registry()

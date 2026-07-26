@@ -30,7 +30,7 @@ from unittest import mock
 
 import pytest
 
-from foundry_x.trace.logger import TraceLogger, TraceEvent
+from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 _BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
 
@@ -569,9 +569,11 @@ def test_delete_session_jsonl_rolls_back_on_replace_failure(tmp_path):
     def raising_replace(src, dst, *args, **kwargs):
         raise OSError("simulated rename failure")
 
-    with mock.patch("foundry_x.trace.logger.os.replace", side_effect=raising_replace):
-        with pytest.raises(OSError, match="simulated rename failure"):
-            logger.delete_session(sid_drop)
+    with (
+        mock.patch("foundry_x.trace.logger.os.replace", side_effect=raising_replace),
+        pytest.raises(OSError, match="simulated rename failure"),
+    ):
+        logger.delete_session(sid_drop)
 
     # Original file is untouched.
     assert path.read_bytes() == pre_bytes

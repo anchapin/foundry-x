@@ -16,14 +16,13 @@ raw SQL in business logic).
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from datetime import datetime
-from typing import Iterable, Sequence
 
 from pydantic import BaseModel
 
-from foundry_x.trace.logger import TraceEvent, TraceLogger
-
 from foundry_x.observability.regression_report import VERDICT_KIND, VerdictRecord
+from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 OUTCOME_KIND = "outcome"
 TASK_ABORTED_KIND = "task_aborted"

@@ -75,6 +75,7 @@ def _run_stub(workspace: Path) -> subprocess.CompletedProcess[str]:
         cwd=workspace,
         capture_output=True,
         text=True,
+        check=False,
     )
 
 

@@ -23,7 +23,7 @@ import ast
 import logging
 from pathlib import Path
 
-from foundry_x.evolution.evolver import Evolver, _RATE_WINDOW
+from foundry_x.evolution.evolver import _RATE_WINDOW, Evolver
 from harness.hooks.rate_limit import (
     DEFAULT_MAX_DIFF_LINES,
     DEFAULT_MAX_PROPOSALS_PER_HOUR,

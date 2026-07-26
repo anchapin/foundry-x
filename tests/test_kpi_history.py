@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from foundry_x.evolution.critic import CriticVerdict
 from foundry_x.observability.kpis import (
     KpiHistoryEntry,
     KpiSummary,
@@ -34,7 +35,6 @@ from foundry_x.observability.kpis import (
     render_history_markdown,
 )
 from foundry_x.observability.regression_report import record_verdict
-from foundry_x.evolution.critic import CriticVerdict
 from foundry_x.trace.logger import TraceLogger
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

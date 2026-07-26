@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-
 from foundry_x.evolution.digester import FailureReport
 from foundry_x.evolution.evolver import (
     Evolver,

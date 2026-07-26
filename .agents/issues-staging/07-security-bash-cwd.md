@@ -7,7 +7,7 @@ All file-operation skills (`read_file`, `write_file`, `edit_file`, `list_dir`, `
 ```python
 cwd: Path | None = None
 if cwd_arg:
-    cwd = Path(cwd_arg)          # no _resolve_path
+    cwd = Path(cwd_arg)  # no _resolve_path
 elif workspace_dir:
     cwd = workspace_dir
 ```

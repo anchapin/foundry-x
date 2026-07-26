@@ -50,10 +50,10 @@ class _RaisingHook:
     def __init__(self, message: str = "boom") -> None:
         self.message = message
 
-    async def pre_tool(self, call: ToolCall) -> ToolCall:  # noqa: ARG002
+    async def pre_tool(self, call: ToolCall) -> ToolCall:
         raise RuntimeError(self.message)
 
-    async def post_tool(self, call: ToolCall, result: ToolResult) -> ToolResult:  # noqa: ARG002
+    async def post_tool(self, call: ToolCall, result: ToolResult) -> ToolResult:
         raise RuntimeError(self.message)
 
 

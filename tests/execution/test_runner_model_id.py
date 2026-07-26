@@ -110,7 +110,7 @@ def test_main_stamps_model_id_into_session_when_env_set(tmp_path, monkeypatch):
         ],
     )
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)
@@ -140,7 +140,7 @@ def test_main_leaves_model_id_null_when_unset(tmp_path, monkeypatch):
         ],
     )
 
-    async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+    async def noop_run_task(task, harness_dir, log, session_id):
         return None
 
     main(run_task_fn=noop_run_task)

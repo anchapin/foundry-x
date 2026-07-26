@@ -303,7 +303,7 @@ def test_frozen_fixture_is_valid_json(fixture_name: str) -> None:
     # JSON is non-empty. This catches the "the file is empty" failure mode
     # long before the round-trip guard fires.
     assert payload, f"{fixture_name} is empty"
-    assert all(isinstance(k, str) for k in payload.keys())
+    assert all(isinstance(k, str) for k in payload)
 
 
 # --- (7) public re-exports -----------------------------------------------------

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 _log = logging.getLogger("harness.hooks.base")
 
@@ -63,7 +64,7 @@ class HookRegistry:
         for index, hook in enumerate(self._hooks):
             try:
                 call = await hook.pre_tool(call)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 self._isolate_failure("pre_tool", index, hook, exc)
         return call
 
@@ -71,7 +72,7 @@ class HookRegistry:
         for index, hook in enumerate(self._hooks):
             try:
                 result = await hook.post_tool(call, result)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 self._isolate_failure("post_tool", index, hook, exc)
         return result
 
@@ -102,7 +103,7 @@ class HookRegistry:
         if self._on_error is not None:
             try:
                 self._on_error(slot, index, hook_name, exc)
-            except Exception as sink_exc:  # pragma: no cover - defensive
+            except Exception as sink_exc:  # pragma: no cover - defensive  # noqa: BLE001
                 # A misbehaving sink must not undo the isolation. Surface the
                 # sink's own failure through the same logger and move on.
                 _log.exception(

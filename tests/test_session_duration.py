@@ -76,9 +76,11 @@ def test_sqlite_session_duration_uses_targeted_query(tmp_path, monkeypatch):
 def test_failed_session_body_still_records_ended_at(tmp_path, backend):
     logger = TraceLogger(tmp_path / f"traces{_suffix(backend)}", backend=backend)
 
-    with pytest.raises(RuntimeError, match="boom"):
-        with logger.session(harness_version="test-0.0") as sid:
-            raise RuntimeError("boom")
+    with (
+        pytest.raises(RuntimeError, match="boom"),
+        logger.session(harness_version="test-0.0") as sid,
+    ):
+        raise RuntimeError("boom")
 
     sessions = logger.list_sessions()
     matching = [s for s in sessions if s.session_id == sid]

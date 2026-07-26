@@ -17,7 +17,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOAD_CHECK = REPO_ROOT / "harness" / "scripts" / "load_check.py"
 
@@ -67,6 +66,7 @@ def test_load_check_passes_against_real_harness_dir() -> None:
         capture_output=True,
         text=True,
         timeout=30,
+        check=False,
     )
     assert proc.returncode == 0, (
         f"load_check failed against real harness; stdout={proc.stdout!r} stderr={proc.stderr!r}"
@@ -118,6 +118,7 @@ def test_load_check_reports_broken_skill(tmp_path: Path) -> None:
         # project-level one; isolate PYTHONPATH so we exercise only the
         # script's own sys.path handling (parent of --harness-dir).
         env={**os.environ, "PYTHONPATH": ""},
+        check=False,
     )
     assert proc.returncode != 0, (
         f"load_check should have failed; stdout={proc.stdout!r} stderr={proc.stderr!r}"
@@ -178,6 +179,7 @@ def test_load_check_reports_skill_name_filename_mismatch(tmp_path: Path) -> None
         # project-level one; isolate PYTHONPATH so we exercise only the
         # script's own sys.path handling (parent of --harness-dir).
         env={**os.environ, "PYTHONPATH": ""},
+        check=False,
     )
     assert proc.returncode != 0, (
         f"load_check should have failed on name/filename mismatch; "
@@ -201,6 +203,7 @@ def test_load_check_exits_2_for_missing_dir() -> None:
         capture_output=True,
         text=True,
         timeout=10,
+        check=False,
     )
     assert proc.returncode == 2
     assert "does not exist" in proc.stderr
@@ -254,6 +257,7 @@ def test_load_check_fails_when_manifest_references_missing_skill(tmp_path: Path)
         text=True,
         timeout=30,
         env={**os.environ, "PYTHONPATH": ""},
+        check=False,
     )
     assert proc.returncode != 0, (
         f"load_check should fail on manifest/disk drift; "
@@ -287,6 +291,7 @@ def test_load_check_fails_when_manifest_references_missing_hook(tmp_path: Path) 
         text=True,
         timeout=30,
         env={**os.environ, "PYTHONPATH": ""},
+        check=False,
     )
     assert proc.returncode != 0, (
         f"load_check should fail on manifest/disk drift; "
@@ -390,6 +395,7 @@ def test_hook_order_validation_passes_when_order_matches(tmp_path: Path) -> None
         text=True,
         timeout=30,
         env={**os.environ, "PYTHONPATH": ""},
+        check=False,
     )
     assert proc.returncode == 0, (
         f"load_check should pass when hook order matches; "
@@ -431,6 +437,7 @@ def test_hook_order_validation_fails_when_order_mismatches(tmp_path: Path) -> No
         text=True,
         timeout=30,
         env={**os.environ, "PYTHONPATH": ""},
+        check=False,
     )
     assert proc.returncode != 0, (
         f"load_check should fail when hook order mismatches; "
@@ -473,6 +480,7 @@ def test_hook_order_validation_skips_without_phase(tmp_path: Path) -> None:
         text=True,
         timeout=30,
         env={**os.environ, "PYTHONPATH": ""},
+        check=False,
     )
     assert proc.returncode == 0, (
         f"load_check should pass (skip) when hook has no _phase; "

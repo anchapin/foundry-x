@@ -135,7 +135,7 @@ def test_evolution_full_loop_real_model() -> None:
         pytest.skip(f"harness directory {HARNESS_DIR} is not present")
     try:
         validate_harness_layout(HARNESS_DIR)
-    except Exception as exc:
+    except Exception as exc:  # Could be HarnessValidationError or OSError  # noqa: BLE001
         pytest.skip(f"harness layout at {HARNESS_DIR} is invalid: {exc}")
 
     trace_path = Path(os.environ.get("FOUNDRY_TRACE_PATH", str(DEFAULT_TRACE_PATH))).resolve()

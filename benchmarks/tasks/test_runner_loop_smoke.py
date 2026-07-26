@@ -54,7 +54,6 @@ from foundry_x.execution.model_adapter import (
 from foundry_x.execution.runner import run_task
 from foundry_x.trace.logger import TraceLogger
 
-
 TASK = BenchmarkTask(
     name="runner_loop_smoke",
     description=(
@@ -83,7 +82,7 @@ class _StubAdapter:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def complete(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def complete(self, messages, tools=None, **kwargs):
         self.calls += 1
         if self.calls == 1:
             tool_call = ModelToolCall(
@@ -114,10 +113,10 @@ class _StubAdapter:
             f"SECURITY.md 'Runaway detection')"
         )
 
-    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+    async def chat(self, messages, tools=None, **kwargs):
         return await self.complete(messages, tools, **kwargs)
 
-    async def stream(self, messages, tools=None, **kwargs):  # noqa: ANN001, ARG002
+    async def stream(self, messages, tools=None, **kwargs):
         response = await self.complete(messages, tools, **kwargs)
         if response.message.content:
             yield ModelResponseChunk(content=response.message.content)
@@ -154,7 +153,7 @@ def _stub_harness(harness_dir: Path) -> Path:
     return harness_dir
 
 
-def _install_on_error_tracker(tracker):  # noqa: ANN001
+def _install_on_error_tracker(tracker):
     """Install ``tracker`` on the default ``HookRegistry`` for the test.
 
     Resets the registry so state from prior tests does not leak in, then

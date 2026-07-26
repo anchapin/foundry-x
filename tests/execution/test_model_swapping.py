@@ -147,7 +147,7 @@ class TestQuantizationCliFlag:
             ],
         )
 
-        async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+        async def noop_run_task(task, harness_dir, log, session_id):
             return None
 
         main(run_task_fn=noop_run_task)
@@ -179,7 +179,7 @@ class TestQuantizationCliFlag:
             ],
         )
 
-        async def noop_run_task(task, harness_dir, log, session_id):  # noqa: ANN001
+        async def noop_run_task(task, harness_dir, log, session_id):
             return None
 
         main(run_task_fn=noop_run_task)

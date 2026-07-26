@@ -4,7 +4,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -102,14 +102,7 @@ def _format_session_list_row(session: TraceSession) -> str:
     emitted as a placeholder column rather than conditionally appended.
     """
     ended = session.ended_at if session.ended_at is not None else "-"
-    return "  ".join(
-        [
-            session.session_id,
-            session.started_at,
-            ended,
-            session.harness_version,
-        ]
-    )
+    return f"{session.session_id}  {session.started_at}  {ended}  {session.harness_version}"
 
 
 def _session_list(args: argparse.Namespace) -> int:
@@ -202,7 +195,7 @@ def _logger_for(db_path: str) -> TraceLogger:
 
 
 def _now_ts() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _write_audit(args: argparse.Namespace, record: dict[str, Any]) -> None:
@@ -331,7 +324,7 @@ def _prune(args: argparse.Namespace) -> int:
         if args.older_than <= 0:
             sys.stderr.write("prune: --older-than must be a positive integer.\n")
             return 1
-        cutoff = datetime.now(timezone.utc) - timedelta(days=args.older_than)
+        cutoff = datetime.now(UTC) - timedelta(days=args.older_than)
         to_delete = [s for s in sessions if datetime.fromisoformat(s.started_at) < cutoff]
 
     if not to_delete:

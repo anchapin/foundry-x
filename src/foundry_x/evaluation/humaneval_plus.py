@@ -129,7 +129,7 @@ def load_humaneval_slice(path: str | Path) -> list[HumanEvalTask]:
             raise ValueError(f"{p}:{line_no}: malformed JSON: {exc}") from exc
         try:
             tasks.append(HumanEvalTask.model_validate(obj))
-        except Exception as exc:  # noqa: BLE001 -- re-raised with location
+        except Exception as exc:
             raise ValueError(f"{p}:{line_no}: invalid HumanEvalTask: {exc}") from exc
 
     if not tasks:
@@ -148,7 +148,7 @@ def _build_check_namespace(task: HumanEvalTask) -> dict[str, Any]:
     namespace: dict[str, Any] = {"__name__": "__not_main__"}
     try:
         exec(candidate_src, namespace)  # noqa: S102 -- trusted source, see module doc
-    except Exception as exc:  # noqa: BLE001 -- surfaced with task id
+    except Exception as exc:
         raise HumanEvalExecutionError(
             f"{task.task_id}: canonical solution failed to import: {exc!r}"
         ) from exc
@@ -177,7 +177,7 @@ def _compile_check(task: HumanEvalTask, namespace: dict[str, Any]) -> None:
     """
     try:
         exec(task.test, namespace)  # noqa: S102 -- trusted source, see module doc
-    except Exception as exc:  # noqa: BLE001 -- re-raised with task id
+    except Exception as exc:
         raise HumanEvalExecutionError(
             f"{task.task_id}: test source failed to compile: {exc!r}"
         ) from exc
@@ -234,7 +234,7 @@ def run_candidate_solution(task: HumanEvalTask, candidate_body: str) -> bool:
     candidate_src = task.prompt + candidate_body
     try:
         exec(candidate_src, namespace)  # noqa: S102 -- see module doc on trust boundary
-    except Exception as exc:  # noqa: BLE001 -- surfaced with task id
+    except Exception as exc:
         raise HumanEvalExecutionError(
             f"{task.task_id}: candidate solution failed to import: {exc!r}"
         ) from exc
@@ -299,7 +299,7 @@ __all__ = [
     "HumanEvalExecutionError",
     "HumanEvalTask",
     "load_humaneval_slice",
-    "run_canonical_solution",
     "run_candidate_solution",
+    "run_canonical_solution",
     "slice_pass_rates",
 ]

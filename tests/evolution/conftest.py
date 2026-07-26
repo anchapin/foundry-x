@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -8,7 +8,7 @@ from foundry_x.evolution.digester import FailureReport
 from foundry_x.evolution.evolver import ProposedEdit
 from foundry_x.trace.logger import TraceEvent
 
-_BASE_TS = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+_BASE_TS = datetime(2026, 7, 10, 12, 0, 0, tzinfo=UTC)
 
 
 def _event(kind: str, offset: float, payload: dict, *, event_id: str) -> TraceEvent:
