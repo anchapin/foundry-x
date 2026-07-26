@@ -15,7 +15,6 @@
   "skills": [
     "bash.json",
     "edit_file.json",
-    "example_skill.json",
     "grep_search.json",
     "list_dir.json",
     "read_file.json",
@@ -30,10 +29,6 @@
     {
       "name": "edit_file",
       "description": "Make a precise string replacement in a file. Use for modifying existing code or text."
-    },
-    {
-      "name": "example_skill",
-      "description": "Example skill demonstrating skill JSON schema. Not for production use."
     },
     {
       "name": "grep_search",
