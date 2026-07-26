@@ -1212,6 +1212,8 @@ def _context_efficiency(
         sid = event.session_id
         dropped = event.payload.get("dropped", 0) if event.payload else 0
         threshold = event.payload.get("threshold", 0) if event.payload else 0
+        if threshold == 0 and event.payload:
+            threshold = event.payload.get("threshold_tokens", 0)
         session_dropped[sid] = session_dropped.get(sid, 0) + dropped
         session_threshold[sid] = session_threshold.get(sid, 0) + threshold
 
