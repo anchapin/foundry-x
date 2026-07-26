@@ -1337,11 +1337,7 @@ def _evolver_llm_failure(
     for event in logger.query_events(kind="task_received", harness_version=harness_version):
         sessions_with_task.add(event.session_id)
 
-    rate = (
-        len(sessions_with_exhausted) / len(sessions_with_task)
-        if sessions_with_task
-        else 0.0
-    )
+    rate = len(sessions_with_exhausted) / len(sessions_with_task) if sessions_with_task else 0.0
     return total_count, rate
 
 
