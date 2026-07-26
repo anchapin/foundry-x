@@ -188,6 +188,14 @@ class QuantizationResult(BaseModel):
             "comparable success rates across quantizations (issue #495)."
         ),
     )
+    notes: str = Field(
+        default="",
+        description=(
+            "Free-form annotation. Populated when gate_timeout_s kills the "
+            "sweep subprocess so the verdict records why pass_rate is 0.0 "
+            "(issue #937)."
+        ),
+    )
 
 
 class QuantizationVerdict(BaseModel):
@@ -397,11 +405,24 @@ class Critic:
         ``avg_cycle_time_s`` are both available (requires trace integration).
         """
         quant_label = Path(model_file).stem
-        result = subprocess.run(
-            [sys.executable, "-m", "pytest", *self.pytest_args, "--tb=no", "-v"],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", *self.pytest_args, "--tb=no", "-v"],
+                capture_output=True,
+                text=True,
+                timeout=self.gate_timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # gate_timeout_s killed the sweep subprocess — return a
+            # zero-pass-rate result with a timeout note so the verdict records
+            # *why* rather than hanging indefinitely (issue #937).
+            return QuantizationResult(
+                quantization=quant_label,
+                model_path=model_file,
+                model_id=model_id,
+                pass_rate=0.0,
+                notes=_timeout_notes(exc),
+            )
 
         passed = 0
         failed = 0
