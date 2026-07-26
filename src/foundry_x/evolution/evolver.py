@@ -829,20 +829,42 @@ class Evolver:
         Attempts to extract a JSON array of edits from the LLM output.
         Each edit must have target_file, rationale, and unified_diff fields.
         Malformed edits are skipped; returns empty list if no valid edits found.
+
+        When both the regex extraction (``_EDIT_JSON_RE``) and the bare
+        ``json.loads`` fallback fail, a ``generation_attempt`` trace event
+        with a ``parse_failure`` error type is emitted so the silent edit
+        loss is observable (issue #976). Previously this path returned
+        ``[]`` with no trace event, no exception, and no operator signal,
+        causing ``improvement-rate`` to under-report.
         """
-        try:
-            match = self._EDIT_JSON_RE.search(content)
-            if match:
+        data: Any = None
+        parse_error: str | None = None
+
+        match = self._EDIT_JSON_RE.search(content)
+        if match:
+            try:
+                data = json.loads(match.group())
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
                 try:
-                    data = json.loads(match.group())
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    try:
-                        data = json.loads(content)
-                    except (json.JSONDecodeError, KeyError, TypeError):
-                        return []
-            else:
+                    data = json.loads(content)
+                except (json.JSONDecodeError, KeyError, TypeError) as fallback_exc:
+                    parse_error = (
+                        f"parse_failure: regex extraction failed ({exc}); "
+                        f"bare json.loads fallback also failed ({fallback_exc})"
+                    )
+        else:
+            try:
                 data = json.loads(content)
-        except (json.JSONDecodeError, KeyError, TypeError):
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                parse_error = f"parse_failure: bare json.loads failed ({exc})"
+
+        if parse_error is not None:
+            snippet = content[:200].replace("\n", "\\n")
+            self._record_generation_attempt(
+                attempt=1,
+                error=(f"{parse_error} (content_length={len(content)}): {snippet!r}"),
+                model_response_excerpt=content,
+            )
             return []
 
         if data is None:
