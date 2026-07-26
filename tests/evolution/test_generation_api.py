@@ -15,6 +15,7 @@ from foundry_x.evolution.evolver import (
     _build_generation_prompt,
     _parse_edits_from_response,
 )
+from foundry_x.trace.logger import TraceLogger
 
 
 class TestBuildGenerationPrompt:
@@ -228,3 +229,91 @@ class TestGenerateEdits:
         assert len(attempt_calls) == 2, (
             f"Expected one generation_attempt event per retry (2), got {len(attempt_calls)}"
         )
+
+
+class TestParseLlmResponseParseFailure:
+    """Tests for issue #976: JSON-parse failure must be observable, not silent.
+
+    ``_parse_llm_response`` previously returned ``[]`` with no trace event
+    when both the regex extraction and the bare ``json.loads`` failed,
+    causing silent edit loss and ``improvement-rate`` under-reporting.
+    """
+
+    def test_unparseable_content_emits_generation_attempt(self, tmp_path: Path) -> None:
+        """Garbage content emits a ``generation_attempt`` trace event."""
+        logger = TraceLogger(tmp_path / "trace.db")
+        with logger.session("sess-parse-fail") as session_id:
+            evolver = Evolver(
+                trace_logger=logger,
+                session_id=session_id,
+            )
+            edits = evolver._parse_llm_response("this is not json at all")
+
+        assert edits == []
+        events = list(logger.iter_events(session_id, kind=GENERATION_ATTEMPT_KIND))
+        assert len(events) == 1, "Expected exactly one generation_attempt event"
+        error = events[0].payload["error"]
+        assert "parse_failure" in error
+        assert "content_length=" in error
+
+    def test_regex_match_but_both_json_loads_fail_emits_event(self, tmp_path: Path) -> None:
+        """Content matching ``_EDIT_JSON_RE`` but with broken inner JSON emits an event.
+
+        Exercises the double-failure path: the regex wrapper matches but
+        ``json.loads`` on both the matched group and the full content fail.
+        """
+        logger = TraceLogger(tmp_path / "trace.db")
+        with logger.session("sess-double-fail") as session_id:
+            evolver = Evolver(
+                trace_logger=logger,
+                session_id=session_id,
+            )
+            # The regex can match a ``{...proposed_edits...}`` shell, but
+            # the inner JSON is intentionally malformed (trailing comma).
+            content = '{"proposed_edits": [BROKEN,]}'
+            edits = evolver._parse_llm_response(content)
+
+        assert edits == []
+        events = list(logger.iter_events(session_id, kind=GENERATION_ATTEMPT_KIND))
+        assert len(events) == 1
+        assert "parse_failure" in events[0].payload["error"]
+
+    def test_event_includes_content_snippet(self, tmp_path: Path) -> None:
+        """The trace event carries a snippet of the unparseable content."""
+        logger = TraceLogger(tmp_path / "trace.db")
+        content = "<<<garbage>>>"
+        with logger.session("sess-snippet") as session_id:
+            evolver = Evolver(
+                trace_logger=logger,
+                session_id=session_id,
+            )
+            evolver._parse_llm_response(content)
+
+        events = list(logger.iter_events(session_id, kind=GENERATION_ATTEMPT_KIND))
+        assert len(events) == 1
+        # The model_response_excerpt field carries the raw content.
+        assert events[0].payload["model_response_excerpt"] == content
+
+    def test_valid_json_no_event_emitted(self, tmp_path: Path) -> None:
+        """Valid JSON with no parseable edits does NOT emit a parse_failure event.
+
+        A well-formed JSON response that simply has no valid edits is not
+        a parse failure — only unparseable content triggers the event.
+        """
+        logger = TraceLogger(tmp_path / "trace.db")
+        with logger.session("sess-valid") as session_id:
+            evolver = Evolver(
+                trace_logger=logger,
+                session_id=session_id,
+            )
+            edits = evolver._parse_llm_response('{"proposed_edits": []}')
+
+        assert edits == []
+        events = list(logger.iter_events(session_id, kind=GENERATION_ATTEMPT_KIND))
+        assert len(events) == 0, "Valid JSON should not emit a parse_failure event"
+
+    def test_no_trace_logger_no_crash(self) -> None:
+        """Without a TraceLogger, parse failure still returns [] gracefully."""
+        evolver = Evolver()
+        edits = evolver._parse_llm_response("not json")
+        assert edits == []
