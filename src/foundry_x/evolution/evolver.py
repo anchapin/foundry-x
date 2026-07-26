@@ -1043,7 +1043,8 @@ class Evolver:
             self._check_rate_limit()
         except EvolverGuardError:
             return []
-        messages = _build_generation_prompt(failure, harness_dir)
+        few_shot_edits = self._get_past_successful_edits(failure.proposed_class)
+        messages = self._build_llm_messages(failure, few_shot_edits=few_shot_edits)
 
         for attempt in range(1, max_retries + 1):
             try:
