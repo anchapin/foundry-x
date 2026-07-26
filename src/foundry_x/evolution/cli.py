@@ -70,11 +70,6 @@ _ASYNC_DEPRECATED_MSG = (
 )
 
 
-def _now_iso() -> str:
-    """Return a UTC ISO-8601 timestamp with offset suffix."""
-    return datetime.now(UTC).isoformat()
-
-
 def _infer_backend(trace_db: str) -> str:
     """Return ``"jsonl"`` for ``.jsonl`` paths, ``"sqlite"`` otherwise."""
     return "jsonl" if trace_db.endswith(".jsonl") else "sqlite"
