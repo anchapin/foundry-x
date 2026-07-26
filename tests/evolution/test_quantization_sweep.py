@@ -648,3 +648,132 @@ class TestComputeTokenMetrics:
         )
         assert result.token_efficiency == token_efficiency
         assert result.total_tokens == 150
+
+
+class TestSweepGateTimeout:
+    """gate_timeout_s bounds the sweep subprocess (issue #937)."""
+
+    def test_timeout_produces_zero_pass_rate_with_note(self):
+        """A killed sweep subprocess yields pass_rate=0.0 and a timeout note."""
+        import subprocess
+
+        from foundry_x.evolution.critic import Critic
+
+        critic = Critic(
+            harness_dir=Path("/tmp/nonexistent"),
+            gate_timeout_s=0.001,
+        )
+
+        def _raise_timeout(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=args[0] if args else [], timeout=0.001)
+
+        with patch(
+            "foundry_x.evolution.critic.subprocess.run",
+            side_effect=_raise_timeout,
+        ):
+            result = critic._run_sweep_for_quant(
+                model_file="/srv/models/test.Q4_K_S.gguf",
+                model_id="Q4_K_S",
+            )
+
+        assert result.pass_rate == 0.0
+        assert result.passed_tasks == 0
+        assert result.total_tasks == 0
+        assert result.quantization == "test.Q4_K_S"
+        assert result.model_id == "Q4_K_S"
+        assert "gate_timeout_s" in result.notes
+        assert "0.001" in result.notes
+
+    def test_timeout_note_includes_partial_output(self):
+        """When the killed process wrote partial output, the note surfaces it."""
+        import subprocess
+
+        from foundry_x.evolution.critic import Critic
+
+        critic = Critic(
+            harness_dir=Path("/tmp/nonexistent"),
+            gate_timeout_s=1.0,
+        )
+
+        exc = subprocess.TimeoutExpired(
+            cmd=["pytest"], timeout=1.0, output="partial stdout line", stderr=""
+        )
+
+        with patch(
+            "foundry_x.evolution.critic.subprocess.run",
+            side_effect=exc,
+        ):
+            result = critic._run_sweep_for_quant(
+                model_file="/srv/models/test.Q5_K_M.gguf",
+                model_id="Q5_K_M",
+            )
+
+        assert result.pass_rate == 0.0
+        assert "partial stdout line" in result.notes
+
+    def test_default_none_timeout_passes_timeout_none(self):
+        """When gate_timeout_s=None (default) the timeout kwarg is None
+        so behaviour is unchanged (issue #937 criterion 3)."""
+        from foundry_x.evolution.critic import Critic
+
+        critic = Critic(harness_dir=Path("/tmp/nonexistent"))
+
+        captured: dict = {}
+
+        class _FakeCompletedProcess:
+            returncode = 0
+            stdout = "1 passed"
+            stderr = ""
+
+        def _capture(*args, **kwargs):
+            captured.update(kwargs)
+            return _FakeCompletedProcess()
+
+        with (
+            patch(
+                "foundry_x.evolution.critic.subprocess.run",
+                side_effect=_capture,
+            ),
+            patch.object(
+                Critic,
+                "_compute_token_metrics",
+                return_value=(0, None),
+            ),
+        ):
+            critic._run_sweep_for_quant(
+                model_file="/srv/models/test.Q4_K_S.gguf",
+                model_id="Q4_K_S",
+            )
+
+        assert "timeout" in captured
+        assert captured["timeout"] is None
+
+    def test_no_timeout_does_not_set_notes(self):
+        """A normal (non-timed-out) sweep leaves notes empty."""
+        from foundry_x.evolution.critic import Critic
+
+        critic = Critic(harness_dir=Path("/tmp/nonexistent"))
+
+        class _FakeCompletedProcess:
+            returncode = 0
+            stdout = "1 passed"
+            stderr = ""
+
+        with (
+            patch(
+                "foundry_x.evolution.critic.subprocess.run",
+                return_value=_FakeCompletedProcess(),
+            ),
+            patch.object(
+                Critic,
+                "_compute_token_metrics",
+                return_value=(0, None),
+            ),
+        ):
+            result = critic._run_sweep_for_quant(
+                model_file="/srv/models/test.Q4_K_S.gguf",
+                model_id="Q4_K_S",
+            )
+
+        assert result.notes == ""
+        assert result.pass_rate == 1.0
