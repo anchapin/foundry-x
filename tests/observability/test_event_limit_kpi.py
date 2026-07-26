@@ -61,27 +61,48 @@ def test_event_limit_abort_count_defaults_to_zero_and_round_trips(tmp_path):
 
 
 def test_event_limit_abort_count_aggregates_across_sessions(tmp_path):
-    """Multiple sessions contribute to a single counter, independent of session count."""
+    """Multiple sessions contribute to a single counter, independent of event count per session.
+
+    Each session is counted once regardless of how many event_limit abort events
+    it emitted — the Runner should emit at most one per session, but the KPI
+    guard ensures correct counting even if multiple are emitted (issue #1005).
+    """
     logger = TraceLogger(tmp_path / "traces.db")
-    _seed_event_limit_aborts(logger, "v1", 2)
-    _seed_event_limit_aborts(logger, "v1", 3)
+    _seed_event_limit_aborts(logger, "v1", 2)   # 1 session, 2 events → counts as 1
+    _seed_event_limit_aborts(logger, "v1", 3)   # 1 session, 3 events → counts as 1
     _seed_event_limit_aborts(logger, "v1", 0)  # clean session contributes nothing
 
     summary = compute_kpis(logger)
 
-    assert summary.event_limit_abort_count == 5
+    assert summary.event_limit_abort_count == 2
+
+
+def test_event_limit_abort_count_deduplicates_within_session(tmp_path):
+    """Multiple event_limit aborts in one session count as one (issue #1005).
+
+    This is the core regression test: if the Runner erroneously emits multiple
+    ``task_aborted(reason="event_limit")`` events for the same session, the KPI
+    must not overcount. The set-based guard in ``_event_limit_abort_count``
+    ensures each session contributes at most one.
+    """
+    logger = TraceLogger(tmp_path / "traces.db")
+    _seed_event_limit_aborts(logger, "v1", 5)  # 1 session, 5 events
+
+    summary = compute_kpis(logger)
+
+    assert summary.event_limit_abort_count == 1
 
 
 def test_event_limit_abort_count_respects_harness_version_filter(tmp_path):
-    """The counter narrows to the requested harness version."""
+    """The counter narrows to the requested harness version; sessions are counted once."""
     logger = TraceLogger(tmp_path / "traces.db")
-    _seed_event_limit_aborts(logger, "v1", 4)
-    _seed_event_limit_aborts(logger, "v2", 7)
+    _seed_event_limit_aborts(logger, "v1", 4)  # 1 session with 4 events
+    _seed_event_limit_aborts(logger, "v2", 7)  # 1 session with 7 events
 
-    assert compute_kpis(logger, harness_version="v1").event_limit_abort_count == 4
-    assert compute_kpis(logger, harness_version="v2").event_limit_abort_count == 7
-    # Unfiltered run aggregates both versions.
-    assert compute_kpis(logger).event_limit_abort_count == 11
+    assert compute_kpis(logger, harness_version="v1").event_limit_abort_count == 1
+    assert compute_kpis(logger, harness_version="v2").event_limit_abort_count == 1
+    # Unfiltered run counts both sessions.
+    assert compute_kpis(logger).event_limit_abort_count == 2
 
 
 def test_event_limit_abort_count_ignores_other_abort_reasons(tmp_path):
@@ -91,11 +112,11 @@ def test_event_limit_abort_count_ignores_other_abort_reasons(tmp_path):
         logger.record(sid, "task_received", {"prompt": "do work"})
         logger.record(sid, "task_aborted", {"reason": "wall_clock", "timeout_s": 1.0})
         logger.record(sid, "task_aborted", {"reason": "token_budget", "token_budget": 1000})
-    _seed_event_limit_aborts(logger, "v1", 2)
+    _seed_event_limit_aborts(logger, "v1", 2)  # 1 session with 2 events → counts as 1
 
     summary = compute_kpis(logger)
 
-    assert summary.event_limit_abort_count == 2
+    assert summary.event_limit_abort_count == 1
     # Wall-clock and token-budget counters are unaffected — they have their own
     # aggregation paths; this test pins that the new counter does not double-count.
     assert summary.wall_clock_abort_count == 1
@@ -106,11 +127,11 @@ def test_event_limit_abort_count_is_surfaced_in_kpi_cli_markdown(tmp_path, capsy
     """The ``foundry-kpis`` CLI renders an Event Limit Aborts section when count > 0."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_event_limit_aborts(logger, "v1", 3)
+    _seed_event_limit_aborts(logger, "v1", 3)  # 1 session with 3 events → counts as 1
 
     assert kpi_main(["--db", str(db)]) == 0
     markdown = capsys.readouterr().out
-    assert "Event Limit Aborts: 3 session(s) hit the per-session event cap." in markdown
+    assert "Event Limit Aborts: 1 session(s) hit the per-session event cap." in markdown
 
 
 def test_event_limit_abort_count_omits_markdown_section_when_clean(tmp_path, capsys):
@@ -127,32 +148,35 @@ def test_event_limit_abort_count_is_surfaced_in_kpi_cli_json(tmp_path, capsys):
     """The JSON contract exposes ``event_limit_abort_count`` at the top level."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_event_limit_aborts(logger, "v1", 6)
+    _seed_event_limit_aborts(logger, "v1", 6)  # 1 session with 6 events → counts as 1
 
     assert kpi_main(["--db", str(db), "--format", "json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["event_limit_abort_count"] == 6
+    assert payload["event_limit_abort_count"] == 1
 
 
 def test_event_limit_abort_count_is_in_comparison_aggregates(tmp_path):
-    """Baseline/candidate comparison exposes the new counter as a signed delta (issue #869)."""
+    """Baseline/candidate comparison exposes the new counter as a signed delta (issue #869, #1005).
+
+    Sessions are counted once regardless of how many abort events they emitted.
+    """
     logger = TraceLogger(tmp_path / "traces.db")
-    _seed_event_limit_aborts(logger, "baseline", 1)
-    _seed_event_limit_aborts(logger, "candidate", 4)
+    _seed_event_limit_aborts(logger, "baseline", 1)   # 1 session with 1 event → counts as 1
+    _seed_event_limit_aborts(logger, "candidate", 4)  # 1 session with 4 events → counts as 1
 
     comparison = compare_kpis(logger, "baseline", "candidate")
 
     assert comparison.baseline.event_limit_abort_count == 1
-    assert comparison.candidate.event_limit_abort_count == 4
-    assert comparison.deltas["event_limit_abort_count"] == 3
+    assert comparison.candidate.event_limit_abort_count == 1
+    assert comparison.deltas["event_limit_abort_count"] == 0
 
 
 def test_event_limit_abort_count_appears_in_comparison_markdown(tmp_path, capsys):
     """The baseline/candidate CLI comparison renders the new row."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_event_limit_aborts(logger, "baseline", 1)
-    _seed_event_limit_aborts(logger, "candidate", 2)
+    _seed_event_limit_aborts(logger, "baseline", 1)   # 1 session with 1 event → counts as 1
+    _seed_event_limit_aborts(logger, "candidate", 2)  # 1 session with 2 events → counts as 1
 
     rc = kpi_main(
         [
@@ -170,7 +194,7 @@ def test_event_limit_abort_count_appears_in_comparison_markdown(tmp_path, capsys
     assert "Event Limit Abort Count" in markdown
     # Both sides render as integers; the delta is signed with the
     # higher-is-better=False convention (more aborts → negative).
-    assert "| 1 | 2 |" in markdown
+    assert "| 1 | 1 |" in markdown
 
 
 def test_session_card_counts_event_limit_task_aborted_events(tmp_path):
