@@ -56,9 +56,7 @@ def test_paths_cover_dependency_files(config: dict) -> None:
     pr_trigger = _pull_request_trigger(config)
     paths: list[str] = pr_trigger.get("paths", [])
     for dep_file in DEPENDENCY_PATHS:
-        assert any(
-            dep_file in p for p in paths
-        ), (
+        assert any(dep_file in p for p in paths), (
             f"paths must include {dep_file!r} to trigger pip-audit only when "
             f"dependencies change (issue #1012). Current paths: {paths}"
         )
