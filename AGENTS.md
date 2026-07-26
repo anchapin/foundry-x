@@ -30,11 +30,16 @@ Before you write code in this repo, read in this order:
    loop in §3 below.
 9. `docs/MODEL_CONFIG.md` — the full set of model-side env vars
    (`OPENCODE_SERVER_URL`, `FOUNDRY_TOKEN_BUDGET`, `FOUNDRY_TASK_TIMEOUT`,
-   `FOUNDRY_REQUEST_TIMEOUT_S`, …) and the resolution order.
+   `FOUNDRY_MAX_EVENTS_PER_SESSION`, `FOUNDRY_REQUEST_TIMEOUT_S`, …) and the
+   resolution order. Three resource caps guard against runaway loops:
+   `FOUNDRY_TASK_TIMEOUT` (wall-clock, default 600 s),
+   `FOUNDRY_TOKEN_BUDGET` (total tokens, unset), and
+   `FOUNDRY_MAX_EVENTS_PER_SESSION` (event count, unset).
 10. `docs/adr/` — read the relevant ADR before changing that area:
     - `harness/` → ADR-0004 | `pyproject.toml` / deps → ADR-0002
     - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
     - Module-boundary models → ADR-0006 | `src/foundry_x/execution/` → ADR-0010
+    - `src/foundry_x/evolution/` → ADR-0010 | `evolution/loop.py` → ADR-0010
 11. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
@@ -109,34 +114,39 @@ mirrors the way our product works:
   hygiene checks. See `.pre-commit-config.yaml`.
 - **Lint:** `uv run ruff check .` must pass before commit (also enforced
   by pre-commit). Always run before pytest. The CI `lint` job additionally
-  runs `uv run ruff format --check`; do not let unformatted code reach
-  PR review.
+  runs `uv run ruff format --check`; fix locally with `uv run ruff format .`
+  (run `--check` first, then `format .` if it fails — never let unformatted
+  code reach PR review). Note `ruff` line-length is **100** here, not the
+  default 88 (see `[tool.ruff]` in `pyproject.toml`); pre-commit's `ruff`
+  hook auto-fixes with `--fix --exit-non-zero-on-fix`, so staged files get
+  modified and must be re-added.
 - **Test:** `uv run pytest` — must pass before commit. Run after lint.
   Pytest discovers both `tests/` and `benchmarks/` (see `testpaths` in
   `pyproject.toml`); benchmark tasks under `benchmarks/tasks/` are gated
   by the `@pytest.mark.benchmark` marker (ADR-0004, ADR-0005).
-  - Unit tests only: `uv run pytest -m "not benchmark"`
-  - Single test: `uv run pytest tests/path/to_test.py::test_name`
-  - Single benchmark: `uv run pytest benchmarks/tasks/test_name.py -m benchmark`
-  - Full benchmark suite: `uv run pytest -m benchmark`
-  - List registered benchmark tasks without running them:
-    `uv run pytest --co -q -m benchmark`
-  - **Test fixtures** (defined in `tests/conftest.py` and `benchmarks/conftest.py`):
-    - `model_adapter` (tests/conftest.py): session-scoped `ModelAdapter`
-      selected by `TEST_MODEL_MODE` — defaults to a deterministic
-      `MockModelAdapter` with no network access, so unit tests and
-      most benchmarks run offline. Set `TEST_MODEL_MODE=real` to drive
-      `OpenAICompatibleAdapter` against `OPENCODE_SERVER_URL` /
-      `LLAMACPP_HOST` for live integration runs (matches
-      `.github/workflows/test.yml::test-real-model`).
-    - `mock_adapter` (tests/conftest.py): fresh `MockModelAdapter` per
-      test; ignore `TEST_MODEL_MODE`. Use when configuring
-      per-test responses without sharing state.
-    - `benchmark_workspace` (benchmarks/conftest.py): per-test isolated
-      `tmp_path` the benchmark task treats as the agent's entire
-      filesystem. Indirect-parametrize with the name of a directory
-      under `benchmarks/fixtures/<name>/` to seed inputs (fails loudly
-      if the fixture directory is missing).
+    - Unit tests only: `uv run pytest -m "not benchmark"`
+    - Single test: `uv run pytest tests/path/to_test.py::test_name`
+    - Single benchmark: `uv run pytest benchmarks/tasks/test_name.py -m benchmark`
+    - Full benchmark suite: `uv run pytest -m benchmark`
+    - List registered benchmark tasks without running them:
+      `uv run pytest --co -q -m benchmark`
+    - **Test fixtures** (defined in `tests/conftest.py` and `benchmarks/conftest.py`):
+      - `model_adapter` (tests/conftest.py): session-scoped `ModelAdapter`
+        selected by `TEST_MODEL_MODE` — defaults to a deterministic
+        `MockModelAdapter` with no network access, so unit tests and
+        most benchmarks run offline. Set `TEST_MODEL_MODE=real` to drive
+        `OpenAICompatibleAdapter` against `OPENCODE_SERVER_URL` /
+        `LLAMACPP_HOST` for live integration runs (matches
+        `.github/workflows/test.yml::test-real-model`).
+        **Session-scoped**: do not re-configure it mid-test.
+      - `mock_adapter` (tests/conftest.py): fresh `MockModelAdapter` per
+        test; ignore `TEST_MODEL_MODE`. Use when configuring
+        per-test responses without sharing state.
+      - `benchmark_workspace` (benchmarks/conftest.py): per-test isolated
+        `tmp_path` the benchmark task treats as the agent's entire
+        filesystem. Indirect-parametrize with the name of a directory
+        under `benchmarks/fixtures/<name>/` to seed inputs (fails loudly
+        if the fixture directory is missing).
   - `benchmarks/fixtures/` contains large benchmark inputs and is
     excluded from both ruff and pytest on purpose
     (`pyproject.toml` `extend-exclude` + `norecursedirs`). Don't lint
@@ -162,11 +172,19 @@ mirrors the way our product works:
     tracked token-budget metric from traces.
   - `uv run fx-trace regression-report` — aggregate `critic_verdict`
     events from `logs/` into a regression baseline report.
-  - `uv run foundry-evolve --session-id <id>` — run one evolution
+  - `uv run foundry-evolve evolve --session-id <id>` — run one evolution
     iteration (Digester → Evolver → Critic) against an existing
-    session.
+    session. Use `approve <uuid>` to mark a ProposedEdit as reviewed
+    and `apply <uuid>` to apply it to the harness. Pass `--no-verify`
+    to skip the Critic gate (local-only, audit-logged). Pass `--background`
+    to run non-blocking. Both flags are documented in SECURITY.md.
   - `uv run foundry-sweep` — parametric sweep of harness variants
     (e.g. quantization sweep; Phase 3).
+  - `uv run fx-trace` (from `observability/cli.py`) — KPI reports,
+    regression reports, session summaries, tool-latency percentiles.
+  - `uv run foundry-x-trace` / `foundry-trace` (from `trace/cli.py`) —
+    trace inspection: list/show sessions, grep events, redact secrets,
+    seed sample traces, prune the trace store.
 - **Operational notes:**
   - `logs/` is gitignored but grows without bound. Manage retention
     with `uv run foundry-x-trace prune --keep-last N` or
