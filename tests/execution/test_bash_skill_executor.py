@@ -132,6 +132,52 @@ class TestBashSkillExecutor:
         assert tmp_path.name in result["stdout"] or str(tmp_path) in result["stdout"]
 
     @pytest.mark.asyncio
+    async def test_cwd_inside_workspace_subdir_is_allowed(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        sub = workspace / "sub"
+        sub.mkdir()
+        result = await _bash_skill_executor(
+            "bash", {"command": "pwd", "cwd": str(sub)}, workspace_dir=workspace
+        )
+        assert result["exit_code"] == 0
+        assert "sub" in result["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_cwd_outside_workspace_root_returns_error(self, tmp_path: Path) -> None:
+        """Issue #935: a ``cwd`` resolving outside ``workspace_root`` is rejected.
+
+        Mirrors the file-operation skill confinement: ``_resolve_path`` raises
+        ``ValueError`` for path escapes, and the executor returns an error
+        result instead of executing the command in the escaped directory.
+        """
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+
+        result = await _bash_skill_executor(
+            "bash", {"command": "pwd", "cwd": str(outside)}, workspace_dir=workspace
+        )
+        assert result["exit_code"] == -1
+        assert result["truncated"] is False
+        assert result["stdout"] == ""
+        assert "escapes workspace root" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_cwd_dotdot_escape_returns_error(self, tmp_path: Path) -> None:
+        """Issue #935: a relative ``..`` escape in ``cwd`` is rejected too."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "inner").mkdir()
+
+        result = await _bash_skill_executor(
+            "bash", {"command": "pwd", "cwd": "../outside"}, workspace_dir=workspace
+        )
+        assert result["exit_code"] == -1
+        assert "escapes workspace root" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_shlex_split_handles_quotes(self) -> None:
         result = await _bash_skill_executor("bash", {"command": 'echo "hello world"'})
         assert "hello world" in result["stdout"]
