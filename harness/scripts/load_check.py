@@ -156,6 +156,15 @@ def _check_manifest(harness_dir: Path) -> list[str]:
                 failures.append(
                     f"{manifest}: skill entry {entry!r} not found on disk at {skill_path}"
                 )
+        if skills_dir.is_dir():
+            declared_skills = {str(e) for e in skills}
+            for skill_file in sorted(skills_dir.glob("*.json")):
+                if skill_file.name not in declared_skills:
+                    failures.append(
+                        f"{manifest}: undeclared skill file on disk: {skill_file.name} "
+                        f"(must be added to manifest.json skills[] or removed from disk; "
+                        f"issue #1010)"
+                    )
     else:
         failures.append(f"{manifest}: 'skills' must be a list, got {type(skills).__name__}")
 
@@ -168,6 +177,18 @@ def _check_manifest(harness_dir: Path) -> list[str]:
                 failures.append(
                     f"{manifest}: hook entry {entry!r} not found on disk at {hook_path}"
                 )
+        if hooks_dir.is_dir():
+            declared_hooks = {str(e) for e in hooks}
+            for hook_file in sorted(hooks_dir.glob("*.py")):
+                if hook_file.name in ("__init__.py", "base.py"):
+                    continue
+                stem = hook_file.stem
+                if stem not in declared_hooks:
+                    failures.append(
+                        f"{manifest}: undeclared hook file on disk: {hook_file.name} "
+                        f"(must be added to manifest.json hooks[] or removed from disk; "
+                        f"issue #1010)"
+                    )
     else:
         failures.append(f"{manifest}: 'hooks' must be a list, got {type(hooks).__name__}")
 
