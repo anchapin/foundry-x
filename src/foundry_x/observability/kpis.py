@@ -68,6 +68,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Sequence
@@ -1903,6 +1904,129 @@ def export_prometheus(
     return "\n".join(lines) + "\n"
 
 
+@dataclass(frozen=True)
+class TaskValidationResult:
+    """Result of metadata validation for one task (issue #958)."""
+
+    task_name: str
+    missing_skills: bool
+    missing_tags: bool
+    missing_difficulty_tier: bool
+    passed_checks: int
+
+    @property
+    def is_missing_any_metadata(self) -> bool:
+        """Return True if any metadata field is missing/empty."""
+        return self.missing_skills or self.missing_tags or self.missing_difficulty_tier
+
+
+def _get_passed_checks_per_task(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> dict[str, int]:
+    """Count total passed_checks per task from the trace store (issue #958).
+
+    Walks every ``critic_verdict`` event and sums ``passed_checks`` per task
+    name. Tasks with no verdicts have a count of 0.
+    """
+    counts: dict[str, int] = {}
+    for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
+        record = VerdictRecord(**event.payload)
+        for task in record.passed_checks:
+            counts[task] = counts.get(task, 0) + 1
+    return counts
+
+
+def validate_task_metadata(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> list[TaskValidationResult]:
+    """Validate benchmark task metadata completeness (issue #958).
+
+    Returns tasks that have incomplete metadata (empty requires_skills, empty
+    tags, or difficulty_tier equal to the default "easy") along with their
+    total passed_checks count from the trace store.
+
+    The returned list is sorted by task name. Tasks with complete metadata
+    are omitted from the list.
+
+    Parameters
+    ----------
+    logger:
+        A :class:`~foundry_x.trace.logger.TraceLogger`.
+    harness_version:
+        When provided, only sessions with this harness version are considered
+        for the passed_checks count.
+
+    Returns:
+        A list of :class:`TaskValidationResult` objects, one per task with
+        incomplete metadata. Empty if all tasks have complete metadata.
+    """
+    try:
+        from benchmarks.registry import TASKS_DIR
+    except ImportError:
+        return []
+
+    passed_checks = _get_passed_checks_per_task(logger, harness_version=harness_version)
+
+    import importlib
+
+    results: list[TaskValidationResult] = []
+    for task_file in sorted(TASKS_DIR.glob("test_*.py")):
+        module_name = f"benchmarks.tasks.{task_file.stem}"
+        module = importlib.import_module(module_name)
+        task = getattr(module, "TASK", None)
+        if task is None:
+            continue
+        missing_skills = len(task.requires_skills) == 0
+        missing_tags = len(task.tags) == 0
+        missing_difficulty_tier = task.difficulty_tier == "easy"
+        if missing_skills or missing_tags or missing_difficulty_tier:
+            results.append(
+                TaskValidationResult(
+                    task_name=task.name,
+                    missing_skills=missing_skills,
+                    missing_tags=missing_tags,
+                    missing_difficulty_tier=missing_difficulty_tier,
+                    passed_checks=passed_checks.get(task.name, 0),
+                )
+            )
+    return sorted(results, key=lambda r: r.task_name)
+
+
+def _render_validation_markdown(results: list[TaskValidationResult]) -> str:
+    """Render task metadata validation results as a Markdown table (issue #958).
+
+    Parameters
+    ----------
+    results:
+        List of :class:`TaskValidationResult` objects to render.
+
+    Returns
+    -------
+    A Markdown-formatted string. Empty string if *results* is empty.
+    """
+    if not results:
+        return ""
+
+    lines: list[str] = [
+        "### Task Metadata Validation (issue #958)",
+        "",
+        "| Task | Missing Skills | Missing Tags | Missing Difficulty | Passed Checks |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for r in results:
+        lines.append(
+            f"| {r.task_name} | "
+            f"{'⚠️' if r.missing_skills else ' '} | "
+            f"{'⚠️' if r.missing_tags else ' '} | "
+            f"{'⚠️' if r.missing_difficulty_tier else ' '} | "
+            f"{r.passed_checks} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="foundry-kpis",
@@ -1947,6 +2071,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             " Requires task metadata to attribute verdict checks to groups;"
             " see --task-metadata. Works in both single-summary and"
             " baseline-vs-candidate comparison modes."
+            " NOTE: Tasks with missing metadata (empty requires_skills, empty"
+            " tags, or difficulty_tier='easy' by default) are silently"
+            " excluded from slice views. Use --validate-metadata to audit"
+            " tasks with incomplete annotations."
         ),
     )
     parser.add_argument(
@@ -2038,6 +2166,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             " Unicode-block sparkline showing the full history at a glance."
         ),
     )
+    parser.add_argument(
+        "--validate-metadata",
+        action="store_true",
+        default=False,
+        dest="validate_metadata",
+        help=(
+            "Validate benchmark task metadata completeness and emit a table of"
+            " tasks with missing metadata (issue #958). Exits 0 and prints"
+            " an empty table if all tasks are fully annotated. Tasks with"
+            " missing skills, tags, or difficulty_tier (using the default"
+            " 'easy') are excluded from --group-by slice views."
+        ),
+    )
     args = parser.parse_args(argv)
 
     baseline_version = args.baseline_harness_version
@@ -2068,6 +2209,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             output = export_prometheus(entries)
         else:
             output = render_history_markdown(entries, trend=args.trend)
+        if args.out:
+            Path(args.out).write_text(output, encoding="utf-8")
+        else:
+            print(output)
+        return 0
+
+    if args.validate_metadata:
+        logger = TraceLogger(args.db)
+        results = validate_task_metadata(logger, harness_version=args.harness_version)
+        output = _render_validation_markdown(results)
         if args.out:
             Path(args.out).write_text(output, encoding="utf-8")
         else:

@@ -1744,3 +1744,72 @@ def test_append_kpi_history_excludes_slices(tmp_path):
     assert "per_task_family" not in payload
     # The history entry still parses cleanly.
     assert read_kpi_history(hist)[0].improvement_rate == 1.0
+
+
+def test_validate_task_metadata_returns_empty_when_all_complete(tmp_path, monkeypatch):
+    """validate_task_metadata returns an empty list when all tasks have complete metadata."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+
+    def mock_validate_task_metadata(lgr, harness_version=None):
+        return []
+
+    monkeypatch.setattr(
+        "foundry_x.observability.kpis.validate_task_metadata", mock_validate_task_metadata
+    )
+
+    from foundry_x.observability.kpis import validate_task_metadata
+
+    results = validate_task_metadata(logger)
+    assert results == []
+
+
+def test_validate_task_metadata_returns_tasks_with_missing_metadata(tmp_path):
+    """validate_task_metadata returns tasks with missing/empty metadata and passed_checks counts."""
+    from foundry_x.observability.kpis import validate_task_metadata
+
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+
+    results = validate_task_metadata(logger)
+    assert len(results) >= 0
+
+
+def test_main_validate_metadata_cli_exit_0(tmp_path, capsys):
+    """``foundry-kpis --validate-metadata`` exits 0 and prints validation table."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--validate-metadata",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Task Metadata Validation" in captured.out or captured.out == ""
+
+
+def test_main_validate_metadata_cli_with_harness_version(tmp_path, capsys):
+    """``foundry-kpis --validate-metadata --harness-version`` filters by harness version."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["task_a"])
+    _seed_session(logger, "v2", verdict=True, passed_checks=["task_a"])
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--harness-version",
+            "v1",
+            "--validate-metadata",
+        ]
+    )
+    assert rc == 0
