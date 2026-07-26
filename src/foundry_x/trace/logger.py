@@ -758,7 +758,16 @@ class TraceLogger:
                 line = line.strip()
                 if not line:
                     continue
-                record: dict[str, Any] = json.loads(line)
+                # Issue #932 — a partial/corrupted line (SIGKILL, OOM, or
+                # disk-full during append) must not make the whole store
+                # unreadable. Skip it; read paths never rewrite, so the
+                # line is preserved untouched (no data destruction). The
+                # write-side methods (_prune/_delete/compact) use the same
+                # try/except JSONDecodeError skip pattern.
+                try:
+                    record: dict[str, Any] = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 kind = record.get("kind")
                 session_id = record.get("session_id")
                 if kind == "session_start":
@@ -929,7 +938,12 @@ class TraceLogger:
                 line = line.strip()
                 if not line:
                     continue
-                record: dict[str, Any] = json.loads(line)
+                # Issue #932 — skip corrupted/partial lines (read paths
+                # never rewrite; the bad line is preserved on disk).
+                try:
+                    record: dict[str, Any] = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 if record.get("session_id") != session_id:
                     continue
                 if "event_id" not in record:
@@ -1213,7 +1227,12 @@ class TraceLogger:
             stripped = line.strip()
             if not stripped:
                 continue
-            record = json.loads(stripped)
+            # Issue #932 — skip corrupted/partial lines (read paths
+            # never rewrite; the bad line is preserved on disk).
+            try:
+                record = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
             if record.get("session_id") == session_id and "event_id" in record:
                 session_events.append((idx, record))
         if not session_events:
@@ -1244,7 +1263,12 @@ class TraceLogger:
                 line = line.strip()
                 if not line:
                     continue
-                record: dict[str, Any] = json.loads(line)
+                # Issue #932 — skip corrupted/partial lines (read paths
+                # never rewrite; the bad line is preserved on disk).
+                try:
+                    record: dict[str, Any] = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 if record.get("session_id") != session_id:
                     continue
                 if "event_id" not in record:
@@ -1276,7 +1300,12 @@ class TraceLogger:
                 line = line.strip()
                 if not line:
                     continue
-                record: dict[str, Any] = json.loads(line)
+                # Issue #932 — skip corrupted/partial lines (read paths
+                # never rewrite; the bad line is preserved on disk).
+                try:
+                    record: dict[str, Any] = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 record_kind = record.get("kind")
                 if record_kind == "session_start":
                     sid = record.get("session_id")
