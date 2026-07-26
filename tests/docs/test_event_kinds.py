@@ -45,6 +45,7 @@ from foundry_x.evolution.digester import (
 # Repo root: tests/docs/test_event_kinds.py -> parents[2]
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTEXT_MD = REPO_ROOT / "docs" / "CONTEXT.md"
+DIGESTER_PY = REPO_ROOT / "src" / "foundry_x" / "evolution" / "digester.py"
 
 # Closed set of ``kind`` values currently emitted by FoundryX. Update in
 # the same PR that introduces a new producer (CONTEXT.md:8-9) — this
@@ -101,6 +102,16 @@ _BULLET_KIND_RE = re.compile(r"`([a-z][a-z0-9_]*)`")
 # The section we want to scan starts at "## Event kinds" and ends at the
 # next "## " heading.
 _SECTION_HEADING_RE = re.compile(r"^##\s+", re.MULTILINE)
+
+# A line-number citation in the Failure-signalling subset, e.g. the
+# ``digester.py:61-88`` range on the ``FAILURE_KINDS`` bullet. Captures the
+# constant name and the cited start/end line numbers so the test can verify
+# the range still points at the frozenset definition (issue #934).
+_CITATION_RE = re.compile(
+    r"\*\*`(?P<name>FAILURE_KINDS|FAILURE_PAYLOAD_KEYS)`\*\*"
+    r"[^\n]*\n\s*`src/foundry_x/evolution/digester\.py:"
+    r"(?P<start>\d+)-(?P<end>\d+)`"
+)
 
 
 def _read_event_kinds_section() -> str:
@@ -215,3 +226,53 @@ def test_failure_subset_cross_references_digester_constants():
         "CONTEXT.md 'Failure-signalling subset' must name every key in "
         f"FAILURE_PAYLOAD_KEYS. Missing: {missing_payload_keys}."
     )
+
+
+def test_failure_subset_citations_match_digester_line_numbers():
+    """Line-number citations in the Failure-signalling subset must stay accurate.
+
+    CONTEXT.md cites ``digester.py:NN-NN`` ranges for ``FAILURE_KINDS``
+    and ``FAILURE_PAYLOAD_KEYS``. When a new ``FAILURE_KINDS`` entry
+    shifts the frozenset's line range (issues #901, #867), the citation
+    must be updated in the same PR — otherwise developers following the
+    doc land on the wrong lines. This test parses each citation and
+    asserts the cited range is the actual frozenset definition in
+    :mod:`src.foundry_x.evolution.digester` (issue #934).
+    """
+    section = _read_event_kinds_section()
+    citations = list(_CITATION_RE.finditer(section))
+    assert citations, (
+        "Could not find any `digester.py:NN-NN` citations for "
+        "FAILURE_KINDS / FAILURE_PAYLOAD_KEYS in CONTEXT.md's "
+        "Failure-signalling subset."
+    )
+
+    digester_lines = DIGESTER_PY.read_text(encoding="utf-8").splitlines()
+    cited_names = {m.group("name") for m in citations}
+    assert cited_names == {"FAILURE_KINDS", "FAILURE_PAYLOAD_KEYS"}, (
+        "Expected citations for both FAILURE_KINDS and "
+        f"FAILURE_PAYLOAD_KEYS; found: {sorted(cited_names)}."
+    )
+
+    for match in citations:
+        name = match.group("name")
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        assert 1 <= start <= end <= len(digester_lines), (
+            f"Citation for {name} references digester.py:{start}-{end}, "
+            f"but digester.py has only {len(digester_lines)} lines."
+        )
+        start_text = digester_lines[start - 1]
+        end_text = digester_lines[end - 1]
+        assert name in start_text and "frozenset" in start_text, (
+            f"CONTEXT.md cites {name} starting at digester.py:{start}, but "
+            f"that line is not the {name} frozenset definition:\n"
+            f"  {start_text!r}\nThe citation drifted — update CONTEXT.md "
+            "(issue #934)."
+        )
+        assert end_text.strip() == ")", (
+            f"CONTEXT.md cites the end of {name} at digester.py:{end}, but "
+            f"that line is not the frozenset's closing paren:\n"
+            f"  {end_text!r}\nThe citation drifted — update CONTEXT.md "
+            "(issue #934)."
+        )
