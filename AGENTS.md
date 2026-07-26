@@ -124,8 +124,10 @@ mirrors the way our product works:
   include ruff, ruff-format, gitleaks (secret scan), and standard
   hygiene checks. See `.pre-commit-config.yaml`.
 - **Lint:** `uv run ruff check .` must pass before commit (also enforced
-  by pre-commit). Always run before pytest. The CI `lint` job additionally
-  runs `uv run ruff format --check`; fix locally with `uv run ruff format .`
+  by pre-commit). Always run before pytest. The `lint.yml` workflow
+  additionally enforces `uv run ruff format --check` (note: this is a
+  separate workflow from `ci.yml`'s lint+test job, which only runs
+  `ruff check .`); fix locally with `uv run ruff format .`
   (run `--check` first, then `format .` if it fails — never let unformatted
   code reach PR review). Note `ruff` line-length is **100** here, not the
   default 88 (see `[tool.ruff]` in `pyproject.toml`); pre-commit's `ruff`
