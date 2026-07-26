@@ -200,22 +200,15 @@ def test_propose_clean_class_returns_empty_list(tmp_path):
 def test_propose_class_returns_proposed_edit(tmp_path, proposed_class: str):
     harness_dir = tmp_path / "harness"
     harness_dir.mkdir()
-    if proposed_class == "context-overflow":
-        manifest_file = harness_dir / "manifest.json"
-        manifest_file.write_text("{}\n", encoding="utf-8")
-    else:
-        prompt_file = harness_dir / "system_prompt.txt"
-        prompt_file.write_text("You are FoundryAgent.\n", encoding="utf-8")
+    prompt_file = harness_dir / "system_prompt.txt"
+    prompt_file.write_text("You are FoundryAgent.\n", encoding="utf-8")
     e = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
     failure = FailureReport(session_id="s", summary="test failure", proposed_class=proposed_class)
     result = e.propose(harness_dir, failure=failure)
     assert len(result) == 1
     edit = result[0]
     assert isinstance(edit, ProposedEdit)
-    if proposed_class == "context-overflow":
-        assert edit.target_file == "harness/manifest.json"
-    else:
-        assert edit.target_file == "harness/system_prompt.txt"
+    assert edit.target_file == "harness/system_prompt.txt"
     assert edit.rationale is not None
     assert "--- a/" in edit.unified_diff
     assert "+++ b/" in edit.unified_diff

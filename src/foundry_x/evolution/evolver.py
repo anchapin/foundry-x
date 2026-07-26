@@ -246,10 +246,13 @@ _PROPOSED_CLASS_EDIT_TEMPLATES: dict[str, tuple[str, str, list[str], dict[str, A
         None,
     ),
     "context-overflow": (
-        "manifest.json",
-        "address context-overflow failure: lower token_threshold to reduce context exhaustion",
-        [],
-        {"context_pruning": {"token_threshold": 6144, "event_threshold": 200}},
+        "system_prompt.txt",
+        "address context-overflow failure: add context-pressure self-correction guidance",
+        [
+            "  - When you receive a `context_pruned` signal, prior conversation history was shed. Re-establish essential context (file paths, error details, decisions) before proceeding.",
+            '  - On `task_aborted(reason="token_budget")`, simplify outputs and avoid redundant tool calls; prefer single-call solutions over multi-step exploration.',
+        ],
+        None,
     ),
     "unknown": (
         "system_prompt.txt",

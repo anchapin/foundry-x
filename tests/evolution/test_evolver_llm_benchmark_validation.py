@@ -716,6 +716,9 @@ def test_original():
         Regression test for issue #794: _PROPOSED_CLASS_EDIT_TEMPLATES had no
         context-overflow entry, causing _propose_from_template to return [] and
         silently waste the evolution cycle.
+
+        Issue #901 changed the template target from manifest.json to
+        system_prompt.txt (behavioral guidance instead of config tuning).
         """
         failure_report = FailureReport(
             session_id="sess-template-fallback",
@@ -742,9 +745,9 @@ def test_original():
             "Check that _PROPOSED_CLASS_EDIT_TEMPLATES has a context-overflow entry."
         )
         edit = edits[0]
-        assert edit.target_file == "harness/manifest.json"
+        assert edit.target_file == "harness/system_prompt.txt"
         assert (
             "context-overflow" in edit.rationale.lower()
-            or "token_threshold" in edit.rationale.lower()
+            or "context-pressure" in edit.rationale.lower()
         )
         assert len(edit.unified_diff) > 0

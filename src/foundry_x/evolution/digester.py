@@ -62,6 +62,14 @@ FAILURE_KINDS: frozenset[str] = frozenset(
     {
         "tool_error",
         "task_failed",
+        # Issue #901: ``task_aborted`` is a terminal failure marker emitted
+        # by ``Runner.run_with_limits`` when the wall-clock cap fires
+        # (reason=``wall_clock``) or the token budget is exceeded
+        # (reason=``token_budget``). Without it in FAILURE_KINDS the Digester
+        # silently classifies token-budget abort sessions as ``clean``,
+        # so the Evolver never proposes remediation. CONTEXT.md §Event kinds
+        # already documents this as a failure signal; this aligns the code.
+        "task_aborted",
         "run_failed",
         "agent_error",
         "error",
@@ -151,7 +159,7 @@ _CLASS_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "max_steps",
             "context overflow",
             "context limit",
-            "token budget",
+            "token_budget",
         ),
     ),
     (
@@ -208,7 +216,8 @@ _CLASS_CAUSE_TEMPLATES: dict[str, str] = {
     "context-overflow": (
         "Agent loop hit context budget limit (matched: {match}); the model "
         "repeated tool calls or exceeded the context window before producing a "
-        "final answer. Review the pruning hook."
+        "final answer. Add behavioral guidance so the agent self-corrects "
+        "under context pressure, and review the pruning hook configuration."
     ),
 }
 

@@ -1,19 +1,20 @@
-"""Regression tests for issue #892.
+"""Regression tests for issues #892 and #901.
 
-The ``context-overflow`` template edit targets ``harness/manifest.json``.
-Before the fix the template appended a raw JSON fragment to the file's
-existing content, producing syntactically invalid JSON (a trailing
-``"context_pruning": {...}`` after the closing ``}``). The Critic's
-``load_check`` gate then rejected the proposal as a false-negative even
-though the edit was semantically correct.
+Issue #892 introduced JSON-aware merge-patch helpers so template edits
+targeting ``harness/manifest.json`` produce valid JSON. The unit tests
+for those helpers (``_apply_json_merge_patch``, ``_deep_merge``) remain
+below.
 
-These tests pin the JSON-aware patching contract:
+Issue #901 changed the ``context-overflow`` template from a
+``manifest.json`` config tweak (lowering ``token_threshold``) to a
+``system_prompt.txt`` behavioral edit that teaches the agent to
+self-correct under context pressure. The end-to-end tests below pin
+the new contract:
 
 1. ``Evolver.propose()`` for a ``context-overflow`` failure emits a diff
-   whose post-``git apply`` result is valid JSON.
-2. The patched manifest carries the lowered ``token_threshold`` while
-   preserving every pre-existing key.
-3. The patched harness passes ``harness/scripts/load_check.py`` (the
+   whose post-``git apply`` result adds ``context_pruned`` and
+   ``token_budget`` guidance to ``system_prompt.txt``.
+2. The patched harness passes ``harness/scripts/load_check.py`` (the
    exact gate the Critic runs in :func:`Critic.evaluate`).
 """
 
@@ -175,48 +176,48 @@ def test_apply_json_merge_patch_rejects_non_object_top_level() -> None:
 # --- End-to-end template -> diff -> manifest tests -------------------------
 
 
-def test_context_overflow_template_diff_yields_valid_json(tmp_path: Path) -> None:
-    """Acceptance criterion #1 + #3 (issue #892).
+def test_context_overflow_template_targets_system_prompt(tmp_path: Path) -> None:
+    """Acceptance criterion #1 (issue #901).
 
     The diff produced by ``Evolver.propose()`` for a ``context-overflow``
-    failure must, after ``git apply``, leave ``manifest.json`` as valid JSON
-    that still parses with ``json.loads`` and carries the lowered threshold.
+    failure must target ``system_prompt.txt`` and, after ``git apply``,
+    append guidance about ``context_pruned`` signals and
+    ``task_aborted(reason="token_budget")``.
     """
     harness_dir = _build_load_check_harness(tmp_path)
-    original_manifest = json.loads((harness_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert original_manifest["context_pruning"]["token_threshold"] == 8192
+    original_prompt = (harness_dir / "system_prompt.txt").read_text(encoding="utf-8")
 
     evolver = Evolver(model_adapter=None)
     edits = evolver.propose(harness_dir, _context_overflow_failure())
 
     assert len(edits) == 1, "context-overflow template must produce exactly one edit"
     edit = edits[0]
-    assert edit.target_file == "harness/manifest.json"
+    assert edit.target_file == "harness/system_prompt.txt"
 
-    # Apply the proposal to a throwaway sandbox copy so the source harness
-    # is untouched. The layout (sandbox/harness) mirrors the Critic.
-    sandbox_parent = _materialize_sandbox(tmp_path, "json-sandbox", harness_dir)
+    sandbox_parent = _materialize_sandbox(tmp_path, "prompt-sandbox", harness_dir)
     dest = sandbox_parent / "harness"
 
     _apply_diff(sandbox_parent, edit.unified_diff)
 
-    patched_text = (dest / "manifest.json").read_text(encoding="utf-8")
-    patched = json.loads(patched_text)  # acceptance criterion #1: must parse
+    patched_prompt = (dest / "system_prompt.txt").read_text(encoding="utf-8")
 
-    # The token_threshold is lowered; surrounding keys survive.
-    assert patched["context_pruning"]["token_threshold"] == 6144
-    assert patched["context_pruning"]["event_threshold"] == 200
-    assert patched["version"] == original_manifest["version"]
-    assert patched["hooks"] == original_manifest["hooks"]
-    assert patched["skills"] == original_manifest["skills"]
+    # The original content survives and guidance is appended.
+    assert original_prompt.rstrip("\n") in patched_prompt
+    assert "context_pruned" in patched_prompt, (
+        "system_prompt must mention context_pruned signals (issue #901 AC #1)"
+    )
+    assert "token_budget" in patched_prompt, (
+        "system_prompt must mention token_budget aborts (issue #901 AC #2)"
+    )
 
 
 def test_context_overflow_template_passes_load_check(tmp_path: Path) -> None:
-    """Acceptance criterion #2 (issue #892).
+    """Acceptance criterion #2 (issue #901).
 
-    After applying the ``context-overflow`` template diff, the sandboxed
-    harness must pass ``harness/scripts/load_check.py`` — the exact gate
-    the Critic runs in :func:`Critic.evaluate` (gate 3, ADR-0004).
+    After applying the ``context-overflow`` template diff to
+    ``system_prompt.txt``, the sandboxed harness must pass
+    ``harness/scripts/load_check.py`` — the exact gate the Critic runs
+    in :func:`Critic.evaluate` (gate 3, ADR-0004).
     """
     harness_dir = _build_load_check_harness(tmp_path)
 
