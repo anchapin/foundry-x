@@ -107,6 +107,12 @@ TOOL_ARGUMENT_PARSE_ERROR_KIND = "tool_argument_parse_error"
 # across the trace store.
 SERVER_UNAVAILABLE_KIND = "server_unavailable"
 
+# Issue #953: the evolver emits ``generation_exhausted`` when all LLM
+# generation retries have been exhausted without producing a valid edit.
+# The ``evolver_llm_failure_count`` KPI is the total number of such events;
+# ``evolver_llm_failure_rate`` is the fraction of sessions with at least one.
+GENERATION_EXHAUSTED_KIND = "generation_exhausted"
+
 
 #: Dimension accepted by :func:`compute_kpis`'s ``group_by`` parameter
 #: (issue #898). Each value selects which :class:`TaskKpiMetadata` field
@@ -219,6 +225,13 @@ class KpiSummary(BaseModel):
     fields on each ``model_response`` event. Empty by default; populated
     only when at least one ``model_response`` event carries timing data.
 
+    Issue #951 adds ``context_efficiency``: mean per-session
+    ``1 - (sum(dropped) / sum(threshold + dropped))`` across sessions,
+    sourced from the ``dropped`` and ``threshold`` fields of
+    ``context_pruned`` events. ``None`` when no ``context_pruned``
+    events are present (graceful degradation). Near 1.0 means pruning
+    rarely fired; near 0.0 means heavy pruning throughout sessions.
+
     Issue #626 adds ``context_pruned_count``: a ``session_id -> count`` map
     of ``context_pruned`` events per session, sourced from the pruning hook.
     Empty by default; populated only when at least one ``context_pruned``
@@ -280,6 +293,14 @@ class KpiSummary(BaseModel):
     populated; the other two stay empty so the JSON snapshot stays
     compact and the selected dimension is unambiguous. See
     :class:`SkillKpiSlice` for the verdict-attribution semantics.
+
+    Issue #953 adds ``evolver_llm_failure_count`` and ``evolver_llm_failure_rate``:
+    the total number of ``generation_exhausted`` events emitted by the evolver
+    when all LLM generation retries have been exhausted without producing a valid
+    edit, and the fraction of sessions with at least one such event. A rising
+    rate signals LLM provider flakiness or model degradation that prevents the
+    evolver from proposing harness edits — surfaced as an auxiliary operator
+    signal alongside ``model_retry_count`` and ``tool_argument_parse_error_count``.
     """
 
     cycle_time_seconds: float | None = None
@@ -292,6 +313,7 @@ class KpiSummary(BaseModel):
     hooks_disabled_rate: float = 0.0
     token_budget_abort_count: int = 0
     token_budget_hit_rate: float = 0.0
+    context_efficiency: float | None = None
     streaming_quality: dict[str, "StreamingQualityData"] = {}
     context_pruned_count: dict[str, int] = {}
     wall_clock_abort_count: int = 0
@@ -301,6 +323,8 @@ class KpiSummary(BaseModel):
     event_limit_abort_count: int = 0
     server_restart_count: int = 0
     excluded_from_cycle_time: int = 0
+    evolver_llm_failure_count: int = 0
+    evolver_llm_failure_rate: float = 0.0
     per_skill: dict[str, SkillKpiSlice] = {}
     per_task_family: dict[str, SkillKpiSlice] = {}
     per_difficulty_tier: dict[str, SkillKpiSlice] = {}
@@ -374,6 +398,8 @@ class KpiHistoryEntry(BaseModel):
     and ``wall_clock_abort_count``) were removed because they are in
     the exclude set and never appear in the JSONL line; any consumer
     already sees their defaults.
+
+    Issue #953 adds ``evolver_llm_failure_count`` and ``evolver_llm_failure_rate``.
     """
 
     timestamp: str
@@ -390,6 +416,8 @@ class KpiHistoryEntry(BaseModel):
     event_limit_abort_count: int = 0
     server_restart_count: int = 0
     failure_class_distribution: dict[str, int] = {}
+    evolver_llm_failure_count: int = 0
+    evolver_llm_failure_rate: float = 0.0
 
 
 def _failure_class_distribution(
@@ -461,6 +489,7 @@ def compute_kpis(
     token_budget_abort_count = _token_budget_aborts(logger, harness_version=harness_version)
     token_budget_hit_rate = _token_budget_hit_rate(logger, harness_version=harness_version)
     streaming_quality = _streaming_quality(logger, harness_version=harness_version)
+    context_efficiency = _context_efficiency(logger, harness_version=harness_version)
     context_pruned_count = _context_pruned(logger, harness_version=harness_version)
     wall_clock_abort_count = _wall_clock_abort_count(logger, harness_version=harness_version)
     failure_class_distribution = _failure_class_distribution(
@@ -472,6 +501,9 @@ def compute_kpis(
     )
     event_limit_abort_count = _event_limit_abort_count(logger, harness_version=harness_version)
     server_restart_count = _server_restart_count(logger, harness_version=harness_version)
+    evolver_llm_failure_count, evolver_llm_failure_rate = _evolver_llm_failure(
+        logger, harness_version=harness_version
+    )
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -483,6 +515,7 @@ def compute_kpis(
         hooks_disabled_rate=hooks_disabled_rate,
         token_budget_abort_count=token_budget_abort_count,
         token_budget_hit_rate=token_budget_hit_rate,
+        context_efficiency=context_efficiency,
         streaming_quality=streaming_quality,
         context_pruned_count=context_pruned_count,
         wall_clock_abort_count=wall_clock_abort_count,
@@ -492,6 +525,8 @@ def compute_kpis(
         event_limit_abort_count=event_limit_abort_count,
         server_restart_count=server_restart_count,
         excluded_from_cycle_time=excluded_from_cycle_time,
+        evolver_llm_failure_count=evolver_llm_failure_count,
+        evolver_llm_failure_rate=evolver_llm_failure_rate,
         **_slice_field(
             _slice_verdict_rates(
                 logger,
@@ -637,6 +672,7 @@ def _compute_deltas(
         "token_budget_hit_rate": _delta(
             baseline.token_budget_hit_rate, candidate.token_budget_hit_rate
         ),
+        "context_efficiency": _delta(baseline.context_efficiency, candidate.context_efficiency),
         "hooks_disabled_rate": _delta(baseline.hooks_disabled_rate, candidate.hooks_disabled_rate),
         "wall_clock_abort_count": candidate.wall_clock_abort_count
         - baseline.wall_clock_abort_count,
@@ -652,6 +688,13 @@ def _compute_deltas(
         # widens the survivorship-bias blind spot in ``cycle_time_seconds``.
         "excluded_from_cycle_time": candidate.excluded_from_cycle_time
         - baseline.excluded_from_cycle_time,
+        # Issue #953: evolver LLM failure count and rate deltas.
+        "evolver_llm_failure_count": (
+            candidate.evolver_llm_failure_count - baseline.evolver_llm_failure_count
+        ),
+        "evolver_llm_failure_rate": _delta(
+            baseline.evolver_llm_failure_rate, candidate.evolver_llm_failure_rate
+        ),
     }
 
 
@@ -1131,6 +1174,49 @@ def _context_pruned(
     return counts
 
 
+def _context_efficiency(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> float | None:
+    """Mean per-session context efficiency (issue #951).
+
+    Per-session efficiency = 1 - (sum(dropped) / sum(threshold + dropped)).
+    Sessions with no ``context_pruned`` events are excluded from the mean.
+    Returns ``None`` when no session has any ``context_pruned`` events
+    (graceful degradation, matching the ``cycle_time_seconds`` contract).
+
+    Uses one :meth:`TraceLogger.query_events` cursor with the kind and
+    ``harness_version`` filters pushed down.
+    """
+    session_dropped: dict[str, int] = {}
+    session_threshold: dict[str, int] = {}
+    for event in logger.query_events(
+        kind=CONTEXT_PRUNED_KIND,
+        harness_version=harness_version,
+    ):
+        sid = event.session_id
+        dropped = event.payload.get("dropped", 0) if event.payload else 0
+        threshold = event.payload.get("threshold", 0) if event.payload else 0
+        session_dropped[sid] = session_dropped.get(sid, 0) + dropped
+        session_threshold[sid] = session_threshold.get(sid, 0) + threshold
+
+    if not session_dropped:
+        return None
+
+    efficiencies: list[float] = []
+    for sid in session_dropped:
+        dropped = session_dropped[sid]
+        threshold = session_threshold[sid]
+        denominator = threshold + dropped
+        if denominator > 0:
+            efficiency = 1.0 - (dropped / denominator)
+            efficiencies.append(efficiency)
+
+    if not efficiencies:
+        return None
+    return sum(efficiencies) / len(efficiencies)
+
+
 def _wall_clock_abort_count(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -1269,6 +1355,47 @@ def _server_restart_count(
     return count
 
 
+def _evolver_llm_failure(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> tuple[int, float]:
+    """Count ``generation_exhausted`` events and compute session-fraction failure rate (issue #953).
+
+    Returns ``(failure_count, failure_rate)`` where ``failure_count`` is the
+    total number of ``generation_exhausted`` events emitted when the evolver's
+    LLM generation retries were all exhausted without producing a valid edit,
+    and ``failure_rate`` is the fraction of sessions with a ``task_received``
+    event that also had at least one such event.
+
+    A non-zero count signals that the LLM is failing to produce parseable,
+    valid ProposedEdit objects after retries — a rising rate correlates with
+    LLM provider flakiness or model-output degradation. Surfaced as an
+    auxiliary operator signal alongside :func:`_model_retry_count` and
+    :func:`_tool_argument_parse_error_count`.
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    sessions_with_exhausted: set[str] = set()
+    total_count = 0
+    for event in logger.query_events(
+        kind=GENERATION_EXHAUSTED_KIND,
+        harness_version=harness_version,
+    ):
+        total_count += 1
+        sessions_with_exhausted.add(event.session_id)
+
+    if not sessions_with_exhausted:
+        return 0, 0.0
+
+    sessions_with_task: set[str] = set()
+    for event in logger.query_events(kind="task_received", harness_version=harness_version):
+        sessions_with_task.add(event.session_id)
+
+    rate = len(sessions_with_exhausted) / len(sessions_with_task) if sessions_with_task else 0.0
+    return total_count, rate
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -1310,6 +1437,7 @@ def _render_markdown(summary: KpiSummary) -> str:
         f"| Hooks Disabled Count | {summary.hooks_disabled_count} |",
         f"| Hooks Disabled Rate | {_format_value(summary.hooks_disabled_rate)} |",
         f"| Token Budget Hit Rate | {_format_value(summary.token_budget_hit_rate)} |",
+        f"| Context Efficiency | {_format_value(summary.context_efficiency)} |",
     ]
     # Issue #120: surface per-session ``injection_blocked`` counts only when
     # at least one session has ≥1 block; a clean trace store stays compact.
@@ -1421,6 +1549,17 @@ def _render_markdown(summary: KpiSummary) -> str:
         lines.append(
             f"Server Restarts: {summary.server_restart_count} server_unavailable "
             "event(s) recorded by the runner's mid-session health-check."
+        )
+    # Issue #953: surface evolver LLM failure count when > 0. A non-zero count
+    # signals that the evolver's LLM generation retries were exhausted without
+    # producing a valid ProposedEdit — a rising rate correlates with provider
+    # flakiness or model-output degradation.
+    if summary.evolver_llm_failure_count > 0:
+        lines.append("")
+        lines.append(
+            f"Evolver LLM Failures: {summary.evolver_llm_failure_count} "
+            f"generation_exhausted event(s) "
+            f"(rate: {_format_value(summary.evolver_llm_failure_rate)})."
         )
     # Issue #895: surface the cycle-time exclusion count when > 0 so the
     # survivorship bias in ``cycle_time_seconds`` is visible — a high count
@@ -1554,6 +1693,10 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{_format_value(baseline.token_budget_hit_rate)} | "
         f"{_format_value(candidate.token_budget_hit_rate)} | "
         f"{_format_delta(baseline.token_budget_hit_rate, candidate.token_budget_hit_rate, higher_is_better=False)} |",
+        "| Context Efficiency | "
+        f"{_format_value(baseline.context_efficiency)} | "
+        f"{_format_value(candidate.context_efficiency)} | "
+        f"{_format_delta(baseline.context_efficiency, candidate.context_efficiency, higher_is_better=True)} |",
         "| Hooks Disabled Rate | "
         f"{_format_value(baseline.hooks_disabled_rate)} | "
         f"{_format_value(candidate.hooks_disabled_rate)} | "
@@ -1585,6 +1728,15 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{baseline.excluded_from_cycle_time} | "
         f"{candidate.excluded_from_cycle_time} | "
         f"{_format_delta(float(baseline.excluded_from_cycle_time), float(candidate.excluded_from_cycle_time), higher_is_better=False)} |",
+        # Issue #953: evolver LLM failure count and rate.
+        "| Evol LLM Failure Count | "
+        f"{baseline.evolver_llm_failure_count} | "
+        f"{candidate.evolver_llm_failure_count} | "
+        f"{_format_delta(float(baseline.evolver_llm_failure_count), float(candidate.evolver_llm_failure_count), higher_is_better=False)} |",
+        "| Evol LLM Failure Rate | "
+        f"{_format_value(baseline.evolver_llm_failure_rate)} | "
+        f"{_format_value(candidate.evolver_llm_failure_rate)} | "
+        f"{_format_delta(baseline.evolver_llm_failure_rate, candidate.evolver_llm_failure_rate, higher_is_better=False)} |",
     ]
     return "\n".join(lines)
 
@@ -1654,7 +1806,8 @@ def append_kpi_history(
     ``hooks_disabled_count``, ``hooks_disabled_rate``,
     ``token_budget_abort_count``, ``token_budget_hit_rate``,
     ``model_retry_count``, ``tool_argument_parse_error_count``,
-    ``event_limit_abort_count``, and ``server_restart_count`` are scalar
+    ``event_limit_abort_count``, ``server_restart_count``,
+    ``evolver_llm_failure_count``, and ``evolver_llm_failure_rate`` are scalar
     fields and are included so the trend table can show their drift
     across harness edits. Then ``timestamp`` and the optional
     ``harness_version`` are added. Parent directories are created on
@@ -1767,6 +1920,8 @@ _RELIABILITY_SIGNALS: list[tuple[str, str]] = [
     ("token_budget_hit_rate", "Token Budget Hit Rate"),
     ("hooks_disabled_count", "Hooks Disabled"),
     ("hooks_disabled_rate", "Hooks Disabled Rate"),
+    ("evolver_llm_failure_count", "Evol LLM Failures"),
+    ("evolver_llm_failure_rate", "Evol LLM Failure Rate"),
 ]
 
 

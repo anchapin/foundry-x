@@ -1,7 +1,12 @@
 # Parallel Issue Generation Results
 
-**Session:** `parallel-issue-generation`  
-**Generated:** 2026-07-18  
+<<<<<<< HEAD
+**Session:** `parallel-issue-generation`
+**Generated:** 2026-07-18
+=======
+**Session:** `parallel-issue-generation`
+**Generated:** 2026-07-18
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Sub-agents:** 6 (Evolution Engine, Trace Store, Harness Layer, Runner/Model Adapter, Phase 4 Discovery, Developer Experience)
 
 ---
@@ -68,10 +73,17 @@
 
 #### 1. fix(loop): pass failure_class to critic.evaluate in run_evolution_step_async
 
-**Priority:** P0  
-**KPI Tags:** `kpi-improvement-rate`, `kpi-cycle-time`  
-**ADR Tags:** `ADR-0006`  
-**Confidence:** 0.95  
+<<<<<<< HEAD
+**Priority:** P0
+**KPI Tags:** `kpi-improvement-rate`, `kpi-cycle-time`
+**ADR Tags:** `ADR-0006`
+**Confidence:** 0.95
+=======
+**Priority:** P0
+**KPI Tags:** `kpi-improvement-rate`, `kpi-cycle-time`
+**ADR Tags:** `ADR-0006`
+**Confidence:** 0.95
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 1 — Evolution Engine
 
 **Body:**
@@ -97,10 +109,17 @@ ADR-0006 (pydantic at module boundary)
 
 #### 2. fix(evolver): context-overflow template produces invalid manifest JSON
 
-**Priority:** P0  
-**KPI Tags:** `kpi-token-budget`, `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0004`, `ADR-0012`  
-**Confidence:** 0.90  
+<<<<<<< HEAD
+**Priority:** P0
+**KPI Tags:** `kpi-token-budget`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0004`, `ADR-0012`
+**Confidence:** 0.90
+=======
+**Priority:** P0
+**KPI Tags:** `kpi-token-budget`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0004`, `ADR-0012`
+**Confidence:** 0.90
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 3 — Harness Layer
 
 **Body:**
@@ -127,10 +146,17 @@ ADR-0012 (manifest.json as evolver target), ADR-0004 (Critic gate)
 
 #### 3. fix(critic): implement gate_timeout_s as documented in evaluate() docstring
 
-**Priority:** P0  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** `ADR-0004`, `ADR-0010`  
-**Confidence:** 0.95  
+<<<<<<< HEAD
+**Priority:** P0
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0004`, `ADR-0010`
+**Confidence:** 0.95
+=======
+**Priority:** P0
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0004`, `ADR-0010`
+**Confidence:** 0.95
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 1 — Evolution Engine
 
 **Body:**
@@ -162,10 +188,17 @@ ADR-0004 (Critic gate), ADR-0010 (Runner agent loop termination)
 
 #### 4. fix(evolver): context-overflow template produces valid manifest.json JSON edits
 
-**Priority:** P1  
-**KPI Tags:** `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0012`  
-**Confidence:** 0.90  
+<<<<<<< HEAD
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0012`
+**Confidence:** 0.90
+=======
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0012`
+**Confidence:** 0.90
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 1 — Evolution Engine
 
 **Body:**
@@ -192,10 +225,17 @@ ADR-0012
 
 #### 5. fix(trace): event_limit early-return bypasses outcome event emission
 
-**Priority:** P1  
-**KPI Tags:** `kpi-cycle-time`, `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0010`, `ADR-0007`  
-**Confidence:** 0.92  
+<<<<<<< HEAD
+**Priority:** P1
+**KPI Tags:** `kpi-cycle-time`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0010`, `ADR-0007`
+**Confidence:** 0.92
+=======
+**Priority:** P1
+**KPI Tags:** `kpi-cycle-time`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0010`, `ADR-0007`
+**Confidence:** 0.92
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 2 — Trace Store
 
 **Body:**
@@ -222,10 +262,17 @@ ADR-0010, ADR-0007
 
 #### 6. fix(harness): remove stale example_skill from manifest skill_inventory
 
-**Priority:** P1  
-**KPI Tags:** `kpi-improvement-rate`, `kpi-regression-rate`  
-**ADR Tags:** `ADR-0004`, `ADR-0012`  
-**Confidence:** 0.90  
+<<<<<<< HEAD
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`, `kpi-regression-rate`
+**ADR Tags:** `ADR-0004`, `ADR-0012`
+**Confidence:** 0.90
+=======
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`, `kpi-regression-rate`
+**ADR Tags:** `ADR-0004`, `ADR-0012`
+**Confidence:** 0.90
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 3 — Harness Layer
 
 **Body:**
@@ -252,10 +299,17 @@ ADR-0004, ADR-0012
 
 #### 7. perf(trace): SQLite prune doesn't reclaim WAL space causing unbounded growth
 
-**Priority:** P1  
-**KPI Tags:** —  
-**ADR Tags:** `ADR-0013`, `ADR-0022`  
-**Confidence:** 0.88  
+<<<<<<< HEAD
+**Priority:** P1
+**KPI Tags:** —
+**ADR Tags:** `ADR-0013`, `ADR-0022`
+**Confidence:** 0.88
+=======
+**Priority:** P1
+**KPI Tags:** —
+**ADR Tags:** `ADR-0013`, `ADR-0022`
+**Confidence:** 0.88
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 2 — Trace Store
 
 **Body:**
@@ -282,10 +336,17 @@ ADR-0013, ADR-0022
 
 #### 8. docs(evolver): add context-overflow to evolver_meta_prompt.txt failure taxonomy
 
-**Priority:** P1  
-**KPI Tags:** `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0011`, `ADR-0018`  
-**Confidence:** 0.90  
+<<<<<<< HEAD
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0011`, `ADR-0018`
+**Confidence:** 0.90
+=======
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0011`, `ADR-0018`
+**Confidence:** 0.90
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 1 — Evolution Engine
 
 **Body:**
@@ -312,10 +373,17 @@ ADR-0011, ADR-0018
 
 #### 9. fix(runner): emit one tool_call event per skill execution
 
-**Priority:** P1  
-**KPI Tags:** `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0010`  
-**Confidence:** 0.95  
+<<<<<<< HEAD
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.95
+=======
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.95
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 4 — Runner/Model Adapter
 
 **Body:**
@@ -342,10 +410,17 @@ ADR-0010
 
 #### 10. feat(kpis): add per-skill and per-task-family improvement_rate and regression_rate slices
 
-**Priority:** P1  
-**KPI Tags:** `kpi-regression-rate`, `kpi-cycle-time`, `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0006`  
-**Confidence:** 0.85  
+<<<<<<< HEAD
+**Priority:** P1
+**KPI Tags:** `kpi-regression-rate`, `kpi-cycle-time`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0006`
+**Confidence:** 0.85
+=======
+**Priority:** P1
+**KPI Tags:** `kpi-regression-rate`, `kpi-cycle-time`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0006`
+**Confidence:** 0.85
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 5 — Phase 4 Discovery
 
 **Body:**
@@ -374,10 +449,17 @@ ADR-0006
 
 #### 11. feat(harness): add context-pruning and token-budget guidance to system_prompt
 
-**Priority:** P1  
-**KPI Tags:** `kpi-token-budget`, `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0004`  
-**Confidence:** 0.85  
+<<<<<<< HEAD
+**Priority:** P1
+**KPI Tags:** `kpi-token-budget`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0004`
+**Confidence:** 0.85
+=======
+**Priority:** P1
+**KPI Tags:** `kpi-token-budget`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0004`
+**Confidence:** 0.85
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 3 — Harness Layer
 
 **Body:**
@@ -405,10 +487,17 @@ ADR-0004 (Evolver must generate), PHILOSOPHY.md §6
 
 #### 12. fix(observability): cycle_time KPI excludes sessions that fail before Critic runs
 
-**Priority:** P1  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** `ADR-0010`  
-**Confidence:** 0.78  
+<<<<<<< HEAD
+**Priority:** P1
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.78
+=======
+**Priority:** P1
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.78
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 2 — Trace Store
 
 **Body:**
@@ -437,10 +526,17 @@ ADR-0010
 
 #### 13. feat(benchmark): validate internal suite against external coding evals (HumanEval+/SWE-bench)
 
-**Priority:** P1  
-**KPI Tags:** `kpi-improvement-rate`, `kpi-regression-rate`  
-**ADR Tags:** `ADR-0005`  
-**Confidence:** 0.75  
+<<<<<<< HEAD
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`, `kpi-regression-rate`
+**ADR Tags:** `ADR-0005`
+**Confidence:** 0.75
+=======
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`, `kpi-regression-rate`
+**ADR Tags:** `ADR-0005`
+**Confidence:** 0.75
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 5 — Phase 4 Discovery
 
 **Body:**
@@ -468,10 +564,17 @@ ADR-0005
 
 #### 14. feat(infra): add automated llama-server health-check and restart to foundry-runner
 
-**Priority:** P1  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** —  
-**Confidence:** 0.80  
+<<<<<<< HEAD
+**Priority:** P1
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** —
+**Confidence:** 0.80
+=======
+**Priority:** P1
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** —
+**Confidence:** 0.80
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 5 — Phase 4 Discovery
 
 **Body:**
@@ -500,10 +603,17 @@ None
 
 #### 15. feat(harness): add pre-tool argument validation hook slot
 
-**Priority:** P1  
-**KPI Tags:** `kpi-improvement-rate`, `kpi-token-budget`  
-**ADR Tags:** `ADR-0004`, `ADR-0009`  
-**Confidence:** 0.75  
+<<<<<<< HEAD
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`, `kpi-token-budget`
+**ADR Tags:** `ADR-0004`, `ADR-0009`
+**Confidence:** 0.75
+=======
+**Priority:** P1
+**KPI Tags:** `kpi-improvement-rate`, `kpi-token-budget`
+**ADR Tags:** `ADR-0004`, `ADR-0009`
+**Confidence:** 0.75
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 3 — Harness Layer
 
 **Body:**
@@ -531,10 +641,17 @@ ADR-0004, ADR-0009
 
 #### 16. docs: Add a getting-started tutorial for new contributors
 
-**Priority:** P1  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** —  
-**Confidence:** 0.90  
+<<<<<<< HEAD
+**Priority:** P1
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** —
+**Confidence:** 0.90
+=======
+**Priority:** P1
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** —
+**Confidence:** 0.90
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 6 — Developer Experience
 
 **Body:**
@@ -567,70 +684,119 @@ None
 
 #### 17. feat(observability): session-summary and session-card lack --latest flag
 
-**Priority:** P2  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** `ADR-0007`  
-**Confidence:** 0.85  
+<<<<<<< HEAD
+**Priority:** P2
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0007`
+**Confidence:** 0.85
+=======
+**Priority:** P2
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0007`
+**Confidence:** 0.85
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 2 — Trace Store
 
 ---
 
 #### 18. perf(runner): record post-tool hook latency in tool_call event
 
-**Priority:** P2  
-**KPI Tags:** `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0010`  
-**Confidence:** 0.90  
+<<<<<<< HEAD
+**Priority:** P2
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.90
+=======
+**Priority:** P2
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.90
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 4 — Runner/Model Adapter
 
 ---
 
 #### 19. feat(evolver): add cross-task-family pattern transfer to the evolver meta-prompt
 
-**Priority:** P2  
-**KPI Tags:** `kpi-improvement-rate`, `kpi-cycle-time`  
-**ADR Tags:** `ADR-0018`, `ADR-0004`  
-**Confidence:** 0.65  
+<<<<<<< HEAD
+**Priority:** P2
+**KPI Tags:** `kpi-improvement-rate`, `kpi-cycle-time`
+**ADR Tags:** `ADR-0018`, `ADR-0004`
+**Confidence:** 0.65
+=======
+**Priority:** P2
+**KPI Tags:** `kpi-improvement-rate`, `kpi-cycle-time`
+**ADR Tags:** `ADR-0018`, `ADR-0004`
+**Confidence:** 0.65
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 5 — Phase 4 Discovery
 
 ---
 
 #### 20. fix(runner): ttft_ms=None is ambiguous for tool-call-only streaming responses
 
-**Priority:** P2  
-**KPI Tags:** `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0010`  
-**Confidence:** 0.75  
+<<<<<<< HEAD
+**Priority:** P2
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.75
+=======
+**Priority:** P2
+**KPI Tags:** `kpi-improvement-rate`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.75
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 4 — Runner/Model Adapter
 
 ---
 
 #### 21. docs: Add ADR for workspace-root and agent filesystem boundary concept
 
-**Priority:** P2  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** `ADR-0010`  
-**Confidence:** 0.75  
+<<<<<<< HEAD
+**Priority:** P2
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.75
+=======
+**Priority:** P2
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.75
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 6 — Developer Experience
 
 ---
 
 #### 22. cli: Improve error messages for common failure paths to guide recovery
 
-**Priority:** P2  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** `ADR-0010`  
-**Confidence:** 0.70  
+<<<<<<< HEAD
+**Priority:** P2
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.70
+=======
+**Priority:** P2
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0010`
+**Confidence:** 0.70
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 6 — Developer Experience
 
 ---
 
 #### 23. feat(runner): add session checkpoint and resumption via trace replay
 
-**Priority:** P2  
-**KPI Tags:** `kpi-cycle-time`, `kpi-improvement-rate`  
-**ADR Tags:** `ADR-0007`, `ADR-0010`  
-**Confidence:** 0.60  
+<<<<<<< HEAD
+**Priority:** P2
+**KPI Tags:** `kpi-cycle-time`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0007`, `ADR-0010`
+**Confidence:** 0.60
+=======
+**Priority:** P2
+**KPI Tags:** `kpi-cycle-time`, `kpi-improvement-rate`
+**ADR Tags:** `ADR-0007`, `ADR-0010`
+**Confidence:** 0.60
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 4 — Runner/Model Adapter
 
 ---
@@ -641,10 +807,17 @@ None
 
 #### 24. chore: Add spell-check and markdownlint to pre-commit hooks
 
-**Priority:** P3  
-**KPI Tags:** `kpi-cycle-time`  
-**ADR Tags:** `ADR-0008`  
-**Confidence:** 0.85  
+<<<<<<< HEAD
+**Priority:** P3
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0008`
+**Confidence:** 0.85
+=======
+**Priority:** P3
+**KPI Tags:** `kpi-cycle-time`
+**ADR Tags:** `ADR-0008`
+**Confidence:** 0.85
+>>>>>>> c6e2738 (feat(trace): improve WAL vacuum discoverability in foundry-trace prune)
 **Source:** Sub-agent 6 — Developer Experience
 
 ---

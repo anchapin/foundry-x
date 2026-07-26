@@ -300,13 +300,15 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     # tool_argument_parse_error_count are also scalar fields, so they land in
     # the trend line (issues #871 and #872). server_restart_count is a
     # scalar field introduced for issue #899. context_pruned_count is a
-    # per-session dict excluded by issue #933.
+    # per-session dict excluded by issue #933. context_efficiency is a
+    # scalar field included by issue #951.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
         "improvement_rate",
         "token_budget_abort_count",
         "token_budget_hit_rate",
+        "context_efficiency",
         "timestamp",
         "evolver_duration_ms",
         "hooks_disabled_count",
@@ -316,6 +318,8 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "tool_argument_parse_error_count",
         "event_limit_abort_count",
         "server_restart_count",
+        "evolver_llm_failure_count",
+        "evolver_llm_failure_rate",
     }
     assert "injection_blocks" not in payload
     assert "token_totals" not in payload

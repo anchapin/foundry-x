@@ -82,6 +82,9 @@ _FALLBACK_REQUEST_MODEL = "foundry-local"
 # Env-var for quantization label (issue #494).
 _QUANTIZATION_ENV = "FOUNDRY_QUANTIZATION"
 
+# Env-var for harness variant label (issue #955).
+_HARNESS_VARIANT_ENV = "FOUNDRY_HARNESS_VARIANT"
+
 # Trace-backend selection (issue #13). ``.env.example`` documents
 # ``FOUNDRY_TRACE_BACKEND`` as the way to switch the trace store between the
 # default SQLite database and the JSONL export format (ADR-0003). Keeping the
@@ -252,6 +255,18 @@ def resolve_model_id(env: Mapping[str, str] | None = None) -> str | None:
             return host
 
     return None
+
+
+def resolve_quantization(env: Mapping[str, str] | None = None) -> str | None:
+    """Resolve the quantization label from ``FOUNDRY_QUANTIZATION`` (issue #494).
+
+    Returns the trimmed value of ``FOUNDRY_QUANTIZATION`` if set, else ``None``.
+    The value is stored in the session metadata so the external-eval aggregator
+    (issue #955) can group critic_verdict events per configuration.
+    """
+    source = env if env is not None else os.environ
+    raw = source.get(_QUANTIZATION_ENV, "").strip()
+    return raw or None
 
 
 def _resolve_model_request_name(env: Mapping[str, str] | None = None) -> str:
@@ -2016,6 +2031,12 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         "LLAMACPP_HOST is used (default http://127.0.0.1:8080). "
         "Issue #494.",
     )
+    parser.add_argument(
+        "--harness-variant",
+        default=None,
+        help="Harness variant label (e.g. q4km, q5km). Stored in session "
+        "metadata for external-eval correlation grouping (issue #955).",
+    )
     args = parser.parse_args()
 
     harness_dir = Path(args.harness_dir).resolve()
@@ -2038,15 +2059,20 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
     model_id_override = args.model_id if args.model_id is not None else None
     quantization_override = args.quantization if args.quantization is not None else None
     path_or_endpoint_override = args.path_or_endpoint if args.path_or_endpoint is not None else None
+    harness_variant_override = args.harness_variant if args.harness_variant is not None else None
     model_id = model_id_override if model_id_override is not None else resolve_model_id()
+    quantization = (
+        quantization_override if quantization_override is not None else resolve_quantization()
+    )
+    harness_variant = (
+        harness_variant_override
+        if harness_variant_override is not None
+        else os.environ.get(_HARNESS_VARIANT_ENV, "").strip() or None
+    )
     limits = run_limits_from_env()
 
     model_adapter: ModelAdapter | None = None
-    if (
-        model_id_override is not None
-        or quantization_override is not None
-        or path_or_endpoint_override is not None
-    ):
+    if model_id_override is not None or path_or_endpoint_override is not None:
         model_adapter = build_model_adapter_with_overrides(
             model_id=model_id_override,
             quantization=quantization_override,
@@ -2062,7 +2088,17 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
     # degradation even when no restart is attempted.
     server_manager = FoundryServerManager()
 
-    with logger.session(harness_version=harness_version, model_id=model_id) as session_id:
+    session_metadata: dict[str, Any] = {}
+    if quantization is not None:
+        session_metadata["quantization"] = quantization
+    if harness_variant is not None:
+        session_metadata["harness_variant"] = harness_variant
+
+    with logger.session(
+        harness_version=harness_version,
+        model_id=model_id,
+        metadata=session_metadata if session_metadata else None,
+    ) as session_id:
         logger.record(session_id, kind="task_received", payload={"prompt": args.task})
         start = time.monotonic()
         if run_task_fn is not None:
