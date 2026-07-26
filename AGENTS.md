@@ -40,12 +40,13 @@ Before you write code in this repo, read in this order:
     - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
     - Module-boundary models → ADR-0006 | `src/foundry_x/execution/` → ADR-0010
     - `src/foundry_x/evolution/` → ADR-0010 | `evolution/loop.py` → ADR-0010
-    - Newer subsystems map to higher-numbered ADRs (0008–0023); e.g.
-      Conventional Commits → ADR-0008, security-eval benchmarks → ADR-0009,
-      manifest as evolver target → ADR-0012, model abstraction → ADR-0014/0015,
-      review state machine → ADR-0017, context pruning at scale → ADR-0021.
-      Run `ls docs/adr/` for the current set before assuming a subsystem
-      has no governing decision.
+     - Newer subsystems map to higher-numbered ADRs (0008–0023); e.g.
+       Conventional Commits → ADR-0008, security-eval benchmarks → ADR-0009,
+       manifest as evolver target → ADR-0012, model abstraction → ADR-0014
+       (ADR-0015 merged into 0014), review state machine → ADR-0017,
+       context pruning at scale → ADR-0021.
+       Run `ls docs/adr/` for the current set before assuming a subsystem
+       has no governing decision.
 11. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
@@ -157,7 +158,7 @@ mirrors the way our product works:
         under `benchmarks/fixtures/<name>/` to seed inputs (fails loudly
         if the fixture directory is missing).
   - `benchmarks/fixtures/` contains large benchmark inputs and is
-    excluded from both ruff and pytest on purpose
+    excluded from ruff, ruff-format, and pytest on purpose
     (`pyproject.toml` `extend-exclude` + `norecursedirs`). Don't lint
     or import from it; copy fixtures into the `benchmark_workspace`
     (or `tests/`) if you need them outside a benchmark task.
