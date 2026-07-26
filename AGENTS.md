@@ -9,6 +9,11 @@
 
 ## 1. Read first, then act
 
+First session here? Work through [`docs/TUTORIAL.md`](./docs/TUTORIAL.md)
+(<30 min, fully offline): it plants a trace, walks the six core events
+the `TraceLogger` emits, and reads the KPIs. It establishes the mental
+model the rest of this file assumes.
+
 Before you write code in this repo, read in this order:
 
 1. `README.md` — what this is.
