@@ -24,7 +24,7 @@ foundry-sweep = "foundry_x.evolution.cli:sweep_main"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    "ruff>=0.3",
+    "ruff>=0.15.22",
     "pre-commit>=3.8",
 ]
 
