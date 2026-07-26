@@ -883,8 +883,10 @@ def _slice_verdict_rates(
             meta = task_metadata.get(task)
             if meta is not None:
                 touched |= _groups_for_task(meta, group_by)
-        if not touched:
-            continue
+        # No explicit ``if not touched: continue`` here: an empty ``touched``
+        # (a verdict naming only unknown tasks, or tasks with no values for the
+        # chosen dimension) is a natural no-op for the ``for group in touched``
+        # loop below, so the guard was dead code with no behavioural effect.
         for group in touched:
             bucket = acc.setdefault(group, _SliceAcc())
             bucket.total += 1
