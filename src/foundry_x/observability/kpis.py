@@ -225,6 +225,13 @@ class KpiSummary(BaseModel):
     fields on each ``model_response`` event. Empty by default; populated
     only when at least one ``model_response`` event carries timing data.
 
+    Issue #951 adds ``context_efficiency``: mean per-session
+    ``1 - (sum(dropped) / sum(threshold + dropped))`` across sessions,
+    sourced from the ``dropped`` and ``threshold`` fields of
+    ``context_pruned`` events. ``None`` when no ``context_pruned``
+    events are present (graceful degradation). Near 1.0 means pruning
+    rarely fired; near 0.0 means heavy pruning throughout sessions.
+
     Issue #626 adds ``context_pruned_count``: a ``session_id -> count`` map
     of ``context_pruned`` events per session, sourced from the pruning hook.
     Empty by default; populated only when at least one ``context_pruned``
@@ -306,6 +313,7 @@ class KpiSummary(BaseModel):
     hooks_disabled_rate: float = 0.0
     token_budget_abort_count: int = 0
     token_budget_hit_rate: float = 0.0
+    context_efficiency: float | None = None
     streaming_quality: dict[str, "StreamingQualityData"] = {}
     context_pruned_count: dict[str, int] = {}
     wall_clock_abort_count: int = 0
@@ -481,6 +489,7 @@ def compute_kpis(
     token_budget_abort_count = _token_budget_aborts(logger, harness_version=harness_version)
     token_budget_hit_rate = _token_budget_hit_rate(logger, harness_version=harness_version)
     streaming_quality = _streaming_quality(logger, harness_version=harness_version)
+    context_efficiency = _context_efficiency(logger, harness_version=harness_version)
     context_pruned_count = _context_pruned(logger, harness_version=harness_version)
     wall_clock_abort_count = _wall_clock_abort_count(logger, harness_version=harness_version)
     failure_class_distribution = _failure_class_distribution(
@@ -506,6 +515,7 @@ def compute_kpis(
         hooks_disabled_rate=hooks_disabled_rate,
         token_budget_abort_count=token_budget_abort_count,
         token_budget_hit_rate=token_budget_hit_rate,
+        context_efficiency=context_efficiency,
         streaming_quality=streaming_quality,
         context_pruned_count=context_pruned_count,
         wall_clock_abort_count=wall_clock_abort_count,
@@ -662,6 +672,7 @@ def _compute_deltas(
         "token_budget_hit_rate": _delta(
             baseline.token_budget_hit_rate, candidate.token_budget_hit_rate
         ),
+        "context_efficiency": _delta(baseline.context_efficiency, candidate.context_efficiency),
         "hooks_disabled_rate": _delta(baseline.hooks_disabled_rate, candidate.hooks_disabled_rate),
         "wall_clock_abort_count": candidate.wall_clock_abort_count
         - baseline.wall_clock_abort_count,
@@ -1163,6 +1174,49 @@ def _context_pruned(
     return counts
 
 
+def _context_efficiency(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> float | None:
+    """Mean per-session context efficiency (issue #951).
+
+    Per-session efficiency = 1 - (sum(dropped) / sum(threshold + dropped)).
+    Sessions with no ``context_pruned`` events are excluded from the mean.
+    Returns ``None`` when no session has any ``context_pruned`` events
+    (graceful degradation, matching the ``cycle_time_seconds`` contract).
+
+    Uses one :meth:`TraceLogger.query_events` cursor with the kind and
+    ``harness_version`` filters pushed down.
+    """
+    session_dropped: dict[str, int] = {}
+    session_threshold: dict[str, int] = {}
+    for event in logger.query_events(
+        kind=CONTEXT_PRUNED_KIND,
+        harness_version=harness_version,
+    ):
+        sid = event.session_id
+        dropped = event.payload.get("dropped", 0) if event.payload else 0
+        threshold = event.payload.get("threshold", 0) if event.payload else 0
+        session_dropped[sid] = session_dropped.get(sid, 0) + dropped
+        session_threshold[sid] = session_threshold.get(sid, 0) + threshold
+
+    if not session_dropped:
+        return None
+
+    efficiencies: list[float] = []
+    for sid in session_dropped:
+        dropped = session_dropped[sid]
+        threshold = session_threshold[sid]
+        denominator = threshold + dropped
+        if denominator > 0:
+            efficiency = 1.0 - (dropped / denominator)
+            efficiencies.append(efficiency)
+
+    if not efficiencies:
+        return None
+    return sum(efficiencies) / len(efficiencies)
+
+
 def _wall_clock_abort_count(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -1383,6 +1437,7 @@ def _render_markdown(summary: KpiSummary) -> str:
         f"| Hooks Disabled Count | {summary.hooks_disabled_count} |",
         f"| Hooks Disabled Rate | {_format_value(summary.hooks_disabled_rate)} |",
         f"| Token Budget Hit Rate | {_format_value(summary.token_budget_hit_rate)} |",
+        f"| Context Efficiency | {_format_value(summary.context_efficiency)} |",
     ]
     # Issue #120: surface per-session ``injection_blocked`` counts only when
     # at least one session has ≥1 block; a clean trace store stays compact.
@@ -1638,6 +1693,10 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
         f"{_format_value(baseline.token_budget_hit_rate)} | "
         f"{_format_value(candidate.token_budget_hit_rate)} | "
         f"{_format_delta(baseline.token_budget_hit_rate, candidate.token_budget_hit_rate, higher_is_better=False)} |",
+        "| Context Efficiency | "
+        f"{_format_value(baseline.context_efficiency)} | "
+        f"{_format_value(candidate.context_efficiency)} | "
+        f"{_format_delta(baseline.context_efficiency, candidate.context_efficiency, higher_is_better=True)} |",
         "| Hooks Disabled Rate | "
         f"{_format_value(baseline.hooks_disabled_rate)} | "
         f"{_format_value(candidate.hooks_disabled_rate)} | "
