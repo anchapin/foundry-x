@@ -282,7 +282,7 @@ def _build_generation_prompt(
         "  - harness/system_prompt.txt\n"
         "  - harness/manifest.json\n"
         "  - harness/hooks/*.py\n"
-        "  - harness/skills/*/*.md\n"
+        "  - harness/skills/*.json\n"
         "Every edit must be returned as a JSON array of ProposedEdit objects:\n"
         '  [{"target_file": "...", "rationale": "...", "unified_diff": "..."}]\n'
         "The unified_diff must be a valid git-apply unified diff with --- a/ and +++ b/ headers.\n"
@@ -762,7 +762,7 @@ class Evolver:
                 "  - harness/system_prompt.txt (leaf file)",
                 "  - harness/manifest.json (leaf file)",
                 "  - harness/hooks/*.py (arbitrary depth)",
-                "  - harness/skills/*.py (arbitrary depth)",
+                "  - harness/skills/*.json (arbitrary depth)",
                 "",
                 "Each proposed edit must include:",
                 "  1. target_file: path relative to harness/",
