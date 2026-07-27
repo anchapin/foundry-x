@@ -1736,8 +1736,19 @@ def test_doctor_no_corrupt_lines(tmp_path, capsys):
     _write_jsonl(
         db,
         [
-            {"kind": "session_start", "session_id": "abc", "started_at": "2025-01-01T00:00:00Z", "harness_version": "0.1.0"},
-            {"kind": "task_received", "event_id": "e1", "session_id": "abc", "timestamp": "2025-01-01T00:00:01Z", "payload": {}},
+            {
+                "kind": "session_start",
+                "session_id": "abc",
+                "started_at": "2025-01-01T00:00:00Z",
+                "harness_version": "0.1.0",
+            },
+            {
+                "kind": "task_received",
+                "event_id": "e1",
+                "session_id": "abc",
+                "timestamp": "2025-01-01T00:00:01Z",
+                "payload": {},
+            },
             {"kind": "session_end", "session_id": "abc", "ended_at": "2025-01-01T00:00:02Z"},
         ],
     )

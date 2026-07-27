@@ -63,7 +63,8 @@ TASK = BenchmarkTask(
 
 #: The intentionally buggy diff content that the agent will review.
 #: This diff modifies two files with several intentional issues.
-DIFF_CONTENT = "\n".join([  # noqa: FLY002
+DIFF_CONTENT = "\n".join(  # noqa: FLY002
+    [
         "diff --git a/src/auth.py b/src/auth.py",
         "index 3f2a1b2..9c8e4d1 100644",
         "--- a/src/auth.py",

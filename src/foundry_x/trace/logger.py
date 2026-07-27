@@ -518,9 +518,7 @@ class TraceLogger:
             "last_line_number": (
                 self._jsonl_last_skip["line_number"] if self._jsonl_last_skip else None
             ),
-            "last_reason": (
-                self._jsonl_last_skip["reason"] if self._jsonl_last_skip else None
-            ),
+            "last_reason": (self._jsonl_last_skip["reason"] if self._jsonl_last_skip else None),
         }
 
     @contextmanager
@@ -1530,7 +1528,12 @@ class TraceLogger:
         if self.backend != "jsonl":
             raise RuntimeError("doctor: jsonl backend required")
         if not self.path.exists():
-            return {"skipped_lines": [], "skipped_session_ids": [], "kept_lines": 0, "applied": False}
+            return {
+                "skipped_lines": [],
+                "skipped_session_ids": [],
+                "kept_lines": 0,
+                "applied": False,
+            }
 
         skipped_lines: list[int] = []
         skipped_session_ids: list[str] = []
@@ -1563,7 +1566,12 @@ class TraceLogger:
             }
 
         if not skipped_lines:
-            return {"skipped_lines": [], "skipped_session_ids": [], "kept_lines": len(kept_lines), "applied": False}
+            return {
+                "skipped_lines": [],
+                "skipped_session_ids": [],
+                "kept_lines": len(kept_lines),
+                "applied": False,
+            }
 
         with tempfile.NamedTemporaryFile(
             mode="w",

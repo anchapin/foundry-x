@@ -230,9 +230,7 @@ class TestProposeBatch:
         assert len(edits) == 1
         assert edits[0].target_file == "harness/system_prompt.txt"
 
-    def test_propose_batch_multiple_failures_same_class_deduplicates(
-        self, tmp_path: Path
-    ) -> None:
+    def test_propose_batch_multiple_failures_same_class_deduplicates(self, tmp_path: Path) -> None:
         """Multiple failures of the same class produce only one edit (dedup by target)."""
         from foundry_x.evolution.digester import BatchFailureReport, FailureReport
 
@@ -262,9 +260,7 @@ class TestProposeBatch:
         edits = evolver.propose_batch(harness_dir, batch)
         assert len(edits) == 1
 
-    def test_propose_batch_multiple_failures_different_classes(
-        self, tmp_path: Path
-    ) -> None:
+    def test_propose_batch_multiple_failures_different_classes(self, tmp_path: Path) -> None:
         """Multiple failures of different classes produce separate edits."""
         from foundry_x.evolution.digester import BatchFailureReport, FailureReport
 
