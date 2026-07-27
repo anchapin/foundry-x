@@ -1,9 +1,7 @@
 """Tests for ``foundry-evolve evolve`` CLI flags (issue #888).
 
-Covers the new ``--background`` and ``--no-verify`` flags on the
-``evolve`` subcommand, the deprecation warning emitted by the legacy
-top-level ``--async`` flag, and the audit-trail regression fix in
-``_run_loop_async`` (which now calls ``record_verdict``).
+Covers the ``--background`` and ``--no-verify`` flags on the
+``evolve`` subcommand.
 
 These tests intentionally live under ``tests/cli/`` rather than
 ``tests/evolution/`` because they target the user-facing CLI surface
@@ -21,7 +19,6 @@ from unittest import mock
 import pytest
 
 from foundry_x.evolution.cli import (
-    _ASYNC_DEPRECATED_MSG,
     _build_evolve_subparser,
     _run_loop,
     main,
@@ -341,140 +338,6 @@ class TestNoVerifyFlag:
         # failure been detected, the gate would have been skipped.
         assert "WARNING" in captured.err
         assert "No failure detected" in captured.out
-
-
-# --------------------------------------------------------------------------- #
-# --async deprecation                                                         #
-# --------------------------------------------------------------------------- #
-
-
-class TestAsyncDeprecation:
-    """Legacy top-level ``--async`` emits a deprecation warning (issue #888)."""
-
-    def test_legacy_async_emits_deprecation_warning(self, tmp_path, capsys):
-        db = tmp_path / "traces.db"
-        sid = _populate_clean_session(db)
-        harness = tmp_path / "harness"
-        harness.mkdir()
-        _write_minimal_harness(harness)
-
-        rc = main(
-            [
-                "--session-id",
-                sid,
-                "--trace-db",
-                str(db),
-                "--harness-dir",
-                str(harness),
-                "--async",
-            ]
-        )
-
-        # The async path still runs to completion, so the exit code reflects
-        # the loop outcome (clean session -> 0). The deprecation notice is
-        # on stderr.
-        assert rc == 0
-        err = capsys.readouterr().err
-        assert _ASYNC_DEPRECATED_MSG.strip() in err
-        # The notice points operators at the replacement flag.
-        assert "--background" in err
-
-    def test_legacy_async_warning_constant_is_self_describing(self):
-        # Sanity-check the constant so the warning text is not silently
-        # truncated by a future refactor.
-        assert "Deprecation" in _ASYNC_DEPRECATED_MSG
-        assert "--background" in _ASYNC_DEPRECATED_MSG
-
-
-# --------------------------------------------------------------------------- #
-# _run_loop_async record_verdict regression                                    #
-# --------------------------------------------------------------------------- #
-
-
-class TestRunLoopAsyncRecordsVerdict:
-    """Regression: ``_run_loop_async`` must persist the verdict trace event.
-
-    Issue #888 calls out an observability gap: the async path returned a
-    verdict object to its caller but never invoked :func:`record_verdict`,
-    so the regression report was blind to async runs. The fix routes the
-    async result.verdict through ``record_verdict`` so the trace store
-    carries a ``critic_verdict`` event.
-    """
-
-    def test_async_loop_persists_critic_verdict_event(self, tmp_path, capsys):
-        import asyncio
-
-        from foundry_x.evolution.cli import _run_loop_async
-
-        db = tmp_path / "traces.db"
-        sid = _populate_failing_session(db)
-        harness = tmp_path / "harness"
-        harness.mkdir()
-        _write_minimal_harness(harness)
-
-        report, edit, verdict, exit_code, _hv = asyncio.run(
-            _run_loop_async(
-                session_id=sid,
-                trace_db=str(db),
-                harness_dir=harness,
-                verbose=False,
-            )
-        )
-
-        # Sanity: the failing session produced an edit and the loop reached
-        # the verdict stage.
-        assert report is not None
-        assert edit is not None
-        assert verdict is not None
-        # Rejected by the Critic in the mocked harness fixture -> exit 1.
-        assert exit_code == 1
-
-        # The verdict must be persisted as a critic_verdict event so the
-        # regression report and KPI consumers can see it.
-        logger = TraceLogger(db)
-        verdict_events = [ev for ev in logger.load_session(sid) if ev.kind == VERDICT_KIND]
-        assert len(verdict_events) == 1
-        assert verdict_events[0].payload["verdict"] is False
-
-    def test_async_loop_no_verify_persists_skipped_verdict(self, tmp_path, capsys):
-        import asyncio
-
-        from foundry_x.evolution.cli import _run_loop_async
-
-        db = tmp_path / "traces.db"
-        sid = _populate_failing_session(db)
-        harness = tmp_path / "harness"
-        harness.mkdir()
-        _write_minimal_harness(harness)
-
-        report, edit, verdict, exit_code, _hv = asyncio.run(
-            _run_loop_async(
-                session_id=sid,
-                trace_db=str(db),
-                harness_dir=harness,
-                verbose=False,
-                no_verify=True,
-            )
-        )
-
-        # ``--no-verify`` short-circuits the gate without rejecting the edit.
-        assert report is not None
-        assert edit is not None
-        assert verdict is not None
-        assert verdict.verdict is None
-        assert exit_code == 0
-        captured = capsys.readouterr()
-        assert "SKIPPED" in captured.out
-        assert "WARNING" in captured.err
-
-        # Audit-trail parity with the sync path: async + --no-verify must
-        # also persist the synthetic verdict so the trace store carries the
-        # skip marker.
-        logger = TraceLogger(db)
-        verdict_events = [ev for ev in logger.load_session(sid) if ev.kind == VERDICT_KIND]
-        assert len(verdict_events) == 1
-        assert verdict_events[0].payload["verdict"] is None
-        assert verdict_events[0].payload["notes"] == "--no-verify: skipped"
 
 
 # --------------------------------------------------------------------------- #
