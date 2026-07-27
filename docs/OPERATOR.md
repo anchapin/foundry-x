@@ -3,6 +3,11 @@
 > A guide for human operators running the FoundryX harness against their tasks.
 > For the visual loop diagram, see the [loop diagram in CONTEXT.md](./CONTEXT.md#the-loop).
 > For the full glossary of terms, see [Glossary](#glossary) below.
+>
+> **Advanced workflows** — quantization sweeps (`foundry-sweep`) and the
+> external eval study (HumanEval+ correlation) are documented in
+> [OPERATOR_ADVANCED.md](./OPERATOR_ADVANCED.md). Read that after you are
+> comfortable with the evolution loop below.
 
 ## What is an operator?
 
