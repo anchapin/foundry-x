@@ -2,7 +2,11 @@
 
 ## Status
 
-Proposed. 2026-07-26.
+**Accepted. 2026-07-27.** (supersedes "Proposed" from issue #1028 implementation)
+
+**Pending — awaiting execution.** LLAMACPP_HOST not available in current
+environment; study configuration and execution plan are prepared.
+See `docs/adr/EXTERNAL_EVAL_EXECUTION_PLAN.md` for the full execution guide.
 
 ## Context
 

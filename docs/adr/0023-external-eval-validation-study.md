@@ -2,7 +2,12 @@
 
 ## Status
 
-Accepted. 2026-07-18.
+**Accepted. 2026-07-18.**
+
+**Pending — study plan prepared, awaiting execution (issue #1028).**
+The study protocol is documented in [ADR-0032](0032-external-eval-pearson-study-protocol.md).
+Study configuration (36 configs) is at `configs/external_eval_configs_36.txt`.
+Execution plan is at `docs/adr/EXTERNAL_EVAL_EXECUTION_PLAN.md`.
 
 ## Context
 
