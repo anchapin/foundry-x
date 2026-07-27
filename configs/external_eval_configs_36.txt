@@ -1,0 +1,63 @@
+# External-eval Pearson correlation study configurations (issue #1028, ADR-0032)
+#
+# 36 configurations: 2 model sizes × 6 quantizations × 3 harness versions
+#
+# Usage:
+#   infra/scripts/run_external_eval.sh --model <gguf> --configs configs/external_eval_configs_36.txt
+#
+# Each line: "<label> <fx-runner arg>..."
+# The label is used in the state file and report; args are passed to fx-runner.
+#
+# Model: Qwen2.5-7B and Qwen2.5-14B GGUF files
+# Quantizations: Q4_K_M, Q5_K_M, Q6_K_M, Q8_0, IQ4_XS, IQ4_NL
+# Harness versions: v1.0, v1.1, v1.2 (git tags; verify with: git tag -l "harness-v1.*")
+
+# =============================================================================
+# Qwen2.5-7B configurations
+# =============================================================================
+
+q7b-q4km-v10   --quantization Q4_K_M   --harness-version v1.0
+q7b-q5km-v10   --quantization Q5_K_M   --harness-version v1.0
+q7b-q6km-v10   --quantization Q6_K_M   --harness-version v1.0
+q7b-q8-v10     --quantization Q8_0     --harness-version v1.0
+q7b-iq4xs-v10  --quantization IQ4_XS   --harness-version v1.0
+q7b-iq4nl-v10  --quantization IQ4_NL   --harness-version v1.0
+
+q7b-q4km-v11   --quantization Q4_K_M   --harness-version v1.1
+q7b-q5km-v11   --quantization Q5_K_M   --harness-version v1.1
+q7b-q6km-v11   --quantization Q6_K_M   --harness-version v1.1
+q7b-q8-v11     --quantization Q8_0     --harness-version v1.1
+q7b-iq4xs-v11  --quantization IQ4_XS   --harness-version v1.1
+q7b-iq4nl-v11  --quantization IQ4_NL   --harness-version v1.1
+
+q7b-q4km-v12   --quantization Q4_K_M   --harness-version v1.2
+q7b-q5km-v12   --quantization Q5_K_M   --harness-version v1.2
+q7b-q6km-v12   --quantization Q6_K_M   --harness-version v1.2
+q7b-q8-v12     --quantization Q8_0     --harness-version v1.2
+q7b-iq4xs-v12  --quantization IQ4_XS   --harness-version v1.2
+q7b-iq4nl-v12  --quantization IQ4_NL   --harness-version v1.2
+
+# =============================================================================
+# Qwen2.5-14B configurations
+# =============================================================================
+
+q14b-q4km-v10  --quantization Q4_K_M   --harness-version v1.0
+q14b-q5km-v10  --quantization Q5_K_M   --harness-version v1.0
+q14b-q6km-v10  --quantization Q6_K_M   --harness-version v1.0
+q14b-q8-v10    --quantization Q8_0     --harness-version v1.0
+q14b-iq4xs-v10 --quantization IQ4_XS   --harness-version v1.0
+q14b-iq4nl-v10 --quantization IQ4_NL   --harness-version v1.0
+
+q14b-q4km-v11  --quantization Q4_K_M   --harness-version v1.1
+q14b-q5km-v11  --quantization Q5_K_M   --harness-version v1.1
+q14b-q6km-v11  --quantization Q6_K_M   --harness-version v1.1
+q14b-q8-v11    --quantization Q8_0     --harness-version v1.1
+q14b-iq4xs-v11 --quantization IQ4_XS   --harness-version v1.1
+q14b-iq4nl-v11 --quantization IQ4_NL   --harness-version v1.1
+
+q14b-q4km-v12  --quantization Q4_K_M   --harness-version v1.2
+q14b-q5km-v12  --quantization Q5_K_M   --harness-version v1.2
+q14b-q6km-v12  --quantization Q6_K_M   --harness-version v1.2
+q14b-q8-v12    --quantization Q8_0     --harness-version v1.2
+q14b-iq4xs-v12 --quantization IQ4_XS   --harness-version v1.2
+q14b-iq4nl-v12 --quantization IQ4_NL   --harness-version v1.2
