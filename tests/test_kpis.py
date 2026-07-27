@@ -45,6 +45,7 @@ def _seed_session(
     wall_clock_abort: bool = False,
     tool_argument_parse_error_count: int = 0,
     generation_exhausted_count: int = 0,
+    token_budget_abort: tuple[int, int] | None = None,
 ) -> str:
     """Create a session with task_received + optional persisted critic_verdict.
 
@@ -71,6 +72,10 @@ def _seed_session(
     Issue #953 adds ``generation_exhausted_count``: when >0, that many
     ``generation_exhausted`` events are planted so the KPI aggregation can
     surface the evolver LLM failure count and rate.
+
+    Issue #1112 adds ``token_budget_abort``: when provided as
+    ``(tokens_used, token_budget)``, plants a ``task_aborted(reason="token_budget")``
+    event with those values so the KPI aggregation can compute the overrun percentage.
     """
     with logger.session(harness_version=harness_version) as sid:
         logger.record(sid, kind="task_received", payload={"prompt": "do work"})
@@ -108,6 +113,17 @@ def _seed_session(
                 sid,
                 kind="task_aborted",
                 payload={"reason": "wall_clock", "timeout_s": 1.0, "token_budget": None},
+            )
+        if token_budget_abort is not None:
+            tokens_used, token_budget = token_budget_abort
+            logger.record(
+                sid,
+                kind="task_aborted",
+                payload={
+                    "reason": "token_budget",
+                    "tokens_used": tokens_used,
+                    "token_budget": token_budget,
+                },
             )
         for i in range(tool_argument_parse_error_count):
             logger.record(
@@ -192,6 +208,69 @@ def test_compute_kpis_empty_db(tmp_path):
     assert summary.improvement_rate == 0.0
     assert summary.injection_blocks == {}
     assert summary.token_totals == {}
+
+
+# ---------------------------------------------------------------------------
+# Issue #1112: token budget overrun percentage. The runner emits
+# ``task_aborted(reason="token_budget")`` with ``tokens_used`` and
+# ``token_budget`` in the payload; the KPI layer now extracts the overrun
+# percentage so operators can distinguish a session that barely exceeded
+# a correctly-sized budget from one that ran away.
+# ---------------------------------------------------------------------------
+
+
+def test_token_budget_overrun_pct_returns_none_when_no_aborts(tmp_path):
+    """When no session hit the token budget, overrun_pct is None (issue #1112)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+    _seed_session(logger, "v1", verdict=True)
+
+    summary = compute_kpis(logger)
+    assert summary.token_budget_overrun_pct is None
+
+
+def test_token_budget_overrun_pct_computes_mean_overrun(tmp_path):
+    """Mean percentage overrun across sessions that hit token_budget (issue #1112).
+
+    Two sessions hit the token budget:
+    - Session 1: used 5100 of 5000 → overrun = (5100-5000)/5000 * 100 = 2%
+    - Session 2: used 11000 of 10000 → overrun = (11000-10000)/10000 * 100 = 10%
+    Mean = (2 + 10) / 2 = 6%
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, token_budget_abort=(5100, 5000))
+    _seed_session(logger, "v1", verdict=True, token_budget_abort=(11000, 10000))
+    _seed_session(logger, "v1", verdict=True)
+
+    summary = compute_kpis(logger)
+    assert summary.token_budget_abort_count == 2
+    assert summary.token_budget_overrun_pct == 6.0
+
+
+def test_token_budget_overrun_pct_single_abort(tmp_path):
+    """Single session overrun is returned directly (issue #1112)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, token_budget_abort=(5500, 5000))
+
+    summary = compute_kpis(logger)
+    assert summary.token_budget_abort_count == 1
+    assert summary.token_budget_overrun_pct == 10.0
+
+
+def test_token_budget_overrun_pct_compare_kpis(tmp_path):
+    """Token budget overrun delta appears in compare_kpis (issue #1112)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, token_budget_abort=(5100, 5000))
+    _seed_session(logger, "v2", verdict=True, token_budget_abort=(6000, 5000))
+
+    comparison = compare_kpis(logger, "v1", "v2")
+    assert comparison.baseline.token_budget_overrun_pct == 2.0
+    assert comparison.candidate.token_budget_overrun_pct == 20.0
+    assert comparison.deltas["token_budget_overrun_pct"] == 18.0
 
 
 def test_compute_kpis_harness_version_filter(tmp_path):
@@ -552,6 +631,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "hooks_disabled_rate",
         "token_budget_abort_count",
         "token_budget_hit_rate",
+        "token_budget_overrun_pct",
         "context_efficiency",
         "streaming_quality",
         "context_pruned_count",

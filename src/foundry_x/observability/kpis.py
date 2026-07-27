@@ -320,6 +320,13 @@ class KpiSummary(BaseModel):
     rate signals LLM provider flakiness or model degradation that prevents the
     evolver from proposing harness edits — surfaced as an auxiliary operator
     signal alongside ``model_retry_count`` and ``tool_argument_parse_error_count``.
+
+    Issue #1112 adds ``token_budget_overrun_pct``: the mean percentage by which
+    sessions that hit ``task_aborted(reason="token_budget")`` exceeded their
+    token budget, i.e. ``mean((tokens_used - token_budget) / token_budget)``
+    across aborted sessions. Returns ``None`` when no session hit the token
+    budget, so operators can distinguish a clean store (None) from one where
+    all sessions exceeded their budgets (a real percentage).
     """
 
     cycle_time_seconds: float | None = None
@@ -344,6 +351,7 @@ class KpiSummary(BaseModel):
     excluded_from_cycle_time: int = 0
     evolver_llm_failure_count: int = 0
     evolver_llm_failure_rate: float = 0.0
+    token_budget_overrun_pct: float | None = None
     per_skill: dict[str, SkillKpiSlice] = {}
     per_task_family: dict[str, SkillKpiSlice] = {}
     per_difficulty_tier: dict[str, SkillKpiSlice] = {}
@@ -427,6 +435,10 @@ class KpiHistoryEntry(BaseModel):
     already sees their defaults.
 
     Issue #953 adds ``evolver_llm_failure_count`` and ``evolver_llm_failure_rate``.
+
+    Issue #1112 adds ``token_budget_overrun_pct``: the mean percentage by which
+    sessions that hit ``task_aborted(reason="token_budget")`` exceeded their
+    token budget. ``None`` when no session hit the token budget.
     """
 
     timestamp: str
@@ -438,6 +450,7 @@ class KpiHistoryEntry(BaseModel):
     hooks_disabled_rate: float = 0.0
     token_budget_abort_count: int = 0
     token_budget_hit_rate: float = 0.0
+    token_budget_overrun_pct: float | None = None
     model_retry_count: int = 0
     tool_argument_parse_error_count: int = 0
     event_limit_abort_count: int = 0
@@ -792,6 +805,7 @@ def compute_kpis(
     )
     token_budget_abort_count = _token_budget_aborts(logger, harness_version=harness_version)
     token_budget_hit_rate = _token_budget_hit_rate(logger, harness_version=harness_version)
+    token_budget_overrun_pct = _token_budget_overrun(logger, harness_version=harness_version)
     streaming_quality = _streaming_quality(logger, harness_version=harness_version)
     context_efficiency = _context_efficiency(logger, harness_version=harness_version)
     context_pruned_count = _context_pruned(logger, harness_version=harness_version)
@@ -819,6 +833,7 @@ def compute_kpis(
         hooks_disabled_rate=hooks_disabled_rate,
         token_budget_abort_count=token_budget_abort_count,
         token_budget_hit_rate=token_budget_hit_rate,
+        token_budget_overrun_pct=token_budget_overrun_pct,
         context_efficiency=context_efficiency,
         streaming_quality=streaming_quality,
         context_pruned_count=context_pruned_count,
@@ -984,6 +999,11 @@ def _compute_deltas(
         "improvement_rate": _delta(baseline.improvement_rate, candidate.improvement_rate),
         "token_budget_hit_rate": _delta(
             baseline.token_budget_hit_rate, candidate.token_budget_hit_rate
+        ),
+        # Issue #1112: token budget overrun percentage delta (lower is better —
+        # fewer tokens over budget means more efficient sessions).
+        "token_budget_overrun_pct": _delta(
+            baseline.token_budget_overrun_pct, candidate.token_budget_overrun_pct
         ),
         "context_efficiency": _delta(baseline.context_efficiency, candidate.context_efficiency),
         "hooks_disabled_rate": _delta(baseline.hooks_disabled_rate, candidate.hooks_disabled_rate),
@@ -1515,6 +1535,46 @@ def _token_budget_hit_rate(
     return len(sessions_with_abort) / len(all_sessions)
 
 
+def _token_budget_overrun(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> float | None:
+    """Mean token budget overrun percentage across sessions that hit ``task_aborted(reason="token_budget")`` (issue #1112).
+
+    For each session that recorded at least one ``task_aborted`` event with
+    ``reason="token_budget"``, extracts ``tokens_used`` and ``token_budget`` from
+    the payload and computes the percentage overrun:
+    ``(tokens_used - token_budget) / token_budget * 100``.
+
+    Sessions are first-attempt-only (only the first abort event per session is
+    considered) to avoid skewing the mean with repeated aborts in the same
+    session. Returns ``None`` when no session hit the token budget, so operators
+    can distinguish a clean store (None) from one where all sessions exceeded
+    their budgets (a real percentage).
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    session_overruns: dict[str, float] = {}
+    for event in logger.query_events(
+        kind=TASK_ABORTED_KIND,
+        harness_version=harness_version,
+    ):
+        if event.payload.get("reason") == TOKEN_BUDGET_REASON:
+            sid = event.session_id
+            if sid in session_overruns:
+                continue
+            tokens_used = event.payload.get("tokens_used")
+            token_budget = event.payload.get("token_budget")
+            if isinstance(tokens_used, int) and isinstance(token_budget, int) and token_budget > 0:
+                overrun_pct = (tokens_used - token_budget) / token_budget * 100.0
+                session_overruns[sid] = overrun_pct
+
+    if not session_overruns:
+        return None
+    return sum(session_overruns.values()) / len(session_overruns)
+
+
 def _streaming_quality(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -1866,6 +1926,7 @@ def _render_markdown(summary: KpiSummary) -> str:
         f"| Hooks Disabled Count | {summary.hooks_disabled_count} |",
         f"| Hooks Disabled Rate | {_format_value(summary.hooks_disabled_rate)} |",
         f"| Token Budget Hit Rate | {_format_value(summary.token_budget_hit_rate)} |",
+        f"| Token Budget Overrun % | {_format_value(summary.token_budget_overrun_pct)} |",
         f"| Context Efficiency | {_format_value(summary.context_efficiency)} |",
     ]
     # Issue #120: surface per-session ``injection_blocked`` counts only when
@@ -2134,6 +2195,12 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
             f"{_format_delta(baseline.token_budget_hit_rate, candidate.token_budget_hit_rate, higher_is_better=False)} |"
         ),
         (
+            "| Token Budget Overrun % | "
+            f"{_format_value(baseline.token_budget_overrun_pct)} | "
+            f"{_format_value(candidate.token_budget_overrun_pct)} | "
+            f"{_format_delta(baseline.token_budget_overrun_pct, candidate.token_budget_overrun_pct, higher_is_better=False)} |"
+        ),
+        (
             "| Context Efficiency | "
             f"{_format_value(baseline.context_efficiency)} | "
             f"{_format_value(candidate.context_efficiency)} | "
@@ -2268,7 +2335,8 @@ def append_kpi_history(
     excluded (the "minus per-session maps" half of the round-trip contract).
     ``hooks_disabled_count``, ``hooks_disabled_rate``,
     ``token_budget_abort_count``, ``token_budget_hit_rate``,
-    ``model_retry_count``, ``tool_argument_parse_error_count``,
+    ``token_budget_overrun_pct``, ``model_retry_count``,
+    ``tool_argument_parse_error_count``,
     ``event_limit_abort_count``, ``server_restart_count``,
     ``evolver_llm_failure_count``, and ``evolver_llm_failure_rate`` are scalar
     fields and are included so the trend table can show their drift
