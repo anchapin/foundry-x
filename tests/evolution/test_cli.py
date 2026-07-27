@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from foundry_x.evolution.cli import _build_parser, _infer_backend, _run_loop, main
+from foundry_x.evolution.cli import _infer_backend, _run_loop, main
 from foundry_x.trace.logger import TraceLogger
 from tests._harness_fixture import install_load_check_prerequisites
 
@@ -58,37 +58,6 @@ class TestInferBackend:
         assert _infer_backend("logs/traces.jsonl") == "jsonl"
 
 
-class TestBuildParser:
-    def test_required_args(self):
-        parser = _build_parser()
-        args = parser.parse_args(["--session-id", "abc", "--harness-dir", "/tmp/harness"])
-        assert args.session_id == "abc"
-        assert args.harness_dir == Path("/tmp/harness")
-        assert args.verbose is False
-        assert args.trace_db == "logs/traces.db"
-
-    def test_verbose_flag(self):
-        parser = _build_parser()
-        args = parser.parse_args(
-            ["--session-id", "abc", "--harness-dir", "/tmp/harness", "--verbose"]
-        )
-        assert args.verbose is True
-
-    def test_custom_trace_db(self):
-        parser = _build_parser()
-        args = parser.parse_args(
-            [
-                "--session-id",
-                "abc",
-                "--harness-dir",
-                "/tmp/harness",
-                "--trace-db",
-                "/custom/path.db",
-            ]
-        )
-        assert args.trace_db == "/custom/path.db"
-
-
 class TestFoundryEvolveCLI:
     def test_unknown_session_returns_exit_2(self, tmp_path, capsys):
         db = tmp_path / "traces.db"
@@ -98,7 +67,15 @@ class TestFoundryEvolveCLI:
         _write_minimal_harness(harness)
 
         rc = main(
-            ["--session-id", "does-not-exist", "--trace-db", str(db), "--harness-dir", str(harness)]
+            [
+                "evolve",
+                "--session-id",
+                "does-not-exist",
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+            ]
         )
 
         assert rc == 2
@@ -112,7 +89,9 @@ class TestFoundryEvolveCLI:
         harness.mkdir()
         _write_minimal_harness(harness)
 
-        rc = main(["--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)])
+        rc = main(
+            ["evolve", "--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)]
+        )
 
         assert rc == 0
         out = capsys.readouterr().out
@@ -125,7 +104,9 @@ class TestFoundryEvolveCLI:
         harness.mkdir()
         _write_minimal_harness(harness)
 
-        main(["--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)])
+        main(
+            ["evolve", "--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)]
+        )
 
         out = capsys.readouterr().out
         assert "Failure Report" in out
@@ -138,7 +119,9 @@ class TestFoundryEvolveCLI:
         harness.mkdir()
         _write_minimal_harness(harness)
 
-        rc = main(["--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)])
+        rc = main(
+            ["evolve", "--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)]
+        )
 
         captured = capsys.readouterr()
         assert "Failure Report" in captured.out
@@ -156,6 +139,7 @@ class TestFoundryEvolveCLI:
 
         rc = main(
             [
+                "evolve",
                 "--session-id",
                 sid,
                 "--trace-db",
@@ -180,7 +164,9 @@ class TestFoundryEvolveCLI:
         harness.mkdir()
         _write_minimal_harness(harness)
 
-        rc = main(["--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)])
+        rc = main(
+            ["evolve", "--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)]
+        )
 
         assert rc == 0
 
@@ -191,7 +177,9 @@ class TestFoundryEvolveCLI:
         harness.mkdir()
         _write_minimal_harness(harness)
 
-        rc = main(["--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)])
+        rc = main(
+            ["evolve", "--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)]
+        )
 
         assert rc == 1
         captured = capsys.readouterr().out
@@ -208,7 +196,9 @@ class TestFoundryEvolveCLI:
         harness.mkdir()
         _write_minimal_harness(harness)
 
-        rc = main(["--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)])
+        rc = main(
+            ["evolve", "--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)]
+        )
 
         assert rc == 0
         out = capsys.readouterr().out

@@ -3,15 +3,14 @@
 Orchestrates the evolution loop as a standalone command so an operator can
 run one evolution step without writing Python code::
 
-    foundry-evolve --session-id <id> --trace-db <path> --harness-dir <dir>
+    foundry-evolve evolve --session-id <id> --trace-db <path> --harness-dir <dir>
 
 The loop is: TraceLogger -> Digester -> Evolver -> Critic.
 
 Issue #888 adds two flags to the ``evolve`` subcommand:
 
 * ``--background`` spawns the evolution loop as a detached subprocess and
-  returns exit code 0 immediately after printing the child PID. Replaces
-  the legacy ``--async`` flag (kept with a deprecation warning).
+  returns exit code 0 immediately after printing the child PID.
 * ``--no-verify`` skips ``Critic.evaluate(...)``, records an explicit
   ``CriticVerdict(verdict=None, notes="--no-verify: skipped")`` for the
   audit trail, and prints a prominent stderr warning. Per ADR-0004 the
@@ -50,7 +49,7 @@ from foundry_x.evolution.critic import (
 )
 from foundry_x.evolution.digester import Digester, FailureReport
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
-from foundry_x.evolution.loop import run_evolution_daemon, run_evolution_step_async
+from foundry_x.evolution.loop import run_evolution_daemon
 from foundry_x.evolution.store import ProposedEditStatus, ProposedEditStore, TrackedProposedEdit
 from foundry_x.execution.runner import resolve_harness_version
 from foundry_x.infra.server_manager import ServerConfig, ServerPool
@@ -65,15 +64,6 @@ _NO_VERIFY_WARNING = (
     "WARNING: --no-verify bypasses the Critic gate. Per ADR-0004, harness "
     "edits not evaluated by Critic cannot ship to main. "
     "Use only for local experimentation.\n"
-)
-
-#: Deprecation notice emitted on stderr whenever the legacy top-level
-#: ``--async`` flag is used (issue #888). ``--async`` blocked on the event
-#: loop and never returned control to the caller; ``--background`` spawns a
-#: detached subprocess instead.
-_ASYNC_DEPRECATED_MSG = (
-    "Deprecation: top-level --async is replaced by `foundry-evolve evolve "
-    "--background` (issue #888). --async will be removed in a future release.\n"
 )
 
 #: Env var pointing to the pool manifest JSON path (issue #1046, ADR-0026).
@@ -389,81 +379,6 @@ def _run_loop(
     return report, edit, verdict, exit_code, harness_version
 
 
-async def _run_loop_async(
-    session_id: str,
-    trace_db: str,
-    harness_dir: Path,
-    verbose: bool = False,
-    no_verify: bool = False,
-) -> tuple[FailureReport, ProposedEdit | None, CriticVerdict | None, int, str]:
-    """Async variant of _run_loop.
-
-    Phase 1: awaits run_evolution_step_async (Critic is still sync inside the
-    pipeline unless ``no_verify=True``).
-
-    Issue #888 fixes an observability gap: the async path now mirrors the
-    sync path by calling :func:`record_verdict` so the ``critic_verdict``
-    trace event is persisted for downstream consumers (regression report,
-    KPIs). When ``no_verify=True`` the Critic is skipped via
-    :func:`run_evolution_step_async` and a synthetic
-    ``CriticVerdict(verdict=None, notes="--no-verify: skipped")`` is recorded.
-    """
-    if no_verify:
-        sys.stderr.write(_NO_VERIFY_WARNING)
-    harness_version = resolve_harness_version(harness_dir).version
-    started_at = _now_iso()
-    backend = _infer_backend(trace_db)
-    logger = TraceLogger(trace_db, backend=backend)
-    events = logger.load_session(session_id)
-    if not events:
-        sys.stderr.write(f"No events found for session {session_id}.\n")
-        return None, None, None, 2, harness_version
-
-    result = await run_evolution_step_async(
-        session_id=session_id,
-        events=events,
-        harness_dir=harness_dir,
-        no_verify=no_verify,
-    )
-
-    report = result.failure_report
-    print(_render_failure_report(report))
-    print()
-
-    if report.proposed_class == "clean":
-        completed_at = _now_iso()
-        print(f"Started: {started_at} | Completed: {completed_at}")
-        print()
-        print("No failure detected — evolution loop complete.")
-        return report, None, None, 0, harness_version
-
-    if not result.proposed_edits:
-        print("Evolver returned no ProposedEdit objects.")
-        return report, None, None, 0, harness_version
-
-    edit = result.proposed_edits[0]
-    print(_render_proposed_edit(edit, verbose=verbose))
-    print()
-
-    if result.verdict is not None:
-        # Audit-trail parity with the sync path (issue #888): persist the
-        # critic_verdict trace event whether the gate ran, approved, rejected,
-        # or was skipped via --no-verify (verdict.verdict is None).
-        record_verdict(logger, session_id, result.verdict)
-        print(_render_critic_verdict(result.verdict))
-        print()
-
-    completed_at = _now_iso()
-    print(f"Started: {started_at} | Completed: {completed_at}")
-    print()
-
-    # None (no verdict produced), None (skipped via --no-verify), and True
-    # (approved) all exit 0; only an explicit False (rejected) exits 1.
-    rejected = result.verdict is not None and result.verdict.verdict is False
-    exit_code = 1 if rejected else 0
-    return report, edit, result.verdict, exit_code, harness_version
-
-
 def _list_pending(args: argparse.Namespace) -> int:
     """Implement ``foundry-evolve list-pending`` (issue #498)."""
     store = ProposedEditStore(args.store)
@@ -546,51 +461,6 @@ def _apply(args: argparse.Namespace) -> int:
     if applied:
         sys.stdout.write(_render_tracked_edit(applied, verbose=False) + "\n")
     return 0
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="foundry-evolve",
-        description=(
-            "Run one evolution loop step: TraceLogger -> Digester -> "
-            "Evolver -> Critic.  Prints FailureReport, ProposedEdit "
-            "details, and CriticVerdict.  Exit 0 when Critic approves "
-            "(or no failure found), 1 when rejected."
-        ),
-    )
-    parser.add_argument(
-        "--session-id",
-        required=True,
-        help="Trace session UUID to analyse.",
-    )
-    parser.add_argument(
-        "--trace-db",
-        default="logs/traces.db",
-        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
-    )
-    parser.add_argument(
-        "--harness-dir",
-        required=True,
-        type=Path,
-        help="Path to the harness directory to be evolved and evaluated.",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Print the full unified_diff of each ProposedEdit.",
-    )
-    parser.add_argument(
-        "--async",
-        dest="use_async",
-        action="store_true",
-        help=(
-            "DEPRECATED (issue #888): use `foundry-evolve evolve --background` "
-            "instead. --async runs the loop on the asyncio event loop but "
-            "still blocks the caller until completion; --background spawns a "
-            "detached subprocess and returns immediately."
-        ),
-    )
-    return parser
 
 
 def _build_sweep_parser() -> argparse.ArgumentParser:
@@ -822,8 +692,13 @@ def main(argv: list[str] | None = None) -> int:
             return args.func(args)
         else:
             return 2
-    else:
-        return _main_evolve_legacy(argv)
+    # Legacy top-level invocation (foundry-evolve --session-id ...) is no longer
+    # supported since the --async flag was removed (issue #1029).
+    sys.stderr.write(
+        "error: invalid usage; use `foundry-evolve evolve --session-id ...` "
+        "or `foundry-evolve --help` for more information.\n"
+    )
+    return 2
 
 
 def _build_evolve_subparser(parser: argparse.ArgumentParser) -> None:
@@ -1079,32 +954,6 @@ def _spawn_background_evolve(args: argparse.Namespace) -> int:
     sys.stdout.flush()
     # Do not wait — return immediately so the caller regains control.
     return 0
-
-
-def _main_evolve_legacy(argv: list[str] | None) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-    if args.use_async:
-        # Deprecation notice (issue #888): --async blocks on the event loop
-        # and will be removed in a future release. Point operators at
-        # ``evolve --background`` which actually detaches.
-        sys.stderr.write(_ASYNC_DEPRECATED_MSG)
-        _report, _edit, _verdict, exit_code, _harness_version = asyncio.run(
-            _run_loop_async(
-                session_id=args.session_id,
-                trace_db=args.trace_db,
-                harness_dir=args.harness_dir,
-                verbose=args.verbose,
-            )
-        )
-    else:
-        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
-            session_id=args.session_id,
-            trace_db=args.trace_db,
-            harness_dir=args.harness_dir,
-            verbose=args.verbose,
-        )
-    return exit_code
 
 
 def _execute_sweep(args: argparse.Namespace, critic: Critic) -> int:
