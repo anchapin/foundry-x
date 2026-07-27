@@ -21,7 +21,11 @@ from foundry_x.observability.session_summary import (
     build_session_summary,
     render_session_summary,
 )
-from foundry_x.observability.timeline import format_timeline, render_timeline_json
+from foundry_x.observability.timeline import (
+    format_timeline,
+    render_timeline_json,
+    render_timeline_svg,
+)
 from foundry_x.observability.tool_latency import (
     LatencyWindow,
     aggregate_tool_latency,
@@ -141,10 +145,11 @@ def _build_parser() -> argparse.ArgumentParser:
     timeline.add_argument(
         "--format",
         default=None,
-        choices=("markdown", "json"),
+        choices=("markdown", "json", "svg"),
         help=(
-            "Output format (issue #270). Default: 'markdown'. When --out"
-            " ends in '.json', 'json' is selected automatically (mirrors"
+            "Output format (issue #270, issue #1036). Default: 'markdown'. "
+            "'svg' renders a Gantt chart with color-coded event kinds. "
+            "When --out ends in '.json', 'json' is selected automatically (mirrors"
             " the kpis --format / --out convention)."
         ),
     )
@@ -384,6 +389,8 @@ def main(argv: list[str] | None = None) -> int:
         fmt = _resolve_format(args.format, args.out)
         if fmt == "json":
             rendered = render_timeline_json(events)
+        elif fmt == "svg":
+            rendered = render_timeline_svg(events)
         else:
             rendered = format_timeline(events)
         if args.out:
