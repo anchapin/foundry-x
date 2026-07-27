@@ -447,6 +447,253 @@ class KpiHistoryEntry(BaseModel):
     evolver_llm_failure_rate: float = 0.0
 
 
+class KpiTrends(BaseModel):
+    """Computed trend statistics from KPI history entries (issue #1031).
+
+    Derives direction, slope, and percent change for each of the three PRD KPIs
+    by fitting a simple linear regression over the history entries.  Entries
+    are weighted equally (ordinary least squares); no entry-level weights are
+    applied.  ``None`` values in the source data are excluded from the fit.
+
+    The trend direction uses the PRD "good direction" convention:
+
+    * Cycle time: decreasing is *improving* (good), increasing is *worsening*.
+    * Regression rate: decreasing is *improving*, increasing is *worsening*.
+    * Improvement rate: increasing is *improving*, decreasing is *worsening*.
+
+    ``entry_count`` and ``time_span_seconds`` let operators distinguish a
+    meaningful trend (many entries over a long span) from a noisy two-point
+    snapshot.
+    """
+
+    cycle_time_slope: float | None = None  # seconds per entry
+    cycle_time_direction: Literal["improving", "worsening", "stable", "insufficient_data"] = (
+        "insufficient_data"
+    )
+    cycle_time_percent_change: float | None = None  # from first to last valid entry
+
+    regression_rate_slope: float | None = None  # per entry
+    regression_rate_direction: Literal["improving", "worsening", "stable", "insufficient_data"] = (
+        "insufficient_data"
+    )
+    regression_rate_percent_change: float | None = None
+
+    improvement_rate_slope: float | None = None  # per entry
+    improvement_rate_direction: Literal["improving", "worsening", "stable", "insufficient_data"] = (
+        "insufficient_data"
+    )
+    improvement_rate_percent_change: float | None = None
+
+    entry_count: int = 0
+    time_span_seconds: float | None = None  # first to last timestamp
+
+
+class _TrendField:
+    """Helper to compute trend stats for one scalar field."""
+
+    __slots__ = ("first_value", "last_value", "times", "values")
+
+    def __init__(self) -> None:
+        self.values: list[float] = []
+        self.times: list[float] = []  # seconds from first entry
+        self.first_value: float | None = None
+        self.last_value: float | None = None
+
+    def add(self, value: float | None, timestamp: str) -> None:
+        if value is None:
+            return
+        self.values.append(value)
+        if self.first_value is None:
+            self.first_value = value
+        self.last_value = value
+        # Parse ISO timestamp to seconds from epoch
+        dt = datetime.fromisoformat(timestamp)
+        self.times.append(dt.timestamp())
+
+
+def compute_trends(entries: Sequence[KpiHistoryEntry]) -> KpiTrends:
+    """Compute trend statistics from KPI history entries (issue #1031).
+
+    Fits a simple linear regression over each of the three PRD KPI fields.
+    Returns a :class:`KpiTrends` object with slope, direction, and percent
+    change.  ``None`` values are excluded from the fit.
+
+    An *improving* direction means the KPI moved toward its PRD "good"
+    direction; a *worsening* direction means it moved away.  ``stable``
+    is returned when the absolute slope is below a small epsilon threshold.
+    ``insufficient_data`` is returned when fewer than two valid data points
+    exist for the field.
+
+    Parameters
+    ----------
+    entries:
+        History entries in chronological order (oldest first).  Typically
+        produced by :func:`read_kpi_history`.
+
+    Returns
+    -------
+    A :class:`KpiTrends` with per-KPI trend fields and aggregate metadata
+    (``entry_count``, ``time_span_seconds``).
+    """
+    if not entries:
+        return KpiTrends()
+
+    # Time of first entry (epoch seconds) for computing relative spans.
+    first_dt = datetime.fromisoformat(entries[0].timestamp)
+    first_ts = first_dt.timestamp()
+
+    # Collect valid data points for each field.
+    cycle = _TrendField()
+    reg = _TrendField()
+    imp = _TrendField()
+
+    for entry in entries:
+        cycle.add(entry.cycle_time_seconds, entry.timestamp)
+        reg.add(entry.regression_rate, entry.timestamp)
+        imp.add(entry.improvement_rate, entry.timestamp)
+
+    # Compute time span
+    last_dt = datetime.fromisoformat(entries[-1].timestamp)
+    time_span = last_dt.timestamp() - first_ts if len(entries) > 1 else None
+
+    return KpiTrends(
+        cycle_time_slope=_slope(cycle.values, cycle.times),
+        cycle_time_direction=_trend_direction(
+            cycle.values, cycle.first_value, cycle.last_value, higher_is_better=False
+        ),
+        cycle_time_percent_change=_percent_change(cycle.first_value, cycle.last_value),
+        regression_rate_slope=_slope(reg.values, reg.times),
+        regression_rate_direction=_trend_direction(
+            reg.values, reg.first_value, reg.last_value, higher_is_better=False
+        ),
+        regression_rate_percent_change=_percent_change(reg.first_value, reg.last_value),
+        improvement_rate_slope=_slope(imp.values, imp.times),
+        improvement_rate_direction=_trend_direction(
+            imp.values, imp.first_value, imp.last_value, higher_is_better=True
+        ),
+        improvement_rate_percent_change=_percent_change(imp.first_value, imp.last_value),
+        entry_count=len(entries),
+        time_span_seconds=time_span,
+    )
+
+
+def _slope(values: list[float], times: list[float]) -> float | None:
+    """Simple linear regression slope (delta per second).
+
+    Returns ``None`` when fewer than two points are available.
+    Uses the standard OLS formula for a line through the origin (times
+    are already relative to the first entry).
+    """
+    if len(values) < 2 or len(times) < 2:
+        return None
+    n = len(values)
+    sum_x = sum(times)
+    sum_y = sum(values)
+    sum_xy = sum(t * v for t, v in zip(times, values))
+    sum_x2 = sum(t * t for t in times)
+    denom = n * sum_x2 - sum_x * sum_x
+    if abs(denom) < 1e-12:
+        return 0.0
+    return (n * sum_xy - sum_x * sum_y) / denom
+
+
+def _trend_direction(
+    values: list[float],
+    first: float | None,
+    last: float | None,
+    higher_is_better: bool,
+) -> Literal["improving", "worsening", "stable", "insufficient_data"]:
+    if len(values) < 2 or first is None or last is None:
+        return "insufficient_data"
+    # Use the first-to-last delta as the primary trend signal.
+    # The percent change is computed separately; this only determines direction.
+    delta = last - first
+    eps = 1e-9
+    if abs(delta) < eps:
+        return "stable"
+    # For higher_is_better=True: positive delta = improving.
+    # For higher_is_better=False: negative delta = improving.
+    if (delta > 0) is higher_is_better:
+        return "improving"
+    return "worsening"
+
+
+def _percent_change(first: float | None, last: float | None) -> float | None:
+    """Percent change from first to last value, or None if first is zero/None."""
+    if first is None or last is None:
+        return None
+    if abs(first) < 1e-12:
+        return None
+    return ((last - first) / abs(first)) * 100.0
+
+
+def render_trends_markdown(trends: KpiTrends) -> str:
+    """Render trend statistics as a Markdown summary (issue #1031).
+
+    Renders a compact table with one row per KPI showing the direction,
+    slope (per-entry delta), and percent change from first to last entry.
+    An ``entry_count`` footer describes how many history entries underpin
+    the trend.
+    """
+    if trends.entry_count == 0:
+        return "_No KPI history entries — cannot compute trends._"
+
+    lines: list[str] = [
+        "| KPI | Direction | Slope (per entry) | % Change |",
+        "| --- | --- | --- | --- |",
+        _trend_row(
+            "Cycle Time (s)",
+            trends.cycle_time_direction,
+            trends.cycle_time_slope,
+            trends.cycle_time_percent_change,
+            higher_is_better=False,
+        ),
+        _trend_row(
+            "Regression Rate",
+            trends.regression_rate_direction,
+            trends.regression_rate_slope,
+            trends.regression_rate_percent_change,
+            higher_is_better=False,
+        ),
+        _trend_row(
+            "Improvement Rate",
+            trends.improvement_rate_direction,
+            trends.improvement_rate_slope,
+            trends.improvement_rate_percent_change,
+            higher_is_better=True,
+        ),
+        "",
+        f"_Computed from {trends.entry_count} history entry(ies)"
+        + (
+            f" spanning {trends.time_span_seconds / 3600:.1f} hours._"
+            if trends.time_span_seconds and trends.time_span_seconds > 0
+            else "._"
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def _trend_row(
+    label: str,
+    direction: Literal["improving", "worsening", "stable", "insufficient_data"],
+    slope: float | None,
+    pct: float | None,
+    higher_is_better: bool,
+) -> str:
+    """Render one KPI trend row."""
+    arrow = {
+        "improving": "📈 improving" if higher_is_better else "📉 improving",
+        "worsening": "📉 worsening" if higher_is_better else "📈 worsening",
+        "stable": "➡️ stable",
+        "insufficient_data": "⚠️ N/A",
+    }.get(direction, "?")
+
+    slope_str = f"{slope:+.4f}" if slope is not None else "N/A"
+    pct_str = f"{pct:+.1f}%" if pct is not None else "N/A"
+
+    return f"| {label} | {arrow} | {slope_str} | {pct_str} |"
+
+
 def _failure_class_distribution(
     logger: TraceLogger,
     harness_version: str | None = None,
