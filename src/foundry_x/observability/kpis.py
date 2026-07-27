@@ -305,6 +305,14 @@ class KpiSummary(BaseModel):
     successful evolutions) is interpretable: a high exclusion count means
     the mean is computed over a small, self-selected subpopulation.
 
+    Issue #1113 adds ``excluded_wall_clock``, ``excluded_token_budget``,
+    ``excluded_event_limit``, and ``excluded_other``: the breakdown of
+    ``excluded_from_cycle_time`` by the ``reason`` field of the
+    ``task_aborted`` event that caused each session's exclusion.  Sessions
+    that were excluded but have no ``task_aborted`` event (e.g. a session
+    whose timestamps could not be parsed or whose delta was non-positive)
+    contribute to ``excluded_other``.
+
     Issue #898 adds ``per_skill`` / ``per_task_family`` /
     ``per_difficulty_tier``: ``dict[str, SkillKpiSlice]`` breakdowns of
     ``improvement_rate`` and ``regression_rate``. Only the dimension
@@ -342,6 +350,10 @@ class KpiSummary(BaseModel):
     event_limit_abort_count: int = 0
     server_restart_count: int = 0
     excluded_from_cycle_time: int = 0
+    excluded_wall_clock: int = 0
+    excluded_token_budget: int = 0
+    excluded_event_limit: int = 0
+    excluded_other: int = 0
     evolver_llm_failure_count: int = 0
     evolver_llm_failure_rate: float = 0.0
     per_skill: dict[str, SkillKpiSlice] = {}
@@ -783,7 +795,16 @@ def compute_kpis(
     down to the store so a multi-session fixture does not need to be
     materialized in Python.
     """
-    cycle_time, excluded_from_cycle_time = _cycle_time(logger, harness_version=harness_version)
+    (
+        cycle_time,
+        excluded_wall_clock,
+        excluded_token_budget,
+        excluded_event_limit,
+        excluded_other,
+    ) = _cycle_time(logger, harness_version=harness_version)
+    excluded_from_cycle_time = (
+        excluded_wall_clock + excluded_token_budget + excluded_event_limit + excluded_other
+    )
     regression_rate, improvement_rate = _verdict_rates(logger, harness_version=harness_version)
     injection_blocks = _injection_blocks(logger, harness_version=harness_version)
     token_totals = _token_totals(logger, harness_version=harness_version)
@@ -829,6 +850,10 @@ def compute_kpis(
         event_limit_abort_count=event_limit_abort_count,
         server_restart_count=server_restart_count,
         excluded_from_cycle_time=excluded_from_cycle_time,
+        excluded_wall_clock=excluded_wall_clock,
+        excluded_token_budget=excluded_token_budget,
+        excluded_event_limit=excluded_event_limit,
+        excluded_other=excluded_other,
         evolver_llm_failure_count=evolver_llm_failure_count,
         evolver_llm_failure_rate=evolver_llm_failure_rate,
         **_slice_field(
@@ -1001,6 +1026,15 @@ def _compute_deltas(
         # widens the survivorship-bias blind spot in ``cycle_time_seconds``.
         "excluded_from_cycle_time": candidate.excluded_from_cycle_time
         - baseline.excluded_from_cycle_time,
+        # Issue #1113: per-abort-reason exclusion breakdown deltas.
+        "excluded_wall_clock": candidate.excluded_wall_clock - baseline.excluded_wall_clock,
+        "excluded_token_budget": (
+            candidate.excluded_token_budget - baseline.excluded_token_budget
+        ),
+        "excluded_event_limit": (
+            candidate.excluded_event_limit - baseline.excluded_event_limit
+        ),
+        "excluded_other": candidate.excluded_other - baseline.excluded_other,
         # Issue #953: evolver LLM failure count and rate deltas.
         "evolver_llm_failure_count": (
             candidate.evolver_llm_failure_count - baseline.evolver_llm_failure_count
@@ -1014,12 +1048,16 @@ def _compute_deltas(
 def _cycle_time(
     logger: TraceLogger,
     harness_version: str | None = None,
-) -> tuple[float | None, int]:
-    """Mean wall-clock time from ``task_received`` to ``critic_verdict`` plus exclusion count.
+) -> tuple[float | None, int, int, int, int]:
+    """Mean wall-clock time from ``task_received`` to ``critic_verdict`` plus exclusion breakdown.
 
-    Returns ``(mean_seconds, excluded_count)``. The mean is over sessions
-    that have both a ``task_received`` and a ``critic_verdict`` event with
-    a strictly positive delta; it is ``None`` when no session qualified.
+    Returns
+    -------
+    ``(mean_seconds, excluded_wall_clock, excluded_token_budget, excluded_event_limit, excluded_other)``.
+
+    The mean is over sessions that have both a ``task_received`` and a
+    ``critic_verdict`` event with a strictly positive delta; it is
+    ``None`` when no session qualified.
 
     Issue #273 — previously looped every session id and called
     ``iter_events`` twice per session to find the first event of each
@@ -1037,6 +1075,11 @@ def _cycle_time(
     Surfacing the count alongside the mean lets an operator tell a mean
     computed over every session from one computed over a small, self-
     selected subpopulation of survivors.
+
+    Issue #1113 — the exclusion count is broken down by the ``reason``
+    field of the ``task_aborted`` event for each excluded session:
+    ``wall_clock``, ``token_budget``, ``event_limit``, or ``other``
+    (e.g. no abort event or a reason not in the three tracked categories).
     """
     start_events: dict[str, TraceEvent] = {}
     for event in logger.query_events(kind="task_received", harness_version=harness_version):
@@ -1045,8 +1088,19 @@ def _cycle_time(
     for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
         end_events.setdefault(event.session_id, event)
 
+    # Issue #1113: build a session_id -> reason map from task_aborted events
+    # so we can attribute excluded sessions to their abort reason.
+    abort_reasons: dict[str, str] = {}
+    for event in logger.query_events(kind="task_aborted", harness_version=harness_version):
+        if event.session_id not in abort_reasons:
+            abort_reasons[event.session_id] = event.payload.get("reason", "other")
+
     deltas: list[float] = []
-    excluded = 0
+    excluded_wall_clock = 0
+    excluded_token_budget = 0
+    excluded_event_limit = 0
+    excluded_other = 0
+
     for sid, start_event in start_events.items():
         end_event = end_events.get(sid)
         if end_event is None:
@@ -1054,22 +1108,33 @@ def _cycle_time(
             # ``critic_verdict`` failed before the Critic ran and is
             # excluded from the mean — count it so the survivorship bias
             # is visible rather than silent.
-            excluded += 1
+            # Issue #1113: break down by abort reason.
+            reason = abort_reasons.get(sid, "other")
+            if reason == "wall_clock":
+                excluded_wall_clock += 1
+            elif reason == "token_budget":
+                excluded_token_budget += 1
+            elif reason == "event_limit":
+                excluded_event_limit += 1
+            else:
+                excluded_other += 1
             continue
         try:
             t0 = datetime.fromisoformat(start_event.timestamp)
             t1 = datetime.fromisoformat(end_event.timestamp)
         except ValueError:
-            excluded += 1
+            # Issue #1113: timestamp parse failure — categorize as "other".
+            excluded_other += 1
             continue
         delta = (t1 - t0).total_seconds()
         if delta > 0:
             deltas.append(delta)
         else:
-            excluded += 1
+            excluded_other += 1
+
     if not deltas:
-        return None, excluded
-    return sum(deltas) / len(deltas), excluded
+        return None, excluded_wall_clock, excluded_token_budget, excluded_event_limit, excluded_other
+    return sum(deltas) / len(deltas), excluded_wall_clock, excluded_token_budget, excluded_event_limit, excluded_other
 
 
 def _verdict_rates(
@@ -2004,11 +2069,11 @@ def _render_markdown(summary: KpiSummary) -> str:
             f"generation_exhausted event(s) "
             f"(rate: {_format_value(summary.evolver_llm_failure_rate)})."
         )
-    # Issue #895: surface the cycle-time exclusion count when > 0 so the
-    # survivorship bias in ``cycle_time_seconds`` is visible — a high count
-    # means the mean is computed over a small subpopulation of sessions
-    # that survived to a ``critic_verdict``. Zero (the clean-store case)
-    # keeps the summary compact.
+    # Issue #895, #1113: surface the cycle-time exclusion count and its
+    # per-abort-reason breakdown when > 0 so the survivorship bias in
+    # ``cycle_time_seconds`` is visible — a high count means the mean is
+    # computed over a small subpopulation of sessions that survived to a
+    # ``critic_verdict``. Zero (the clean-store case) keeps the summary compact.
     if summary.excluded_from_cycle_time > 0:
         lines.append("")
         lines.append(
@@ -2016,6 +2081,21 @@ def _render_markdown(summary: KpiSummary) -> str:
             "session(s) had a task_received but no usable critic_verdict "
             "(failed before the Critic ran)."
         )
+        # Issue #1113: show the breakdown by abort reason.
+        total_breakdown = (
+            summary.excluded_wall_clock
+            + summary.excluded_token_budget
+            + summary.excluded_event_limit
+            + summary.excluded_other
+        )
+        if total_breakdown > 0:
+            lines.append("")
+            lines.append("| Abort Reason | Excluded Sessions |")
+            lines.append("| --- | --- |")
+            lines.append(f"| wall_clock | {summary.excluded_wall_clock} |")
+            lines.append(f"| token_budget | {summary.excluded_token_budget} |")
+            lines.append(f"| event_limit | {summary.excluded_event_limit} |")
+            lines.append(f"| other | {summary.excluded_other} |")
     if summary.failure_class_distribution:
         total = sum(summary.failure_class_distribution.values())
         lines.append("")
@@ -2198,6 +2278,31 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
             f"{candidate.excluded_from_cycle_time} | "
             f"{_format_delta(float(baseline.excluded_from_cycle_time), float(candidate.excluded_from_cycle_time), higher_is_better=False)} |"
         ),
+        # Issue #1113: per-abort-reason exclusion breakdown.
+        (
+            "| Excl. wall_clock | "
+            f"{baseline.excluded_wall_clock} | "
+            f"{candidate.excluded_wall_clock} | "
+            f"{_format_delta(float(baseline.excluded_wall_clock), float(candidate.excluded_wall_clock), higher_is_better=False)} |"
+        ),
+        (
+            "| Excl. token_budget | "
+            f"{baseline.excluded_token_budget} | "
+            f"{candidate.excluded_token_budget} | "
+            f"{_format_delta(float(baseline.excluded_token_budget), float(candidate.excluded_token_budget), higher_is_better=False)} |"
+        ),
+        (
+            "| Excl. event_limit | "
+            f"{baseline.excluded_event_limit} | "
+            f"{candidate.excluded_event_limit} | "
+            f"{_format_delta(float(baseline.excluded_event_limit), float(candidate.excluded_event_limit), higher_is_better=False)} |"
+        ),
+        (
+            "| Excl. other | "
+            f"{baseline.excluded_other} | "
+            f"{candidate.excluded_other} | "
+            f"{_format_delta(float(baseline.excluded_other), float(candidate.excluded_other), higher_is_better=False)} |"
+        ),
         # Issue #953: evolver LLM failure count and rate.
         (
             "| Evol LLM Failure Count | "
@@ -2315,6 +2420,12 @@ def append_kpi_history(
             # (like the per-slice fields below), not a trend metric — keep
             # the JSONL history line compact and its key set stable.
             "excluded_from_cycle_time",
+            # Issue #1113: the per-abort-reason breakdown is also an auxiliary
+            # coverage signal recomputed from the trace store on demand.
+            "excluded_wall_clock",
+            "excluded_token_budget",
+            "excluded_event_limit",
+            "excluded_other",
             # Issue #898, #1039: per-slice breakdowns are an on-demand
             # diagnostic view (populated only with --group-by), not a
             # trend metric — exclude them so the JSONL history line stays
