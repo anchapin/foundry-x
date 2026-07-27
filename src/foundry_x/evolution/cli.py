@@ -39,6 +39,8 @@ from pathlib import Path
 from foundry_x.evolution.critic import (
     Critic,
     CriticVerdict,
+    ModelFamilySweepResult,
+    ModelFamilyVerdict,
     QuantizationResult,
     QuantizationVerdict,
 )
@@ -192,6 +194,47 @@ def _render_quantization_verdict(verdict: QuantizationVerdict) -> str:
     lines.append("=" * 90)
     reg_status = "REGRESSION DETECTED" if verdict.regression else "No regression"
     lines.append(f"Recommended: {verdict.recommended}  [{reg_status}]")
+    return "\n".join(lines)
+
+
+def _render_model_family_sweep_result(result: ModelFamilySweepResult) -> str:
+    """Render a ModelFamilySweepResult as a block."""
+    lines = [f"Model Family: {result.model_family}", "-" * 60]
+    for qr in result.results:
+        pass_rate_pct = qr.pass_rate * 100
+        avg_time = f"{qr.avg_cycle_time_s:.1f}s" if qr.avg_cycle_time_s else "N/A"
+        token_eff = f"{qr.token_efficiency:.1f}" if qr.token_efficiency else "N/A"
+        cost = f"${qr.cost_per_task:.4f}" if qr.cost_per_task else "N/A"
+        lines.append(
+            f"  {qr.quantization:<15} | {pass_rate_pct:>6.1f}% | "
+            f"{avg_time:>8} | {qr.total_tokens:>10} | "
+            f"{token_eff:>8} | {cost:>10} | {qr.model_id}"
+        )
+    reg_status = "REGRESSION" if result.regression else "OK"
+    lines.append(f"  Recommended: {result.recommended}  [{reg_status}]")
+    return "\n".join(lines)
+
+
+def _render_model_family_verdict(verdict: ModelFamilyVerdict) -> str:
+    """Render a ModelFamilyVerdict as a cross-family comparison table."""
+    lines = ["Cross-Model-Family Sweep Results", "=" * 90]
+    header = f"  {'Model Family':<20} | {'Recommended Quant':<18} | {'Pass Rate':>9} | Status"
+    lines.append(header)
+    lines.append("-" * 90)
+    for family_result in verdict.family_results:
+        best = max(family_result.results, key=lambda r: r.pass_rate)
+        pass_rate_pct = best.pass_rate * 100
+        reg_status = "REGRESSION" if family_result.regression else "OK"
+        lines.append(
+            f"  {family_result.model_family:<20} | "
+            f"{family_result.recommended:<18} | {pass_rate_pct:>6.1f}% | {reg_status}"
+        )
+    lines.append("=" * 90)
+    overall_reg = "REGRESSION DETECTED" if verdict.regression else "No regression"
+    lines.append(
+        f"Recommended: {verdict.recommended_family} + {verdict.recommended_quantization}  "
+        f"[{overall_reg}]"
+    )
     return "\n".join(lines)
 
 
@@ -559,6 +602,18 @@ def _build_sweep_parser() -> argparse.ArgumentParser:
             "If not specified, results are not persisted to disk."
         ),
     )
+    parser.add_argument(
+        "--model-families",
+        type=str,
+        default=None,
+        dest="model_families",
+        help=(
+            "Comma-separated list of model family identifiers to sweep across. "
+            "When set, FOUNDRY_MODEL_REGISTRY must be populated with entries "
+            "mapping each family to {path, quantization, endpoint}. "
+            "Example: --model-families qwen2.5-0.5b,llama-3.2-1b,phi-3-mini"
+        ),
+    )
     return parser
 
 
@@ -760,6 +815,18 @@ def _build_sweep_subparser(parser: argparse.ArgumentParser) -> None:
             "If not specified, results are not persisted to disk."
         ),
     )
+    parser.add_argument(
+        "--model-families",
+        type=str,
+        default=None,
+        dest="model_families",
+        help=(
+            "Comma-separated list of model family identifiers to sweep across. "
+            "When set, FOUNDRY_MODEL_REGISTRY must be populated with entries "
+            "mapping each family to {path, quantization, endpoint}. "
+            "Example: --model-families qwen2.5-0.5b,llama-3.2-1b,phi-3-mini"
+        ),
+    )
 
 
 def _main_evolve(args: argparse.Namespace) -> int:
@@ -857,13 +924,27 @@ def _main_sweep(args: argparse.Namespace) -> int:
         return 2
 
     critic = Critic(harness_dir=args.harness_dir)
+
+    model_families: list[str] | None = None
+    if getattr(args, "model_families", None):
+        model_families = [f.strip() for f in args.model_families.split(",") if f.strip()]
+
     try:
-        verdict = critic.quantization_sweep(
-            quantizations=quantizations,
-            baseline_quantization=args.baseline,
-            regression_threshold_pp=args.regression_threshold,
-            cost_per_token=args.cost_per_token,
-        )
+        if model_families:
+            verdict = critic.model_family_sweep(
+                model_families=model_families,
+                quantizations=quantizations,
+                baseline_quantization=args.baseline,
+                regression_threshold_pp=args.regression_threshold,
+                cost_per_token=args.cost_per_token,
+            )
+        else:
+            verdict = critic.quantization_sweep(
+                quantizations=quantizations,
+                baseline_quantization=args.baseline,
+                regression_threshold_pp=args.regression_threshold,
+                cost_per_token=args.cost_per_token,
+            )
     except (ValueError, FileNotFoundError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
@@ -874,7 +955,10 @@ def _main_sweep(args: argparse.Namespace) -> int:
         output_path.write_text(json.dumps(verdict.model_dump(mode="json"), indent=2))
         print(f"Results written to {output_path}", file=sys.stderr)
 
-    print(_render_quantization_verdict(verdict))
+    if isinstance(verdict, ModelFamilyVerdict):
+        print(_render_model_family_verdict(verdict))
+    else:
+        print(_render_quantization_verdict(verdict))
     return 0 if not verdict.regression else 1
 
 
@@ -887,7 +971,8 @@ def sweep_main(argv: list[str] | None = None) -> int:
 
     Standalone sweep invocation that does not go through the evolution loop.
     Runs the benchmark suite against each listed quantization and prints a
-    comparison table.
+    comparison table. When ``--model-families`` is set, runs a cross-model-family
+    sweep per ADR-0025.
 
     Exit codes:
         0  Sweep completed with no regression detected
@@ -903,13 +988,27 @@ def sweep_main(argv: list[str] | None = None) -> int:
         return 2
 
     critic = Critic(harness_dir=args.harness_dir)
+
+    model_families: list[str] | None = None
+    if getattr(args, "model_families", None):
+        model_families = [f.strip() for f in args.model_families.split(",") if f.strip()]
+
     try:
-        verdict = critic.quantization_sweep(
-            quantizations=quantizations,
-            baseline_quantization=args.baseline,
-            regression_threshold_pp=args.regression_threshold,
-            cost_per_token=args.cost_per_token,
-        )
+        if model_families:
+            verdict = critic.model_family_sweep(
+                model_families=model_families,
+                quantizations=quantizations,
+                baseline_quantization=args.baseline,
+                regression_threshold_pp=args.regression_threshold,
+                cost_per_token=args.cost_per_token,
+            )
+        else:
+            verdict = critic.quantization_sweep(
+                quantizations=quantizations,
+                baseline_quantization=args.baseline,
+                regression_threshold_pp=args.regression_threshold,
+                cost_per_token=args.cost_per_token,
+            )
     except (ValueError, FileNotFoundError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
@@ -920,5 +1019,8 @@ def sweep_main(argv: list[str] | None = None) -> int:
         output_path.write_text(json.dumps(verdict.model_dump(mode="json"), indent=2))
         print(f"Results written to {output_path}", file=sys.stderr)
 
-    print(_render_quantization_verdict(verdict))
+    if isinstance(verdict, ModelFamilyVerdict):
+        print(_render_model_family_verdict(verdict))
+    else:
+        print(_render_quantization_verdict(verdict))
     return 0 if not verdict.regression else 1

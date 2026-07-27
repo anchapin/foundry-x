@@ -35,6 +35,14 @@ format and process.
 | [0021](./0021-context-pruning-at-scale.md) | Context pruning at scale — Phase 3 findings | Accepted |
 | [0022](./0022-store-implementation-selection-criteria.md) | Store implementation selection criteria | Accepted |
 | [0023](./0023-external-eval-validation-study.md) | External-eval validation study (issue #900) | Accepted |
+| [0024](./0024-unused-number.md) | (unused number — superseded) | Superseded |
+| [0025](./0025-cross-model-family-sweeps.md) | Cross-model-family sweeps | Proposed |
+| [0026](./0026-server-pool.md) | Server pool for multi-slot llama-server lifecycle management | Proposed |
+| [0027](./0027-proxy-broadening-contingency.md) | Proxy-broadening contingency (issue #1045) | Accepted |
+| [0028](./0028-hard-difficulty-tier.md) | Add "hard" to DifficultyTier and define hard-tier task archetypes | Proposed |
+| [0029](./0029-cloud-model-adapters.md) | Cloud-native model adapters for Anthropic and OpenAI | Proposed |
+| [0030](./0030-cross-session-failure-accumulator.md) | Cross-session failure-pattern accumulator | Accepted |
+| [0031](./0031-security-benchmark-vectors.md) | Security benchmark vectors — injection-via-filename and hook timing attack | Accepted |
 | [0032](./0032-external-eval-pearson-study-protocol.md) | External-eval Pearson correlation study protocol (issue #1028) | Proposed |
 
 When adding a new ADR, append it to this table in the same PR.
