@@ -93,6 +93,10 @@ Evolver can reason about its own constraints.
   enforces structure.
 - The fixed templates in `_PROPOSED_CLASS_EDIT_TEMPLATES` remain as a
   fallback for non-LLM Evolver implementations. They are not removed.
+  As of issue #1051, every failure class in ADR-0011 — including the
+  security-critical `injection-attempt` — has a dedicated template
+  entry; no class falls through to the generic `unknown` template on
+  the template path.
 - Adding a new `proposed_class` value (per ADR-0011 §Class invariants)
   requires amending this ADR and updating the meta-prompt in the same PR.
 

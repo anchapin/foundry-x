@@ -238,6 +238,15 @@ removes) a class:
   `failed_steps`, not be picked off one-by-one by the generic walk.
   A future reviewer who proposes "fold `injection-attempt` into
   `_CLASS_KEYWORDS`" must rebut that argument here.
+- **`injection-attempt` Evolver template coverage (issue #1051).**
+  `_PROPOSED_CLASS_EDIT_TEMPLATES` in `evolver.py` now carries a
+  dedicated `injection-attempt` entry targeting `system_prompt.txt`
+  with guidance about firewall-hook adherence and tool-result
+  validation, consistent with the cause template in
+  `digester.py` (`_CLASS_CAUSE_TEMPLATES["injection-attempt"]`).
+  This prevents the security-critical class from falling through to
+  the generic `unknown` template on the Evolver's template path.
+  Tests: `tests/evolution/test_evolver_injection_template.py`.
 - **Trace vocabulary alignment is unchanged.** Per ADR-0006 the
   vocabulary of `kind` values is a `pydantic` enum at module
   boundaries; this ADR does not modify that enum. The
