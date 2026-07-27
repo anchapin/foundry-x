@@ -295,11 +295,80 @@ def slice_pass_rates(tasks: Sequence[HumanEvalTask]) -> tuple[int, int]:
     return passed, len(tasks)
 
 
+#: Maximum acceptable standard error of the external pass rate for a
+#: slice to be considered statistically adequate. When the worst-case SE
+#: (at ``p = 0.5``) exceeds this threshold the slice is too noisy and the
+#: full EvalPlus set is justified (issue #1055, ADR-0023 §"Slice size
+#: decision"). 0.05 = 5 percentage points.
+SLICE_MAX_STANDARD_ERROR: float = 0.05
+
+
+def binomial_standard_error(passed: int, total: int) -> float:
+    """Standard error of a binomial pass-rate estimate.
+
+    For a slice of *n* tasks with empirical pass rate *p* =
+    ``passed / total``, the standard error of that estimate is
+    ``sqrt(p * (1 - p) / n)``. A small slice inflates the SE and adds
+    noise to the Pearson correlation computed across configurations
+    (ADR-0023). Issue #1055 uses this quantity to decide whether the
+    20-task slice is statistically adequate or must be replaced with the
+    full EvalPlus set.
+
+    Args:
+        passed: Number of tasks that passed.
+        total: Total number of tasks in the slice.
+
+    Returns:
+        The binomial standard error in ``[0.0, 0.5]``.
+
+    Raises:
+        ValueError: If ``total <= 0``, ``passed < 0``, or
+            ``passed > total``.
+    """
+    import math
+
+    if total <= 0:
+        raise ValueError(f"total must be a positive integer; got {total}")
+    if passed < 0 or passed > total:
+        raise ValueError(f"0 <= passed <= total required; got passed={passed}, total={total}")
+    p = passed / total
+    return math.sqrt(p * (1.0 - p) / total)
+
+
+def slice_is_adequate(
+    total: int,
+    *,
+    max_se: float = SLICE_MAX_STANDARD_ERROR,
+) -> bool:
+    """Return ``True`` if a slice of *total* tasks is statistically adequate.
+
+    Evaluates the *worst-case* standard error, which occurs at ``p = 0.5``
+    (half the tasks pass). If even the worst case is within the ``max_se``
+    threshold, the slice is adequate for *any* observed pass rate. This is
+    the conservative test issue #1055 applies to the 20-task slice.
+
+    Args:
+        total: Number of tasks in the slice.
+        max_se: Maximum acceptable standard error (defaults to
+            :data:`SLICE_MAX_STANDARD_ERROR`).
+
+    Returns:
+        ``True`` if ``sqrt(0.25 / total) <= max_se``.
+
+    Raises:
+        ValueError: If ``total <= 0``.
+    """
+    return binomial_standard_error(total // 2, total) <= max_se
+
+
 __all__ = [
+    "SLICE_MAX_STANDARD_ERROR",
     "HumanEvalExecutionError",
     "HumanEvalTask",
+    "binomial_standard_error",
     "load_humaneval_slice",
     "run_candidate_solution",
     "run_canonical_solution",
+    "slice_is_adequate",
     "slice_pass_rates",
 ]
