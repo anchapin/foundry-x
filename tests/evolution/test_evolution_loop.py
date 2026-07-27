@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from foundry_x.evolution.cli import main
-from foundry_x.evolution.critic import CriticVerdict
+from foundry_x.evolution.critic import Critic, CriticVerdict
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
 from foundry_x.evolution.loop import EvolutionResult, run_evolution_step, run_evolution_step_async
 from foundry_x.trace.logger import TraceEvent, TraceLogger
@@ -436,7 +436,7 @@ class TestRunEvolutionStepAsync:
 
         call_records: list[str | None] = []
 
-        def mock_evaluate(self, proposed_diff, *, edit_index=None, failure_class=None):
+        def mock_evaluate(self, proposed_diff, *, edit_index=None, failure_class=None, tier="full"):
             call_records.append(failure_class)
             return CriticVerdict(
                 verdict=True,
@@ -519,7 +519,7 @@ class TestRunEvolutionStepAsync:
 
         call_records: list[tuple[str, int]] = []
 
-        def mock_evaluate(self, proposed_diff, *, edit_index=None, failure_class=None):
+        def mock_evaluate(self, proposed_diff, *, edit_index=None, failure_class=None, tier="full"):
             call_records.append((proposed_diff, edit_index))
             return CriticVerdict(verdict=True, passed_checks=["git apply"], edit_index=edit_index)
 
@@ -1041,3 +1041,71 @@ class TestDaemonCLI:
             ]
         )
         assert exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Two-tier Critic gate passthrough (issue #1042)
+# ---------------------------------------------------------------------------
+
+
+class TestCriticTierPassthrough:
+    """run_evolution_step forwards critic_tier to Critic.evaluate (issue #1042)."""
+
+    def _events(self) -> list[TraceEvent]:
+        return [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+    @staticmethod
+    def _edit() -> ProposedEdit:
+        return ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix the failure",
+            unified_diff=(
+                "--- a/harness/system_prompt.txt\n"
+                "+++ b/harness/system_prompt.txt\n"
+                "@@ -1 +1 @@\n-old\n+new\n"
+            ),
+        )
+
+    def test_smoke_tier_forwarded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        harness_dir = _write_harness(tmp_path)
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [TestCriticTierPassthrough._edit()]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+        seen: list[str] = []
+
+        def spy_evaluate(self, diff, **kwargs):
+            seen.append(kwargs.get("tier", "full"))
+            return CriticVerdict(verdict=True, edit_index=kwargs.get("edit_index"))
+
+        monkeypatch.setattr(Critic, "evaluate", spy_evaluate)
+        run_evolution_step(
+            "sess-tier-smoke",
+            self._events(),
+            harness_dir,
+            critic=Critic(harness_dir),
+            critic_tier="smoke",
+        )
+        assert seen == ["smoke"]
+
+    def test_full_tier_is_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        harness_dir = _write_harness(tmp_path)
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [TestCriticTierPassthrough._edit()]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+        seen: list[str] = []
+
+        def spy_evaluate(self, diff, **kwargs):
+            seen.append(kwargs.get("tier", "full"))
+            return CriticVerdict(verdict=True, edit_index=kwargs.get("edit_index"))
+
+        monkeypatch.setattr(Critic, "evaluate", spy_evaluate)
+        # No critic_tier kwarg → defaults to "full" (unchanged behaviour).
+        run_evolution_step("sess-tier-default", self._events(), harness_dir)
+        assert seen == ["full"]

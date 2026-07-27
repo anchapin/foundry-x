@@ -10,6 +10,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +19,17 @@ from benchmarks.registry import load_all_tasks
 from foundry_x.trace.logger import TraceLogger
 
 DEFAULT_REGRESSION_THRESHOLD_PP = 2.0
+
+#: Default tag set for the fast-reject ("smoke") tier (issue #1042). The
+#: ``test_smoke.py`` task carries ``tags=["smoke", "infrastructure"]``, so the
+#: default subset is the single infrastructure canary that every harness edit
+#: must keep green. Operators override this via the ``smoke_benchmark_tags``
+#: constructor argument or the ``FOUNDRY_SMOKE_BENCHMARK_TAGS`` env var.
+DEFAULT_SMOKE_BENCHMARK_TAGS: list[str] = ["smoke"]
+
+#: Env var name for runtime configuration of the smoke-tier benchmark subset
+#: (issue #1042). Comma-separated tag values, e.g. ``"smoke,core"``.
+_SMOKE_BENCHMARK_TAGS_ENV = "FOUNDRY_SMOKE_BENCHMARK_TAGS"
 
 _NOTES_TAIL_CHARS = 4000
 
@@ -122,6 +134,27 @@ def _parse_model_registry() -> dict[str, dict[str, str]] | None:
     except json.JSONDecodeError as exc:
         sys.stderr.write(f"FOUNDRY_MODEL_REGISTRY is not valid JSON: {exc}\n")
         return None
+
+
+def _resolve_smoke_tags(explicit: list[str] | None) -> list[str]:
+    """Resolve the smoke-tier benchmark tag set (issue #1042).
+
+    Resolution order: an explicit constructor argument wins; otherwise the
+    ``FOUNDRY_SMOKE_BENCHMARK_TAGS`` env var is parsed as a comma-separated
+    list (whitespace trimmed, empties dropped); otherwise the
+    ``DEFAULT_SMOKE_BENCHMARK_TAGS`` constant is used.
+
+    Always returns a fresh, deduplicated list so callers can mutate it
+    without aliasing the module constant.
+    """
+    if explicit is not None:
+        return list(dict.fromkeys(explicit))
+    raw = os.environ.get(_SMOKE_BENCHMARK_TAGS_ENV, "").strip()
+    if raw:
+        tags = [t.strip() for t in raw.split(",") if t.strip()]
+        if tags:
+            return list(dict.fromkeys(tags))
+    return list(DEFAULT_SMOKE_BENCHMARK_TAGS)
 
 
 def _scan_diff_for_injection(diff: str) -> list[str]:
@@ -308,6 +341,7 @@ class Critic:
         benchmark_tasks: list[BenchmarkTask] | None = None,
         max_diff_lines: int = 200,
         gate_timeout_s: float | None = None,
+        smoke_benchmark_tags: list[str] | None = None,
     ) -> None:
         self.harness_dir = harness_dir
         self.benchmark_path = benchmark_path
@@ -328,6 +362,13 @@ class Critic:
         if gate_timeout_s is not None and gate_timeout_s <= 0:
             raise ValueError("gate_timeout_s must be > 0 or None")
         self.gate_timeout_s = gate_timeout_s
+        # Two-tier gate (issue #1042): the fast-reject ("smoke") tier runs a
+        # configurable subset of benchmark tasks before the full suite. The
+        # subset is selected by intersecting each task's ``tags`` with
+        # ``smoke_benchmark_tags``. Resolution order: explicit constructor
+        # argument → ``FOUNDRY_SMOKE_BENCHMARK_TAGS`` env var (comma-separated)
+        # → ``DEFAULT_SMOKE_BENCHMARK_TAGS``.
+        self.smoke_benchmark_tags = _resolve_smoke_tags(smoke_benchmark_tags)
         # In-process registry wiring (issue #108): the Critic can now
         # enumerate benchmark tasks without spawning pytest. Stored as
         # ``None`` so the registry is loaded lazily on first access --
@@ -350,6 +391,43 @@ class Critic:
         if self._benchmark_tasks is None:
             self._benchmark_tasks = load_all_tasks()
         return self._benchmark_tasks
+
+    @property
+    def smoke_tasks(self) -> list[BenchmarkTask]:
+        """Benchmark tasks selected for the fast-reject ("smoke") tier (issue #1042).
+
+        A task is selected when any of its ``tags`` intersects
+        ``self.smoke_benchmark_tags``. The registry is the source of truth
+        (ADR-0005); tags are free-form grouping labels on ``BenchmarkTask``.
+        Returns a fresh list; empty when no task carries a smoke tag (a
+        misconfiguration — :meth:`_smoke_pytest_args` falls back to the full
+        suite so the gate never rejects on an empty selection).
+        """
+        smoke_set = set(self.smoke_benchmark_tags)
+        return [t for t in self.benchmark_tasks if smoke_set & set(t.tags)]
+
+    def _smoke_pytest_args(self) -> list[str]:
+        """Build pytest args selecting only smoke-tagged benchmark tasks (issue #1042).
+
+        The smoke tier runs the same cheap gates as the full tier, then runs
+        pytest restricted to the subset of ``@pytest.mark.benchmark`` tasks
+        whose ``tags`` intersect :attr:`smoke_benchmark_tags`. Selection uses
+        a pytest ``-k`` OR-expression built from the matched task names —
+        each ``BenchmarkTask.name`` is a substring of its test function
+        (``test_<name>``), so ``-k <name>`` matches it without coupling to
+        the on-disk file layout.
+
+        When no task carries a smoke tag the method returns the full
+        ``self.pytest_args`` unchanged: an empty selection would otherwise
+        make pytest exit 5 ("no tests ran") and falsely reject the edit.
+        Falling back to the full suite is safe (it is the existing default
+        behaviour) and surfaces the misconfiguration at the same cost.
+        """
+        names = sorted({t.name for t in self.smoke_tasks})
+        if not names:
+            return list(self.pytest_args)
+        expr = " or ".join(names)
+        return [*self.pytest_args, "-k", expr]
 
     def quantization_sweep(
         self,
@@ -779,9 +857,32 @@ class Critic:
         return total_tokens, avg_cycle_time_s
 
     def evaluate(
-        self, proposed_diff: str, *, edit_index: int | None = None, failure_class: str | None = None
+        self,
+        proposed_diff: str,
+        *,
+        edit_index: int | None = None,
+        failure_class: str | None = None,
+        tier: Literal["smoke", "full"] = "full",
     ) -> CriticVerdict:
         """Apply ``proposed_diff`` to a sandbox copy of the harness and gate it.
+
+        Two-tier gate (issue #1042): the ``tier`` argument selects which
+        benchmark subset the pytest gate runs after the cheap gates pass.
+
+        * ``tier="full"`` (default) — existing behaviour: the full
+          ``@pytest.mark.benchmark`` suite via ``self.pytest_args``.
+        * ``tier="smoke"`` — fast-reject: run only the subset of benchmark
+          tasks whose ``tags`` intersect :attr:`smoke_benchmark_tags`
+          (computed by :meth:`_smoke_pytest_args`). A smoke-tier failure
+          rejects the edit *without* running the full suite, so
+          ``kpi-cycle-time`` for obvious rejections drops to the cost of the
+          cheap gates + the smoke subset. The caller decides whether to
+          escalate a passing smoke verdict to the full suite.
+
+        All other steps (sandbox copy, diff-size cap, injection scan,
+        ``git apply``, ``load_check``) run identically in both tiers —
+        the only difference is which benchmark tasks the pytest subprocess
+        executes.
 
         Steps (ADR-0004):
 
@@ -948,8 +1049,14 @@ class Critic:
             passed_checks.append("load_check")
 
             # Gate 4: Pytest benchmark suite (issue #548).
-            # Plumb token_budget from BenchmarkTask through to the subprocess
-            # via FOUNDRY_TOKEN_BUDGET so the Runner enforces it.
+            # Two-tier gate (issue #1042): the smoke tier restricts the
+            # subprocess to the smoke-tagged benchmark subset so an obvious
+            # rejection never pays the full-suite cost. Plumb token_budget
+            # from BenchmarkTask through to the subprocess via
+            # FOUNDRY_TOKEN_BUDGET so the Runner enforces it.
+            effective_pytest_args = (
+                self._smoke_pytest_args() if tier == "smoke" else self.pytest_args
+            )
             token_budget: int | None = None
             for task in self.benchmark_tasks:
                 if task.token_budget is not None and (
@@ -961,7 +1068,7 @@ class Critic:
                 pytest_env["FOUNDRY_TOKEN_BUDGET"] = str(token_budget)
             try:
                 pytest_result = subprocess.run(
-                    [sys.executable, "-m", "pytest", *self.pytest_args],
+                    [sys.executable, "-m", "pytest", *effective_pytest_args],
                     cwd=sandbox_root,
                     capture_output=True,
                     text=True,
@@ -981,7 +1088,10 @@ class Critic:
             if pytest_result.returncode == 0:
                 passed_checks.append("pytest")
                 # Record every benchmark tag the run covered (issue #185).
-                covered_tags = sorted({tag for task in self.benchmark_tasks for tag in task.tags})
+                # The smoke tier covers only the smoke-tagged subset; the full
+                # tier covers the whole registry (issue #1042).
+                covered_source = self.smoke_tasks if tier == "smoke" else self.benchmark_tasks
+                covered_tags = sorted({tag for task in covered_source for tag in task.tags})
                 passed_checks.extend(f"benchmark:{tag}" for tag in covered_tags)
             else:
                 failed_checks.append("pytest")

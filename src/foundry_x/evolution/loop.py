@@ -16,6 +16,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -83,6 +84,7 @@ def run_evolution_step(
     evolver: Evolver | None = None,
     no_verify: bool = False,
     trace_logger: TraceLogger | None = None,
+    critic_tier: Literal["smoke", "full"] = "full",
 ) -> EvolutionResult:
     """Run one iteration of the evolution loop over a session's trace events.
 
@@ -123,6 +125,12 @@ def run_evolution_step(
         class) emit ``generation_attempt`` / ``generation_exhausted`` trace
         events instead of returning ``[]`` silently (issue #974). Ignored
         when ``evolver`` is explicitly provided.
+    critic_tier:
+        Which benchmark subset the Critic pytest gate runs (issue #1042).
+        ``"full"`` (default) runs the entire ``@pytest.mark.benchmark``
+        suite — unchanged historical behaviour. ``"smoke"`` runs only the
+        smoke-tagged subset so an obvious rejection fast-fails without the
+        full-suite cost, lowering ``kpi-cycle-time``.
 
     Returns
     -------
@@ -195,7 +203,10 @@ def run_evolution_step(
     else:
         for idx, edit in enumerate(proposed_edits):
             verdict = critic.evaluate(
-                edit.unified_diff, edit_index=idx, failure_class=failure_report.proposed_class
+                edit.unified_diff,
+                edit_index=idx,
+                failure_class=failure_report.proposed_class,
+                tier=critic_tier,
             )
 
     return EvolutionResult(
@@ -220,6 +231,7 @@ async def run_evolution_step_async(
     evolver: Evolver | None = None,
     no_verify: bool = False,
     trace_logger: TraceLogger | None = None,
+    critic_tier: Literal["smoke", "full"] = "full",
 ) -> EvolutionResult:
     """Async variant of :func:`run_evolution_step`.
 
@@ -300,6 +312,7 @@ async def run_evolution_step_async(
                 edit.unified_diff,
                 edit_index=idx,
                 failure_class=failure_report.proposed_class,
+                tier=critic_tier,
             )
 
     return EvolutionResult(

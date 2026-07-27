@@ -713,3 +713,224 @@ class TestModelFamilySweepModels:
             regression=False,
         )
         assert verdict.regression_by_family == {}
+
+
+# ---------------------------------------------------------------------------
+# Two-tier Critic gate: fast-reject ("smoke") tier (issue #1042)
+# ---------------------------------------------------------------------------
+
+
+def _capture_pytest_commands(
+    monkeypatch: pytest.MonkeyPatch, *, returncode: int
+) -> list[list[str]]:
+    """Record every pytest subprocess command, returning a stub result (issue #1042).
+
+    Non-pytest subprocesses (``git apply``, ``load_check``) delegate to the real
+    ``subprocess.run`` so the cheap gates keep working against the harness
+    fixture. The pytest call is short-circuited with a
+    :class:`~subprocess.CompletedProcess` carrying *returncode*, so the gate's
+    tier-routing logic can be asserted deterministically without running the
+    real benchmark suite.
+    """
+    original_run = subprocess.run
+    seen: list[list[str]] = []
+
+    def fake_run(*args: object, **kwargs: object) -> object:
+        cmd = args[0] if args else kwargs.get("args")
+        if cmd is not None and "pytest" in str(cmd):
+            seen.append(list(cmd))  # type: ignore[arg-type]
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=returncode, stdout="", stderr=""
+            )
+        return original_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return seen
+
+
+def test_default_smoke_benchmark_tags() -> None:
+    """A Critic without explicit config uses the smoke tag by default (issue #1042)."""
+    from foundry_x.evolution.critic import DEFAULT_SMOKE_BENCHMARK_TAGS
+
+    critic = Critic(Path("/tmp/nonexistent"))
+    assert DEFAULT_SMOKE_BENCHMARK_TAGS == ["smoke"]
+    assert critic.smoke_benchmark_tags == ["smoke"]
+
+
+def test_smoke_benchmark_tags_constructor_overrides_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit constructor argument wins over default and env var (issue #1042)."""
+    monkeypatch.setenv("FOUNDRY_SMOKE_BENCHMARK_TAGS", "core,integration")
+    critic = Critic(Path("/tmp/nonexistent"), smoke_benchmark_tags=["core", "smoke"])
+    assert critic.smoke_benchmark_tags == ["core", "smoke"]
+
+
+def test_smoke_benchmark_tags_from_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FOUNDRY_SMOKE_BENCHMARK_TAGS is parsed as a comma-separated list (issue #1042)."""
+    monkeypatch.setenv("FOUNDRY_SMOKE_BENCHMARK_TAGS", " core , smoke ")
+    critic = Critic(Path("/tmp/nonexistent"))
+    assert critic.smoke_benchmark_tags == ["core", "smoke"]
+
+
+def test_smoke_benchmark_tags_env_var_empty_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An all-empty env var falls back to the default tag set (issue #1042)."""
+    monkeypatch.setenv("FOUNDRY_SMOKE_BENCHMARK_TAGS", " , ")
+    critic = Critic(Path("/tmp/nonexistent"))
+    assert critic.smoke_benchmark_tags == ["smoke"]
+
+
+def test_smoke_tasks_selects_by_tag_intersection() -> None:
+    """smoke_tasks filters the registry by tag intersection (issue #1042)."""
+    from benchmarks.models import BenchmarkTask
+
+    critic = Critic(
+        Path("/tmp/nonexistent"),
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke"]),
+            BenchmarkTask(name="beta", description="d", tags=["core"]),
+            BenchmarkTask(name="gamma", description="d", tags=["smoke", "core"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    assert {t.name for t in critic.smoke_tasks} == {"alpha", "gamma"}
+
+
+def test_smoke_pytest_args_selects_smoke_tagged_tasks() -> None:
+    """_smoke_pytest_args appends a -k OR-expression of smoke task names (issue #1042)."""
+    from benchmarks.models import BenchmarkTask
+
+    critic = Critic(
+        Path("/tmp/nonexistent"),
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke"]),
+            BenchmarkTask(name="beta", description="d", tags=["core"]),
+            BenchmarkTask(name="gamma", description="d", tags=["smoke", "core"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    args = critic._smoke_pytest_args()
+    assert args[:3] == ["-q", "-m", "benchmark"]
+    assert "-k" in args
+    expr = args[args.index("-k") + 1]
+    assert "alpha" in expr
+    assert "gamma" in expr
+    assert "beta" not in expr
+
+
+def test_smoke_pytest_args_falls_back_when_no_task_matches() -> None:
+    """With no matching smoke tasks, smoke args equal the full suite (issue #1042)."""
+    from benchmarks.models import BenchmarkTask
+
+    critic = Critic(
+        Path("/tmp/nonexistent"),
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="beta", description="d", tags=["core"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    assert critic._smoke_pytest_args() == ["-q", "-m", "benchmark"]
+
+
+def test_smoke_tier_passes_smoke_args_to_pytest(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """evaluate(tier="smoke") invokes pytest with the smoke -k subset (issue #1042)."""
+    from benchmarks.models import BenchmarkTask
+
+    seen = _capture_pytest_commands(monkeypatch, returncode=0)
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke"]),
+            BenchmarkTask(name="beta", description="d", tags=["core"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    verdict = critic.evaluate("", tier="smoke")
+    assert verdict.verdict is True
+    assert len(seen) == 1
+    cmd = seen[0]
+    assert "-k" in cmd
+    expr = cmd[cmd.index("-k") + 1]
+    assert "alpha" in expr
+    assert "beta" not in expr
+
+
+def test_full_tier_passes_full_args_unchanged(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """evaluate(tier="full") invokes pytest with the full suite — no -k filter (issue #1042)."""
+    from benchmarks.models import BenchmarkTask
+
+    seen = _capture_pytest_commands(monkeypatch, returncode=0)
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    critic.evaluate("", tier="full")
+    assert len(seen) == 1
+    assert "-k" not in seen[0]
+
+
+def test_smoke_tier_failure_rejects_without_full_suite(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing smoke tier rejects the edit and runs pytest exactly once (issue #1042).
+
+    The smoke tier never escalates to the full suite within a single
+    ``evaluate()`` call, so a *failing* smoke tier provably never pays the
+    full-suite cost — exactly the ``kpi-cycle-time`` win the issue targets.
+    """
+    from benchmarks.models import BenchmarkTask
+
+    seen = _capture_pytest_commands(monkeypatch, returncode=1)
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke"]),
+            BenchmarkTask(name="beta", description="d", tags=["core"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    verdict = critic.evaluate("", tier="smoke")
+    assert verdict.verdict is False
+    assert "pytest" in verdict.failed_checks
+    assert len(seen) == 1
+    assert "-k" in seen[0]
+    assert "beta" not in seen[0][seen[0].index("-k") + 1]
+
+
+def test_smoke_tier_covered_tags_reflect_subset(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A passing smoke verdict records only smoke-tagged benchmark tags (issue #1042)."""
+    from benchmarks.models import BenchmarkTask
+
+    _capture_pytest_commands(monkeypatch, returncode=0)
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke", "infra"]),
+            BenchmarkTask(name="beta", description="d", tags=["core", "heavy"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    verdict = critic.evaluate("", tier="smoke")
+    assert verdict.verdict is True
+    passed = set(verdict.passed_checks)
+    assert "benchmark:smoke" in passed
+    assert "benchmark:infra" in passed
+    assert "benchmark:core" not in passed
+    assert "benchmark:heavy" not in passed
