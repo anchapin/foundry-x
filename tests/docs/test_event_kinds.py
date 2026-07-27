@@ -58,7 +58,12 @@ DIGESTER_PY = REPO_ROOT / "src" / "foundry_x" / "evolution" / "digester.py"
 #   - Runner.run_with_limits: ``task_aborted``
 #   - Runner.run_task: ``user_prompt``, ``model_request``, ``model_response``,
 #     ``model_error``, ``tool_call``, ``tool_result``, ``outcome``,
-#     ``hook_registry_error`` (issue #260: get_registry() raised)
+#     ``hook_registry_error`` (issue #260: get_registry() raised),
+#     ``token_usage_missing`` (issue #580: endpoint omitted usage),
+#     ``tool_argument_parse_error`` (issue #261: malformed tool-call args)
+#   - Runner._consume_model_stream: ``model_response_chunk`` (issue #199)
+#   - Runner.run_task via _on_retry closure on OpenAICompatibleAdapter:
+#     ``model_retry`` (issue #200: transient HTTP/connect retry)
 #   - InjectionFirewallHook: ``injection_blocked`` (via ``tracer`` callback)
 #   - InjectionFirewallHook: ``firewall_exception`` (via ``tracer`` callback, issue #823)
 #   - ContextPruningHook: ``context_pruned`` (via ``tracer`` callback)
@@ -78,6 +83,8 @@ KNOWN_KINDS: frozenset[str] = frozenset(
         "model_error",
         "model_request",
         "model_response",
+        "model_response_chunk",
+        "model_retry",
         "outcome",
         "server_unavailable",
         "session_end",
@@ -87,6 +94,8 @@ KNOWN_KINDS: frozenset[str] = frozenset(
         "task_completed",
         "task_failed",
         "task_received",
+        "token_usage_missing",
+        "tool_argument_parse_error",
         "tool_call",
         "tool_result",
         "user_prompt",
@@ -201,6 +210,44 @@ def test_table_kind_names_are_snake_case():
         f"Invalid kind names in CONTEXT.md Event kinds table: {invalid}. "
         "Kinds must be snake_case and unchanged from the emitter (issue #194)."
     )
+
+
+# Map each kind documented in issue #1049 to the source file that emits the
+# kind as a string literal. This prevents drift: if a refactor renames a
+# kind without updating CONTEXT.md (or vice-versa), this test fails.
+#   kind -> relative path from repo root
+KIND_EMITTERS: dict[str, str] = {
+    "model_response_chunk": "src/foundry_x/execution/runner.py",
+    "model_retry": "src/foundry_x/execution/runner.py",
+    "token_usage_missing": "src/foundry_x/execution/runner.py",
+    "tool_argument_parse_error": "src/foundry_x/execution/runner.py",
+}
+
+
+def test_documented_kinds_are_string_literals_in_source():
+    """Each kind added in issue #1049 must appear as a string literal in source.
+
+    CONTEXT.md documents these kinds as vocabulary, but the closed set is
+    only trustworthy if the ``kind=`` string literal actually exists in
+    the production code. If a future refactor renames the literal without
+    updating CONTEXT.md, the vocabulary drifts silently. This test pins
+    the contract by grepping each emitter file for the quoted kind name.
+    """
+    for kind, rel_path in KIND_EMITTERS.items():
+        source_path = REPO_ROOT / rel_path
+        assert source_path.is_file(), f"emitter source not found: {source_path}"
+        source_text = source_path.read_text(encoding="utf-8")
+        # Search for the kind as a quoted string literal (double or single
+        # quotes) so that a variable or comment with the same name does
+        # not satisfy the check by accident.
+        quoted = f'"{kind}"'
+        alt_quoted = f"'{kind}'"
+        assert quoted in source_text or alt_quoted in source_text, (
+            f"Kind '{kind}' is documented in CONTEXT.md but does not appear "
+            f"as a string literal in {rel_path}. Either the documentation "
+            "drifted or the emitter moved — update KIND_EMITTERS in this "
+            "test (issue #1049)."
+        )
 
 
 def test_failure_subset_cross_references_digester_constants():

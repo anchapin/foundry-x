@@ -158,6 +158,10 @@ pin their producer, payload contract, and failure-signal classification
 | **`outcome`** | `Runner.run_task` (always emitted in `finally`) | `{"status": "success" \| "truncated" \| "failed", "reason": "final_answer" \| "model_error" \| "max_steps", "steps": int}` — terminal status the Digester attributes to the session. | when `status == "failed"` |
 | **`hook_registry_error`** | `Runner.run_task` via `_resolve_hook_registry` (issue #260) | `{"error_type": str, "message": str}` — emitted when `harness.hooks.get_registry()` raises after a successful lazy import. The session continues in degraded mode (`registry is None`, so no hook fan-out including the `InjectionFirewallHook`), but the event records that the firewall layer is off so the Digester and operator have a signal (AGENTS.md §2). | **yes** (security-critical hooks disabled) |
 | **`server_unavailable`** | `Runner.run_task` via `_handle_server_unavailable` (issue #899) | `{"step": int, "host": str, "health_url": str, "restart_attempted": bool}` — emitted when the `FoundryServerManager` reports `GET /health` returning a non-200 status mid-session and triggers the supervisor's bounded exponential-backoff restart loop. The `restart_count` attribute on the manager (and the `server_restart_count` KPI consumer in `foundry_x.observability.kpis`) tracks actual successful supervisor recoveries, not detection count. The session continues only if `restart()` re-establishes `/health` within the configured retry budget. | **yes** (infrastructure) |
+| **`model_response_chunk`** | `Runner._consume_model_stream` (issue #199) | `{"step": int, "delta_index": int, "content_so_far": str, "chunk_duration_ms": int}` — one event per SSE delta received from `adapter.stream()`, emitted via `ModelResponseChunkEvent` (`src/foundry_x/execution/runner.py:168`). `delta_index` is the zero-based chunk ordinal within the step; `chunk_duration_ms` is wall-clock milliseconds since the previous chunk (or stream start for delta 0). Enables KPI consumers to split model latency (time-to-first-token) from network latency (inter-chunk gaps) without waiting for the terminal `model_response`. Per-chunk events are excluded from the event-limit accounting so streaming telemetry cannot starve the loop budget (issue #790). | no |
+| **`model_retry`** | `Runner.run_task` via `_on_retry` closure wired onto `OpenAICompatibleAdapter.on_retry` (issue #200) | `{"attempt": int, "error_type": str, "backoff_ms": int}` — 1-based index of the failed attempt, exception class name, and jittered backoff (ms) before the next attempt. Emitted via `ModelRetryEvent` (`src/foundry_x/execution/model_adapter.py:217`). Only `OpenAICompatibleAdapter` has retry logic; injected fakes/stubs are left untouched. If all retries are exhausted the terminal `model_error` event fires. The aggregate count is surfaced as the `model_retry_count` auxiliary KPI. | no |
+| **`token_usage_missing`** | `Runner.run_task` (issue #580) | `{"step": int, "message": str}` — emitted when `response.usage` is `None`, i.e. the endpoint omitted the wire-level `usage` object. The runner counts zero tokens for that step and emits this event so the gap is observable without crashing the loop. The `model_response` event for the same step carries `token_usage: null` and `tokens_used` unchanged. | no |
+| **`tool_argument_parse_error`** | `Runner.run_task` (issue #261, #872) | `{"step": int, "call_id": str, "name": str, "raw": str, "error": str}` — emitted when `_parse_tool_arguments` cannot JSON-decode the model's tool-call arguments string. `raw` is the unparsed arguments string; `error` is the parse error message (always non-null when the event is emitted). The aggregate count is surfaced as the `tool_argument_parse_error_count` auxiliary KPI. | when `error` is non-null (always; routed via `FAILURE_PAYLOAD_KEYS`) |
 
 ### Hooks
 
@@ -221,6 +225,12 @@ subset of the broader kind vocabulary above.
   *every* block in the session (not just the first), so the generic
   first-failure walk would under-report. It is exposed as a separate
   constant `INJECTION_BLOCKED_KIND` so tests can pin the contract.
+- **`tool_argument_parse_error`** is *not* in `FAILURE_KINDS`: its
+  payload always carries a non-null `error` key, so it is already
+  caught by `FAILURE_PAYLOAD_KEYS` and routed onto the Digester's
+  failure path without needing a kind-level entry. Adding the kind to
+  `FAILURE_KINDS` would add no new classification capability; it is
+  documented in the Agent loop table for discoverability (issue #1049).
 
 - **`model_response`** — emitted by `run_task` for every chat-completion
   round-trip the runner performs. Payload contract (issue #191, issue #580):
