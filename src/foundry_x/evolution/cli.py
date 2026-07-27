@@ -53,6 +53,7 @@ from foundry_x.evolution.evolver import Evolver, ProposedEdit
 from foundry_x.evolution.loop import run_evolution_daemon, run_evolution_step_async
 from foundry_x.evolution.store import ProposedEditStatus, ProposedEditStore, TrackedProposedEdit
 from foundry_x.execution.runner import resolve_harness_version
+from foundry_x.infra.server_manager import ServerConfig, ServerPool
 from foundry_x.observability.regression_report import record_verdict
 from foundry_x.trace.logger import TraceLogger
 
@@ -74,6 +75,13 @@ _ASYNC_DEPRECATED_MSG = (
     "Deprecation: top-level --async is replaced by `foundry-evolve evolve "
     "--background` (issue #888). --async will be removed in a future release.\n"
 )
+
+#: Env var pointing to the pool manifest JSON path (issue #1046, ADR-0026).
+#: The manifest is a dict of slot → ServerConfig fields. When ``--pool`` is
+#: passed to ``foundry-sweep`` this file is loaded to build a
+#: :class:`~foundry_x.infra.server_manager.ServerPool`.
+FOUNDRY_POOL_MANIFEST_ENV = "FOUNDRY_POOL_MANIFEST"
+_DEFAULT_POOL_MANIFEST = "infra/pool_manifest.json"
 
 
 def _infer_backend(trace_db: str) -> str:
@@ -240,6 +248,46 @@ def _render_model_family_verdict(verdict: ModelFamilyVerdict) -> str:
         f"[{overall_reg}]"
     )
     return "\n".join(lines)
+
+
+def _load_pool_manifest(path: str | None = None) -> dict[str, ServerConfig]:
+    """Load a pool manifest JSON into ``{slot: ServerConfig}`` (issue #1046).
+
+    The manifest is a JSON object mapping slot names to ServerConfig field
+    dicts::
+
+        {
+            "q4-km-fast": {
+                "host": "http://127.0.0.1:8081",
+                "model_path": "/srv/models/qwen.Q4_K_M.gguf",
+                "n_gpu_layers": "35",
+                "ctx_size": "4096",
+                "autostart": true
+            }
+        }
+
+    Raises :class:`FileNotFoundError` when the manifest file does not exist
+    and :class:`ValueError` when the JSON is malformed or a slot entry is
+    missing required fields.
+    """
+    manifest_path = Path(path or os.environ.get(FOUNDRY_POOL_MANIFEST_ENV, _DEFAULT_POOL_MANIFEST))
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"pool manifest not found: {manifest_path} "
+            f"(set {FOUNDRY_POOL_MANIFEST_ENV} or create the default at "
+            f"{_DEFAULT_POOL_MANIFEST})"
+        )
+    raw = json.loads(manifest_path.read_text())
+    if not isinstance(raw, dict):
+        raise TypeError(f"pool manifest must be a JSON object, got {type(raw).__name__}")
+    configs: dict[str, ServerConfig] = {}
+    for slot, fields in raw.items():
+        if not isinstance(fields, dict):
+            raise TypeError(
+                f"pool manifest slot {slot!r} must be an object, got {type(fields).__name__}"
+            )
+        configs[slot] = ServerConfig(**{**fields, "slot": slot})
+    return configs
 
 
 def _run_loop(
@@ -629,6 +677,17 @@ def _build_sweep_parser() -> argparse.ArgumentParser:
             "Example: --model-families qwen2.5-0.5b,llama-3.2-1b,phi-3-mini"
         ),
     )
+    parser.add_argument(
+        "--pool",
+        action="store_true",
+        default=False,
+        help=(
+            "Pre-warm a ServerPool from a manifest before the sweep so each "
+            "quantization runs against an already-started llama-server slot. "
+            "The manifest path defaults to infra/pool_manifest.json or the "
+            "FOUNDRY_POOL_MANIFEST env var (issue #1046, ADR-0026)."
+        ),
+    )
     return parser
 
 
@@ -868,6 +927,16 @@ def _build_sweep_subparser(parser: argparse.ArgumentParser) -> None:
             "Example: --model-families qwen2.5-0.5b,llama-3.2-1b,phi-3-mini"
         ),
     )
+    parser.add_argument(
+        "--pool",
+        action="store_true",
+        default=False,
+        help=(
+            "Pre-warm a ServerPool from a manifest before the sweep so each "
+            "quantization runs against an already-started llama-server slot "
+            "(issue #1046, ADR-0026)."
+        ),
+    )
 
 
 def _build_daemon_subparser(parser: argparse.ArgumentParser) -> None:
@@ -1023,50 +1092,83 @@ def _main_evolve_legacy(argv: list[str] | None) -> int:
     return exit_code
 
 
-def _main_sweep(args: argparse.Namespace) -> int:
+def _execute_sweep(args: argparse.Namespace, critic: Critic) -> int:
+    """Shared sweep execution used by ``_main_sweep`` and ``sweep_main``.
+
+    When ``args.pool`` is truthy a :class:`ServerPool` is built from the
+    pool manifest, pre-warmed via ``start_all()`` before the sweep runs,
+    and torn down via ``stop_all()`` afterwards — eliminating
+    per-quantization cold-start latency (issue #1046, ADR-0026).
+    """
     quantizations = [q.strip() for q in args.quantizations.split(",") if q.strip()]
     if not quantizations:
         sys.stderr.write("--quantizations must specify at least one quantization label.\n")
         return 2
 
-    critic = Critic(harness_dir=args.harness_dir)
-
     model_families: list[str] | None = None
     if getattr(args, "model_families", None):
         model_families = [f.strip() for f in args.model_families.split(",") if f.strip()]
 
+    use_pool = getattr(args, "pool", False)
+    pool: ServerPool | None = None
+
     try:
-        if model_families:
-            verdict = critic.model_family_sweep(
-                model_families=model_families,
-                quantizations=quantizations,
-                baseline_quantization=args.baseline,
-                regression_threshold_pp=args.regression_threshold,
-                cost_per_token=args.cost_per_token,
+        if use_pool:
+            configs = _load_pool_manifest()
+            pool = ServerPool()
+            for slot, config in configs.items():
+                pool.register(slot, config)
+            start_results = asyncio.run(pool.start_all())
+            failed = [s for s, ok in start_results.items() if not ok]
+            if failed:
+                sys.stderr.write(f"WARNING: pool slots failed to start: {', '.join(failed)}\n")
+            print(
+                f"Pool pre-warmed: {len(start_results)} slot(s) "
+                f"({sum(start_results.values())} healthy)",
+                file=sys.stderr,
             )
+
+        try:
+            if model_families:
+                verdict = critic.model_family_sweep(
+                    model_families=model_families,
+                    quantizations=quantizations,
+                    baseline_quantization=args.baseline,
+                    regression_threshold_pp=args.regression_threshold,
+                    cost_per_token=args.cost_per_token,
+                )
+            else:
+                verdict = critic.quantization_sweep(
+                    quantizations=quantizations,
+                    baseline_quantization=args.baseline,
+                    regression_threshold_pp=args.regression_threshold,
+                    cost_per_token=args.cost_per_token,
+                    context_tokens=getattr(args, "context_tokens", None),
+                )
+        except (ValueError, TypeError, FileNotFoundError) as exc:
+            sys.stderr.write(f"Error: {exc}\n")
+            return 1
+
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps(verdict.model_dump(mode="json"), indent=2))
+            print(f"Results written to {output_path}", file=sys.stderr)
+
+        if isinstance(verdict, ModelFamilyVerdict):
+            print(_render_model_family_verdict(verdict))
         else:
-            verdict = critic.quantization_sweep(
-                quantizations=quantizations,
-                baseline_quantization=args.baseline,
-                regression_threshold_pp=args.regression_threshold,
-                cost_per_token=args.cost_per_token,
-                context_tokens=getattr(args, "context_tokens", None),
-            )
-    except (ValueError, FileNotFoundError) as exc:
-        sys.stderr.write(f"Error: {exc}\n")
-        return 1
+            print(_render_quantization_verdict(verdict))
+        return 0 if not verdict.regression else 1
+    finally:
+        if pool is not None:
+            asyncio.run(pool.stop_all())
+            print("Pool stopped.", file=sys.stderr)
 
-    if args.output:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(verdict.model_dump(mode="json"), indent=2))
-        print(f"Results written to {output_path}", file=sys.stderr)
 
-    if isinstance(verdict, ModelFamilyVerdict):
-        print(_render_model_family_verdict(verdict))
-    else:
-        print(_render_quantization_verdict(verdict))
-    return 0 if not verdict.regression else 1
+def _main_sweep(args: argparse.Namespace) -> int:
+    critic = Critic(harness_dir=args.harness_dir)
+    return _execute_sweep(args, critic)
 
 
 if __name__ == "__main__":
@@ -1079,7 +1181,9 @@ def sweep_main(argv: list[str] | None = None) -> int:
     Standalone sweep invocation that does not go through the evolution loop.
     Runs the benchmark suite against each listed quantization and prints a
     comparison table. When ``--model-families`` is set, runs a cross-model-family
-    sweep per ADR-0025.
+    sweep per ADR-0025. When ``--pool`` is set, pre-warms a
+    :class:`ServerPool` from a manifest so each quantization runs against an
+    already-started llama-server slot (issue #1046, ADR-0026).
 
     Exit codes:
         0  Sweep completed with no regression detected
@@ -1088,47 +1192,5 @@ def sweep_main(argv: list[str] | None = None) -> int:
     """
     parser = _build_sweep_parser()
     args = parser.parse_args(argv)
-
-    quantizations = [q.strip() for q in args.quantizations.split(",") if q.strip()]
-    if not quantizations:
-        sys.stderr.write("--quantizations must specify at least one quantization label.\n")
-        return 2
-
     critic = Critic(harness_dir=args.harness_dir)
-
-    model_families: list[str] | None = None
-    if getattr(args, "model_families", None):
-        model_families = [f.strip() for f in args.model_families.split(",") if f.strip()]
-
-    try:
-        if model_families:
-            verdict = critic.model_family_sweep(
-                model_families=model_families,
-                quantizations=quantizations,
-                baseline_quantization=args.baseline,
-                regression_threshold_pp=args.regression_threshold,
-                cost_per_token=args.cost_per_token,
-            )
-        else:
-            verdict = critic.quantization_sweep(
-                quantizations=quantizations,
-                baseline_quantization=args.baseline,
-                regression_threshold_pp=args.regression_threshold,
-                cost_per_token=args.cost_per_token,
-                context_tokens=getattr(args, "context_tokens", None),
-            )
-    except (ValueError, FileNotFoundError) as exc:
-        sys.stderr.write(f"Error: {exc}\n")
-        return 1
-
-    if args.output:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(verdict.model_dump(mode="json"), indent=2))
-        print(f"Results written to {output_path}", file=sys.stderr)
-
-    if isinstance(verdict, ModelFamilyVerdict):
-        print(_render_model_family_verdict(verdict))
-    else:
-        print(_render_quantization_verdict(verdict))
-    return 0 if not verdict.regression else 1
+    return _execute_sweep(args, critic)

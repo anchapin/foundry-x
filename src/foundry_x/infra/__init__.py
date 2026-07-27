@@ -11,6 +11,7 @@ from foundry_x.infra.server_manager import (
     ServerConfig,
     ServerLaunchError,
     ServerNotManagedError,
+    ServerPool,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "ServerConfig",
     "ServerLaunchError",
     "ServerNotManagedError",
+    "ServerPool",
 ]

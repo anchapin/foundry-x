@@ -119,9 +119,15 @@ class ServerConfig:
     restart_backoff_base_s: float = _DEFAULT_RESTART_BACKOFF_BASE_S
     restart_backoff_cap_s: float = _DEFAULT_RESTART_BACKOFF_CAP_S
     popen_kwargs: dict[str, Any] = field(default_factory=dict)
+    slot: str | None = None
 
     @classmethod
-    def from_env(cls, env: dict[str, str] | None = None) -> ServerConfig:
+    def from_env(
+        cls,
+        env: dict[str, str] | None = None,
+        *,
+        slot: str | None = None,
+    ) -> ServerConfig:
         """Resolve a :class:`ServerConfig` from the supplied env dict.
 
         ``env`` defaults to :data:`os.environ`; tests pass a populated
@@ -152,6 +158,7 @@ class ServerConfig:
             ctx_size=ctx_size,
             autostart=autostart,
             server_bin=server_bin,
+            slot=slot,
         )
 
 
@@ -418,3 +425,155 @@ def quote_argv(argv: list[str]) -> str:
     render an argv that survives round-trips through :func:`shlex.split`.
     """
     return shlex.join(argv)
+
+
+# ---------------------------------------------------------------------------
+# ServerPool — multi-slot lifecycle management (issue #1046, ADR-0026)
+# ---------------------------------------------------------------------------
+
+#: Polling interval (seconds) used by :meth:`ServerPool.acquire` when
+#: waiting for a warming slot to become healthy.
+_POOL_HEALTH_POLL_INTERVAL_S = 2.0
+
+
+class ServerPool:
+    """Manage multiple :class:`FoundryServerManager` instances keyed by slot.
+
+    The pool is populated explicitly by the caller via :meth:`register`.
+    Each slot maps to one resolved :class:`ServerConfig` and the
+    :class:`FoundryServerManager` built from it.
+
+    Lifecycle:
+
+    * :meth:`start_all` — pre-warm every registered server in parallel.
+    * :meth:`stop_all` — tear down every server in parallel.
+    * :meth:`acquire` — return ``(slot, manager)`` for the healthiest
+      available slot, optionally waiting for a warming slot to become
+      ready.
+
+    See ``docs/adr/0026-server-pool.md`` for the design rationale.
+    """
+
+    def __init__(
+        self,
+        *,
+        manager_factory: Callable[[ServerConfig], FoundryServerManager] | None = None,
+    ) -> None:
+        self._managers: dict[str, FoundryServerManager] = {}
+        self._manager_factory = manager_factory or FoundryServerManager
+
+    # ---- registration --------------------------------------------------
+
+    def register(self, slot: str, config: ServerConfig) -> None:
+        """Add *slot* to the pool with the resolved *config*.
+
+        Raises :class:`KeyError` if *slot* is already registered. A slot
+        may be registered at most once per pool lifetime (``deregister``
+        is deferred — see ADR-0026 §Follow-up work).
+        """
+        if slot in self._managers:
+            raise KeyError(
+                f"slot {slot!r} is already registered; "
+                f"a slot may not be registered twice without deregister"
+            )
+        self._managers[slot] = self._manager_factory(config)
+
+    def get(self, slot: str) -> FoundryServerManager:
+        """Return the :class:`FoundryServerManager` for *slot*.
+
+        Raises :class:`KeyError` if *slot* is not registered.
+        """
+        try:
+            return self._managers[slot]
+        except KeyError:
+            raise KeyError(f"slot {slot!r} is not registered") from None
+
+    @property
+    def slots(self) -> list[str]:
+        """Return the registered slot names in insertion order."""
+        return list(self._managers)
+
+    def slot_health(self) -> dict[str, bool]:
+        """Return a non-blocking snapshot of every slot's health.
+
+        This is a convenience for monitoring: it probes each manager
+        synchronously and therefore blocks for up to
+        ``config.health_timeout_s`` per slot. Use :meth:`acquire` for
+        the health-aware routing path.
+        """
+        result: dict[str, bool] = {}
+        for slot, mgr in self._managers.items():
+            result[slot] = mgr._is_healthy_sync()  # type: ignore[attr-defined]
+        return result
+
+    # ---- lifecycle -----------------------------------------------------
+
+    async def start_all(self) -> dict[str, bool]:
+        """Pre-warm every registered server in parallel.
+
+        Returns a ``dict`` mapping each slot name to ``True`` when the
+        server started successfully or ``False`` when it raised
+        (:class:`ServerLaunchError`, :class:`ServerNotManagedError`,
+        etc.). Failures do not propagate so the caller can inspect the
+        dict and decide whether to abort.
+        """
+
+        async def _start_slot(slot: str, mgr: FoundryServerManager) -> tuple[str, bool]:
+            try:
+                await mgr.start()
+            except Exception:  # noqa: BLE001 — ADR-0026: failures return False, not raise
+                return slot, False
+            return slot, True
+
+        if not self._managers:
+            return {}
+        results = await asyncio.gather(*(_start_slot(s, m) for s, m in self._managers.items()))
+        return dict(results)
+
+    async def stop_all(self) -> None:
+        """Tear down every registered server in parallel."""
+        if not self._managers:
+            return
+        await asyncio.gather(*(m.stop() for m in self._managers.values()))
+
+    async def acquire(self) -> tuple[str, FoundryServerManager]:
+        """Return ``(slot, manager)`` for the healthiest available slot.
+
+        Health is determined by :meth:`FoundryServerManager.is_healthy`.
+        The first healthy slot (in registration order) is returned.
+
+        When no slot is healthy and at least one slot has
+        ``config.autostart`` enabled, the pool polls the first such slot
+        every ``_POOL_HEALTH_POLL_INTERVAL_S`` seconds up to that slot's
+        ``health_ready_timeout_s``. If the slot becomes healthy within
+        the window, it is returned.
+
+        If no slot becomes healthy (or no slot has autostart), the first
+        registered slot is returned as a fallback — the caller decides
+        whether to proceed.
+        """
+        if not self._managers:
+            raise KeyError("cannot acquire from an empty pool")
+
+        # First pass: check every slot's health in parallel.
+        async def _check(slot: str, mgr: FoundryServerManager) -> tuple[str, bool]:
+            return slot, await mgr.is_healthy()
+
+        checks = await asyncio.gather(*(_check(s, m) for s, m in self._managers.items()))
+        for slot, healthy in checks:
+            if healthy:
+                return slot, self._managers[slot]
+
+        # No healthy slot — look for an autostart slot to wait on.
+        for slot, mgr in self._managers.items():
+            if mgr.config.autostart:
+                deadline = time.monotonic() + mgr.config.health_ready_timeout_s
+                while time.monotonic() < deadline:
+                    await asyncio.sleep(_POOL_HEALTH_POLL_INTERVAL_S)
+                    if await mgr.is_healthy():
+                        return slot, mgr
+                break
+
+        # Fallback: first registered slot.
+        first_slot = next(iter(self._managers))
+        return first_slot, self._managers[first_slot]
