@@ -218,10 +218,7 @@ def _render_model_family_sweep_result(result: ModelFamilySweepResult) -> str:
 def _render_model_family_verdict(verdict: ModelFamilyVerdict) -> str:
     """Render a ModelFamilyVerdict as a cross-family comparison table."""
     lines = ["Cross-Model-Family Sweep Results", "=" * 90]
-    header = (
-        f"  {'Model Family':<20} | {'Recommended Quant':<18} | "
-        f"{'Pass Rate':>9} | Status"
-    )
+    header = f"  {'Model Family':<20} | {'Recommended Quant':<18} | {'Pass Rate':>9} | Status"
     lines.append(header)
     lines.append("-" * 90)
     for family_result in verdict.family_results:

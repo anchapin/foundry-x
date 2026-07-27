@@ -789,9 +789,12 @@ class TestModelFamiliesCLI:
         parser = _build_sweep_parser()
         args = parser.parse_args(
             [
-                "--quantizations", "Q4_K_S,Q5_K_M",
-                "--harness-dir", "/tmp/harness",
-                "--model-families", "qwen2.5-0.5b,llama-3.2-1b",
+                "--quantizations",
+                "Q4_K_S,Q5_K_M",
+                "--harness-dir",
+                "/tmp/harness",
+                "--model-families",
+                "qwen2.5-0.5b,llama-3.2-1b",
             ]
         )
         assert args.model_families == "qwen2.5-0.5b,llama-3.2-1b"
@@ -804,8 +807,10 @@ class TestModelFamiliesCLI:
         parser = _build_sweep_parser()
         args = parser.parse_args(
             [
-                "--quantizations", "Q4_K_S",
-                "--harness-dir", "/tmp/harness",
+                "--quantizations",
+                "Q4_K_S",
+                "--harness-dir",
+                "/tmp/harness",
             ]
         )
         assert args.model_families is None

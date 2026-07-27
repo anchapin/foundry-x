@@ -74,6 +74,7 @@ def _parse_model_registry() -> dict[str, dict[str, str]] | None:
         return None
     try:
         import json
+
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
             sys.stderr.write(

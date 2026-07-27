@@ -584,7 +584,9 @@ def test_timeout_notes_uses_wall_clock_message_when_no_output() -> None:
 class TestParseModelRegistry:
     """Tests for FOUNDRY_MODEL_REGISTRY parsing (ADR-0025)."""
 
-    def test_parse_model_registry_returns_none_when_not_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_parse_model_registry_returns_none_when_not_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Absent env var returns None."""
         monkeypatch.delenv("FOUNDRY_MODEL_REGISTRY", raising=False)
         from foundry_x.evolution.critic import _parse_model_registry
@@ -595,6 +597,7 @@ class TestParseModelRegistry:
     def test_parse_model_registry_parses_valid_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Valid JSON registry is parsed correctly."""
         import json
+
         registry = {
             "qwen2.5-0.5b": {
                 "path": "/models/qwen2.5-0.5b-q4_k_m.gguf",
@@ -616,7 +619,9 @@ class TestParseModelRegistry:
         assert result["qwen2.5-0.5b"]["path"] == "/models/qwen2.5-0.5b-q4_k_m.gguf"
         assert result["llama-3.2-1b"]["endpoint"] == "http://localhost:8081"
 
-    def test_parse_model_registry_returns_none_for_invalid_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_parse_model_registry_returns_none_for_invalid_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Invalid JSON returns None with a warning."""
         monkeypatch.setenv("FOUNDRY_MODEL_REGISTRY", "not valid json")
         from foundry_x.evolution.critic import _parse_model_registry
@@ -624,7 +629,9 @@ class TestParseModelRegistry:
         result = _parse_model_registry()
         assert result is None
 
-    def test_parse_model_registry_returns_none_for_non_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_parse_model_registry_returns_none_for_non_dict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Non-object JSON root returns None."""
         monkeypatch.setenv("FOUNDRY_MODEL_REGISTRY", '["not", "an", "object"]')
         from foundry_x.evolution.critic import _parse_model_registry
