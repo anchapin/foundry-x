@@ -6,7 +6,8 @@
     "injection_firewall",
     "context_pruning",
     "rate_limit",
-    "token_aware_pruning"
+    "token_aware_pruning",
+    "web_fetch"
   ],
   "context_pruning": {
     "token_threshold": 8192,
@@ -19,7 +20,8 @@
     "list_dir.json",
     "read_file.json",
     "read_multiple_files.json",
-    "write_file.json"
+    "write_file.json",
+    "web_fetch.json"
   ],
   "skill_inventory": [
     {
@@ -49,6 +51,10 @@
     {
       "name": "write_file",
       "description": "Write content to a file. Creates new files or overwrites existing ones."
+    },
+    {
+      "name": "web_fetch",
+      "description": "Fetch a URL from an operator-allowlisted domain and return the response body."
     }
   ]
 }

@@ -27,6 +27,19 @@ We design against these threats:
    enter a runaway loop, blowing up the GPU, the disk, or the wallet.
 6. **Local privilege.** The harness runs on a host with user
    permissions; a buggy hook could read files outside the workspace.
+7. **Controlled fetch SSRF / data exfiltration.** The Docker sandbox
+   isolates the agent from the host network. The `web_fetch` skill
+   provides a controlled path for the agent to retrieve library
+   documentation, man pages, or reference material from allowlisted
+   domains. Without an allowlist enforcement, this capability would
+   open an SSRF channel (the agent fetching internal metadata
+   endpoints like `169.254.169.254`) or a data-exfiltration channel
+   (the agent sending collected data to an attacker-controlled
+   domain). The `WebFetchHook` (`harness/hooks/web_fetch.py`)
+   mitigates this threat by validating every `web_fetch` tool call's
+   URL host against the operator-configured `FETCH_ALLOWED_DOMAINS`
+   allowlist before the HTTP request is issued. When the allowlist is
+   empty or unset, **all** fetches are blocked (deny-by-default).
 
 ## Guardrails
 
@@ -84,6 +97,20 @@ We design against these threats:
   container with read-only mounts for the host filesystem (see
   `infra/`). The default local dev path runs unsandboxed but should
   be migrated to the container for any non-trivial evolution run.
+- **Controlled fetch allowlist (issue #1054).** The `web_fetch` skill
+  lets the agent retrieve documentation from allowlisted domains. The
+  `WebFetchHook` (`harness/hooks/web_fetch.py`) validates every
+  `web_fetch` tool call's URL host against the `FETCH_ALLOWED_DOMAINS`
+  environment variable (comma-separated domain list). A URL whose host
+  is not in the allowlist is blocked — the hook records a
+  ``fetch_blocked`` trace event and clears the URL so the skill
+  executor returns an error without issuing the HTTP request. When
+  `FETCH_ALLOWED_DOMAINS` is empty or unset, **all** fetches are
+  blocked (deny-by-default). The skill executor additionally guards
+  against non-HTTP(S) schemes (file://, ftp://, etc.) so a
+  misconfigured or absent hook cannot open a protocol-pivot channel.
+  Response bodies are treated as untrusted text and pass through the
+  prompt-input firewall before re-injection into the model prompt.
 
 ## Secrets
 
