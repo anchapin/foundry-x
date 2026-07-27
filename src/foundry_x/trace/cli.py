@@ -755,6 +755,221 @@ def _diagnose(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- Issue #1036: graphical timeline visualization ----------------------------
+# Renders a session's events as a graphical ASCII timeline with duration bars,
+# timing offsets, and visual markers for different event categories.
+
+
+def _extract_summary(payload: dict[str, Any] | None) -> str:
+    """Pull a short human-readable summary from an event payload."""
+    if not payload:
+        return ""
+    for key in ("kind", "message", "summary", "tool", "status", "phase", "text"):
+        if key in payload:
+            return str(payload[key])[:80]
+    return ""
+
+
+def _with_token_total(summary: str, payload: dict[str, Any] | None) -> str:
+    """Append token counts to a model_response summary if available."""
+    if not payload:
+        return summary
+    usage = payload.get("usage") or payload
+    in_tok = usage.get("input_tokens") or usage.get("prompt_tokens")
+    out_tok = usage.get("output_tokens") or usage.get("completion_tokens")
+    if in_tok and out_tok:
+        return f"{summary} ({in_tok}+{out_tok} tok)".strip()
+    if out_tok:
+        return f"{summary} ({out_tok} tok)".strip()
+    return summary
+
+
+# Visual category mapping: event kinds → display labels and marker characters.
+_TIMELINE_CATEGORIES: dict[str, tuple[str, str]] = {
+    "session_start": ("SESSION", ">>"),
+    "session_end": ("SESSION", "<<"),
+    "task_received": ("TASK", "->"),
+    "task_completed": ("TASK", "OK"),
+    "task_failed": ("TASK", "!!"),
+    "task_aborted": ("TASK", "XX"),
+    "user_prompt": ("PROMPT", ">>"),
+    "model_request": ("MODEL", "->"),
+    "model_response": ("MODEL", "<-"),
+    "model_error": ("MODEL", "!!"),
+    "tool_call": ("TOOL", "->"),
+    "tool_result": ("TOOL", "<-"),
+    "outcome": ("RESULT", "OK"),
+    "critic_verdict": ("VERDICT", ">>"),
+    "hook_registry_error": ("HOOK", "!!"),
+    "injection_blocked": ("SECURITY", "!!"),
+    "context_pruned": ("CONTEXT", "~~"),
+}
+
+# Error kinds get a distinct visual marker in the timeline.
+_TIMELINE_ERROR_KINDS: frozenset[str] = frozenset(
+    {"model_error", "task_failed", "task_aborted", "hook_registry_error", "injection_blocked"}
+)
+
+# Bar rendering: max bar width in characters, and the scale factor (ms → chars).
+_TIMELINE_BAR_MAX = 40
+_TIMELINE_BAR_CHAR = "#"
+_TIMELINE_GAP_CHAR = "."
+
+
+def _parse_ts(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp string."""
+    return datetime.fromisoformat(value)
+
+
+def _timeline_category(kind: str) -> tuple[str, str]:
+    """Return (category_label, marker) for an event kind."""
+    return _TIMELINE_CATEGORIES.get(kind, ("OTHER", "??"))
+
+
+def _timeline_is_error(kind: str) -> bool:
+    """True when the kind is a failure/error category."""
+    return kind in _TIMELINE_ERROR_KINDS
+
+
+def _format_duration_ms(ms: float) -> str:
+    """Format milliseconds into a human-readable string."""
+    if ms < 1000:
+        return f"{ms:.0f}ms"
+    if ms < 60_000:
+        return f"{ms / 1000:.1f}s"
+    minutes = int(ms // 60_000)
+    seconds = (ms % 60_000) / 1000
+    return f"{minutes}m{seconds:.0f}s"
+
+
+def _render_bar(duration_ms: float, max_ms: float, width: int = _TIMELINE_BAR_MAX) -> str:
+    """Render a proportional ASCII bar for a duration value.
+
+    The bar's length is proportional to *duration_ms* relative to *max_ms*.
+    A minimum of 1 character is shown for non-zero durations so the
+    timeline stays readable for short-lived events.
+    """
+    if duration_ms <= 0 or max_ms <= 0:
+        return ""
+    filled = max(1, round((duration_ms / max_ms) * width))
+    filled = min(filled, width)
+    return _TIMELINE_BAR_CHAR * filled + _TIMELINE_GAP_CHAR * (width - filled)
+
+
+def build_graphical_timeline(
+    events: Sequence[TraceEvent],
+    *,
+    kind_filter: str | None = None,
+    use_color: bool = False,
+) -> str:
+    """Render a session's events as a graphical ASCII timeline.
+
+    Each event produces one line with:
+      - A step number (zero-padded)
+      - The wall-clock offset from the first event
+      - The duration from the previous event as a proportional bar
+      - The event kind (left-justified)
+      - A one-line summary extracted from the payload
+
+    Events matching *kind_filter* (if provided) are shown; all others
+    are included but marked as filtered. Error events get a ``!`` prefix.
+
+    Returns the complete timeline as a multi-line string. Empty event
+    sequences produce a header-only output.
+    """
+    if not events:
+        return "(no events)\n"
+
+    base = _parse_ts(events[0].timestamp)
+    lines: list[str] = []
+
+    # Pre-compute inter-event durations to find the max for bar scaling.
+    offsets: list[float] = []
+    deltas: list[float] = []
+    for i, event in enumerate(events):
+        delta_s = (_parse_ts(event.timestamp) - base).total_seconds()
+        offsets.append(delta_s)
+        if i == 0:
+            deltas.append(0.0)
+        else:
+            deltas.append(delta_s - offsets[i - 1])
+
+    max_delta_ms = max((d * 1000 for d in deltas), default=0)
+
+    # Header.
+    total_s = offsets[-1] if offsets else 0
+    lines.append(
+        f"Timeline: {len(events)} event(s), total span {_format_duration_ms(total_s * 1000)}"
+    )
+    lines.append("-" * 78)
+
+    for i, event in enumerate(events):
+        step = f"#{i + 1:03d}"
+        offset = offsets[i]
+        delta_ms = deltas[i] * 1000
+        cat_label, marker = _timeline_category(event.kind)
+        is_err = _timeline_is_error(event.kind)
+
+        # Duration bar.
+        bar = _render_bar(delta_ms, max_delta_ms) if i > 0 else ""
+
+        # Summary from payload.
+        summary = _extract_summary(event.payload)
+        if event.kind == "model_response":
+            summary = _with_token_total(summary, event.payload)
+
+        # Build the line.
+        err_prefix = "!" if is_err else " "
+        bar_part = f"[{bar}]" if bar else " " * (_TIMELINE_BAR_MAX + 2)
+        ts_str = f"+{offset:.3f}s"
+
+        kind_display = event.kind.ljust(22)
+        cat_display = cat_label.ljust(8)
+
+        line = (
+            f"{err_prefix}{step} {ts_str:>10s}  {_format_duration_ms(delta_ms):>8s}  "
+            f"{bar_part}  {cat_display} {kind_display} {marker} {summary}"
+        )
+        lines.append(line.rstrip())
+
+    lines.append("-" * 78)
+    return "\n".join(lines) + "\n"
+
+
+def _timeline(args: argparse.Namespace) -> int:
+    """Implement ``timeline`` (issue #1036).
+
+    Renders a session's events as a graphical ASCII timeline with
+    duration bars, timing offsets, and visual markers for event
+    categories. Supports ``--kind`` to filter by event kind and
+    ``--no-color`` to disable TTY detection (colors are not used in
+    the current implementation but the flag is reserved).
+    """
+    logger = _logger_for(args.db)
+    events = logger.load_session(args.session_id)
+    if not events:
+        sys.stderr.write(f"No events found for session {args.session_id}.\n")
+        return 1
+    kind_filter = getattr(args, "kind", None)
+    use_color = not getattr(args, "no_color", False)
+
+    # Apply kind filter if specified.
+    if kind_filter is not None:
+        events = [e for e in events if e.kind == kind_filter]
+        if not events:
+            sys.stderr.write(
+                f"No events matching kind '{kind_filter}' in session {args.session_id}.\n"
+            )
+            return 1
+
+    output = build_graphical_timeline(events, kind_filter=kind_filter, use_color=use_color)
+    if args.out:
+        Path(args.out).write_text(output, encoding="utf-8")
+    else:
+        sys.stdout.write(output)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="foundry-trace",
@@ -1036,6 +1251,38 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write the report to this path instead of stdout.",
     )
     diagnose_parser.set_defaults(func=_diagnose)
+
+    # --- timeline (issue #1036) ---
+    timeline_parser = sub.add_parser(
+        "timeline",
+        help="Render a graphical ASCII timeline of a session's events with duration bars.",
+    )
+    timeline_parser.add_argument(
+        "session_id",
+        help="The session ID to render a timeline for.",
+    )
+    timeline_parser.add_argument(
+        "--kind",
+        default=None,
+        help="Filter to a single event kind (e.g. 'tool_call', 'model_request').",
+    )
+    timeline_parser.add_argument(
+        "--no-color",
+        action="store_true",
+        default=False,
+        help="Disable TTY color detection (reserved for future use).",
+    )
+    timeline_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    timeline_parser.add_argument(
+        "--out",
+        default=None,
+        help="Write the timeline to this path instead of stdout.",
+    )
+    timeline_parser.set_defaults(func=_timeline)
 
     return parser
 

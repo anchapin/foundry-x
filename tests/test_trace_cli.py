@@ -1529,3 +1529,146 @@ def test_diagnose_multiple_modes_fire(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert out.count("| yes |") == 4
+
+
+# --- Issue #1036: graphical timeline visualization tests ----------------------
+
+
+def test_timeline_shows_events(tmp_path, capsys):
+    """The timeline subcommand renders event kinds and duration bars."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+
+    rc = main(["timeline", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "user_prompt" in out
+    assert "tool_call" in out
+    assert "outcome" in out
+    # At least one duration bar should appear after the first event.
+    assert "[" in out
+
+
+def test_timeline_empty_session_returns_nonzero(tmp_path, capsys):
+    """Timeline of a session with no events returns exit code 1."""
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    # Create a session with no recorded events.
+    logger = TraceLogger(db)
+    with logger.session(harness_version="0.1.0") as sid:
+        pass
+
+    rc = main(["timeline", sid, "--db", str(db)])
+
+    # Empty session has no events → error message + nonzero.
+    assert rc == 1
+    assert "No events" in capsys.readouterr().err
+
+
+def test_timeline_kind_filter(tmp_path, capsys):
+    """Filtering by --kind shows only matching events."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+
+    rc = main(["timeline", sid, "--db", str(db), "--kind", "tool_call"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tool_call" in out
+    assert "user_prompt" not in out
+
+
+def test_timeline_kind_filter_no_match_returns_nonzero(tmp_path, capsys):
+    """Filtering by a nonexistent kind returns exit code 1."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+
+    rc = main(["timeline", sid, "--db", str(db), "--kind", "nonexistent"])
+
+    assert rc == 1
+    assert "No events matching" in capsys.readouterr().err
+
+
+def test_timeline_output_file(tmp_path):
+    """Writing timeline to --out file produces correct content."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+    out_file = tmp_path / "timeline.txt"
+
+    rc = main(["timeline", sid, "--db", str(db), "--out", str(out_file)])
+
+    assert rc == 0
+    text = out_file.read_text(encoding="utf-8")
+    assert "user_prompt" in text
+    assert "tool_call" in text
+
+
+def test_build_graphical_timeline_header(tmp_path):
+    """The header reports event count and total span."""
+    from foundry_x.trace.cli import build_graphical_timeline
+
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="0.1.0", model_id="m") as sid:
+        logger.record(sid, "user_prompt", {"prompt": "hello"})
+        logger.record(sid, "outcome", {"status": "ok"})
+    events = logger.load_session(sid)
+
+    output = build_graphical_timeline(events)
+
+    assert "2 event(s)" in output
+    assert "Timeline:" in output
+
+
+def test_build_graphical_timeline_empty(tmp_path):
+    """An empty event list renders a placeholder line."""
+    from foundry_x.trace.cli import build_graphical_timeline
+
+    output = build_graphical_timeline([])
+    assert "(no events)" in output
+
+
+def test_render_bar_proportional():
+    """The bar length is proportional to the ratio of duration/max."""
+    from foundry_x.trace.cli import _render_bar
+
+    bar_50 = _render_bar(500, 1000, width=20)
+    bar_100 = _render_bar(1000, 1000, width=20)
+
+    # bar_100 should be at least as long as bar_50.
+    filled_50 = bar_50.count("#")
+    filled_100 = bar_100.count("#")
+    assert filled_100 > filled_50
+    # Full bar should fill the entire width.
+    assert filled_100 == 20
+
+
+def test_render_bar_zero_duration():
+    """Zero duration produces an empty string."""
+    from foundry_x.trace.cli import _render_bar
+
+    assert _render_bar(0, 1000) == ""
+
+
+def test_extract_summary_from_various_keys(tmp_path):
+    """_extract_summary tries common payload keys in order."""
+    from foundry_x.trace.cli import _extract_summary
+
+    assert _extract_summary({"tool": "read_file"}) == "read_file"
+    assert _extract_summary({"message": "done"}) == "done"
+    assert _extract_summary({"status": "ok"}) == "ok"
+    assert _extract_summary({}) == ""
+    assert _extract_summary(None) == ""
+
+
+def test_with_token_total(tmp_path):
+    """_with_token_total appends token counts when present."""
+    from foundry_x.trace.cli import _with_token_total
+
+    result = _with_token_total("response", {"input_tokens": 100, "output_tokens": 50})
+    assert "150" in result or "100+50" in result
+
+    result_no_tok = _with_token_total("response", {})
+    assert result_no_tok == "response"
