@@ -455,6 +455,11 @@ class TraceLogger:
             columns = {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)")}
             if "ended_at" not in columns:
                 self._conn.execute("ALTER TABLE sessions ADD COLUMN ended_at TEXT")
+            # Non-destructive migration for the ``evolved`` flag (issue #1047).
+            # The daemon sets this to 1 after processing a session so it does
+            # not re-evolve it on the next poll cycle. Default 0 = unprocessed.
+            if "evolved" not in columns:
+                self._conn.execute("ALTER TABLE sessions ADD COLUMN evolved INTEGER DEFAULT 0")
             self._conn.commit()
 
     def close(self) -> None:
@@ -568,6 +573,130 @@ class TraceLogger:
             if masking_active_exception:
                 return
             raise
+
+    def mark_session_evolved(self, session_id: str) -> bool:
+        """Flag a session as processed by the evolution daemon (issue #1047).
+
+        Sets the ``evolved`` column to 1 on the sessions table (sqlite) or
+        appends a ``session_evolved`` marker line (jsonl). Idempotent:
+        calling on an already-evolved session is a no-op.
+
+        Returns ``True`` when the session was found and marked (including
+        when it was already evolved), ``False`` when the session_id does not
+        exist in the trace store.
+        """
+        if self.backend == "jsonl":
+            return self._mark_session_evolved_jsonl(session_id)
+        return self._mark_session_evolved_sqlite(session_id)
+
+    def _mark_session_evolved_sqlite(self, session_id: str) -> bool:
+        assert self._conn is not None  # backend == "sqlite"
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE sessions SET evolved = 1 WHERE session_id = ?",
+                (session_id,),
+            )
+        return cur.rowcount > 0
+
+    def _mark_session_evolved_jsonl(self, session_id: str) -> bool:
+        if not self.path.exists():
+            return False
+        found = any(s.session_id == session_id for s in self._list_sessions_jsonl())
+        if not found:
+            return False
+        with self.path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "session_id": session_id,
+                        "kind": "session_evolved",
+                    }
+                )
+                + "\n"
+            )
+        return True
+
+    def is_session_evolved(self, session_id: str) -> bool:
+        """Return ``True`` when ``session_id`` has been marked evolved (issue #1047)."""
+        if self.backend == "jsonl":
+            return self._is_session_evolved_jsonl(session_id)
+        return self._is_session_evolved_sqlite(session_id)
+
+    def _is_session_evolved_sqlite(self, session_id: str) -> bool:
+        assert self._conn is not None  # backend == "sqlite"
+        row = self._conn.execute(
+            "SELECT evolved FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        return bool(row[0])
+
+    def _is_session_evolved_jsonl(self, session_id: str) -> bool:
+        if not self.path.exists():
+            return False
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    record: dict[str, Any] = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    record.get("kind") == "session_evolved"
+                    and record.get("session_id") == session_id
+                ):
+                    return True
+        return False
+
+    def list_unevolved_sessions(self) -> list[str]:
+        """Return session IDs that have not yet been evolved (issue #1047).
+
+        Only sessions that have ended (``ended_at`` is set) are returned, so
+        the daemon does not try to evolve a session that is still recording
+        events. Ordering is by ``started_at`` ascending, matching
+        :meth:`list_sessions`.
+        """
+        if self.backend == "jsonl":
+            return self._list_unevolved_sessions_jsonl()
+        return self._list_unevolved_sessions_sqlite()
+
+    def _list_unevolved_sessions_sqlite(self) -> list[str]:
+        assert self._conn is not None  # backend == "sqlite"
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)")}
+        evolved_col = "evolved" if "evolved" in columns else "0"
+        ended_col = "ended_at" if "ended_at" in columns else "NULL"
+        rows = self._conn.execute(
+            f"SELECT session_id FROM sessions WHERE {evolved_col} = 0 "
+            f"AND {ended_col} IS NOT NULL ORDER BY started_at"
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def _list_unevolved_sessions_jsonl(self) -> list[str]:
+        sessions = self._list_sessions_jsonl()
+        evolved_ids: set[str] = set()
+        if self.path.exists():
+            with self.path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        record: dict[str, Any] = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        record.get("kind") == "session_evolved"
+                        and record.get("session_id") is not None
+                    ):
+                        evolved_ids.add(record["session_id"])
+        return [
+            s.session_id
+            for s in sessions
+            if s.session_id not in evolved_ids and s.ended_at is not None
+        ]
 
     def session_duration(self, session_id: str) -> timedelta | None:
         """Wall-clock duration of a session, or ``None`` if not yet ended.
