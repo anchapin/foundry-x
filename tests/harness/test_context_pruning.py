@@ -1065,8 +1065,7 @@ class TestSqlitePrunerConnectionReuse:
                 pruner.prune(sid, frozenset({"tool_result", "user_prompt"}), 200)
             pruner.close()
             assert connect_count == 1, (
-                f"Expected 1 sqlite3.connect call (connection reuse), "
-                f"got {connect_count}"
+                f"Expected 1 sqlite3.connect call (connection reuse), got {connect_count}"
             )
         finally:
             sqlite3.connect = original  # type: ignore[method-assign]
@@ -1083,9 +1082,7 @@ class TestSqlitePrunerConnectionReuse:
         try:
             results = []
             for _ in range(5):
-                dropped = pruner.prune(
-                    sid, frozenset({"tool_result", "user_prompt"}), 200
-                )
+                dropped = pruner.prune(sid, frozenset({"tool_result", "user_prompt"}), 200)
                 results.append(dropped)
             assert results == [50, 0, 0, 0, 0], (
                 f"Expected [50, 0, 0, 0, 0] (first call drops to 200, rest are "
@@ -1115,4 +1112,3 @@ class TestSqlitePrunerConnectionReuse:
         pruner = _SqlitePruner(db)
         pruner.close()
         pruner.close()
-

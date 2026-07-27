@@ -124,9 +124,7 @@ class _SqlitePruner:
         payload = json.loads(row[0])
         return payload.get("tokens_used", 0)
 
-    def prune(
-        self, session_id: str, keep_kinds: frozenset[str], target_count: int
-    ) -> int:
+    def prune(self, session_id: str, keep_kinds: frozenset[str], target_count: int) -> int:
         not_in_clause = ", ".join("?" for _ in keep_kinds)
         total = self._conn.execute(
             "SELECT COUNT(*) FROM events WHERE session_id = ?",
@@ -138,9 +136,7 @@ class _SqlitePruner:
         params: list[object] = [session_id, *keep_kinds, to_drop]
         cursor = self._conn.execute(
             "SELECT event_id FROM events "
-            "WHERE session_id = ? AND kind NOT IN ("
-            + not_in_clause
-            + ") "
+            "WHERE session_id = ? AND kind NOT IN (" + not_in_clause + ") "
             "ORDER BY timestamp LIMIT ?",
             params,
         )
