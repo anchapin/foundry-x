@@ -34,7 +34,7 @@ TASK = BenchmarkTask(
         "space-separated on one line to output.txt. Write an empty "
         "output.txt when n is 0."
     ),
-    difficulty_tier="smoke",
+    difficulty_tier="easy",
     expected_outcome=(
         "output.txt contains the space-separated FizzBuzz tokens for 1..n, or is empty when n is 0."
     ),
