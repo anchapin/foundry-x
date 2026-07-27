@@ -1769,20 +1769,21 @@ async def run_task(
     if context_tokens_threshold:
         _token_threshold = int(context_tokens_threshold)
         from harness.hooks.context_pruning import (
-            _sqlite_pruner,
+            _SqlitePruner,
             register_token_aware_into,
         )
 
         def _tracer(sid: str, kind: str, payload: dict[str, object]) -> None:
             log.record(sid, kind=kind, payload=payload)
 
+        _pruner = _SqlitePruner(log.path)
         register_token_aware_into(
             registry,
             session_id=session_id,
             token_threshold=_token_threshold,
-            pruner=_sqlite_pruner(log.path),
+            pruner=_pruner.prune,
             tracer=_tracer,
-            get_tokens=lambda sid: tokens_used,
+            get_tokens=_pruner.count_tokens,
         )
 
     resolved_workspace_root = (
