@@ -1282,9 +1282,7 @@ class TestParallelQuantizationSweep:
             ),
             patch.object(Critic, "_run_sweep_for_quant", fake_run),
         ):
-            seq_verdict = critic.quantization_sweep(
-                quantizations=["Q4_K_M", "Q5_K_M", "Q8_0"]
-            )
+            seq_verdict = critic.quantization_sweep(quantizations=["Q4_K_M", "Q5_K_M", "Q8_0"])
 
         with (
             patch.dict(
@@ -1297,9 +1295,7 @@ class TestParallelQuantizationSweep:
             ),
             patch.object(Critic, "_run_sweep_for_quant", fake_run),
         ):
-            par_verdict = critic.quantization_sweep(
-                quantizations=["Q4_K_M", "Q5_K_M", "Q8_0"]
-            )
+            par_verdict = critic.quantization_sweep(quantizations=["Q4_K_M", "Q5_K_M", "Q8_0"])
 
         assert seq_verdict.recommended == par_verdict.recommended
         assert seq_verdict.regression == par_verdict.regression
@@ -1411,7 +1407,9 @@ class TestParallelQuantizationSweep:
         captured_env: dict[str, str | None] = {}
 
         def fake_run(self, model_file, model_id, cost_per_token=None, env=None):
-            captured_env["FOUNDRY_CONTEXT_TOKENS"] = env.get("FOUNDRY_CONTEXT_TOKENS") if env else None
+            captured_env["FOUNDRY_CONTEXT_TOKENS"] = (
+                env.get("FOUNDRY_CONTEXT_TOKENS") if env else None
+            )
             captured_env["FOUNDRY_MODEL_ID"] = env.get("FOUNDRY_MODEL_ID") if env else None
             return QuantizationResult(
                 quantization="Q5_K_M",
@@ -1479,9 +1477,7 @@ class TestParallelQuantizationSweep:
             ),
             patch.object(Critic, "_run_sweep_for_quant", fake_run),
         ):
-            verdict = critic.quantization_sweep(
-                quantizations=["Q4_K_S", "Q5_K_M", "Q8_0", "Q6_K"]
-            )
+            verdict = critic.quantization_sweep(quantizations=["Q4_K_S", "Q5_K_M", "Q8_0", "Q6_K"])
 
         assert len(verdict.quantizations) == 4
         assert {r.quantization for r in verdict.quantizations} == {

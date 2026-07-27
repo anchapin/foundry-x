@@ -548,9 +548,7 @@ class Critic:
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
-                    executor.submit(
-                        _run_for_quant_in_env, mf, mid, base_env
-                    ): (mf, mid)
+                    executor.submit(_run_for_quant_in_env, mf, mid, base_env): (mf, mid)
                     for mf, mid in quant_work
                 }
                 for future in as_completed(futures):
