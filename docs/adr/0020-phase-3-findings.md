@@ -76,10 +76,24 @@ The sweep code (`Critic.quantization_sweep`) accepts arbitrary
 quantization labels; the known v4 types are documented in
 `KNOWN_V4_QUANTIZATIONS` in `src/foundry_x/evolution/critic.py`.
 
+The sweep is executed via the ``foundry-sweep`` CLI or the benchmark task
+``benchmarks/tasks/test_quantization_v4_sweep.py`` (issue #1078):
+
+```bash
+FOUNDRY_MODEL_PATH=/srv/models \
+  foundry-sweep sweep \
+  --quantizations Q2_K,IQ2_XXS,IQ3_XXS,IQ3_S,IQ4_XS,Q4_K_M,Q5_K_M,Q8_0 \
+  --harness-dir harness \
+  --baseline Q8_0 \
+  --regression-threshold 2.0 \
+  --output logs/sweep_v4.json
+```
+
 ### v4 Intelligence Floor Table
 
-> **Status: PENDING** — requires GPU hardware and v4 model files. Tracked
-> in follow-up issue.
+> **Status: EXECUTABLE** — requires GPU hardware (RX 6600 XT) and v4 model
+> files. Run via the command above or ``uv run pytest -m benchmark
+> benchmarks/tasks/test_quantization_v4_sweep.py``.
 
 | Quantization | VRAM Est. | Pass Rate | vs. Q8_0 | Status |
 |--------------|-----------|-----------|----------|--------|
@@ -211,7 +225,7 @@ Issues #549–#553 have been closed, upgrading this ADR from "projected" to "emp
 | 4 | Does the real-LLM smoke job pass on CI with live model? | Issue #552 | **Closed** — real-LLM smoke job added to CI (workflow `test-real-model`) |
 | 5 | Is `FOUNDRY_CONTEXT_TOKENS=8192` the correct default for 5600G/6600 XT? | Issue #553 | **Closed** — context pruning validated at scale; default confirmed |
 | 6 | Are there benchmark tasks that remain intractable even at Q8_0? | Issue #1027 | **Studied — see §Intractable Task Study** |
-| 7 | Do GGUF v4 IQ quantizations (IQ4_XS, IQ3_S) offer a better quality/VRAM tradeoff than Q5_K_M? | Issue #1050 (follow-up pending) | Open — follow-up issue to be filed |
+| 7 | Do GGUF v4 IQ quantizations (IQ4_XS, IQ3_S) offer a better quality/VRAM tradeoff than Q5_K_M? | Issue #1078 | **Open** — sweep benchmark task added; execution on GPU hardware pending |
 | 8 | Does the intelligence floor change at larger context windows (16k, 32k)? | Issue #1050 (follow-up pending) | Open — follow-up issue to be filed |
 
 ## Intractable Task Study (Open Question #6)

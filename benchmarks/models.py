@@ -157,3 +157,66 @@ class ContextPruningSweepResult(BaseModel):
         default=0,
         description="Total events recorded in the session.",
     )
+
+
+class V4QuantizationSweepResult(BaseModel):
+    """Structured result of a GGUF v4 quantization sweep (issue #1078).
+
+    Produced by ``test_quantization_v4_sweep.py`` for KPI-layer consumption.
+    The sweep runs the benchmark suite across v4 IQ quantizations (IQ4_XS,
+    IQ3_S, IQ3_XXS, IQ2_XXS) plus Q2_K and the v3 K-quant baselines
+    (Q4_K_M, Q5_K_M, Q8_0) to validate whether any v4 IQ quantization
+    offers a better quality/VRAM tradeoff than Q5_K_M (the current
+    recommended floor at ~5.5 GB).
+
+    The key question is whether IQ4_XS (~4.1 GB) matches Q5_K_M quality
+    within 2 pp, which would allow 8 GB card operators to run a
+    higher-quality model per VRAM dollar.
+
+    Attributes
+    ----------
+    quantization:
+        The GGUF quantization label (e.g. ``"IQ4_XS"``, ``"Q5_K_M"``).
+    pass_rate:
+        Fraction of benchmark tasks that passed (0.0 to 1.0).
+    vrams_gb:
+        Estimated VRAM usage in GB for a 7B model at this quantization.
+    regression_vs_baseline:
+        Pass rate delta vs. Q8_0 baseline in percentage points.
+        Negative means lower quality than baseline.
+    within_2pp_of_q5km:
+        Whether this quantization's pass rate is within 2 pp of Q5_K_M.
+        This is the acceptance criterion for v4 IQ quants to be considered
+        competitive with the current recommended floor.
+    recommended:
+        Whether this quantization is recommended as the new floor if
+        regression_vs_baseline is within threshold and VRAM is lower.
+    notes:
+        Free-form annotation for any special circumstances.
+    """
+
+    quantization: str = Field(..., description="GGUF quantization label (e.g. IQ4_XS).")
+    pass_rate: float = Field(
+        default=0.0,
+        description="Benchmark pass rate (0.0 to 1.0).",
+    )
+    vrams_gb: float = Field(
+        default=0.0,
+        description="Estimated VRAM usage in GB for a 7B model.",
+    )
+    regression_vs_baseline: float = Field(
+        default=0.0,
+        description="Pass rate delta vs. Q8_0 baseline in percentage points.",
+    )
+    within_2pp_of_q5km: bool = Field(
+        default=False,
+        description="Whether pass rate is within 2 pp of Q5_K_M.",
+    )
+    recommended: bool = Field(
+        default=False,
+        description="Whether this quantization is recommended as the new floor.",
+    )
+    notes: str = Field(
+        default="",
+        description="Free-form annotation.",
+    )
