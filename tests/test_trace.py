@@ -833,8 +833,10 @@ def test_batch_mode_accumulates_and_flushes_on_threshold(tmp_path):
         flush_call_count += 1
         return original_flush(session_id)
 
-    with unittest.mock.patch.object(logger, "_flush_session", counting_flush), \
-         logger.session(harness_version="0.1.0") as sid:
+    with (
+        unittest.mock.patch.object(logger, "_flush_session", counting_flush),
+        logger.session(harness_version="0.1.0") as sid,
+    ):
         for i in range(200):
             logger.record(sid, kind="model_response_chunk", payload={"index": i})
 
@@ -863,8 +865,10 @@ def test_batch_mode_flushes_remaining_on_session_end(tmp_path):
         flush_call_count += 1
         return original_flush(session_id)
 
-    with unittest.mock.patch.object(logger, "_flush_session", counting_flush), \
-         logger.session(harness_version="0.1.0") as sid:
+    with (
+        unittest.mock.patch.object(logger, "_flush_session", counting_flush),
+        logger.session(harness_version="0.1.0") as sid,
+    ):
         for i in range(37):
             logger.record(sid, kind="model_response_chunk", payload={"index": i})
 
