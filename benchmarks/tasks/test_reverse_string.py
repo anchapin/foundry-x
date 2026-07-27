@@ -1,4 +1,14 @@
-"""Benchmark task: reverse a string."""
+"""Benchmark task: reverse a string.
+
+INFRASTRUCTURE CHECK (issue #1120)
+==================================
+This task uses run_solution to plant a complete golden solution. It tests
+whether the execution infrastructure works correctly -- NOT whether the
+agent can independently synthesize a string-reversal algorithm.
+
+The golden-solution approach provides a deterministic pass/fail baseline
+that locks the infrastructure green before the agent loop is wired.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +26,8 @@ TASK = BenchmarkTask(
         "Read a single line from input.txt, reverse its characters, and write "
         "the result to output.txt."
     ),
-    tags=["strings"],
+    difficulty_tier="easy",
+    tags=["strings", "infrastructure"],
 )
 
 GOLDEN_SOLUTION = """\

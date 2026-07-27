@@ -1,5 +1,11 @@
 """Benchmark task: FizzBuzz (implementation, smoke).
 
+INFRASTRUCTURE CHECK (issue #1120)
+==================================
+This task uses run_solution to plant a complete golden solution. It tests
+whether the execution infrastructure works correctly -- NOT whether the
+agent can independently synthesize a FizzBuzz implementation.
+
 The canonical single-function synthesis task. Exercises the agent's ability
 to map a divisibility spec to conditional branching -- the smallest
 reasoning step beyond pure transformation. Covers the classic 3/5/15
@@ -38,7 +44,7 @@ TASK = BenchmarkTask(
     expected_outcome=(
         "output.txt contains the space-separated FizzBuzz tokens for 1..n, or is empty when n is 0."
     ),
-    tags=["implementation"],
+    tags=["implementation", "infrastructure"],
 )
 
 GOLDEN_SOLUTION = """\

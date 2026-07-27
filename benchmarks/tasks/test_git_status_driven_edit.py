@@ -1,5 +1,11 @@
 """Benchmark task: git-status-driven edit (issue #810).
 
+INFRASTRUCTURE CHECK (issue #1120)
+==================================
+This task uses run_solution to plant a complete golden solution. It tests
+whether the execution infrastructure works correctly -- NOT whether the
+agent can independently use git status to drive an edit.
+
 This benchmark validates the "read git status/diff output -> decide what
 to change -> make targeted edit" loop. A harness regression that breaks
 git skill routing would not be caught without this task.
@@ -57,7 +63,7 @@ TASK = BenchmarkTask(
     ),
     timeout_seconds=30,
     requires_skills=["bash"],
-    tags=["git", "multi-step", "editing", "decision-making"],
+    tags=["git", "multi-step", "editing", "decision-making", "infrastructure"],
 )
 
 _FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / TASK.name

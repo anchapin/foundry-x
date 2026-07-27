@@ -1,5 +1,11 @@
 """Benchmark task: two-sum (find two distinct indices whose values sum to target).
 
+INFRASTRUCTURE CHECK (issue #1120)
+==================================
+This task uses run_solution to plant a complete golden solution. It tests
+whether the execution infrastructure works correctly -- NOT whether the
+agent can independently synthesize a two-sum algorithm.
+
 Medium-tier algorithmic benchmark (issue #179). Exercises the smallest
 non-trivial algorithmic shape beyond the O(n) linear transforms that
 dominate the deterministic suite (``nth_fibonacci``, ``reverse_string``,
@@ -59,7 +65,7 @@ TASK = BenchmarkTask(
         "output.txt contains either '<i> <j>\\n' with i < j on a single line "
         "when a pair sums to the target, or is empty when no pair exists."
     ),
-    tags=["algorithms", "hashing"],
+    tags=["algorithms", "hashing", "infrastructure"],
 )
 
 GOLDEN_SOLUTION = """\

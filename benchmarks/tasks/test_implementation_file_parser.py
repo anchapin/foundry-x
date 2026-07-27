@@ -1,5 +1,11 @@
 """Benchmark task: aggregate key-value pairs across files (implementation, io, multi-file).
 
+INFRASTRUCTURE CHECK (issue #1120)
+==================================
+This task uses run_solution to plant a complete golden solution. It tests
+whether the execution infrastructure works correctly -- NOT whether the
+agent can independently synthesize a file-parsing algorithm.
+
 Parses every ``*.txt`` data file in the workspace, aggregating
 ``name:score`` lines into per-name totals, and writes the result sorted by
 name. This is the suite's first ``implementation`` task that genuinely
@@ -48,7 +54,7 @@ TASK = BenchmarkTask(
         "alphabetical order, or is empty when no data files contain "
         "name:score lines."
     ),
-    tags=["implementation", "io", "multi-file"],
+    tags=["implementation", "io", "multi-file", "infrastructure"],
 )
 
 GOLDEN_SOLUTION = """\
