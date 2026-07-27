@@ -1,0 +1,475 @@
+"""Tests for the cloud-native model adapters (issue #1041, ADR-0029).
+
+Covers:
+
+- `CloudModelAdapter` ABC contract (provider override points).
+- `AnthropicAdapter` — ``/v1/messages`` request shape, ``event:``/``data:``
+  SSE framing, ``anthropic-ratelimit-*`` header parsing, per-token pricing.
+- `OpenAINativeAdapter` — native error envelope, ``x-ratelimit-*`` header
+  parsing, reuse of the OpenAI chat-completion wire body.
+- `resolve_model_adapter` prefix routing (``anthropic/`` / ``openai/`` / fallthrough).
+- `ModelCostEvent` / `ModelRateLimitInfo` callback emission.
+"""
+
+from __future__ import annotations
+
+import json
+
+import httpx
+import pytest
+
+from foundry_x.execution.model_adapter import (
+    AnthropicAdapter,
+    CloudModelAdapter,
+    ModelAdapter,
+    ModelCostEvent,
+    ModelRateLimitInfo,
+    OpenAINativeAdapter,
+    resolve_model_adapter,
+)
+from foundry_x.execution.runner import build_model_adapter_with_overrides
+
+# ---------------------------------------------------------------------------
+# AnthropicAdapter
+# ---------------------------------------------------------------------------
+
+
+def test_anthropic_adapter_requires_api_key():
+    with pytest.raises(ValueError, match="api_key"):
+        AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key=None,
+        )
+
+
+def test_anthropic_adapter_resolves_via_prefix():
+    adapter = resolve_model_adapter(
+        "anthropic/claude-3-5-sonnet-20241022",
+        api_key="sk-ant-test",
+    )
+    try:
+        assert isinstance(adapter, AnthropicAdapter)
+        assert adapter.model == "claude-3-5-sonnet-20241022"
+        assert adapter.base_url == "https://api.anthropic.com"
+        assert isinstance(adapter, ModelAdapter)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+@pytest.mark.asyncio
+async def test_anthropic_complete_posts_messages_endpoint():
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["x_api_key"] = request.headers.get("x-api-key")
+        seen["anthropic_version"] = request.headers.get("anthropic-version")
+        seen["payload"] = json.loads(request.content.decode())
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hello"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+        )
+        response = await adapter.complete(
+            messages=[
+                {"role": "system", "content": "be brief"},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
+    assert seen["url"] == "https://api.anthropic.com/v1/messages"
+    assert seen["x_api_key"] == "sk-ant-test"
+    assert seen["anthropic_version"] == "2023-06-01"
+    payload = seen["payload"]
+    assert payload["model"] == "claude-3-5-sonnet-20241022"
+    assert payload["system"] == "be brief"
+    assert payload["messages"] == [{"role": "user", "content": "hi"}]
+    assert payload["stream"] is False
+
+    assert response.message.content == "hello"
+    assert response.finish_reason == "end_turn"
+    assert response.usage is not None
+    assert response.usage.prompt_tokens == 10
+    assert response.usage.completion_tokens == 5
+    assert response.usage.total_tokens == 15
+
+
+@pytest.mark.asyncio
+async def test_anthropic_complete_parses_tool_use_blocks():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "read_file",
+                        "input": {"path": "README.md"},
+                    }
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+        )
+        response = await adapter.complete(messages=[{"role": "user", "content": "read"}])
+
+    assert response.finish_reason == "tool_use"
+    assert len(response.tool_calls) == 1
+    call = response.tool_calls[0]
+    assert call.id == "toolu_1"
+    assert call.function.name == "read_file"
+    assert json.loads(call.function.arguments) == {"path": "README.md"}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_parses_event_framing():
+    body = (
+        "event: message_start\n"
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":8}}}\n\n'
+        "event: content_block_delta\n"
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}}\n\n'
+        "event: content_block_delta\n"
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"lo"}}\n\n'
+        "event: message_delta\n"
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+        '"usage":{"output_tokens":3}}\n\n'
+        "event: message_stop\n"
+        'data: {"type":"message_stop"}\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+        )
+        chunks = []
+        async for chunk in adapter.stream(messages=[{"role": "user", "content": "hi"}]):
+            chunks.append(chunk)
+
+    contents = [c.content for c in chunks if c.content]
+    assert contents == ["Hel", "lo"]
+    finish_chunks = [c for c in chunks if c.finish_reason == "end_turn"]
+    assert len(finish_chunks) == 1
+    usage_chunks = [c for c in chunks if c.usage is not None]
+    assert len(usage_chunks) >= 1
+
+
+@pytest.mark.asyncio
+async def test_anthropic_complete_emits_cost_and_rate_limit_callbacks():
+    cost_events: list[ModelCostEvent] = []
+    rate_events: list[ModelRateLimitInfo] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1000, "output_tokens": 500},
+            },
+            headers={
+                "anthropic-ratelimit-requests-remaining": "42",
+                "anthropic-ratelimit-tokens-remaining": "8000",
+                "anthropic-ratelimit-requests-reset": "1m",
+                "anthropic-ratelimit-tokens-reset": "2m",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+            on_cost=cost_events.append,
+            on_rate_limit=rate_events.append,
+        )
+        await adapter.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert len(cost_events) == 1
+    cost = cost_events[0]
+    assert cost.provider == "anthropic"
+    assert cost.model == "claude-3-5-sonnet-20241022"
+    assert cost.prompt_tokens == 1000
+    assert cost.completion_tokens == 500
+    # claude-3-5-sonnet: $3.00/1M input, $15.00/1M output
+    expected = (1000 * 3.0 + 500 * 15.0) / 1_000_000.0
+    assert abs(cost.estimated_cost_usd - round(expected, 8)) < 1e-9
+
+    assert len(rate_events) == 1
+    info = rate_events[0]
+    assert info.requests_remaining == 42
+    assert info.tokens_remaining == 8000
+    assert info.requests_reset_seconds == 60.0
+    assert info.tokens_reset_seconds == 120.0
+
+
+@pytest.mark.asyncio
+async def test_anthropic_complete_no_callbacks_when_usage_missing():
+    cost_events: list[ModelCostEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+            on_cost=cost_events.append,
+        )
+        await adapter.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert cost_events == []
+
+
+# ---------------------------------------------------------------------------
+# OpenAINativeAdapter
+# ---------------------------------------------------------------------------
+
+
+def test_openai_native_adapter_requires_api_key():
+    with pytest.raises(ValueError, match="api_key"):
+        OpenAINativeAdapter(
+            model="gpt-4o",
+            base_url="https://api.openai.com",
+            api_key=None,
+        )
+
+
+def test_openai_native_adapter_resolves_via_prefix():
+    adapter = resolve_model_adapter("openai/gpt-4o", api_key="sk-openai-test")
+    try:
+        assert isinstance(adapter, OpenAINativeAdapter)
+        assert adapter.model == "gpt-4o"
+        assert adapter.base_url == "https://api.openai.com"
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+@pytest.mark.asyncio
+async def test_openai_native_complete_posts_chat_completions():
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["authorization"] = request.headers.get("authorization")
+        seen["payload"] = json.loads(request.content.decode())
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAINativeAdapter(
+            model="gpt-4o",
+            base_url="https://api.openai.com",
+            api_key="sk-openai-test",
+            client=client,
+        )
+        response = await adapter.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert seen["url"] == "https://api.openai.com/v1/chat/completions"
+    assert seen["authorization"] == "Bearer sk-openai-test"
+    assert response.message.content == "done"
+    assert response.usage.total_tokens == 8
+
+
+@pytest.mark.asyncio
+async def test_openai_native_complete_raises_response_error_on_error_envelope():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"error": {"message": "invalid_api_key", "type": "invalid_request_error"}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAINativeAdapter(
+            model="gpt-4o",
+            base_url="https://api.openai.com",
+            api_key="sk-openai-test",
+            client=client,
+        )
+        with pytest.raises(Exception, match="invalid_api_key"):
+            await adapter.complete(messages=[{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_openai_native_complete_parses_rate_limit_headers():
+    rate_events: list[ModelRateLimitInfo] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+            },
+            headers={
+                "x-ratelimit-remaining-requests": "1000",
+                "x-ratelimit-remaining-tokens": "50000",
+                "x-ratelimit-reset-requests": "6m0s",
+                "x-ratelimit-reset-tokens": "5m0s",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAINativeAdapter(
+            model="gpt-4o",
+            base_url="https://api.openai.com",
+            api_key="sk-openai-test",
+            client=client,
+            on_rate_limit=rate_events.append,
+        )
+        await adapter.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert len(rate_events) == 1
+    info = rate_events[0]
+    assert info.requests_remaining == 1000
+    assert info.tokens_remaining == 50000
+
+
+# ---------------------------------------------------------------------------
+# resolve_model_adapter
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_model_adapter_falls_back_to_openai_compatible():
+    adapter = resolve_model_adapter(
+        "local-model",
+        api_key="test",
+        base_url="http://localhost:8080",
+    )
+    try:
+        from foundry_x.execution.model_adapter import OpenAICompatibleAdapter
+
+        assert isinstance(adapter, OpenAICompatibleAdapter)
+        assert adapter.model == "local-model"
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_resolve_model_adapter_compatible_requires_base_url():
+    with pytest.raises(ValueError, match="base_url"):
+        resolve_model_adapter("local-model", api_key="test")
+
+
+@pytest.mark.asyncio
+async def test_build_model_adapter_with_overrides_routes_anthropic():
+    adapter = build_model_adapter_with_overrides(
+        "anthropic/claude-3-5-haiku-20241022",
+        quantization=None,
+        path_or_endpoint="https://api.anthropic.com",
+        env={"ANTHROPIC_API_KEY": "sk-ant-test"},
+    )
+    try:
+        assert isinstance(adapter, AnthropicAdapter)
+        assert adapter.model == "claude-3-5-haiku-20241022"
+        assert adapter.base_url == "https://api.anthropic.com"
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_build_model_adapter_with_overrides_routes_openai():
+    adapter = build_model_adapter_with_overrides(
+        "openai/gpt-4o-mini",
+        quantization=None,
+        path_or_endpoint=None,
+        env={"OPENAI_API_KEY": "sk-openai-test"},
+    )
+    try:
+        assert isinstance(adapter, OpenAINativeAdapter)
+        assert adapter.model == "gpt-4o-mini"
+        assert adapter.base_url == "https://api.openai.com"
+    finally:
+        await adapter.aclose()
+
+
+# ---------------------------------------------------------------------------
+# CloudModelAdapter ABC contract
+# ---------------------------------------------------------------------------
+
+
+def test_cloud_model_adapter_is_abstract():
+    with pytest.raises(TypeError):
+        CloudModelAdapter(  # type: ignore[abstract]
+            model="x",
+            base_url="https://example.com",
+            api_key="x",
+        )
+
+
+def test_unknown_model_pricing_returns_zero():
+    adapter = resolve_model_adapter(
+        "anthropic/unknown-model",
+        api_key="sk-test",
+    )
+    try:
+        assert adapter.token_pricing() == (0.0, 0.0)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())

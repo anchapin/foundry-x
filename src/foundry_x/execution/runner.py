@@ -29,8 +29,11 @@ from foundry_x.execution.harness_layout import (
     validate as validate_harness_layout,
 )
 from foundry_x.execution.model_adapter import (
+    CloudModelAdapter,
     ModelAdapter,
+    ModelCostEvent,
     ModelMessage,
+    ModelRateLimitInfo,
     ModelResponse,
     ModelRetryEvent,
     ModelToolCall,
@@ -40,6 +43,7 @@ from foundry_x.execution.model_adapter import (
     ToolDefinition,
     ToolFunctionSchema,
     resolve_adapter_max_retries,
+    resolve_model_adapter,
 )
 from foundry_x.infra.server_manager import (
     SERVER_UNAVAILABLE_KIND,
@@ -93,6 +97,7 @@ _OPENCODE_SERVER_URL_ENV = "OPENCODE_SERVER_URL"
 _LLAMACPP_HOST_ENV = "LLAMACPP_HOST"
 _FOUNDRY_MODEL_API_KEY_ENV = "FOUNDRY_MODEL_API_KEY"
 _OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+_ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
 _FALLBACK_REQUEST_MODEL = "foundry-local"
 
 # Env-var for quantization label (issue #494).
@@ -341,13 +346,21 @@ def build_model_adapter_with_overrides(
     quantization: str | None,
     path_or_endpoint: str | None,
     env: Mapping[str, str] | None = None,
-) -> OpenAICompatibleAdapter:
+) -> ModelAdapter:
     """Build a model adapter with explicit overrides (issue #494).
 
-    When *path_or_endpoint* is a URL it is used as the OpenAI-compatible
-    endpoint directly. When it is a local GGUF path, ``llama-server`` is
-    assumed to be running at ``LLAMACPP_HOST`` (default ``127.0.0.1:8080``)
-    and the path is passed via ``FOUNDRY_MODEL_PATH``.
+    When *model_id* carries a cloud-provider prefix (``anthropic/`` or
+    ``openai/`` per ADR-0029) a `CloudModelAdapter` subclass is returned
+    instead of `OpenAICompatibleAdapter`. In that case *path_or_endpoint*
+    (when a URL) overrides the provider's default API base, and the
+    provider's API key env var (``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY``)
+    is consulted in addition to the shared fallbacks.
+
+    When *path_or_endpoint* is a URL without a cloud prefix it is used as
+    the OpenAI-compatible endpoint directly. When it is a local GGUF path,
+    ``llama-server`` is assumed to be running at ``LLAMACPP_HOST``
+    (default ``127.0.0.1:8080``) and the path is passed via
+    ``FOUNDRY_MODEL_PATH``.
 
     *quantization* is stored in ``FOUNDRY_QUANTIZATION`` for traceability but
     does not affect adapter construction (quantization is a path-level
@@ -370,16 +383,22 @@ def build_model_adapter_with_overrides(
             or source.get(_LLAMACPP_HOST_ENV, "").strip()
         )
 
-    if not base_url:
-        raise ValueError(
-            "Set OPENCODE_SERVER_URL or LLAMACPP_HOST to an OpenAI-compatible endpoint"
-        )
-
     resolved_model_id: str
     if model_id is not None and model_id.strip():
         resolved_model_id = model_id.strip()
     else:
         resolved_model_id = _resolve_model_request_name(source)
+
+    # Cloud-provider prefix routing (ADR-0029 §5, issue #1041). When the
+    # model_id carries ``anthropic/`` or ``openai/`` we hand off to the
+    # provider's native adapter rather than the OpenAI-compatible one.
+    if resolved_model_id.startswith(("anthropic/", "openai/")):
+        return _resolve_cloud_adapter(resolved_model_id, base_url or None, source)
+
+    if not base_url:
+        raise ValueError(
+            "Set OPENCODE_SERVER_URL or LLAMACPP_HOST to an OpenAI-compatible endpoint"
+        )
 
     if quantization is not None and quantization.strip():
         quant_env: dict[str, str] = dict(source)
@@ -395,6 +414,31 @@ def build_model_adapter_with_overrides(
         base_url=base_url,
         model=resolved_model_id,
         api_key=api_key or None,
+        timeout=_resolve_request_timeout(source),
+        max_retries=resolve_adapter_max_retries(source),
+    )
+
+
+def _resolve_cloud_adapter(
+    model_id: str,
+    base_url_override: str | None,
+    source: Mapping[str, str],
+) -> ModelAdapter:
+    """Build a `CloudModelAdapter` for a prefixed *model_id* (ADR-0029)."""
+    if model_id.startswith("anthropic/"):
+        api_key = (
+            source.get(_ANTHROPIC_API_KEY_ENV, "").strip()
+            or source.get(_FOUNDRY_MODEL_API_KEY_ENV, "").strip()
+        )
+    else:
+        api_key = (
+            source.get(_OPENAI_API_KEY_ENV, "").strip()
+            or source.get(_FOUNDRY_MODEL_API_KEY_ENV, "").strip()
+        )
+    return resolve_model_adapter(
+        model_id,
+        api_key=api_key or None,
+        base_url=base_url_override,
         timeout=_resolve_request_timeout(source),
         max_retries=resolve_adapter_max_retries(source),
     )
@@ -1641,8 +1685,9 @@ async def run_task(
     adapter = model_adapter or build_model_adapter()
 
     # Wire retry trace events (issue #200). Only `OpenAICompatibleAdapter`
-    # has retry logic; injected fakes / stubs are left untouched.
-    if isinstance(adapter, OpenAICompatibleAdapter):
+    # and `CloudModelAdapter` subclasses have retry logic; injected fakes /
+    # stubs are left untouched.
+    if isinstance(adapter, OpenAICompatibleAdapter | CloudModelAdapter):
 
         def _on_retry(event: ModelRetryEvent, _sid: str = session_id) -> None:
             _record_and_count(
@@ -1652,6 +1697,30 @@ async def run_task(
             )
 
         adapter.on_retry = _on_retry
+
+    # Wire cost + rate-limit trace events for cloud adapters (issue #1041,
+    # ADR-0029). `OpenAICompatibleAdapter` does not expose these hooks; only
+    # `CloudModelAdapter` subclasses surface per-response cost and rate-limit
+    # windows. The trace events feed the improvement-rate KPI's cost
+    # attribution and operator-visible rate-limit headroom.
+    if isinstance(adapter, CloudModelAdapter):
+
+        def _on_cost(event: ModelCostEvent, _sid: str = session_id) -> None:
+            log.record(
+                _sid,
+                kind="model_cost",
+                payload=event.model_dump(mode="json"),
+            )
+
+        def _on_rate_limit(info: ModelRateLimitInfo, _sid: str = session_id) -> None:
+            log.record(
+                _sid,
+                kind="model_rate_limit",
+                payload=info.model_dump(mode="json"),
+            )
+
+        adapter.on_cost = _on_cost
+        adapter.on_rate_limit = _on_rate_limit
 
     registry = _resolve_hook_registry(log, session_id)
     hook_call_cls, hook_result_cls = _import_hook_types()
