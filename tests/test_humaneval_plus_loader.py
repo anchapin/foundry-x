@@ -14,11 +14,14 @@ import pytest
 from pydantic import ValidationError
 
 from foundry_x.evaluation.humaneval_plus import (
+    SLICE_MAX_STANDARD_ERROR,
     HumanEvalExecutionError,
     HumanEvalTask,
+    binomial_standard_error,
     load_humaneval_slice,
     run_candidate_solution,
     run_canonical_solution,
+    slice_is_adequate,
     slice_pass_rates,
 )
 
@@ -161,3 +164,99 @@ def test_load_humaneval_slice_invalid_schema_raises(tmp_path: Path) -> None:
     p = _write_slice(tmp_path, [{"task_id": "", "entry_point": "f"}])
     with pytest.raises(ValueError, match="invalid HumanEvalTask"):
         load_humaneval_slice(p)
+
+
+# ---------------------------------------------------------------------------
+# binomial_standard_error — issue #1055, ADR-0023 §"Slice size decision"
+# ---------------------------------------------------------------------------
+
+
+def test_binomial_standard_error_known_value() -> None:
+    # p = 0.5, n = 20 -> sqrt(0.25/20) = sqrt(0.0125) ~= 0.1118
+    se = binomial_standard_error(10, 20)
+    assert se == pytest.approx(0.1118, abs=1e-4)
+
+
+def test_binomial_standard_error_zero_pass_rate() -> None:
+    # p = 0 -> SE = 0
+    assert binomial_standard_error(0, 20) == 0.0
+
+
+def test_binomial_standard_error_full_pass_rate() -> None:
+    # p = 1 -> SE = 0
+    assert binomial_standard_error(20, 20) == 0.0
+
+
+def test_binomial_standard_error_worst_case_20_exceeds_threshold() -> None:
+    # Worst case for 20-task slice: p=0.5, SE ~= 0.1118 > 0.05
+    worst = binomial_standard_error(10, 20)
+    assert worst > SLICE_MAX_STANDARD_ERROR
+
+
+def test_binomial_standard_error_worst_case_164_below_threshold() -> None:
+    # Worst case for full 164-task EvalPlus: p=0.5, SE ~= 0.0390 < 0.05
+    worst = binomial_standard_error(82, 164)
+    assert worst < SLICE_MAX_STANDARD_ERROR
+
+
+def test_binomial_standard_error_rejects_zero_total() -> None:
+    with pytest.raises(ValueError, match="total must be a positive"):
+        binomial_standard_error(0, 0)
+
+
+def test_binomial_standard_error_rejects_negative_total() -> None:
+    with pytest.raises(ValueError, match="total must be a positive"):
+        binomial_standard_error(0, -5)
+
+
+def test_binomial_standard_error_rejects_passed_exceeds_total() -> None:
+    with pytest.raises(ValueError, match="0 <= passed <= total"):
+        binomial_standard_error(15, 10)
+
+
+def test_binomial_standard_error_rejects_negative_passed() -> None:
+    with pytest.raises(ValueError, match="0 <= passed <= total"):
+        binomial_standard_error(-1, 10)
+
+
+def test_slice_is_adequate_20_tasks_is_not_adequate() -> None:
+    assert slice_is_adequate(20) is False
+
+
+def test_slice_is_adequate_164_tasks_is_adequate() -> None:
+    assert slice_is_adequate(164) is True
+
+
+def test_slice_is_adequate_custom_threshold() -> None:
+    # With a very tight threshold, even 164 tasks is inadequate.
+    assert slice_is_adequate(164, max_se=0.01) is False
+
+
+# ---------------------------------------------------------------------------
+# load_humaneval_slice with a large synthetic slice (issue #1055 criterion)
+# Confirms the loader handles the full 164-task EvalPlus file unchanged.
+# ---------------------------------------------------------------------------
+
+
+def test_load_humaneval_slice_handles_large_slice(tmp_path: Path) -> None:
+    rows = [
+        {
+            "task_id": f"HumanEval/{i}",
+            "prompt": f'\n\ndef f{i}(x: int) -> int:\n    """ Return x + {i}. """\n',
+            "canonical_solution": f"    return x + {i}\n",
+            "test": (
+                f"def check(candidate):\n"
+                f"    assert candidate(0) == {i}\n"
+                f"    assert candidate(1) == {i + 1}\n"
+            ),
+            "entry_point": f"f{i}",
+        }
+        for i in range(164)
+    ]
+    p = _write_slice(tmp_path, rows)
+    tasks = load_humaneval_slice(p)
+    assert len(tasks) == 164
+    assert tasks[0].task_id == "HumanEval/0"
+    assert tasks[-1].task_id == "HumanEval/163"
+    passed, total = slice_pass_rates(tasks)
+    assert (passed, total) == (164, 164)
