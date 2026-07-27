@@ -43,6 +43,8 @@ def _seed_session(
     failure_class: str | None = None,
     hook_registry_error: bool = False,
     wall_clock_abort: bool = False,
+    token_budget_abort: bool = False,
+    event_limit_abort: bool = False,
     tool_argument_parse_error_count: int = 0,
     generation_exhausted_count: int = 0,
 ) -> str:
@@ -71,6 +73,10 @@ def _seed_session(
     Issue #953 adds ``generation_exhausted_count``: when >0, that many
     ``generation_exhausted`` events are planted so the KPI aggregation can
     surface the evolver LLM failure count and rate.
+
+    Issue #1113 adds ``token_budget_abort`` and ``event_limit_abort`` parameters
+    to plant ``task_aborted`` events with the corresponding reason for cycle-time
+    exclusion breakdown testing.
     """
     with logger.session(harness_version=harness_version) as sid:
         logger.record(sid, kind="task_received", payload={"prompt": "do work"})
@@ -108,6 +114,18 @@ def _seed_session(
                 sid,
                 kind="task_aborted",
                 payload={"reason": "wall_clock", "timeout_s": 1.0, "token_budget": None},
+            )
+        if token_budget_abort:
+            logger.record(
+                sid,
+                kind="task_aborted",
+                payload={"reason": "token_budget", "token_budget": 1000},
+            )
+        if event_limit_abort:
+            logger.record(
+                sid,
+                kind="task_aborted",
+                payload={"reason": "event_limit", "event_limit": 100},
             )
         for i in range(tool_argument_parse_error_count):
             logger.record(
@@ -343,6 +361,154 @@ def test_main_comparison_renders_excluded_from_cycle_time_row(tmp_path, capsys):
     assert "0 | 1 | +1.00 (negative)" in row
 
 
+# ---------------------------------------------------------------------------
+# Issue #1113: ``excluded_from_cycle_time`` breakdown by abort reason:
+# ``excluded_wall_clock``, ``excluded_token_budget``, ``excluded_event_limit``,
+# and ``excluded_other``.  ``_cycle_time()`` inspects the ``reason`` field of
+# ``task_aborted`` events to attribute each excluded session to a category.
+# ---------------------------------------------------------------------------
+
+
+def test_cycle_time_exclusion_breakdown_by_abort_reason(tmp_path):
+    """Excluded sessions are attributed to the correct abort reason (issue #1113).
+
+    Plants 1 completing session, plus 2 wall_clock, 3 token_budget,
+    1 event_limit, and 1 with no abort event (other).  Verifies the breakdown
+    counts match the acceptance criteria.
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", wall_clock_abort=True)
+    _seed_session(logger, "v1", wall_clock_abort=True)
+    _seed_session(logger, "v1", token_budget_abort=True)
+    _seed_session(logger, "v1", token_budget_abort=True)
+    _seed_session(logger, "v1", token_budget_abort=True)
+    _seed_session(logger, "v1", event_limit_abort=True)
+    _seed_session(logger, "v1", verdict=None)
+
+    summary = compute_kpis(logger)
+
+    assert summary.excluded_from_cycle_time == 7
+    assert summary.excluded_wall_clock == 2
+    assert summary.excluded_token_budget == 3
+    assert summary.excluded_event_limit == 1
+    assert summary.excluded_other == 1
+    assert summary.cycle_time_seconds is not None
+    assert summary.cycle_time_seconds > 0.0
+
+
+def test_cycle_time_excluded_other_when_no_abort_event(tmp_path):
+    """Sessions excluded without a ``task_aborted`` event are counted as ``excluded_other``."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=None)
+
+    summary = compute_kpis(logger)
+
+    assert summary.excluded_from_cycle_time == 1
+    assert summary.excluded_wall_clock == 0
+    assert summary.excluded_token_budget == 0
+    assert summary.excluded_event_limit == 0
+    assert summary.excluded_other == 1
+
+
+def test_cycle_time_exclusion_breakdown_respects_harness_version(tmp_path):
+    """The per-reason breakdown honors ``harness_version`` filtering."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+    _seed_session(logger, "v1", wall_clock_abort=True)
+    _seed_session(logger, "v2", verdict=True)
+    _seed_session(logger, "v2", token_budget_abort=True)
+
+    v1_summary = compute_kpis(logger, harness_version="v1")
+    v2_summary = compute_kpis(logger, harness_version="v2")
+
+    assert v1_summary.excluded_wall_clock == 1
+    assert v1_summary.excluded_token_budget == 0
+    assert v1_summary.excluded_event_limit == 0
+    assert v1_summary.excluded_other == 0
+
+    assert v2_summary.excluded_wall_clock == 0
+    assert v2_summary.excluded_token_budget == 1
+    assert v2_summary.excluded_event_limit == 0
+    assert v2_summary.excluded_other == 0
+
+
+def test_main_markdown_renders_exclusion_breakdown_table(tmp_path, capsys):
+    """``foundry-kpis`` renders the per-abort-reason breakdown table (issue #1113)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+    _seed_session(logger, "v1", wall_clock_abort=True)
+    _seed_session(logger, "v1", token_budget_abort=True)
+
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    assert "Excluded From Cycle Time" in captured.out
+    assert "wall_clock" in captured.out
+    assert "token_budget" in captured.out
+    assert "event_limit" in captured.out
+    assert "other" in captured.out
+    assert "| wall_clock | 1 |" in captured.out
+    assert "| token_budget | 1 |" in captured.out
+
+
+def test_compare_kpis_exclusion_breakdown_deltas(tmp_path):
+    """``compare_kpis`` carries per-abort-reason exclusion deltas (issue #1113)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+    _seed_session(logger, "v1", wall_clock_abort=True)
+    _seed_session(logger, "v2", verdict=True)
+    _seed_session(logger, "v2", wall_clock_abort=True)
+    _seed_session(logger, "v2", token_budget_abort=True)
+    _seed_session(logger, "v2", token_budget_abort=True)
+
+    comparison = compare_kpis(logger, "v1", "v2")
+
+    assert comparison.baseline.excluded_wall_clock == 1
+    assert comparison.baseline.excluded_token_budget == 0
+    assert comparison.candidate.excluded_wall_clock == 1
+    assert comparison.candidate.excluded_token_budget == 2
+    assert comparison.deltas["excluded_wall_clock"] == 0
+    assert comparison.deltas["excluded_token_budget"] == 2
+    assert comparison.deltas["excluded_event_limit"] == 0
+    assert comparison.deltas["excluded_other"] == 0
+
+
+def test_main_comparison_renders_exclusion_breakdown_rows(tmp_path, capsys):
+    """The baseline/candidate table renders per-abort-reason exclusion rows (issue #1113)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+    _seed_session(logger, "v1", wall_clock_abort=True)
+    _seed_session(logger, "v2", verdict=True)
+    _seed_session(logger, "v2", token_budget_abort=True)
+
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--baseline-harness-version",
+            "v1",
+            "--candidate-harness-version",
+            "v2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    assert "Excl. wall_clock" in captured.out
+    assert "Excl. token_budget" in captured.out
+    assert "Excl. event_limit" in captured.out
+    assert "Excl. other" in captured.out
+
+
 def test_main_prints_markdown_table(tmp_path, capsys):
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
@@ -562,6 +728,10 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "event_limit_abort_count",
         "server_restart_count",
         "excluded_from_cycle_time",
+        "excluded_wall_clock",
+        "excluded_token_budget",
+        "excluded_event_limit",
+        "excluded_other",
         "evolver_llm_failure_count",
         "evolver_llm_failure_rate",
         "per_skill",
