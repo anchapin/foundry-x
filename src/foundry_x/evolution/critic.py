@@ -239,6 +239,7 @@ class CriticVerdict(BaseModel):
     notes: str = ""
     edit_index: int | None = None
     failure_class: str | None = None
+    target_file: str | None = None
 
 
 class TaskResult(BaseModel):

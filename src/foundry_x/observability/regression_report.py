@@ -27,6 +27,7 @@ class VerdictRecord(BaseModel):
     failed_checks: list[str] = Field(default_factory=list)
     notes: str = ""
     failure_class: str | None = Field(default=None)
+    target_file: str | None = Field(default=None)
 
 
 @dataclass
@@ -95,6 +96,7 @@ def record_verdict(logger: TraceLogger, session_id: str, verdict: CriticVerdict)
         failed_checks=list(verdict.failed_checks),
         notes=verdict.notes,
         failure_class=verdict.failure_class,
+        target_file=verdict.target_file,
     )
     logger.record(session_id=session_id, kind=VERDICT_KIND, payload=record.model_dump())
 
