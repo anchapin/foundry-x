@@ -1,7 +1,7 @@
 # External-Eval Pearson Correlation Study: Execution Plan
 
 > **Issue:** #1028
-> **ADR:** [ADR-0032](adr/0032-external-eval-pearson-study-protocol.md)
+> **ADR:** [ADR-0032](0032-external-eval-pearson-study-protocol.md)
 > **Status:** Pending — LLAMACPP_HOST not available in current environment
 > **Date:** 2026-07-27
 
