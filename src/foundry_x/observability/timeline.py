@@ -164,6 +164,120 @@ def render_timeline_json(events: Sequence[TraceEvent]) -> str:
     )
 
 
+def _kind_color(kind: str) -> str:
+    if _ERROR_PATTERN.search(kind):
+        return "#ef4444"
+    if kind.startswith("model_"):
+        return "#3b82f6"
+    if kind.startswith("tool_"):
+        return "#22c55e"
+    if kind in ("trace_event", "span"):
+        return "#a855f7"
+    return "#6b7280"
+
+
+def _kind_row(kind: str) -> str:
+    if kind.startswith("model_"):
+        return "model"
+    if kind.startswith("tool_"):
+        return "tool"
+    if kind in ("trace_event", "span"):
+        return "trace"
+    return "other"
+
+
+def render_timeline_svg(events: Sequence[TraceEvent]) -> str:
+    records = build_timeline_records(events)
+    if not records:
+        return ""
+
+    total_duration = max(r.offset_seconds for r in records) if records else 1
+    padding = 40
+    row_height = 24
+    row_spacing = 8
+    label_width = 100
+    chart_width = 800
+    chart_height = padding * 2 + len(records) * (row_height + row_spacing)
+
+    rows: list[str] = []
+    for r in records:
+        row = _kind_row(r.kind)
+        if row not in rows:
+            rows.append(row)
+    row_to_y: dict[str, float] = {
+        row: padding + i * (row_height + row_spacing) for i, row in enumerate(rows)
+    }
+
+    bars: list[str] = []
+    for record in records:
+        y = row_to_y[_kind_row(record.kind)]
+        color = _kind_color(record.kind)
+        x = (record.offset_seconds / total_duration) * chart_width + label_width
+        width = (
+            max(2, (record.offset_seconds / total_duration) * chart_width * 0.1)
+            if record.offset_seconds > 0
+            else 2
+        )
+        error_attrs = ' stroke="#ef4444" stroke-width="2"' if record.is_error else ""
+        bars.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{width:.1f}" height="{row_height}"'
+            f' fill="{color}" rx="3"{error_attrs}/>'
+        )
+        if record.summary:
+            bars.append(
+                f'<text x="{x + width + 4:.1f}" y="{y + row_height - 5:.1f}"'
+                f' font-size="10" fill="#374151">{_escape_svg(record.summary[:40])}</text>'
+            )
+
+    legend_items = [
+        (
+            '<rect x="0" y="0" width="12" height="12" fill="#3b82f6" rx="2"/><text x="16" y="11" font-size="11" fill="#374151">model_*</text>',
+            0,
+        ),
+        (
+            '<rect x="0" y="0" width="12" height="12" fill="#22c55e" rx="2"/><text x="16" y="11" font-size="11" fill="#374151">tool_*</text>',
+            1,
+        ),
+        (
+            '<rect x="0" y="0" width="12" height="12" fill="#a855f7" rx="2"/><text x="16" y="11" font-size="11" fill="#374151">trace/span</text>',
+            2,
+        ),
+        (
+            '<rect x="0" y="0" width="12" height="12" fill="#6b7280" rx="2"/><text x="16" y="11" font-size="11" fill="#374151">other</text>',
+            3,
+        ),
+        (
+            '<rect x="0" y="0" width="12" height="12" fill="#ef4444" rx="2"/><text x="16" y="11" font-size="11" fill="#374151">error</text>',
+            4,
+        ),
+    ]
+    legend_x_start = label_width + 20
+    legend_spacing = 90
+    legend_bars = []
+    for item, idx in legend_items:
+        lx = legend_x_start + idx * legend_spacing
+        legend_bars.append(f'<g transform="translate({lx}, 10)">{item}</g>')
+
+    svg_parts: list[str] = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {label_width + chart_width + 40} {chart_height}">',
+        "<style>text{font-family:ui-monospace,monospace}</style>",
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        f'<rect x="{label_width}" y="{padding}" width="{chart_width}" height="{len(rows) * (row_height + row_spacing) - row_spacing}" fill="#f9fafb" rx="4"/>',
+    ]
+    svg_parts.extend(bars)
+    svg_parts.extend(legend_bars)
+    svg_parts.append(
+        f'<text x="{label_width + chart_width // 2}" y="{chart_height - 6}" font-size="11" fill="#9ca3af" text-anchor="middle">0s — {total_duration:.1f}s</text>'
+    )
+    svg_parts.append("</svg>")
+    svg = "".join(svg_parts)
+    return svg
+
+
+def _escape_svg(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
 def format_timeline(
     events: Sequence[TraceEvent],
     highlight_errors: bool = True,
