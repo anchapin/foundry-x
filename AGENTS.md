@@ -44,14 +44,18 @@ Before you write code in this repo, read in this order:
     - `harness/` → ADR-0004 | `pyproject.toml` / deps → ADR-0002
     - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
     - Module-boundary models → ADR-0006 | `src/foundry_x/execution/` → ADR-0010
-    - `src/foundry_x/evolution/` → ADR-0010 | `evolution/loop.py` → ADR-0010
-     - Newer subsystems map to higher-numbered ADRs (0008–0023); e.g.
-       Conventional Commits → ADR-0008, security-eval benchmarks → ADR-0009,
-       manifest as evolver target → ADR-0012, model abstraction → ADR-0014
-       (ADR-0015 merged into 0014), review state machine → ADR-0017,
-       context pruning at scale → ADR-0021.
-       Run `ls docs/adr/` for the current set before assuming a subsystem
-       has no governing decision.
+     - `src/foundry_x/evolution/` → ADR-0010 | `evolution/loop.py` → ADR-0010
+    - Run `ls docs/adr/` for the full current set (0001–0033); key decisions:
+      - Conventional Commits → ADR-0008
+      - Security-eval benchmarks → ADR-0009
+      - Manifest as evolver target → ADR-0012
+      - Model abstraction → ADR-0014 (ADR-0015 merged into it)
+      - Review state machine → ADR-0017
+      - Context pruning at scale → ADR-0021
+      - External eval validation study → ADR-0023
+      - Cross-session failure accumulator → ADR-0030
+      - Security benchmark vectors → ADR-0031
+      - Cloud model adapters → ADR-0029
 11. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
@@ -258,7 +262,6 @@ Keep the two layers strictly separate:
 
 - **`src/foundry_x/`** — the *foundry*: Python code that wraps and evolves agents.
   When you read `src/foundry_x/execution/runner.py`, that is the code that talks to the agent.
-- **`harness/`** — the *artifact being evolved*: the agent's own DNA (system prompt, hooks, skills).
-  When you read `harness/system_prompt.txt`, that is the agent you are talking to.
+- **`harness/`** — the *artifact being evolved*: the agent's own DNA (`system_prompt.txt`, `hooks/`, `skills/`). All three are version-controlled and evolved by the Evolver→Critic loop. Skills are JSON tool definitions the agent can invoke; hooks are Python middleware that runs around every tool call.
 
 Mixing these up is the most common mistake newcomers make.
