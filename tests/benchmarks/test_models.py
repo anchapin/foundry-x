@@ -47,7 +47,7 @@ def test_full_construction_populates_every_field() -> None:
     assert task.tags == ["deploy", "networking"]
 
 
-@pytest.mark.parametrize("tier", ["smoke", "easy", "medium"])
+@pytest.mark.parametrize("tier", ["smoke", "easy", "medium", "hard"])
 def test_difficulty_tier_accepts_documented_values(tier: str) -> None:
     task = BenchmarkTask(name="t", description="d", difficulty_tier=tier)
     assert task.difficulty_tier == tier
@@ -55,7 +55,7 @@ def test_difficulty_tier_accepts_documented_values(tier: str) -> None:
 
 def test_difficulty_tier_rejects_unknown_value() -> None:
     with pytest.raises(ValidationError) as exc_info:
-        BenchmarkTask(name="t", description="d", difficulty_tier="hard")
+        BenchmarkTask(name="t", description="d", difficulty_tier="extreme")
     # Pydantic surfaces the literal constraint in the error.
     assert "difficulty_tier" in str(exc_info.value)
 

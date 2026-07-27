@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-DifficultyTier = Literal["smoke", "easy", "medium"]
+DifficultyTier = Literal["smoke", "easy", "medium", "hard"]
 
 
 class ModelRequirements(BaseModel):
