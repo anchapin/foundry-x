@@ -538,6 +538,8 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     # signal (sessions with task_received but no usable critic_verdict).
     # ``per_skill`` / ``per_task_family`` / ``per_difficulty_tier`` are the
     # issue #898 slice fields (empty unless ``--group-by`` is supplied).
+    # ``per_model_id`` / ``per_quantization`` / ``per_harness_version``
+    # are the issue #1039 session-level slice fields.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
@@ -564,6 +566,9 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "per_skill",
         "per_task_family",
         "per_difficulty_tier",
+        "per_model_id",
+        "per_quantization",
+        "per_harness_version",
     }
 
 
@@ -2211,3 +2216,220 @@ def test_main_validate_metadata_cli_with_harness_version(tmp_path, capsys):
         ]
     )
     assert rc == 0
+
+
+# -- Issue #1039: session-level KPI slices --------------------------------
+
+
+def _seed_session_with_covariates(
+    logger: TraceLogger,
+    harness_version: str,
+    model_id: str | None = None,
+    quantization: str | None = None,
+    verdict: bool | None = None,
+    passed_checks: list[str] | None = None,
+    failed_checks: list[str] | None = None,
+) -> str:
+    """Create a session with optional model_id / quantization covariates."""
+    with logger.session(
+        harness_version=harness_version,
+        model_id=model_id,
+        quantization=quantization,
+    ) as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+        if verdict is not None:
+            time.sleep(0.01)
+            record_verdict(
+                logger,
+                sid,
+                CriticVerdict(
+                    verdict=verdict,
+                    passed_checks=passed_checks or [],
+                    failed_checks=failed_checks or [],
+                ),
+            )
+    return sid
+
+
+def test_compute_kpis_session_slices_by_model_id(tmp_path):
+    """compute_kpis populates per_model_id when group_by='model_id'."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session_with_covariates(
+        logger, "v1", model_id="llama-7b", verdict=True, passed_checks=["a"]
+    )
+    _seed_session_with_covariates(
+        logger, "v1", model_id="llama-7b", verdict=False, failed_checks=["b"]
+    )
+    _seed_session_with_covariates(
+        logger, "v1", model_id="mistral-7b", verdict=True, passed_checks=["a"]
+    )
+
+    summary = compute_kpis(logger, group_by="model_id")
+    assert summary.per_model_id is not None
+    assert summary.per_model_id["llama-7b"].verdict_count == 2
+    assert summary.per_model_id["llama-7b"].improvement_rate == 0.5
+    assert summary.per_model_id["mistral-7b"].verdict_count == 1
+    assert summary.per_model_id["mistral-7b"].improvement_rate == 1.0
+
+
+def test_compute_kpis_session_slices_by_quantization(tmp_path):
+    """compute_kpis populates per_quantization when group_by='quantization'."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session_with_covariates(
+        logger, "v1", quantization="Q5_K_M", verdict=True, passed_checks=["a"]
+    )
+    _seed_session_with_covariates(
+        logger, "v1", quantization="Q5_K_M", verdict=False, failed_checks=["b"]
+    )
+    _seed_session_with_covariates(
+        logger, "v1", quantization="Q8_0", verdict=True, passed_checks=["a"]
+    )
+
+    summary = compute_kpis(logger, group_by="quantization")
+    assert summary.per_quantization is not None
+    assert summary.per_quantization["Q5_K_M"].verdict_count == 2
+    assert summary.per_quantization["Q8_0"].verdict_count == 1
+    assert summary.per_quantization["Q8_0"].improvement_rate == 1.0
+
+
+def test_compute_kpis_session_slices_by_harness_version(tmp_path):
+    """compute_kpis populates per_harness_version when group_by='harness_version'."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session_with_covariates(
+        logger, "v1", verdict=True, passed_checks=["a"]
+    )
+    # v2: one approved, then one where task_a regresses (was passed in
+    # the prior v2 session)
+    _seed_session_with_covariates(
+        logger, "v2", verdict=True, passed_checks=["a"]
+    )
+    _seed_session_with_covariates(
+        logger, "v2", verdict=False, failed_checks=["a"]
+    )
+
+    summary = compute_kpis(logger, group_by="harness_version")
+    assert summary.per_harness_version is not None
+    assert summary.per_harness_version["v1"].verdict_count == 1
+    assert summary.per_harness_version["v1"].improvement_rate == 1.0
+    assert summary.per_harness_version["v2"].verdict_count == 2
+    assert summary.per_harness_version["v2"].improvement_rate == 0.5
+    # Task "a" regressed in the second v2 session
+    assert summary.per_harness_version["v2"].regression_rate == 0.5
+
+
+def test_compute_kpis_session_slices_excludes_none_values(tmp_path):
+    """Sessions with None for the chosen attribute are excluded from slices."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session_with_covariates(
+        logger, "v1", model_id="llama-7b", verdict=True, passed_checks=["a"]
+    )
+    # This session has model_id=None
+    _seed_session_with_covariates(
+        logger, "v1", verdict=False, failed_checks=["b"]
+    )
+
+    summary = compute_kpis(logger, group_by="model_id")
+    assert summary.per_model_id is not None
+    assert "llama-7b" in summary.per_model_id
+    assert summary.per_model_id["llama-7b"].verdict_count == 1
+    # None-valued sessions not in the dict
+    assert len(summary.per_model_id) == 1
+
+
+def test_compare_kpis_session_slices(tmp_path):
+    """compare_kpis produces session-level slice deltas."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # baseline
+    _seed_session_with_covariates(
+        logger, "v1", model_id="llama-7b", verdict=True, passed_checks=["a"]
+    )
+    _seed_session_with_covariates(
+        logger, "v1", model_id="llama-7b", verdict=False, failed_checks=["b"]
+    )
+    # candidate
+    _seed_session_with_covariates(
+        logger, "v2", model_id="llama-7b", verdict=True, passed_checks=["a"]
+    )
+    _seed_session_with_covariates(
+        logger, "v2", model_id="llama-7b", verdict=True, passed_checks=["b"]
+    )
+    _seed_session_with_covariates(
+        logger, "v2", model_id="mistral-7b", verdict=True, passed_checks=["c"]
+    )
+
+    comparison = compare_kpis(logger, "v1", "v2", group_by="model_id")
+    assert comparison.baseline.per_model_id is not None
+    assert comparison.candidate.per_model_id is not None
+    assert comparison.slice_deltas is not None
+    assert "model_id" in comparison.slice_deltas
+
+
+def test_main_cli_group_by_model_id(tmp_path, capsys):
+    """CLI --group-by model_id renders model_id breakdown in markdown."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session_with_covariates(
+        logger, "v1", model_id="llama-7b", verdict=True, passed_checks=["a"]
+    )
+    _seed_session_with_covariates(
+        logger, "v1", model_id="mistral-7b", verdict=False, failed_checks=["b"]
+    )
+
+    rc = main(["--db", str(db), "--group-by", "model_id"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Model ID" in captured.out or "model_id" in captured.out
+    assert "llama-7b" in captured.out
+    assert "mistral-7b" in captured.out
+
+
+def test_main_cli_group_by_quantization(tmp_path, capsys):
+    """CLI --group-by quantization renders quantization breakdown."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session_with_covariates(
+        logger, "v1", quantization="Q5_K_M", verdict=True, passed_checks=["a"]
+    )
+
+    rc = main(["--db", str(db), "--group-by", "quantization"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Q5_K_M" in captured.out
+
+
+def test_session_slices_empty_when_no_group_by(tmp_path):
+    """per_model_id / per_quantization remain empty when group_by is not set."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session_with_covariates(
+        logger, "v1", model_id="llama-7b", verdict=True, passed_checks=["a"]
+    )
+    summary = compute_kpis(logger)
+    assert summary.per_model_id == {}
+    assert summary.per_quantization == {}
+    assert summary.per_harness_version == {}
+
+
+def test_append_kpi_history_excludes_session_slice_fields(tmp_path):
+    """append_kpi_history omits per_model_id/per_quantization/per_harness_version."""
+    from foundry_x.observability.kpis import append_kpi_history
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session_with_covariates(
+        logger, "v1", model_id="llama-7b", quantization="Q5_K_M",
+        verdict=True, passed_checks=["a"]
+    )
+    summary = compute_kpis(logger, group_by="model_id")
+    history_path = tmp_path / "kpi_history.jsonl"
+    append_kpi_history(history_path, summary, harness_version="v1")
+
+    import json
+    line = json.loads(history_path.read_text().strip())
+    assert "per_model_id" not in line
+    assert "per_quantization" not in line
+    assert "per_harness_version" not in line
