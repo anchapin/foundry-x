@@ -23,6 +23,10 @@ Exit codes:
     0  Critic approved the edit (or no failure was detected, or ``--no-verify`` skipped the gate)
     1  Critic rejected the edit
     2  Digester produced no session events, or other usage error
+
+Issue #1047 adds the ``daemon`` subcommand: ``foundry-evolve daemon``
+polls the trace store for unevolved sessions and runs the evolution
+loop on each automatically, with SIGTERM graceful shutdown.
 """
 
 from __future__ import annotations
@@ -46,7 +50,7 @@ from foundry_x.evolution.critic import (
 )
 from foundry_x.evolution.digester import Digester, FailureReport
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
-from foundry_x.evolution.loop import run_evolution_step_async
+from foundry_x.evolution.loop import run_evolution_daemon, run_evolution_step_async
 from foundry_x.evolution.store import ProposedEditStatus, ProposedEditStore, TrackedProposedEdit
 from foundry_x.execution.runner import resolve_harness_version
 from foundry_x.observability.regression_report import record_verdict
@@ -629,7 +633,15 @@ def _build_sweep_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    if argv and argv[0] in ("evolve", "sweep", "list-pending", "approve", "reject", "apply"):
+    if argv and argv[0] in (
+        "evolve",
+        "sweep",
+        "daemon",
+        "list-pending",
+        "approve",
+        "reject",
+        "apply",
+    ):
         parser = argparse.ArgumentParser(
             prog="foundry-evolve",
             description="foundry-evolve and foundry-sweep commands.",
@@ -641,6 +653,12 @@ def main(argv: list[str] | None = None) -> int:
 
         sweep_parser = sub.add_parser("sweep", help="Run a quantization sweep.")
         _build_sweep_subparser(sweep_parser)
+
+        daemon_parser = sub.add_parser(
+            "daemon",
+            help="Run the evolution daemon continuously (issue #1047).",
+        )
+        _build_daemon_subparser(daemon_parser)
 
         list_parser = sub.add_parser(
             "list-pending",
@@ -724,6 +742,8 @@ def main(argv: list[str] | None = None) -> int:
             return _main_evolve(args)
         elif args.command == "sweep":
             return _main_sweep(args)
+        elif args.command == "daemon":
+            return _main_daemon(args)
         elif args.command in ("list-pending", "approve", "reject", "apply"):
             return args.func(args)
         else:
@@ -848,6 +868,71 @@ def _build_sweep_subparser(parser: argparse.ArgumentParser) -> None:
             "Example: --model-families qwen2.5-0.5b,llama-3.2-1b,phi-3-mini"
         ),
     )
+
+
+def _build_daemon_subparser(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--trace-db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    parser.add_argument(
+        "--harness-dir",
+        required=True,
+        type=Path,
+        help="Path to the harness directory to be evolved and evaluated.",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=60.0,
+        help="Seconds between poll cycles when idle (default: 60).",
+    )
+    parser.add_argument(
+        "--no-verify",
+        dest="no_verify",
+        action="store_true",
+        help=(
+            "Skip the Critic gate on each evolution step. Per ADR-0004 "
+            "harness edits not evaluated by Critic cannot ship to main "
+            "(issue #888)."
+        ),
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print per-session progress to stdout.",
+    )
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Exit after this many poll cycles (for testing). Default: run forever.",
+    )
+
+
+def _main_daemon(args: argparse.Namespace) -> int:
+    """Implement ``foundry-evolve daemon`` (issue #1047).
+
+    Runs :func:`run_evolution_daemon` which polls the trace store for
+    unevolved sessions and processes each through the evolution loop.
+    Responds to SIGTERM with graceful shutdown.
+    """
+    result = run_evolution_daemon(
+        harness_dir=args.harness_dir,
+        trace_db=args.trace_db,
+        poll_interval_s=args.poll_interval,
+        no_verify=getattr(args, "no_verify", False),
+        verbose=args.verbose,
+        max_iterations=getattr(args, "max_iterations", None),
+    )
+    sys.stdout.write(
+        f"Daemon stopped ({result.shutdown_reason}): "
+        f"{result.iterations} cycles, "
+        f"{result.sessions_processed} processed, "
+        f"{result.sessions_skipped} skipped.\n"
+    )
+    return 0
 
 
 def _main_evolve(args: argparse.Namespace) -> int:

@@ -7,10 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from foundry_x.evolution.cli import main
 from foundry_x.evolution.critic import CriticVerdict
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
 from foundry_x.evolution.loop import EvolutionResult, run_evolution_step, run_evolution_step_async
-from foundry_x.trace.logger import TraceEvent
+from foundry_x.trace.logger import TraceEvent, TraceLogger
 from tests._harness_fixture import install_load_check_prerequisites
 
 _BASE_TS = datetime(2026, 7, 10, 12, 0, 0, tzinfo=UTC)
@@ -677,3 +678,366 @@ class TestEvolutionResultTimestamps:
         assert result.completed_at is not None
         datetime.fromisoformat(result.started_at)
         datetime.fromisoformat(result.completed_at)
+
+
+# ---------------------------------------------------------------------------
+# Session-evolved marking on TraceLogger (issue #1047)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionEvolvedMarking:
+    """Tests for TraceLogger.mark_session_evolved / is_session_evolved /
+    list_unevolved_sessions (issue #1047)."""
+
+    @pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+    def test_mark_and_check(self, tmp_path: Path, backend: str):
+        db = tmp_path / ("traces.db" if backend == "sqlite" else "traces.jsonl")
+        logger = TraceLogger(db, backend=backend)
+        with logger.session(harness_version="0.1.0") as sid:
+            logger.record(sid, "outcome", {"status": "success"})
+        assert not logger.is_session_evolved(sid)
+        assert logger.mark_session_evolved(sid)
+        assert logger.is_session_evolved(sid)
+        logger.close()
+
+    @pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+    def test_mark_nonexistent_session(self, tmp_path: Path, backend: str):
+        db = tmp_path / ("traces.db" if backend == "sqlite" else "traces.jsonl")
+        logger = TraceLogger(db, backend=backend)
+        assert not logger.mark_session_evolved("nonexistent")
+        assert not logger.is_session_evolved("nonexistent")
+        logger.close()
+
+    @pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+    def test_mark_idempotent(self, tmp_path: Path, backend: str):
+        db = tmp_path / ("traces.db" if backend == "sqlite" else "traces.jsonl")
+        logger = TraceLogger(db, backend=backend)
+        with logger.session(harness_version="0.1.0") as sid:
+            logger.record(sid, "outcome", {"status": "success"})
+        assert logger.mark_session_evolved(sid)
+        assert logger.mark_session_evolved(sid)
+        assert logger.is_session_evolved(sid)
+        logger.close()
+
+    @pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+    def test_list_unevolved_excludes_evolved(self, tmp_path: Path, backend: str):
+        db = tmp_path / ("traces.db" if backend == "sqlite" else "traces.jsonl")
+        logger = TraceLogger(db, backend=backend)
+        with logger.session(harness_version="0.1.0") as sid1:
+            logger.record(sid1, "outcome", {"status": "success"})
+        with logger.session(harness_version="0.1.0") as sid2:
+            logger.record(sid2, "outcome", {"status": "failed"})
+
+        unevolved = logger.list_unevolved_sessions()
+        assert sid1 in unevolved
+        assert sid2 in unevolved
+
+        logger.mark_session_evolved(sid1)
+        unevolved = logger.list_unevolved_sessions()
+        assert sid1 not in unevolved
+        assert sid2 in unevolved
+        logger.close()
+
+    @pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+    def test_list_unevolved_excludes_open_sessions(self, tmp_path: Path, backend: str):
+        """Sessions without ended_at should not appear (still recording)."""
+        db = tmp_path / ("traces.db" if backend == "sqlite" else "traces.jsonl")
+        logger = TraceLogger(db, backend=backend)
+        # Open session — don't exit the context manager yet
+        with logger.session(harness_version="0.1.0") as sid:
+            unevolved = logger.list_unevolved_sessions()
+            assert sid not in unevolved
+        # After exit, ended_at is set, session should now appear
+        unevolved = logger.list_unevolved_sessions()
+        assert sid in unevolved
+        logger.close()
+
+
+# ---------------------------------------------------------------------------
+# run_evolution_daemon (issue #1047)
+# ---------------------------------------------------------------------------
+
+
+class TestRunEvolutionDaemon:
+    """Tests for the continuous background evolution daemon (issue #1047)."""
+
+    @pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+    def test_processes_unevolved_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+    ):
+        """Daemon evolves a session and marks it as evolved."""
+        harness_dir = _write_harness(tmp_path)
+        db = str(tmp_path / ("traces.db" if backend == "sqlite" else "traces.jsonl"))
+        logger = TraceLogger(db, backend=backend)
+        with logger.session(harness_version="0.1.0") as sid:
+            logger.record(sid, "user_prompt", {"prompt": "hello"})
+            logger.record(sid, "outcome", {"status": "success"})
+        logger.close()
+
+        from foundry_x.evolution.loop import run_evolution_daemon
+
+        result = run_evolution_daemon(
+            harness_dir=harness_dir,
+            trace_db=db,
+            poll_interval_s=0.01,
+            max_iterations=1,
+        )
+
+        assert result.shutdown_reason == "max_iterations"
+        assert result.sessions_processed == 1
+        assert result.iterations == 1
+
+        check_logger = TraceLogger(db, backend=backend)
+        assert check_logger.is_session_evolved(sid)
+        assert check_logger.list_unevolved_sessions() == []
+        check_logger.close()
+
+    @pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+    def test_idempotent_does_not_reprocess(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+    ):
+        """Already-evolved sessions are not re-processed."""
+        harness_dir = _write_harness(tmp_path)
+        db = str(tmp_path / ("traces.db" if backend == "sqlite" else "traces.jsonl"))
+        logger = TraceLogger(db, backend=backend)
+        with logger.session(harness_version="0.1.0") as sid:
+            logger.record(sid, "user_prompt", {"prompt": "hello"})
+            logger.record(sid, "outcome", {"status": "success"})
+        logger.mark_session_evolved(sid)
+        logger.close()
+
+        from foundry_x.evolution.loop import run_evolution_daemon
+
+        result = run_evolution_daemon(
+            harness_dir=harness_dir,
+            trace_db=db,
+            poll_interval_s=0.01,
+            max_iterations=1,
+        )
+
+        assert result.sessions_processed == 0
+        assert result.sessions_skipped == 0
+
+    @pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+    def test_multiple_sessions_in_one_cycle(self, tmp_path: Path, backend: str):
+        """Multiple unevolved sessions are processed in a single cycle."""
+        harness_dir = _write_harness(tmp_path)
+        db = str(tmp_path / ("traces.db" if backend == "sqlite" else "traces.jsonl"))
+        logger = TraceLogger(db, backend=backend)
+        sids = []
+        for i in range(3):
+            with logger.session(harness_version="0.1.0") as sid:
+                logger.record(sid, "user_prompt", {"prompt": f"task-{i}"})
+                logger.record(sid, "outcome", {"status": "success"})
+            sids.append(sid)
+        logger.close()
+
+        from foundry_x.evolution.loop import run_evolution_daemon
+
+        result = run_evolution_daemon(
+            harness_dir=harness_dir,
+            trace_db=db,
+            poll_interval_s=0.01,
+            max_iterations=1,
+        )
+
+        assert result.sessions_processed == 3
+        check_logger = TraceLogger(db, backend=backend)
+        assert check_logger.list_unevolved_sessions() == []
+        check_logger.close()
+
+    def test_empty_trace_db_no_sessions(self, tmp_path: Path):
+        """Daemon handles an empty trace store without error."""
+        harness_dir = _write_harness(tmp_path)
+        db = str(tmp_path / "traces.db")
+
+        from foundry_x.evolution.loop import run_evolution_daemon
+
+        result = run_evolution_daemon(
+            harness_dir=harness_dir,
+            trace_db=db,
+            poll_interval_s=0.01,
+            max_iterations=1,
+        )
+
+        assert result.sessions_processed == 0
+        assert result.iterations == 1
+
+    def test_shutdown_state_stops_after_current_session(self, tmp_path: Path):
+        """SIGTERM-style shutdown finishes the current session then exits."""
+        harness_dir = _write_harness(tmp_path)
+        db = str(tmp_path / "traces.db")
+        logger = TraceLogger(db)
+        sids = []
+        for i in range(3):
+            with logger.session(harness_version="0.1.0") as sid:
+                logger.record(sid, "user_prompt", {"prompt": f"task-{i}"})
+                logger.record(sid, "outcome", {"status": "success"})
+            sids.append(sid)
+        logger.close()
+
+        from foundry_x.evolution.loop import (
+            DaemonResult,
+            _ShutdownState,
+            run_evolution_daemon,
+        )
+
+        shutdown = _ShutdownState()
+
+        original_mark = TraceLogger.mark_session_evolved
+        call_count = {"n": 0}
+
+        def mark_and_check(self, session_id):
+            result = original_mark(self, session_id)
+            call_count["n"] += 1
+            if call_count["n"] >= 1:
+                shutdown.requested = True
+            return result
+
+        original_func = TraceLogger.mark_session_evolved
+        TraceLogger.mark_session_evolved = mark_and_check
+        try:
+            result = run_evolution_daemon(
+                harness_dir=harness_dir,
+                trace_db=db,
+                poll_interval_s=0.01,
+                shutdown_state=shutdown,
+            )
+        finally:
+            TraceLogger.mark_session_evolved = original_func
+
+        assert isinstance(result, DaemonResult)
+        assert result.shutdown_reason == "sigterm"
+        assert result.sessions_processed >= 1
+
+    def test_failing_session_processed_and_marked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A failing session triggers the full pipeline and gets marked evolved."""
+        harness_dir = _write_harness(tmp_path)
+        db = str(tmp_path / "traces.db")
+        logger = TraceLogger(db)
+        with logger.session(harness_version="0.1.0") as sid:
+            logger.record(sid, "user_prompt", {"prompt": "Fix the bug"})
+            logger.record(sid, "error", {"error": "something broke"})
+            logger.record(sid, "outcome", {"status": "failed"})
+        logger.close()
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [
+                ProposedEdit(
+                    target_file="harness/system_prompt.txt",
+                    rationale="Fix",
+                    unified_diff=(
+                        "--- a/harness/system_prompt.txt\n"
+                        "+++ b/harness/system_prompt.txt\n"
+                        "@@ -1 +1 @@\n-old\n+new\n"
+                    ),
+                )
+            ]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+
+        from foundry_x.evolution.loop import run_evolution_daemon
+
+        result = run_evolution_daemon(
+            harness_dir=harness_dir,
+            trace_db=db,
+            poll_interval_s=0.01,
+            max_iterations=1,
+            no_verify=True,
+        )
+
+        assert result.sessions_processed == 1
+
+    def test_empty_events_session_marked_as_skipped(self, tmp_path: Path):
+        """A session with no events is marked evolved (skipped)."""
+        harness_dir = _write_harness(tmp_path)
+        db = str(tmp_path / "traces.db")
+        logger = TraceLogger(db)
+        with logger.session(harness_version="0.1.0") as sid:
+            pass
+
+        from foundry_x.evolution.loop import run_evolution_daemon
+
+        result = run_evolution_daemon(
+            harness_dir=harness_dir,
+            trace_db=db,
+            poll_interval_s=0.01,
+            max_iterations=1,
+        )
+
+        assert result.sessions_skipped == 1
+        assert result.sessions_processed == 0
+
+        check_logger = TraceLogger(db)
+        assert check_logger.is_session_evolved(sid)
+        check_logger.close()
+
+    def test_daemon_result_model(self):
+        from foundry_x.evolution.loop import DaemonResult
+
+        result = DaemonResult(
+            iterations=5,
+            sessions_processed=3,
+            sessions_skipped=1,
+            shutdown_reason="sigterm",
+            started_at="2026-07-27T10:00:00+00:00",
+            completed_at="2026-07-27T10:05:00+00:00",
+        )
+        assert result.iterations == 5
+        assert result.sessions_processed == 3
+        assert result.sessions_skipped == 1
+        assert result.shutdown_reason == "sigterm"
+
+
+class TestDaemonCLI:
+    """Tests for the ``foundry-evolve daemon`` subcommand (issue #1047)."""
+
+    def test_daemon_subcommand_runs(self, tmp_path: Path):
+        """The daemon subcommand parses and runs with max_iterations."""
+        harness_dir = tmp_path / "harness"
+        install_load_check_prerequisites(harness_dir)
+        (harness_dir / "system_prompt.txt").write_text("test\n", encoding="utf-8")
+        db = str(tmp_path / "traces.db")
+
+        exit_code = main(
+            [
+                "daemon",
+                "--harness-dir",
+                str(harness_dir),
+                "--trace-db",
+                db,
+                "--poll-interval",
+                "0.01",
+                "--max-iterations",
+                "1",
+            ]
+        )
+        assert exit_code == 0
+
+    def test_daemon_requires_harness_dir(self):
+        with pytest.raises(SystemExit):
+            main(["daemon", "--trace-db", "x.db"])
+
+    def test_daemon_verbose_flag(self, tmp_path: Path):
+        harness_dir = tmp_path / "harness"
+        install_load_check_prerequisites(harness_dir)
+        (harness_dir / "system_prompt.txt").write_text("test\n", encoding="utf-8")
+        db = str(tmp_path / "traces.db")
+
+        exit_code = main(
+            [
+                "daemon",
+                "--harness-dir",
+                str(harness_dir),
+                "--trace-db",
+                db,
+                "--poll-interval",
+                "0.01",
+                "--max-iterations",
+                "1",
+                "--verbose",
+            ]
+        )
+        assert exit_code == 0

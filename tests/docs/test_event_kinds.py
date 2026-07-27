@@ -81,6 +81,7 @@ KNOWN_KINDS: frozenset[str] = frozenset(
         "outcome",
         "server_unavailable",
         "session_end",
+        "session_evolved",
         "session_start",
         "task_aborted",
         "task_completed",

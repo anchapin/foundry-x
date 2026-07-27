@@ -10,6 +10,9 @@ unless the upstream stage emitted a non-clean signal.
 
 from __future__ import annotations
 
+import signal
+import sys
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +23,7 @@ from foundry_x.evolution.critic import Critic, CriticVerdict
 from foundry_x.evolution.digester import Digester, FailureReport
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
 from foundry_x.execution.runner import resolve_harness_version
+from foundry_x.observability.regression_report import record_verdict
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
 
@@ -309,3 +313,228 @@ async def run_evolution_step_async(
         started_at=started_at,
         completed_at=_now_iso(),
     )
+
+
+class DaemonResult(BaseModel):
+    """Structured result of one daemon run (issue #1047).
+
+    Returned by :func:`run_evolution_daemon` when the daemon exits (either
+    via SIGTERM graceful shutdown or by reaching ``max_iterations``).
+    """
+
+    iterations: int = Field(description="Number of poll cycles completed")
+    sessions_processed: int = Field(description="Total sessions evolved across all cycles")
+    sessions_skipped: int = Field(description="Sessions that were already evolved or had no events")
+    shutdown_reason: str = Field(description="Why the daemon stopped")
+    started_at: str
+    completed_at: str
+
+
+class _ShutdownState:
+    """Mutable flag shared between the signal handler and the daemon loop."""
+
+    def __init__(self) -> None:
+        self.requested = False
+
+    def request(self) -> None:
+        self.requested = True
+
+
+def run_evolution_daemon(
+    harness_dir: Path,
+    trace_db: str,
+    *,
+    poll_interval_s: float = 60.0,
+    no_verify: bool = False,
+    verbose: bool = False,
+    max_iterations: int | None = None,
+    trace_logger: TraceLogger | None = None,
+    shutdown_state: _ShutdownState | None = None,
+) -> DaemonResult:
+    """Run the evolution daemon continuously (issue #1047).
+
+    Polls the trace store for sessions that have not yet been evolved,
+    processes each through :func:`run_evolution_step`, records the
+    ``critic_verdict`` event, and marks the session as evolved. Runs
+    indefinitely until:
+
+    * **SIGTERM** is received — the daemon finishes the current session
+      and exits gracefully.
+    * ``max_iterations`` is reached — useful for testing.
+
+    Parameters
+    ----------
+    harness_dir:
+        Path to the live harness directory.
+    trace_db:
+        Path to the trace SQLite database or JSONL file.
+    poll_interval_s:
+        Seconds to sleep between poll cycles when no unevolved sessions
+        are found. Default 60.
+    no_verify:
+        Skip the Critic gate on each evolution step (issue #888).
+    verbose:
+        Print progress to stdout.
+    max_iterations:
+        Maximum number of poll cycles before the daemon returns. ``None``
+        (default) means run indefinitely (until SIGTERM).
+    trace_logger:
+        Optional pre-constructed :class:`TraceLogger`. When omitted, one
+        is created from ``trace_db``.
+    shutdown_state:
+        Optional pre-constructed shutdown flag. When omitted, a new one
+        is created and a SIGTERM handler is installed. Tests can pass
+        their own to avoid modifying process-global signal handlers.
+
+    Returns
+    -------
+    DaemonResult
+        Summary of the daemon run.
+    """
+    if not trace_db:
+        raise ValueError("trace_db must not be empty")
+
+    started_at = _now_iso()
+    owns_logger = trace_logger is None
+    if owns_logger:
+        backend = "jsonl" if trace_db.endswith(".jsonl") else "sqlite"
+        trace_logger = TraceLogger(trace_db, backend=backend)
+
+    owns_shutdown = shutdown_state is None
+    if owns_shutdown:
+        shutdown_state = _ShutdownState()
+
+    previous_handler: signal.Handlers | None = None
+    if owns_shutdown:
+
+        def _sigterm_handler(signum: int, frame: object) -> None:
+            if verbose:
+                sys.stderr.write(
+                    "evolution-daemon: SIGTERM received, shutting down after current session...\n"
+                )
+            shutdown_state.requested = True
+
+        previous_handler = signal.signal(signal.SIGTERM, _sigterm_handler)
+
+    iterations = 0
+    sessions_processed = 0
+    sessions_skipped = 0
+
+    try:
+        while True:
+            if shutdown_state.requested:
+                break
+
+            iterations += 1
+
+            assert trace_logger is not None
+            unevolved = trace_logger.list_unevolved_sessions()
+
+            if not unevolved:
+                if verbose:
+                    print(
+                        f"[daemon] cycle {iterations}: no unevolved sessions, "
+                        f"sleeping {poll_interval_s}s..."
+                    )
+            else:
+                if verbose:
+                    print(
+                        f"[daemon] cycle {iterations}: {len(unevolved)} "
+                        f"unevolved session(s) to process"
+                    )
+
+            for session_id in unevolved:
+                if shutdown_state.requested:
+                    break
+
+                assert trace_logger is not None
+                events = trace_logger.load_session(session_id)
+                if not events:
+                    sessions_skipped += 1
+                    trace_logger.mark_session_evolved(session_id)
+                    continue
+
+                if verbose:
+                    print(f"[daemon] evolving session {session_id} ({len(events)} events)")
+
+                try:
+                    result = run_evolution_step(
+                        session_id,
+                        events,
+                        harness_dir,
+                        no_verify=no_verify,
+                        trace_logger=trace_logger,
+                    )
+                except Exception:  # noqa: BLE001 — per AGENTS.md, log & continue to next session
+                    sys.stderr.write(
+                        f"[daemon] error evolving session {session_id}: {sys.exc_info()[1]}\n"
+                    )
+                    trace_logger.mark_session_evolved(session_id)
+                    sessions_skipped += 1
+                    continue
+
+                if result.verdict is not None:
+                    record_verdict(trace_logger, session_id, result.verdict)
+
+                trace_logger.mark_session_evolved(session_id)
+                sessions_processed += 1
+
+                if verbose:
+                    if result.verdict is None:
+                        status = "clean"
+                    elif result.verdict.verdict:
+                        status = "approved"
+                    else:
+                        status = "rejected"
+                    print(
+                        f"[daemon] session {session_id} done "
+                        f"(class={result.failure_class}, verdict={status})"
+                    )
+
+            if max_iterations is not None and iterations >= max_iterations:
+                break
+
+            if not shutdown_state.requested:
+                _interruptible_sleep(poll_interval_s, shutdown_state)
+    finally:
+        if owns_shutdown and previous_handler is not None:
+            signal.signal(signal.SIGTERM, previous_handler)
+        if owns_logger and trace_logger is not None:
+            trace_logger.close()
+
+    if shutdown_state.requested:
+        shutdown_reason = "sigterm"
+    elif max_iterations is not None:
+        shutdown_reason = "max_iterations"
+    else:
+        shutdown_reason = "unknown"
+
+    return DaemonResult(
+        iterations=iterations,
+        sessions_processed=sessions_processed,
+        sessions_skipped=sessions_skipped,
+        shutdown_reason=shutdown_reason,
+        started_at=started_at,
+        completed_at=_now_iso(),
+    )
+
+
+def _interruptible_sleep(seconds: float, shutdown_state: _ShutdownState) -> None:
+    """Sleep for *seconds* but wake early when shutdown is requested.
+
+    Uses a :class:`threading.Event` so the sleep can be interrupted by a
+    SIGTERM handler running in the main thread.
+    """
+    event = threading.Event()
+
+    def _on_signal(signum: int, frame: object) -> None:
+        shutdown_state.requested = True
+        event.set()
+
+    previous = signal.signal(signal.SIGTERM, _on_signal)
+    try:
+        event.wait(timeout=seconds)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        if event.is_set():
+            shutdown_state.requested = True
