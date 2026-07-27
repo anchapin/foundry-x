@@ -1109,3 +1109,148 @@ class TestCriticTierPassthrough:
         # No critic_tier kwarg → defaults to "full" (unchanged behaviour).
         run_evolution_step("sess-tier-default", self._events(), harness_dir)
         assert seen == ["full"]
+
+
+class TestRunEvolutionBatch:
+    """Tests for the batch evolution pipeline (issue #1033)."""
+
+    def _events(self) -> list[TraceEvent]:
+        return [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+    def test_batch_clean_session_short_circuits(self, tmp_path: Path) -> None:
+        """A clean batch returns immediately with no edits."""
+        from foundry_x.evolution.loop import run_evolution_batch
+
+        harness_dir = _write_harness(tmp_path)
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("outcome", 1.0, {"status": "success"}, event_id="e2"),
+        ]
+        result = run_evolution_batch("sess-batch-clean", events, harness_dir)
+        assert result.total_failures == 0
+        assert len(result.proposed_edits) == 0
+        assert len(result.results) == 0
+
+    def test_batch_single_failure_processes_correctly(self, tmp_path: Path) -> None:
+        """A batch with one failure processes correctly."""
+        from foundry_x.evolution.loop import run_evolution_batch
+
+        harness_dir = _write_harness(tmp_path)
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+        result = run_evolution_batch("sess-batch-single", events, harness_dir)
+        assert result.total_failures == 1
+        assert len(result.results) == 1
+        assert result.results[0].failure_report.proposed_class != "clean"
+
+    def test_batch_multiple_failures_produces_multiple_results(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A batch with multiple failures produces separate results per failure class."""
+        from foundry_x.evolution.evolver import ProposedEdit
+        from foundry_x.evolution.loop import run_evolution_batch
+
+        harness_dir = _write_harness(tmp_path)
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event(
+                "tool_error",
+                1.0,
+                {"error": "no such tool: frobnicate"},
+                event_id="e-wrong-tool",
+            ),
+            _event("tool_error", 2.0, {"error": "traceback occurred"}, event_id="e-tool-err"),
+        ]
+
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return [
+                ProposedEdit(
+                    target_file="harness/system_prompt.txt",
+                    rationale="fix",
+                    unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                )
+            ]
+
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
+        result = run_evolution_batch("sess-batch-multi", events, harness_dir)
+        assert result.total_failures >= 1
+
+    def test_batch_result_contains_all_proposed_edits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The batch result aggregates all proposed edits."""
+        from foundry_x.evolution.evolver import ProposedEdit
+        from foundry_x.evolution.loop import run_evolution_batch
+
+        harness_dir = _write_harness(tmp_path)
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+        result = run_evolution_batch("sess-batch-edits", events, harness_dir)
+        assert proposed_edit in result.proposed_edits
+
+    def test_batch_propose_is_called_per_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The evolver's propose method is called for each non-clean failure."""
+        from foundry_x.evolution.evolver import ProposedEdit
+        from foundry_x.evolution.loop import run_evolution_batch
+
+        harness_dir = _write_harness(tmp_path)
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        call_count = 0
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            nonlocal call_count
+            call_count += 1
+            return []
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+        run_evolution_batch("sess-batch-call", events, harness_dir)
+        assert call_count >= 1, "propose should have been called at least once"
+
+    def test_batch_result_has_harness_version(self, tmp_path: Path) -> None:
+        """The batch result includes the harness version."""
+        from foundry_x.evolution.loop import run_evolution_batch
+
+        harness_dir = _write_harness(tmp_path)
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("outcome", 1.0, {"status": "success"}, event_id="e2"),
+        ]
+        result = run_evolution_batch("sess-batch-version", events, harness_dir)
+        assert result.harness_version is not None
+
+    def test_batch_result_has_timestamps(self, tmp_path: Path) -> None:
+        """The batch result includes started_at and completed_at timestamps."""
+        from foundry_x.evolution.loop import run_evolution_batch
+
+        harness_dir = _write_harness(tmp_path)
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("outcome", 1.0, {"status": "success"}, event_id="e2"),
+        ]
+        result = run_evolution_batch("sess-batch-ts", events, harness_dir)
+        assert result.started_at is not None
+        assert result.completed_at is not None

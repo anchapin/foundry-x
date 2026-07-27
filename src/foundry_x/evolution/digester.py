@@ -53,6 +53,19 @@ class FailureReport(BaseModel):
     seen_across_n_sessions: int = 0
 
 
+class BatchFailureReport(BaseModel):
+    """A batch of failure reports for processing multiple failures at once (issue #1033).
+
+    When a session contains multiple distinct failure patterns, the batch report
+    captures all of them so the Evolver can propose edits that address multiple
+    failure classes simultaneously rather than one at a time.
+    """
+
+    session_id: str
+    failure_reports: list[FailureReport] = Field(default_factory=list)
+    total_failures: int = 0
+
+
 # --- Failure-signalling vocabulary -----------------------------------------
 # Module-level constants (issue #15): the set of ``kind`` values that
 # unambiguously mark a trace event as a failure, plus the payload keys that
@@ -558,4 +571,99 @@ class Digester:
             failed_steps=[],
             suspected_causes=[],
             proposed_class="clean",
+        )
+
+    def digest_batch(
+        self,
+        session_id: str,
+        events: Sequence[TraceEvent],
+    ) -> BatchFailureReport:
+        """Find all failures in trace events and return a batch report (issue #1033).
+
+        Unlike :meth:`digest` which returns the first failure only, this method
+        aggregates every distinct failure found in the session. This enables the
+        Evolver to propose edits that address multiple failure patterns simultaneously.
+
+        The batch is deterministic: failures are sorted by their first occurrence
+        timestamp, and failures of the same class are merged into a single report.
+
+        Returns a :class:`BatchFailureReport` with ``total_failures`` equal to the
+        number of distinct failure classes found. When no failures are detected,
+        ``failure_reports`` contains a single "clean" report.
+        """
+        ordered = sorted(events, key=lambda e: e.timestamp)
+
+        # Short-circuit for terminal conditions: these take precedence over
+        # any other failures that might exist in the same session.
+        overflow_report = _aggregate_context_overflow(session_id, ordered)
+        if overflow_report is not None:
+            return BatchFailureReport(
+                session_id=session_id,
+                failure_reports=[overflow_report],
+                total_failures=1,
+            )
+
+        injection_report = _aggregate_injection_blocks(session_id, ordered)
+        if injection_report is not None:
+            return BatchFailureReport(
+                session_id=session_id,
+                failure_reports=[injection_report],
+                total_failures=1,
+            )
+
+        # Collect all failures and merge by proposed_class.
+        failures_by_class: dict[str, FailureReport] = {}
+        for index, event in enumerate(ordered):
+            is_failure, signal = _is_failure(event)
+            if not is_failure:
+                continue
+            proposed_class, causes = _classify(event, signal)
+            failed_step: dict[str, Any] = {
+                "index": index,
+                "event_id": event.event_id,
+                "kind": event.kind,
+                "timestamp": event.timestamp,
+                "signal": signal,
+                "payload": event.payload,
+            }
+            report = FailureReport(
+                session_id=session_id,
+                summary=_summarise(event, signal, proposed_class),
+                failed_steps=[failed_step],
+                suspected_causes=causes,
+                proposed_class=proposed_class,
+            )
+            if proposed_class in failures_by_class:
+                # Merge: append failed_steps and extend suspected_causes.
+                existing = failures_by_class[proposed_class]
+                existing.failed_steps.append(failed_step)
+                existing.suspected_causes.extend(causes)
+            else:
+                failures_by_class[proposed_class] = report
+
+        if not failures_by_class:
+            clean_report = FailureReport(
+                session_id=session_id,
+                summary=(f"No failures detected across {len(ordered)} trace event(s)."),
+                failed_steps=[],
+                suspected_causes=[],
+                proposed_class="clean",
+            )
+            return BatchFailureReport(
+                session_id=session_id,
+                failure_reports=[clean_report],
+                total_failures=0,
+            )
+
+        # Preserve chronological order by the first occurrence of each class.
+        def first_failure_index(report: FailureReport) -> int:
+            if report.failed_steps:
+                return report.failed_steps[0]["index"]
+            return len(ordered)
+
+        sorted_reports = sorted(failures_by_class.values(), key=first_failure_index)
+        return BatchFailureReport(
+            session_id=session_id,
+            failure_reports=sorted_reports,
+            total_failures=len(sorted_reports),
         )

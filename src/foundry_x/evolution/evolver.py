@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, Field, field_validator
 
-from foundry_x.evolution.digester import FailureReport
+from foundry_x.evolution.digester import BatchFailureReport, FailureReport
 from foundry_x.evolution.store import PATTERN_MIN_SESSIONS
 
 if TYPE_CHECKING:
@@ -1107,6 +1107,92 @@ class Evolver:
                 self._record_generation_attempt(attempt=1, error=f"llm_fallback: {exc}")
 
         return self._propose_from_template(harness_dir, failure)
+
+    def propose_batch(
+        self,
+        harness_dir: Path,
+        batch_report: BatchFailureReport,
+        current_diff: str | None = None,
+    ) -> list[ProposedEdit]:
+        """Propose harness edits for a batch of failure reports (issue #1033).
+
+        Unlike :meth:`propose` which handles a single failure, this method
+        processes multiple failures and aggregates the proposed edits. It attempts
+        to generate edits for each failure class in the batch, deduplicating
+        by target file when multiple failures suggest edits to the same file.
+
+        First attempts LLM-driven edit generation if a ModelAdapter is configured.
+        Falls back to template-based proposals if the LLM call fails.
+
+        Returns a flat list of ProposedEdit objects covering all failures.
+        """
+        all_edits: list[ProposedEdit] = []
+        seen_targets: dict[str, ProposedEdit] = {}
+
+        for failure in batch_report.failure_reports:
+            if failure.proposed_class == "clean":
+                continue
+
+            try:
+                self._check_rate_limit()
+            except EvolverGuardError:
+                self._record_generation_attempt(attempt=1, error="rate_limit_exceeded")
+                continue
+
+            if self._model_adapter is not None:
+                try:
+                    edits = asyncio.run(
+                        self.generate_edits(self._model_adapter, harness_dir, failure)
+                    )
+                except EvolverLLMError as exc:
+                    self._record_generation_attempt(attempt=1, error=f"llm_fallback: {exc}")
+                    edits = self._propose_from_template(harness_dir, failure)
+            else:
+                edits = self._propose_from_template(harness_dir, failure)
+
+            # Deduplicate by target_file: keep the first edit for each target.
+            for edit in edits:
+                if edit.target_file not in seen_targets:
+                    seen_targets[edit.target_file] = edit
+                    all_edits.append(edit)
+
+        return all_edits
+
+    async def propose_batch_async(
+        self,
+        harness_dir: Path,
+        batch_report: BatchFailureReport,
+        current_diff: str | None = None,
+    ) -> list[ProposedEdit]:
+        """Async variant of :meth:`propose_batch` that awaits LLM calls."""
+        all_edits: list[ProposedEdit] = []
+        seen_targets: dict[str, ProposedEdit] = {}
+
+        for failure in batch_report.failure_reports:
+            if failure.proposed_class == "clean":
+                continue
+
+            try:
+                self._check_rate_limit()
+            except EvolverGuardError:
+                self._record_generation_attempt(attempt=1, error="rate_limit_exceeded")
+                continue
+
+            if self._model_adapter is not None:
+                try:
+                    edits = await self.generate_edits(self._model_adapter, harness_dir, failure)
+                except EvolverLLMError as exc:
+                    self._record_generation_attempt(attempt=1, error=f"llm_fallback: {exc}")
+                    edits = self._propose_from_template(harness_dir, failure)
+            else:
+                edits = self._propose_from_template(harness_dir, failure)
+
+            for edit in edits:
+                if edit.target_file not in seen_targets:
+                    seen_targets[edit.target_file] = edit
+                    all_edits.append(edit)
+
+        return all_edits
 
     def _propose_from_template(
         self,
