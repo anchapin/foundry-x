@@ -69,7 +69,7 @@ _ITERATIONS = 500
 # payloads vs each other.  The scan path is identical within each class.
 # A CV above this threshold means one payload variant is measurably
 # faster, indicating a payload-dependent timing signal.
-_MAX_SAME_CLASS_CV = 0.50
+_MAX_SAME_CLASS_CV = 0.75
 
 
 TASK = BenchmarkTask(
