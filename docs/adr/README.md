@@ -35,10 +35,7 @@ format and process.
 | [0021](./0021-context-pruning-at-scale.md) | Context pruning at scale — Phase 3 findings | Accepted |
 | [0022](./0022-store-implementation-selection-criteria.md) | Store implementation selection criteria | Accepted |
 | [0023](./0023-external-eval-validation-study.md) | External-eval validation study (issue #900) | Accepted |
-<<<<<<< HEAD
 | [0024](./0024-unused-number.md) | (unused number — superseded) | Superseded |
-=======
->>>>>>> 6fb78d9 (fix: add missing ADR index rows for 0025-0031)
 | [0025](./0025-cross-model-family-sweeps.md) | Cross-model-family sweeps | Proposed |
 | [0026](./0026-server-pool.md) | Server pool for multi-slot llama-server lifecycle management | Proposed |
 | [0027](./0027-proxy-broadening-contingency.md) | Proxy-broadening contingency (issue #1045) | Accepted |
