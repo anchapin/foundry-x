@@ -110,14 +110,14 @@ def test_add_missing_docstring__agent_output(benchmark_workspace: Path) -> None:
     dest.write_text(src.read_text())
 
     if dest.read_text() == GOLDEN_DOCUMENTED:
-        pytest.skip("calculator.py already contains golden documentation -- no agent output to validate")
+        pytest.skip(
+            "calculator.py already contains golden documentation -- no agent output to validate"
+        )
 
     import importlib.util
     import sys
 
-    spec = importlib.util.spec_from_file_location(
-        "calculator", dest
-    )
+    spec = importlib.util.spec_from_file_location("calculator", dest)
     if spec is None or spec.loader is None:
         pytest.fail(f"task {TASK.name}: could not load calculator module")
     module = importlib.util.module_from_spec(spec)

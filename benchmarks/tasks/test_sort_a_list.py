@@ -100,5 +100,7 @@ def test_sort_a_list__agent_output(benchmark_workspace: Path, case: str) -> None
 
     actual = (benchmark_workspace / "output.txt").read_text().rstrip("\n")
     expected = (fixture_dir / "expected.txt").read_text().rstrip("\n")
-    assert result.returncode == 0, f"task {TASK.name}/{case}: solution.py exited {result.returncode}: {result.stderr}"
+    assert result.returncode == 0, (
+        f"task {TASK.name}/{case}: solution.py exited {result.returncode}: {result.stderr}"
+    )
     assert actual == expected, f"task {TASK.name}/{case}: output mismatch"
