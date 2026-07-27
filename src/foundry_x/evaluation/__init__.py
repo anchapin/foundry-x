@@ -20,4 +20,8 @@ Members
 - :mod:`foundry_x.evaluation.humaneval_plus` — pydantic schema for the
   HumanEval+ JSONL shape, a deterministic JSONL loader, and a
   canonical-solution runner used to validate the plumbing offline.
+- :mod:`foundry_x.evaluation.study_state` — checkpoint model and
+  helpers for the incremental batched-execution mode of
+  ``run_external_eval.sh`` (issue #1040): load/save/record completed
+  configurations so an interrupted real-model study can resume.
 """

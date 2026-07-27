@@ -17,7 +17,9 @@
 #   run_external_eval.sh --model /srv/models/foo.Q5_K_M.gguf \
 #                        --configs configs.txt \
 #                        [--slice benchmarks/external/humaneval_plus_sample.jsonl] \
-#                        [--keep-server] [--dry-run]
+#                        [--keep-server] [--dry-run] \
+#                        [--batch-size N] [--resume] [--reset] \
+#                        [--state-file <path>]
 #
 # Required:
 #   --model <gguf>           GGUF path. Auto-launches llama-server if down.
@@ -32,6 +34,24 @@
 #   --dry-run                Print the planned runs and exit.
 #   --output <path>          Write the JSON results to <path> (default:
 #                            logs/external_eval_<timestamp>.json).
+#   --batch-size N           Run at most N configurations this invocation and
+#                            persist progress to the state file (issue #1040).
+#                            Default 0 = run every remaining configuration in
+#                            one batch (the legacy behaviour).
+#   --resume                 Continue a partial run: load the state file and
+#                            skip configurations already marked complete.
+#                            This is also the default when a state file for the
+#                            current model+configs already exists, so an
+#                            interrupted run picks up where it left off without
+#                            re-spending model tokens. The flag is accepted for
+#                            explicitness/documentation.
+#   --reset                  Delete the state file and start the study over.
+#                            Required to re-run already-completed configurations.
+#   --state-file <path>      Checkpoint location (default:
+#                            logs/.run_external_eval_state.json). Stores
+#                            completed configurations with timestamps and the
+#                            accumulated internal/external rate arrays as
+#                            human-readable JSON.
 #
 # Env vars (all optional):
 #   LLAMACPP_HOST            Host for /health probe (default http://127.0.0.1:8080)
@@ -42,15 +62,21 @@
 #   FOUNDRY_EXTERNAL_EVAL_MIN_PAIRS
 #                            Override the >=30 paired-observation minimum
 #                            (issue #900 criterion 2). Defaults to 30.
+#   FOUNDRY_EXTERNAL_EVAL_STATE_FILE
+#                            Default path for the incremental-batch checkpoint
+#                            (issue #1040). Overridden by --state-file.
 #
 # Exit codes:
-#   0   Study completed and correlation is reportable.
+#   0   Study completed and correlation is reportable, OR a partial batch
+#       finished and progress was checkpointed (issue #1040).
 #   2   CLI usage error.
 #   3   Study is under-powered (fewer than MIN_PAIRS configurations).
 #   4   A configuration's internal OR external pass rate has zero variance
 #       (Pearson is undefined); the operator must choose a more
 #       discriminating task set.
 #   5   One or more runs failed non-recoverably; see stderr.
+#   6   State-file mismatch (resumed run changed --model or --configs);
+#       see stderr.
 #
 set -euo pipefail
 
@@ -61,6 +87,7 @@ DEFAULT_SLICE="$REPO_ROOT/benchmarks/external/humaneval_plus_sample.jsonl"
 TRACES_DB="$REPO_ROOT/logs/traces.db"
 LOGS_DIR="$REPO_ROOT/logs"
 MIN_PAIRS="${FOUNDRY_EXTERNAL_EVAL_MIN_PAIRS:-30}"
+DEFAULT_STATE_FILE="$LOGS_DIR/.run_external_eval_state.json"
 
 LLAMACPP_HOST_URL="${LLAMACPP_HOST:-http://127.0.0.1:8080}"
 LLAMACPP_DIR="${LLAMACPP_DIR:-$HOME/llama.cpp}"
@@ -74,12 +101,17 @@ SLICE="$DEFAULT_SLICE"
 KEEP_SERVER=0
 DRY_RUN=0
 OUTPUT_PATH=""
+BATCH_SIZE=0
+RESUME=0
+RESET=0
+STATE_FILE="${FOUNDRY_EXTERNAL_EVAL_STATE_FILE:-$DEFAULT_STATE_FILE}"
 
 usage() {
     cat <<'USAGE'
 usage: run_external_eval.sh --model <gguf> --configs <path>
                             [--slice <jsonl>] [--keep-server] [--dry-run]
-                            [--output <path>]
+                            [--output <path>] [--batch-size N] [--resume]
+                            [--reset] [--state-file <path>]
 
 Drives the internal benchmark suite and the external HumanEval+ slice
 against each agent configuration listed in --configs, then computes
@@ -96,9 +128,16 @@ Optional:
   --keep-server        Keep auto-launched llama-server on exit.
   --dry-run            Print planned runs and exit.
   --output <path>      Write JSON results to <path>.
+  --batch-size N       Run at most N configs per invocation and checkpoint
+                       progress (issue #1040). 0 = all remaining (default).
+  --resume             Continue a partial run; skip completed configs.
+  --reset              Delete the state file and start over.
+  --state-file <path>  Checkpoint location (default:
+                       logs/.run_external_eval_state.json).
 
 Env: LLAMACPP_HOST, LLAMACPP_SERVER_BIN, LLAMACPP_DIR, LLAMACPP_NGL,
-     LLAMACPP_HEALTH_TIMEOUT, FOUNDRY_EXTERNAL_EVAL_MIN_PAIRS
+     LLAMACPP_HEALTH_TIMEOUT, FOUNDRY_EXTERNAL_EVAL_MIN_PAIRS,
+     FOUNDRY_EXTERNAL_EVAL_STATE_FILE
 USAGE
 }
 
@@ -123,12 +162,31 @@ while [[ $# -gt 0 ]]; do
             KEEP_SERVER=1; shift ;;
         --dry-run)
             DRY_RUN=1; shift ;;
+        --batch-size)
+            [[ $# -ge 2 ]] || { echo "error: --batch-size requires an integer argument" >&2; exit 2; }
+            BATCH_SIZE="$2"; shift 2 ;;
+        --resume)
+            RESUME=1; shift ;;
+        --reset)
+            RESET=1; shift ;;
+        --state-file)
+            [[ $# -ge 2 ]] || { echo "error: --state-file requires a path argument" >&2; exit 2; }
+            STATE_FILE="$2"; shift 2 ;;
         -h|--help)
             usage; exit 0 ;;
         *)
             echo "error: unknown argument: $1 (see --help)" >&2; exit 2 ;;
     esac
 done
+
+if ! [[ "$BATCH_SIZE" =~ ^[0-9]+$ ]]; then
+    echo "error: --batch-size must be a non-negative integer" >&2
+    exit 2
+fi
+[[ $RESET -eq 1 && $RESUME -eq 1 ]] && {
+    echo "error: --reset and --resume are mutually exclusive" >&2
+    exit 2
+}
 
 [[ -n "$MODEL" ]]     || { echo "error: --model is required" >&2; usage >&2; exit 2; }
 [[ -n "$CONFIGS_PATH" ]] || { echo "error: --configs is required" >&2; usage >&2; exit 2; }
@@ -164,7 +222,130 @@ echo "    slice:          $SLICE"
 echo "    model:          $MODEL"
 echo "    configs file:   $CONFIGS_PATH ($config_count configurations)"
 echo "    min pairs:      $MIN_PAIRS"
+echo "    state file:     $STATE_FILE"
+echo "    batch size:     $([[ $BATCH_SIZE -eq 0 ]] && echo "all remaining" || echo "$BATCH_SIZE")"
 [[ -n "$OUTPUT_PATH" ]] && echo "    output:         $OUTPUT_PATH"
+
+# ---------------------------------------------------------------------------
+# Incremental batched execution (issue #1040).
+#
+# A state file at $STATE_FILE records completed configurations with
+# timestamps and the accumulated internal/external rate arrays so an
+# interrupted run can resume without re-spending model tokens. The
+# checkpoint logic lives in foundry_x.evaluation.study_state (pure
+# Python, unit-tested); this block is the operator surface that loads,
+# validates, and computes the next batch.
+#
+# --reset wipes the checkpoint; --resume is explicit but resuming is also
+# the safe default whenever a checkpoint already exists for this study.
+# ---------------------------------------------------------------------------
+if [[ $RESET -eq 1 ]]; then
+    echo "==> --reset: removing state file $STATE_FILE"
+    rm -f "$STATE_FILE"
+fi
+
+# Serialise the planned labels to a JSON array the Python helper can read.
+LABELS_JSON="$(printf '%s\n' "${CONFIG_LABELS[@]}" | uv run --quiet python -c \
+    'import json,sys; print(json.dumps(sys.stdin.read().splitlines()))')"
+
+mkdir -p "$LOGS_DIR"
+echo "==> Loading incremental-study checkpoint"
+STATE_INFO="$(LABELS_JSON="$LABELS_JSON" MODEL="$MODEL" SLICE="$SLICE" \
+    MIN_PAIRS="$MIN_PAIRS" STATE_FILE="$STATE_FILE" BATCH_SIZE="$BATCH_SIZE" \
+    DRY_RUN="$DRY_RUN" \
+    uv run --quiet python -c '
+import json, os, sys
+from pathlib import Path
+from foundry_x.evaluation import study_state as ss
+
+state_file = os.environ["STATE_FILE"]
+labels = json.loads(os.environ["LABELS_JSON"])
+model = os.environ["MODEL"]
+slice_path = os.environ["SLICE"]
+min_pairs = int(os.environ["MIN_PAIRS"])
+
+existing = ss.load_state(state_file)
+if existing is not None:
+    # Refuse to resume across a model or slice change: mixing configurations
+    # from two different models into one Pearson computation would silently
+    # invalidate the study (AGENTS.md S2: never silently swallow).
+    if existing.model != model:
+        print(f"error: state file model={existing.model!r} != --model {model!r}; "
+              "use --reset to start a new study", file=sys.stderr)
+        sys.exit(6)
+    if existing.slice != slice_path:
+        print(f"error: state file slice={existing.slice!r} != --slice {slice_path!r}; "
+              "use --reset to start a new study", file=sys.stderr)
+        sys.exit(6)
+    if existing.configs_planned != labels:
+        print("error: state file configs_planned does not match --configs; "
+              "use --reset to start a new study", file=sys.stderr)
+        sys.exit(6)
+    state = existing
+else:
+    study_id = "external_eval_" + ss._utc_now_iso().replace(":", "").replace("-", "")
+    state = ss.new_state(study_id, model, slice_path, labels, min_pairs=min_pairs)
+    # --dry-run must have no side effects: compute the batch for display
+    # but do not persist a checkpoint the operator did not ask for.
+    if os.environ.get("DRY_RUN", "0") != "1":
+        ss.save_state(state_file, state)
+
+batch_size = int(os.environ["BATCH_SIZE"])
+remaining = ss.remaining_configs(state, labels)
+if batch_size > 0:
+    batch = remaining[:batch_size]
+else:
+    batch = remaining
+
+reportable = ss.is_reportable(state)
+
+# Emit machine-parseable summary lines. The batch labels follow a sentinel
+# so bash can read them back into an array.
+print(f"STUDY_ID={state.study_id}")
+print(f"COMPLETED={len(state.configs_completed)}")
+print(f"PLANNED={len(labels)}")
+print(f"REMAINING={len(remaining)}")
+print(f"BATCH_COUNT={len(batch)}")
+print(f"REPORTABLE={'1' if reportable else '0'}")
+print("BATCH_LABELS_BEGIN")
+for lbl in batch:
+    print(lbl)
+print("BATCH_LABELS_END")
+')" || exit $?
+
+# Parse the summary into shell variables.
+STUDY_ID="$(printf '%s\n' "$STATE_INFO" | sed -n 's/^STUDY_ID=//p')"
+COMPLETED_COUNT="$(printf '%s\n' "$STATE_INFO" | sed -n 's/^COMPLETED=//p')"
+PLANNED_COUNT="$(printf '%s\n' "$STATE_INFO" | sed -n 's/^PLANNED=//p')"
+REMAINING_COUNT="$(printf '%s\n' "$STATE_INFO" | sed -n 's/^REMAINING=//p')"
+BATCH_COUNT="$(printf '%s\n' "$STATE_INFO" | sed -n 's/^BATCH_COUNT=//p')"
+REPORTABLE_FLAG="$(printf '%s\n' "$STATE_INFO" | sed -n 's/^REPORTABLE=//p')"
+
+# Read the batch labels back into an array plus a parallel index array
+# pointing at the position in CONFIG_LABELS (so we can recover the args).
+declare -a BATCH_LABELS=()
+declare -a BATCH_INDICES=()
+in_batch=0
+while IFS= read -r ln; do
+    if [[ "$ln" == "BATCH_LABELS_BEGIN" ]]; then
+        in_batch=1; continue
+    fi
+    [[ "$ln" == "BATCH_LABELS_END" ]] && break
+    [[ $in_batch -eq 1 ]] || continue
+    BATCH_LABELS+=("$ln")
+    for idx in "${!CONFIG_LABELS[@]}"; do
+        if [[ "${CONFIG_LABELS[$idx]}" == "$ln" ]]; then
+            BATCH_INDICES+=("$idx"); break
+        fi
+    done
+done <<<"$STATE_INFO"
+
+echo "    study id:       $STUDY_ID"
+echo "    progress:       $COMPLETED_COUNT/$PLANNED_COUNT configs complete ($REMAINING_COUNT remaining)"
+echo "    batch:          $BATCH_COUNT configuration(s) to run this invocation"
+if [[ "$REPORTABLE_FLAG" == "1" ]]; then
+    echo "    status:         study already reportable; will emit final report"
+fi
 
 # ---------------------------------------------------------------------------
 # Pre-flight: slice integrity (cheap; no model tokens spent).
@@ -268,11 +449,16 @@ fi
 
 # ---------------------------------------------------------------------------
 # 3. Run each configuration against the internal suite and the external slice.
-#    Results are appended to a per-study JSONL file under logs/; the
-#    aggregator at step 4 reads them.
+#    The batch (BATCH_LABELS / BATCH_INDICES) was computed in the
+#    incremental-state block above; it holds only configs not yet marked
+#    complete in the checkpoint. After each config finishes we record its
+#    rates into the state file so an interrupt never loses progress
+#    (issue #1040).
 # ---------------------------------------------------------------------------
 mkdir -p "$LOGS_DIR"
-STUDY_ID="external_eval_$(date -u +%Y%m%dT%H%M%SZ)"
+# STUDY_ID is sourced from the checkpoint so it stays stable across the
+# batches that make up one study. RAW_RESULTS / EXTERNAL_RESULTS are
+# per-batch scratch files; the durable record is the state file.
 RAW_RESULTS="$LOGS_DIR/${STUDY_ID}.jsonl"
 : > "$RAW_RESULTS"
 
@@ -307,6 +493,97 @@ EXTERNAL_PROMPT="Solve each task in ${SLICE} and emit the candidate function bod
 
 EXTERNAL_RESULTS="$LOGS_DIR/${STUDY_ID}_external_results.jsonl"
 : > "$EXTERNAL_RESULTS"
+
+# record_config: compute the per-config internal+external rates and
+# persist them to the checkpoint so the config is not re-run on resume.
+# The internal rate mirrors the aggregator's critic_verdict query; the
+# external rate comes from score_external's EXTERNAL_RESULTS scratch
+# file (defaulting to 0.0 with a warning when external scoring is still
+# pending per ADR-0023 §Placeholder).
+record_config() {
+    local label="$1"
+    local extra_args="$2"
+
+    LABEL="$label" EXTRA_ARGS="$extra_args" \
+    STATE_FILE="$STATE_FILE" TRACES_DB="$TRACES_DB" \
+    EXTERNAL_RESULTS="$EXTERNAL_RESULTS" \
+    uv run --quiet python -c '
+import json, os, sqlite3, sys
+from pathlib import Path
+
+from foundry_x.evaluation import study_state as ss
+
+label = os.environ["LABEL"]
+extra = os.environ["EXTRA_ARGS"]
+state_file = os.environ["STATE_FILE"]
+traces_db = Path(os.environ["TRACES_DB"])
+external_results = Path(os.environ["EXTERNAL_RESULTS"])
+
+# --- internal pass rate from critic_verdict (mirrors the aggregator) ---
+quantization = harness_version = None
+tokens = iter(extra.split())
+for tok in tokens:
+    if tok == "--quantization":
+        quantization = next(tokens, None)
+    elif tok == "--harness-version":
+        harness_version = next(tokens, None)
+
+internal_rate = 0.0
+if quantization and harness_version and traces_db.is_file():
+    conn = sqlite3.connect(traces_db)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """
+        SELECT session_id FROM sessions
+        WHERE quantization = ? AND harness_version = ?
+          AND metadata LIKE '%\"study_run_type\": \"internal_suite\"%'
+        ORDER BY started_at DESC LIMIT 1
+        """,
+        (quantization, harness_version),
+    ).fetchone()
+    if row is not None:
+        verdicts = conn.execute(
+            "SELECT payload FROM events WHERE session_id = ? AND kind = ?",
+            (row["session_id"], "critic_verdict"),
+        ).fetchall()
+        passed = failed = 0
+        for vr in verdicts:
+            payload = json.loads(vr["payload"])
+            passed += len(payload.get("passed_checks", []))
+            failed += len(payload.get("failed_checks", []))
+        total = passed + failed
+        if total > 0:
+            internal_rate = passed / total
+    conn.close()
+else:
+    print(f"warning: cannot compute internal rate for {label} "
+          f"(missing quantization/harness_version or traces.db)", file=sys.stderr)
+
+# --- external pass rate from the per-batch scratch file ---
+external_rate = 0.0
+if external_results.is_file():
+    for ln in external_results.read_text().splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        obj = json.loads(ln)
+        if obj.get("label") == label:
+            p, t = obj.get("passed", 0), obj.get("total", 0)
+            external_rate = p / t if t > 0 else 0.0
+            break
+if external_rate == 0.0:
+    print(f"warning: external scoring pending for {label} "
+          f"(ADR-0023 placeholder); recorded external_rate=0.0", file=sys.stderr)
+
+state = ss.load_state(state_file)
+if state is None:
+    print(f"error: state file vanished mid-run: {state_file}", file=sys.stderr)
+    sys.exit(5)
+ss.record_observation(state, label, internal_rate, external_rate)
+ss.save_state(state_file, state)
+print(f"recorded {label}: internal={internal_rate:.4f} external={external_rate:.4f}")
+'
+}
 
 score_external() {
     local label="$1"
@@ -387,9 +664,11 @@ print(0, file=stdout)
 }
 
 failed_runs=0
-for i in "${!CONFIG_LABELS[@]}"; do
-    label="${CONFIG_LABELS[$i]}"
-    extra="${CONFIG_ARGS[$i]}"
+ran_this_batch=0
+for b in "${!BATCH_LABELS[@]}"; do
+    label="${BATCH_LABELS[$b]}"
+    idx="${BATCH_INDICES[$b]}"
+    extra="${CONFIG_ARGS[$idx]}"
 
     echo "==> [$label] internal suite"
     if ! run_one "$label" "$extra" "$INTERNAL_PROMPT" "internal_suite"; then
@@ -407,34 +686,39 @@ for i in "${!CONFIG_LABELS[@]}"; do
 
     echo "==> [$label] scoring external candidates"
     score_external "$label" "$extra" || true
+
+    echo "==> [$label] checkpointing progress"
+    record_config "$label" "$extra" || {
+        echo "error: failed to checkpoint '$label'" >&2
+        exit 5
+    }
+    ran_this_batch=$((ran_this_batch + 1))
 done
 
 if [[ $failed_runs -gt 0 ]]; then
     echo "error: $failed_runs configuration run(s) failed; raw results at $RAW_RESULTS" >&2
+    echo "       successfully-completed configs in this batch WERE checkpointed;" >&2
+    echo "       fix the failure and re-run (with --resume or the same flags) to continue." >&2
     exit 5
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Aggregate and compute Pearson correlation (ADR-0032, issue #1028).
+# 4. Aggregate / checkpoint (issue #1040).
 #
-#    The aggregator:
-#      - reads the configs file to enumerate the 30+ configurations,
-#      - queries traces.db for internal_suite sessions and computes
-#        internal_pass_rate = passed / (passed + failed) from critic_verdict,
-#      - reads the external results file for external pass rates,
-#      - invokes pearson_binary and pearson_binary_ci_95,
-#      - writes the JSON report.
+#    The checkpoint holds the accumulated internal/external rate arrays
+#    across every batch in this study, so the final report is computed
+#    directly from the state (no traces.db re-query needed). When the
+#    study is not yet reportable we persist progress and exit 0 so the
+#    operator can resume the next batch later.
 # ---------------------------------------------------------------------------
 DEFAULT_OUTPUT="$LOGS_DIR/${STUDY_ID}_report.json"
 OUTPUT_PATH="${OUTPUT_PATH:-$DEFAULT_OUTPUT}"
 
-echo "==> Aggregating results into $OUTPUT_PATH"
-uv run --quiet python -c "
-import json
-import sqlite3
-import sys
+FINAL_INFO="$(uv run --quiet python -c '
+import json, os, sys
 from pathlib import Path
 
+from foundry_x.evaluation import study_state as ss
 from foundry_x.evaluation.correlation import (
     MIN_PAIRED_OBSERVATIONS,
     UnderpoweredStudyError,
@@ -444,141 +728,99 @@ from foundry_x.evaluation.correlation import (
     pearson_binary_ci_95,
 )
 
-traces_db = Path('$TRACES_DB')
-if not traces_db.is_file():
-    print(f'error: {traces_db} not found', file=sys.stderr)
+state_file = os.environ["STATE_FILE"]
+output_path = os.environ["OUTPUT_PATH"]
+model = os.environ["MODEL"]
+slice_path = os.environ["SLICE"]
+config_count = int(os.environ["CONFIG_COUNT"])
+
+state = ss.load_state(state_file)
+if state is None:
+    print(f"error: state file missing at finalize: {state_file}", file=sys.stderr)
     sys.exit(5)
 
-external_results_path = Path('$EXTERNAL_RESULTS')
-external_results: dict[str, tuple[int, int]] = {}
-if external_results_path.is_file():
-    for line in external_results_path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        obj = json.loads(line)
-        external_results[obj['label']] = (obj['passed'], obj['total'])
+completed = len(state.configs_completed)
+planned = len(state.configs_planned)
 
-# Build the per-config pass rate vectors in the same order as CONFIG_LABELS.
-internal_rates: list[float] = []
-external_rates: list[float] = []
-configs_observed = 0
+# Not enough paired observations yet: persist progress and stop. The
+# operator runs the next batch (same flags) to accumulate more.
+if not ss.is_reportable(state):
+    print(f"PARTIAL=1")
+    print(f"COMPLETED={completed}")
+    print(f"PLANNED={planned}")
+    print(f"MIN_PAIRS={state.min_pairs}")
+    sys.exit(0)
 
-conn = sqlite3.connect(traces_db)
-conn.row_factory = sqlite3.Row
+# Reportable: compute Pearson r + 95% CI from the accumulated arrays.
+internal_rates = state.internal_rates
+external_rates = state.external_rates
 
-for i, label in enumerate(${CONFIG_LABELS[@]}):
-    extra = ${CONFIG_ARGS[$i]}
-
-    # Extract quantization from extra args for DB query.
-    quantization = None
-    harness_version = None
-    tokens = iter(extra.split())
-    for tok in tokens:
-        if tok == '--quantization':
-            quantization = next(tokens, None)
-        elif tok == '--harness-version':
-            harness_version = next(tokens, None)
-
-    if quantization is None or harness_version is None:
-        print(f'warning: skipping {label}: missing quantization or harness_version', file=sys.stderr)
-        continue
-
-    # Internal pass rate: find internal_suite session for this config.
-    cursor = conn.execute('''
-        SELECT session_id FROM sessions
-        WHERE quantization = ?
-          AND harness_version = ?
-          AND metadata LIKE '%\"study_run_type\": \"internal_suite\"%'
-        ORDER BY started_at DESC
-        LIMIT 1
-    ''', (quantization, harness_version))
-    row = cursor.fetchone()
-    if row is None:
-        print(f'warning: no internal_suite session for {label}', file=sys.stderr)
-        continue
-
-    sid = row['session_id']
-    verdict_rows = conn.execute('''
-        SELECT payload FROM events
-        WHERE session_id = ? AND kind = 'critic_verdict'
-    ''', (sid,)).fetchall()
-
-    if not verdict_rows:
-        print(f'warning: no critic_verdict for {label} session {sid}', file=sys.stderr)
-        continue
-
-    # Sum passed/failed across all critic_verdict events for this session.
-    total_internal = 0
-    passed_internal = 0
-    for vr in verdict_rows:
-        payload = json.loads(vr['payload'])
-        passed_list = payload.get('passed_checks', [])
-        failed_list = payload.get('failed_checks', [])
-        passed_internal += len(passed_list)
-        total_internal += len(passed_list) + len(failed_list)
-
-    internal_rate = passed_internal / total_internal if total_internal > 0 else 0.0
-
-    # External pass rate from the results file.
-    if label in external_results:
-        p, t = external_results[label]
-        external_rate = p / t if t > 0 else 0.0
-    else:
-        print(f'warning: no external result for {label}', file=sys.stderr)
-        continue
-
-    internal_rates.append(internal_rate)
-    external_rates.append(external_rate)
-    configs_observed += 1
-
-conn.close()
-
-# Compute Pearson r and CI.
 pearson_val = None
-ci_95: list[float] | None = None
-verdict_label = 'pending'
+ci_95 = None
+verdict_label = "pending"
+exit_code = 1
 try:
     pearson_val = pearson_binary(internal_rates, external_rates)
     r_lower, r_upper = pearson_binary_ci_95(internal_rates, external_rates)
     ci_95 = [round(r_lower, 4), round(r_upper, 4)]
     verdict_label = interpret_correlation(pearson_val)
+    exit_code = 0
 except UnderpoweredStudyError as exc:
-    print(f'under-powered: {exc}', file=sys.stderr)
+    print(f"under-powered: {exc}", file=sys.stderr)
 except ZeroVarianceError as exc:
-    print(f'zero variance: {exc}', file=sys.stderr)
-    print('       Choose a more discriminating task set.', file=sys.stderr)
+    print(f"zero variance: {exc}", file=sys.stderr)
+    print("       Choose a more discriminating task set.", file=sys.stderr)
 except Exception as exc:
-    print(f'correlation error: {exc}', file=sys.stderr)
+    print(f"correlation error: {exc}", file=sys.stderr)
 
 report = {
-    'study_id': '$STUDY_ID',
-    'adr': 'ADR-0032',
-    'slice': '$SLICE',
-    'slice_task_count': 20,
-    'model': '$MODEL',
-    'harness_versions': ['v1.0', 'v1.1', 'v1.2'],
-    'quantizations': ['Q4_K_M', 'Q5_K_M', 'Q6_K_M', 'Q8_0', 'IQ4_XS', 'IQ4_NL'],
-    'model_sizes': ['Qwen2.5-7B', 'Qwen2.5-14B'],
-    'min_pairs_required': MIN_PAIRED_OBSERVATIONS,
-    'configs_planned': $config_count,
-    'configs_observed': configs_observed,
-    'internal_rates': [round(r, 4) for r in internal_rates],
-    'external_rates': [round(r, 4) for r in external_rates],
-    'pearson': round(pearson_val, 4) if pearson_val is not None else None,
-    'pearson_ci_95': ci_95,
-    'verdict': verdict_label,
-    'interpreted_at': '${STUDY_ID}'.replace('external_eval_', ''),
-    'exit_code': 0 if pearson_val is not None else 1,
+    "study_id": state.study_id,
+    "adr": "ADR-0023",
+    "slice": slice_path,
+    "model": model,
+    "min_pairs_required": MIN_PAIRED_OBSERVATIONS,
+    "configs_planned": planned,
+    "configs_observed": completed,
+    "internal_rates": [round(r, 4) for r in internal_rates],
+    "external_rates": [round(r, 4) for r in external_rates],
+    "configs_completed": list(state.configs_completed),
+    "completed_at": dict(state.completed_at),
+    "pearson": round(pearson_val, 4) if pearson_val is not None else None,
+    "pearson_ci_95": ci_95,
+    "verdict": verdict_label,
+    "exit_code": exit_code,
 }
 
-Path('$OUTPUT_PATH').write_text(json.dumps(report, indent=2) + '\n')
-print(f'    configs observed: {configs_observed}')
-print(f'    Pearson r: {report[\"pearson\"]}')
-print(f'    95% CI: {report[\"pearson_ci_95\"]}')
-print(f'    verdict: {report[\"verdict\"]}')
-"
+Path(output_path).write_text(json.dumps(report, indent=2) + "\n")
+print("PARTIAL=0")
+print(f"COMPLETED={completed}")
+print(f"PLANNED={planned}")
+print(f"PEARSON={round(pearson_val, 4) if pearson_val is not None else \"null\"}")
+print(f"VERDICT={verdict_label}")
+' CONFIG_COUNT="$config_count" OUTPUT_PATH="$OUTPUT_PATH" \
+    STATE_FILE="$STATE_FILE" MODEL="$MODEL" SLICE="$SLICE")" || exit $?
+
+FINAL_PARTIAL="$(printf '%s\n' "$FINAL_INFO" | sed -n 's/^PARTIAL=//p')"
+FINAL_COMPLETED="$(printf '%s\n' "$FINAL_INFO" | sed -n 's/^COMPLETED=//p')"
+FINAL_PLANNED="$(printf '%s\n' "$FINAL_INFO" | sed -n 's/^PLANNED=//p')"
+
+if [[ "$FINAL_PARTIAL" == "1" ]]; then
+    FINAL_MIN_PAIRS="$(printf '%s\n' "$FINAL_INFO" | sed -n 's/^MIN_PAIRS=//p')"
+    echo "==> Batch complete; study not yet reportable (issue #1040 incremental mode)"
+    echo "    progress:   $FINAL_COMPLETED/$FINAL_PLANNED configs checkpointed"
+    echo "    threshold:  $FINAL_MIN_PAIRS paired observations required"
+    echo "    state file: $STATE_FILE"
+    echo "    re-run with the same flags (or --resume) to continue the next batch."
+    echo "==> External-eval batch complete (partial)"
+    exit 0
+fi
+
+FINAL_PEARSON="$(printf '%s\n' "$FINAL_INFO" | sed -n 's/^PEARSON=//p')"
+FINAL_VERDICT="$(printf '%s\n' "$FINAL_INFO" | sed -n 's/^VERDICT=//p')"
 
 echo "==> External-eval study complete"
-echo "    external results: $EXTERNAL_RESULTS"
-echo "    report:          $OUTPUT_PATH"
+echo "    configs observed: $FINAL_COMPLETED/$FINAL_PLANNED"
+echo "    Pearson r:        $FINAL_PEARSON"
+echo "    verdict:          $FINAL_VERDICT"
+echo "    report:           $OUTPUT_PATH"
+echo "    state file:       $STATE_FILE"
