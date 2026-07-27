@@ -49,7 +49,7 @@ TASK = BenchmarkTask(
         "and emits a fetch_blocked trace event; (5) the skill and hook are "
         "registered in harness/manifest.json."
     ),
-    difficulty_tier="easy",
+    difficulty_tier="smoke",
     expected_outcome=(
         "All allowlist invariants hold and the hook's blocking path produces "
         "the fetch_blocked tracer event, the cleared URL, and the sentinel "
