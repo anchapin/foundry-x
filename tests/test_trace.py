@@ -733,3 +733,80 @@ def test_jsonl_read_paths_skip_corrupted_line(tmp_path):
 
     # The corrupted line is still on disk — read paths skip, never delete.
     assert corrupted in path.read_text(encoding="utf-8")
+
+
+def test_doctor_removes_corrupted_lines_preserving_valid_events(tmp_path):
+    """doctor --apply drops JSONDecodeError lines and keeps valid ones (issue #1077).
+
+    Acceptance criterion 5: a JSONL file with one truncated line between two
+    valid events → after ``doctor --apply``, ``load_session`` returns exactly
+    the two valid events.
+    """
+    path = tmp_path / "traces.jsonl"
+    logger = TraceLogger(path, backend="jsonl")
+
+    with logger.session(harness_version="0.1.0", model_id="m") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "first"})
+        logger.record(sid, kind="task_completed", payload={"status": "ok"})
+
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    assert len(lines) >= 4
+    corrupted = '{"kind": "tool_call", "session_id": "' + sid + '", "payload":'
+    injected = lines[:2] + [corrupted + "\n"] + lines[2:]
+    path.write_text("".join(injected), encoding="utf-8")
+
+    reader = TraceLogger(path, backend="jsonl")
+    result = reader.doctor(apply=True)
+    assert result["applied"] is True
+    assert len(result["skipped_lines"]) == 1
+    assert result["skipped_lines"][0] == 3
+
+    loaded = reader.load_session(sid)
+    assert len(loaded) == 2
+    assert {e.kind for e in loaded} == {"task_received", "task_completed"}
+
+
+def test_doctor_dry_run_does_not_modify_file(tmp_path):
+    """doctor without --apply is a pure dry-run (issue #1077)."""
+    path = tmp_path / "traces.jsonl"
+    logger = TraceLogger(path, backend="jsonl")
+
+    with logger.session(harness_version="0.1.0", model_id="m") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "first"})
+
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    corrupted = '{"kind": "tool_call", "session_id": "' + sid + '", "payload":'
+    injected = lines[:1] + [corrupted + "\n"] + lines[1:]
+    path.write_text("".join(injected), encoding="utf-8")
+
+    reader = TraceLogger(path, backend="jsonl")
+    result = reader.doctor(apply=False)
+    assert result["applied"] is False
+    assert len(result["skipped_lines"]) == 1
+    assert result["kept_lines"] == len(lines)
+
+    assert corrupted in path.read_text(encoding="utf-8")
+
+
+def test_jsonl_skip_info_recorded_on_corrupted_read(tmp_path):
+    """jsonl_skip_info is incremented when a JSONDecodeError is caught (issue #1077)."""
+    path = tmp_path / "traces.jsonl"
+    logger = TraceLogger(path, backend="jsonl")
+
+    with logger.session(harness_version="0.1.0", model_id="m") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "first"})
+        logger.record(sid, kind="task_completed", payload={"status": "ok"})
+
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    corrupted = '{"kind": "tool_call", "session_id": "' + sid + '", "payload":'
+    injected = lines[:2] + [corrupted + "\n"] + lines[2:]
+    path.write_text("".join(injected), encoding="utf-8")
+
+    reader = TraceLogger(path, backend="jsonl")
+    assert reader.jsonl_skip_info["count"] == 0
+
+    list(reader.iter_events(sid))
+    info = reader.jsonl_skip_info
+    assert info["count"] >= 1
+    assert info["last_reason"] == "json_decode_error"
+    assert info["last_session_id"] == sid
