@@ -1,6 +1,6 @@
 """Benchmark task: keyword-only API refactor with a test constraint (ADR-0028 H2).
 
-This is the second ``difficulty_tier='hard'`` task in the suite.  It
+This is a ``difficulty_tier='medium'`` task in the suite.  It
 implements Archetype H2 ("multi-file coordinated refactor with
 constraint") from ADR-0028 §3:
 
@@ -91,7 +91,7 @@ TASK = BenchmarkTask(
         "\n"
         "After your changes, 'python -m pytest' must exit 0."
     ),
-    difficulty_tier="hard",
+    difficulty_tier="medium",
     expected_outcome=(
         "After updating all positional callers to keyword-only, "
         "'python -m pytest' exits 0 with 2 passed, and "

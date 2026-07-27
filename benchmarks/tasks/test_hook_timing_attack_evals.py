@@ -88,7 +88,7 @@ TASK = BenchmarkTask(
         "lookups, or branching that would make execution time vary with "
         "the content of the ToolCall/ToolResult."
     ),
-    difficulty_tier="hard",
+    difficulty_tier="medium",
     expected_outcome=(
         "Within each payload class (clean or adversarial), timing CV stays "
         "below the regression threshold.  The injection firewall's scan "
