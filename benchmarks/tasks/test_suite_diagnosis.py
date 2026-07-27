@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from benchmarks.conftest import _seed_workspace
 from benchmarks.models import BenchmarkTask
 
 TASK = BenchmarkTask(
@@ -56,21 +57,17 @@ TASK = BenchmarkTask(
     tags=["pytest", "debugging", "diagnosis", "multi-file"],
 )
 
-FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / TASK.name
-
-
-def _copy_fixture_to_workspace(fixture_dir: Path, workspace: Path) -> None:
-    """Copy the fixture pkg/ and tests/ directories into workspace."""
-    skip_dirs = {"__pycache__", ".git", ".venv", "node_modules"}
-    for subdir in ("pkg", "tests"):
-        src = fixture_dir / subdir
-        dst = workspace / subdir
-        for file in src.rglob("*"):
-            if file.is_file() and not any(part in skip_dirs for part in file.parts):
-                rel = file.relative_to(src)
-                dst_file = dst / rel
-                dst_file.parent.mkdir(parents=True, exist_ok=True)
-                dst_file.write_text(file.read_text())
+#: Names excluded when seeding the multi-file fixture into the workspace.
+#: Replaces the former bespoke ``_copy_fixture_to_workspace`` skip logic
+#: (issue #1048) and also keeps ``expected_stdout.txt`` out of the agent's
+#: view so the golden answer is not leaked.
+FIXTURE_SKIP: set[str] = {
+    "__pycache__",
+    ".git",
+    ".venv",
+    "node_modules",
+    "expected_stdout.txt",
+}
 
 
 def _clear_pycache(workspace: Path) -> None:
@@ -101,7 +98,7 @@ def test_test_suite_diagnosis(benchmark_workspace: Path) -> None:
     Pre-condition: the seeded suite genuinely fails with AssertionError.
     Post-condition: after fixing the incorrect assertion, pytest passes.
     """
-    _copy_fixture_to_workspace(FIXTURE_DIR, benchmark_workspace)
+    _seed_workspace(benchmark_workspace, TASK.name, skip=FIXTURE_SKIP)
 
     test_file = benchmark_workspace / "tests" / "test_math.py"
     seeded_test = test_file.read_text()

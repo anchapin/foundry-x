@@ -1,0 +1,2 @@
+# Fixture manifest for skip_demo — demonstrates manifest-driven skip patterns.
+skip = ["__pycache__", ".git", ".venv", "excluded"]
