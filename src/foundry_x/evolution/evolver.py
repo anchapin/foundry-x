@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import json
+import os
 import random
 import re
 from collections import deque
@@ -52,6 +53,17 @@ _HARNESS_LEAF_FILES = frozenset({_HARNESS_PROMPT_FILE, _HARNESS_MANIFEST})
 # ``hooks`` and ``skills`` are subtrees the Evolver may edit arbitrarily
 # deep beneath.
 _HARNESS_SUBDIRS = frozenset({"hooks", "skills"})
+
+# Env var that opt-in enables LLM-driven edit generation (issue #1116).
+# When set to "1" or "true" (case-insensitive), the Evolver will call
+# generate_edits() instead of the template path when a ModelAdapter is
+# configured. Absent or false means template path is used.
+_FOUNDRY_EVOLVER_LLM_ENABLED_ENV = "FOUNDRY_EVOLVER_LLM_ENABLED"
+
+
+def _is_llm_edit_gen_enabled() -> bool:
+    """Return True when FOUNDRY_EVOLVER_LLM_ENABLED is set to a truthy value."""
+    return os.environ.get(_FOUNDRY_EVOLVER_LLM_ENABLED_ENV, "").lower() in ("1", "true")
 
 
 class EvolverGenerationError(Exception):
@@ -1052,11 +1064,12 @@ class Evolver:
         """Async variant of propose() that attempts LLM-driven edit generation.
 
         This method first attempts to generate edits via an LLM call using the
-        failure report context. If the LLM call fails or returns invalid output,
-        it falls back to the template-based approach, emitting a
+        failure report context when ``FOUNDRY_EVOLVER_LLM_ENABLED=true`` and a
+        ModelAdapter is configured. If the LLM call fails or returns invalid
+        output, it falls back to the template-based approach, emitting a
         ``generation_attempt`` trace event with ``error="llm_fallback"`` so an
         operator can distinguish template-derived ``proposed_edit`` events from
-        LLM-derived ones (issue #977).
+        LLM-derived ones (issue #977, #1116).
         """
         try:
             self._check_rate_limit()
@@ -1066,7 +1079,7 @@ class Evolver:
         if failure.proposed_class == "clean":
             return []
 
-        if self._model_adapter is not None:
+        if self._model_adapter is not None and _is_llm_edit_gen_enabled():
             try:
                 return await self.generate_edits(self._model_adapter, harness_dir, failure)
             except EvolverLLMError as exc:
@@ -1085,10 +1098,11 @@ class Evolver:
     ) -> list[ProposedEdit]:
         """Propose harness edits for a given failure report.
 
-        First attempts LLM-driven edit generation if a ModelAdapter is configured.
-        Falls back to template-based proposals if the LLM call fails or is
-        unavailable, emitting a ``generation_attempt`` trace event with
-        ``error="llm_fallback"`` so the fallback is observable (issue #977).
+        First attempts LLM-driven edit generation when ``FOUNDRY_EVOLVER_LLM_ENABLED``
+        is set and a ModelAdapter is configured. Falls back to template-based
+        proposals if the env var is not set or the LLM call fails, emitting a
+        ``generation_attempt`` trace event with ``error="llm_fallback"`` so the
+        fallback is observable (issue #977, #1116).
         """
         try:
             self._check_rate_limit()
@@ -1098,7 +1112,7 @@ class Evolver:
         if failure.proposed_class == "clean":
             return []
 
-        if self._model_adapter is not None:
+        if self._model_adapter is not None and _is_llm_edit_gen_enabled():
             try:
                 return asyncio.run(self.generate_edits(self._model_adapter, harness_dir, failure))
             except EvolverLLMError as exc:
@@ -1121,8 +1135,9 @@ class Evolver:
         to generate edits for each failure class in the batch, deduplicating
         by target file when multiple failures suggest edits to the same file.
 
-        First attempts LLM-driven edit generation if a ModelAdapter is configured.
-        Falls back to template-based proposals if the LLM call fails.
+        First attempts LLM-driven edit generation when ``FOUNDRY_EVOLVER_LLM_ENABLED``
+        is set and a ModelAdapter is configured. Falls back to template-based
+        proposals if the env var is not set or the LLM call fails (issue #1116).
 
         Returns a flat list of ProposedEdit objects covering all failures.
         """
@@ -1139,7 +1154,7 @@ class Evolver:
                 self._record_generation_attempt(attempt=1, error="rate_limit_exceeded")
                 continue
 
-            if self._model_adapter is not None:
+            if self._model_adapter is not None and _is_llm_edit_gen_enabled():
                 try:
                     edits = asyncio.run(
                         self.generate_edits(self._model_adapter, harness_dir, failure)
@@ -1164,7 +1179,11 @@ class Evolver:
         batch_report: BatchFailureReport,
         current_diff: str | None = None,
     ) -> list[ProposedEdit]:
-        """Async variant of :meth:`propose_batch` that awaits LLM calls."""
+        """Async variant of :meth:`propose_batch` that awaits LLM calls.
+
+        LLM-driven generation is attempted when ``FOUNDRY_EVOLVER_LLM_ENABLED`` is set
+        and a ModelAdapter is configured (issue #1116).
+        """
         all_edits: list[ProposedEdit] = []
         seen_targets: dict[str, ProposedEdit] = {}
 
@@ -1178,7 +1197,7 @@ class Evolver:
                 self._record_generation_attempt(attempt=1, error="rate_limit_exceeded")
                 continue
 
-            if self._model_adapter is not None:
+            if self._model_adapter is not None and _is_llm_edit_gen_enabled():
                 try:
                     edits = await self.generate_edits(self._model_adapter, harness_dir, failure)
                 except EvolverLLMError as exc:
