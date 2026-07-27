@@ -1286,6 +1286,94 @@ async def _exec_write_file(arguments: dict[str, Any], workspace_root: Path) -> d
     return {"path": str(resolved), "sha256": sha, "bytes_written": bytes_written}
 
 
+async def _exec_web_fetch(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Execute the ``web_fetch`` skill (issue #1054).
+
+    Fetches a URL using ``httpx`` and returns the response body, truncated
+    to ``max_bytes``. Only HTTP(S) URLs are permitted; redirects are
+    followed up to httpx's default limit. URL validation against
+    ``FETCH_ALLOWED_DOMAINS`` is handled by ``WebFetchHook`` in ``pre_tool``
+    (the hook clears the ``url`` and sets ``__fetch_blocked`` when the domain
+    is not allowed); this executor performs a final scheme guard so a
+    misconfigured or absent hook cannot open an SSRF channel.
+    """
+    import httpx
+
+    url: str = arguments.get("url", "")
+    max_bytes = int(arguments.get("max_bytes", 32768))
+    timeout_seconds = float(arguments.get("timeout_seconds", 30))
+
+    if not url:
+        return {
+            "content": "",
+            "status_code": 0,
+            "url": "",
+            "content_type": "",
+            "truncated": False,
+            "bytes_returned": 0,
+            "error": "url is required",
+        }
+
+    # Final scheme guard: the WebFetchHook already blocks non-allowed
+    # domains, but this check ensures non-HTTP(S) schemes are rejected
+    # even if the hook is absent or bypassed.
+    scheme = urlsplit(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        return {
+            "content": "",
+            "status_code": 0,
+            "url": url,
+            "content_type": "",
+            "truncated": False,
+            "bytes_returned": 0,
+            "error": f"scheme {scheme!r} not allowed; only http and https are permitted",
+        }
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout_seconds,
+            follow_redirects=True,
+        ) as client:
+            response = await client.get(url)
+    except httpx.TimeoutException as exc:
+        return {
+            "content": "",
+            "status_code": 0,
+            "url": url,
+            "content_type": "",
+            "truncated": False,
+            "bytes_returned": 0,
+            "error": f"timeout after {timeout_seconds}s: {exc}",
+        }
+    except httpx.RequestError as exc:
+        return {
+            "content": "",
+            "status_code": 0,
+            "url": url,
+            "content_type": "",
+            "truncated": False,
+            "bytes_returned": 0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    raw_body = response.content
+    content_type = response.headers.get("content-type", "")
+    final_url = str(response.url)
+
+    truncated_body, was_truncated = _truncate_at_newline(raw_body, max_bytes)
+    content_str = truncated_body.decode("utf-8", errors="replace")
+
+    return {
+        "content": content_str,
+        "status_code": response.status_code,
+        "url": final_url,
+        "content_type": content_type,
+        "truncated": was_truncated,
+        "bytes_returned": len(truncated_body),
+        "error": None,
+    }
+
+
 async def _file_operation_skill_executor(
     name: str, arguments: dict[str, Any], workspace_root: Path
 ) -> dict[str, Any]:
@@ -1586,6 +1674,23 @@ async def run_task(
             if isinstance(hook, InjectionFirewallHook) and hook._tracer is None:
                 hook._tracer = _inject_tracer  # type: ignore[attr-defined]
 
+    # Wire WebFetchHook tracer (issue #1054): the default registry's
+    # WebFetchHook was registered with tracer=None. Walk the hook list
+    # and wire the first such instance so that blocked fetches emit
+    # ``fetch_blocked`` events to the TraceLogger. The tracer signature
+    # is Callable[[dict], None] (one argument: the payload dict carrying
+    # ``kind``, ``url``, ``reason``, and ``allowed_domains``).
+    if registry is not None:
+        from harness.hooks.web_fetch import WebFetchHook
+
+        def _fetch_tracer(payload: dict[str, object]) -> None:
+            kind = payload.pop("kind", "fetch_blocked")
+            log.record(session_id, kind=kind, payload=payload)
+
+        for hook in registry._hooks:
+            if isinstance(hook, WebFetchHook) and hook._tracer is None:
+                hook._tracer = _fetch_tracer
+
     # Token-aware pruning (issue #465): when FOUNDRY_CONTEXT_TOKENS is set,
     # register TokenAwarePruningHook so the runner's accumulated tokens_used
     # drives pruning decisions instead of raw event count. The get_tokens
@@ -1624,6 +1729,32 @@ async def run_task(
             return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
         if name in ("read_file", "read_multiple_files"):
             return await _file_operation_skill_executor(name, arguments, resolved_workspace_root)
+        if name == "web_fetch":
+            # The WebFetchHook (pre_tool) clears the URL and sets the
+            # sentinel key when the domain is not in FETCH_ALLOWED_DOMAINS.
+            # Short-circuit to an error without issuing the HTTP request.
+            if arguments.get("__fetch_blocked"):
+                return {
+                    "content": "",
+                    "status_code": 0,
+                    "url": "",
+                    "content_type": "",
+                    "truncated": False,
+                    "bytes_returned": 0,
+                    "error": "fetch blocked: domain not in FETCH_ALLOWED_DOMAINS allowlist",
+                }
+            result = await _exec_web_fetch(arguments)
+            if not result.get("error"):
+                _record_and_count(
+                    session_id,
+                    kind="fetch_success",
+                    payload={
+                        "url": arguments.get("url", ""),
+                        "status_code": result.get("status_code", 0),
+                        "bytes_returned": result.get("bytes_returned", 0),
+                    },
+                )
+            return result
         return await _default_skill_executor(name, arguments)
 
     max_steps = _resolve_max_steps()

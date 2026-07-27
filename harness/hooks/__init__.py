@@ -25,6 +25,18 @@ from .rate_limit import (
 from .rate_limit import (
     register_into as rate_limit_register_into,
 )
+from .web_fetch import (
+    WebFetchHook,
+)
+from .web_fetch import (
+    is_url_allowed as web_fetch_is_url_allowed,
+)
+from .web_fetch import (
+    register_into as web_fetch_register_into,
+)
+from .web_fetch import (
+    resolve_allowed_domains as web_fetch_resolve_allowed_domains,
+)
 
 # Importing this package activates the prompt-injection firewall mandated by
 # docs/SECURITY.md (the hook self-registers on import). The context_pruning
@@ -48,6 +60,7 @@ __all__ = [
     "TokenAwarePruningHook",
     "TokenCounter",
     "Tracer",
+    "WebFetchHook",
     "get_default_max_diff_lines",
     "get_default_max_proposals",
     "get_default_rate_window_hours",
@@ -58,4 +71,7 @@ __all__ = [
     "register_token_aware_into",
     "resolve_context_tokens_threshold",
     "token_aware_pruning",
+    "web_fetch_is_url_allowed",
+    "web_fetch_register_into",
+    "web_fetch_resolve_allowed_domains",
 ]
