@@ -1,5 +1,11 @@
 """Benchmark task: multiplication table via list comprehension (implementation, comprehension).
 
+INFRASTRUCTURE CHECK (issue #1120)
+==================================
+This task uses run_solution to plant a complete golden solution. It tests
+whether the execution infrastructure works correctly -- NOT whether the
+agent can independently synthesize a multiplication-table algorithm.
+
 Builds an ``n x n`` multiplication table and flattens it row-major into a
 single line. The golden solution is a genuine double list comprehension --
 ``[(i + 1) * (j + 1) for i in range(n) for j in range(n)]`` -- making the
@@ -43,7 +49,7 @@ TASK = BenchmarkTask(
         "output.txt contains the n*n space-separated products in row-major "
         "order, or is empty when n is 0."
     ),
-    tags=["implementation", "comprehension"],
+    tags=["implementation", "comprehension", "infrastructure"],
 )
 
 GOLDEN_SOLUTION = """\

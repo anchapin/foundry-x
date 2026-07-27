@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from foundry_x.evolution.digester import Digester
 from foundry_x.observability.kpis import (
     _resolve_format,
+    build_task_metadata,
     compute_trends,
     read_kpi_history,
     render_history_markdown,
     render_trends_markdown,
 )
-from foundry_x.observability.regression_report import analyze_regressions
+from foundry_x.observability.regression_report import (
+    TaskKpiMetadata,
+    analyze_regressions,
+)
 from foundry_x.observability.render import render_failure_report
 from foundry_x.observability.session_card import format_session_card
 from foundry_x.observability.session_summary import (
@@ -33,6 +38,25 @@ from foundry_x.observability.tool_latency import (
     render_tool_latency_markdown,
 )
 from foundry_x.trace.logger import TraceLogger
+
+
+def _load_task_metadata(path: Path) -> dict[str, TaskKpiMetadata]:
+    """Load a ``--task-metadata`` JSON file into a ``TaskKpiMetadata`` map (issue #1114).
+
+    The JSON shape is ``{task_name: {skills, task_families, difficulty_tier}}``
+    (all fields optional; the key supplies ``name``). Non-dict values are
+    skipped so a partially-malformed file does not abort the whole run.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise TypeError(f"--task-metadata JSON must be an object, got {type(data).__name__}")
+    metadata: dict[str, TaskKpiMetadata] = {}
+    for name, fields in data.items():
+        if not isinstance(fields, dict):
+            continue
+        payload = {**fields, "name": name}
+        metadata[name] = TaskKpiMetadata.model_validate(payload)
+    return metadata
 
 
 def _infer_backend(path: str | Path) -> str:
@@ -119,6 +143,33 @@ def _build_parser() -> argparse.ArgumentParser:
             "the structured RegressionAnalysis (model_dump_json). When --out "
             "ends in '.json', 'json' is selected automatically (mirrors the "
             "kpis / timeline --format / --out convention)."
+        ),
+    )
+    regression.add_argument(
+        "--group-by",
+        dest="group_by",
+        choices=("skill", "task_family", "difficulty_tier"),
+        default=None,
+        help=(
+            "Break regressions down by this dimension (issue #1114). "
+            "Task-level: 'skill' (per BenchmarkTask.requires_skills), "
+            "'task_family' (per BenchmarkTask tag), or 'difficulty_tier' "
+            "(smoke/easy/medium/hard). Requires --task-metadata for task-level "
+            "dimensions. Appends a Per-<Dim> Regressions section to the "
+            "Markdown report; in JSON output, emits slice data under a "
+            "'slice_regressions' key."
+        ),
+    )
+    regression.add_argument(
+        "--task-metadata",
+        dest="task_metadata",
+        default=None,
+        help=(
+            "JSON file mapping task names to {skills, task_families, "
+            "difficulty_tier}. When --group-by is set and this is omitted, "
+            "metadata is auto-built from benchmarks.registry.load_all_tasks() "
+            "(issue #1114). Use this flag to supply metadata outside the repo "
+            "or to override the registry."
         ),
     )
 
@@ -353,8 +404,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "regression-report":
         logger = TraceLogger(args.db)
+        task_metadata: dict[str, TaskKpiMetadata] | None = None
+        if args.group_by is not None:
+            if args.task_metadata is not None:
+                task_metadata = _load_task_metadata(Path(args.task_metadata))
+            else:
+                task_metadata = build_task_metadata()
         analysis = analyze_regressions(
-            logger, since=args.since, task=args.task, harness_version=args.harness_version
+            logger,
+            since=args.since,
+            task=args.task,
+            harness_version=args.harness_version,
+            group_by=args.group_by,
+            task_metadata=task_metadata,
         )
         fmt = _resolve_format(args.format, args.out)
         if fmt == "json":

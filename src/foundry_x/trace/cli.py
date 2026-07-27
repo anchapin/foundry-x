@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import sys
@@ -215,9 +216,25 @@ def _redact_session(args: argparse.Namespace) -> int:
     (idempotent), prints the count, and optionally appends an audit record
     to ``--out``. Exits 0 even when the session did not exist, mirroring
     the idempotent contract of ``delete_session``.
+
+    ``--dry-run`` (issue #1122) prints what would be removed without
+    calling ``delete_session``.
     """
     logger = _logger_for(args.db)
     count = len(logger.load_session(args.session_id))
+    if getattr(args, "dry_run", False):
+        sessions = logger.list_sessions()
+        session_meta = next((s for s in sessions if s.session_id == args.session_id), None)
+        if session_meta:
+            sys.stdout.write(
+                f"  would redact {session_meta.session_id}"
+                f"  started_at={session_meta.started_at}"
+                f"  harness_version={session_meta.harness_version}\n"
+            )
+        sys.stdout.write(
+            f"Dry run: would redact {count} event(s) from session {args.session_id}.\n"
+        )
+        return 0
     logger.delete_session(args.session_id)
     sys.stdout.write(f"Deleted session {args.session_id}: {count} event(s) removed.\n")
     _write_audit(
@@ -277,9 +294,25 @@ def _delete_session(args: argparse.Namespace) -> int:
     Removes one session and all its events via ``TraceLogger.delete_session``.
     Idempotent: exits 0 whether or not the session existed, mirroring the
     contract of the underlying primitive.
+
+    ``--dry-run`` (issue #1122) prints what would be removed without
+    calling ``delete_session``.
     """
     logger = _logger_for(args.db)
     count = len(logger.load_session(args.session_id))
+    if getattr(args, "dry_run", False):
+        sessions = logger.list_sessions()
+        session_meta = next((s for s in sessions if s.session_id == args.session_id), None)
+        if session_meta:
+            sys.stdout.write(
+                f"  would delete {session_meta.session_id}"
+                f"  started_at={session_meta.started_at}"
+                f"  harness_version={session_meta.harness_version}\n"
+            )
+        sys.stdout.write(
+            f"Dry run: would delete {count} event(s) from session {args.session_id}.\n"
+        )
+        return 0
     logger.delete_session(args.session_id)
     sys.stdout.write(f"Deleted session {args.session_id}: {count} event(s) removed.\n")
     return 0
@@ -1011,6 +1044,160 @@ def _timeline(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- Issue #1123: run-benchmark — single-task benchmark CLI --------------------
+
+
+def _resolve_benchmark_task(task_name: str) -> tuple[Path, str]:
+    """Resolve *task_name* to a (test_file_path, test_function_name) pair.
+
+    Accepts both bare names (``sort_a_list``) and ``test_``-prefixed names
+    (``test_sort_a_list``). Returns a tuple of the resolved pytest path and
+    the canonical test function name.
+
+    Raises:
+        FileNotFoundError: the task file does not exist.
+        ValueError: the task file exists but the corresponding test function
+            is not found inside it.
+    """
+    normalized = task_name
+    if task_name.startswith("test_"):
+        normalized = task_name[5:]
+    test_func_name = f"test_{normalized}"
+    test_file = Path("benchmarks/tasks") / f"test_{normalized}.py"
+
+    if not test_file.exists():
+        raise FileNotFoundError(
+            f"Benchmark task not found: '{task_name}' "
+            f"(tried {test_file}). "
+            f"Check the task name or browse benchmarks/tasks/ for available tasks."
+        )
+
+    source = test_file.read_text(encoding="utf-8")
+    if f"def {test_func_name}(" not in source:
+        raise ValueError(
+            f"Task '{task_name}' resolves to {test_file} but "
+            f"{test_func_name}() is not defined in that file. "
+            f"Verify the task file contains the expected test function."
+        )
+
+    return test_file, test_func_name
+
+
+def _run_benchmark(args: argparse.Namespace) -> int:
+    """Implement ``run-benchmark`` (issue #1123).
+
+    Resolves a named benchmark task to its pytest path and invokes it with
+    the correct ``-m benchmark`` marker and workspace isolation.
+    Accepts ``--fixture <name>`` to seed the benchmark workspace from
+    ``benchmarks/fixtures/<name>/``. Exits with the underlying pytest
+    exit code.
+
+    Task name resolution is forgiving: both ``sort_a_list`` and
+    ``test_sort_a_list`` are accepted and normalised internally.
+    """
+    try:
+        test_file, test_func_name = _resolve_benchmark_task(args.task_name)
+    except FileNotFoundError as exc:
+        sys.stderr.write(f"run-benchmark: {exc}\n")
+        return 1
+    except ValueError as exc:
+        sys.stderr.write(f"run-benchmark: {exc}\n")
+        return 1
+
+    cmd: list[str] = [
+        sys.executable,
+        "-m",
+        "pytest",
+        str(test_file) + "::" + test_func_name,
+        "-m",
+        "benchmark",
+    ]
+
+    env: dict[str, str] = dict(__import__("os").environ)
+    if getattr(args, "fixture", None) is not None:
+        env["PYTEST_BENCHMARK_FIXTURE"] = args.fixture
+
+    import subprocess
+
+    result = subprocess.run(
+        cmd,
+        env=env,
+        check=False,
+    )
+    return result.returncode
+
+
+# --- Issue #1121: session-diff -------------------------------------------------
+# Diffs two sessions' event sequences. Exit 0 when identical, exit 1 when
+# different — grep parity so operators can gate workflows on session parity.
+
+
+def _event_summary(event: TraceEvent) -> str:
+    """One-line summary of an event: kind + sorted single-line payload JSON."""
+    payload = json.dumps(event.payload, sort_keys=True)
+    return f"{event.kind}  {payload}"
+
+
+def _session_diff(args: argparse.Namespace) -> int:
+    """Implement ``session-diff`` (issue #1121).
+
+    Loads two sessions from the trace store, builds a unified diff of their
+    event summaries (kind + payload), and prints it. Exit code is 0 when
+    the sessions are identical, 1 when they differ — grep parity so operators
+    can gate CI workflows on session parity.
+
+    ``--kind`` filters both sessions to only events of that kind before
+    diffing. ``--out`` writes the diff to a file instead of stdout.
+    Both sqlite and jsonl backends are supported via :func:`_logger_for`.
+    """
+    logger = _logger_for(args.db)
+
+    events_a = logger.load_session(args.session_id_a)
+    if not events_a:
+        sys.stderr.write(f"session {args.session_id_a} not found or empty.\n")
+        return 1
+
+    events_b = logger.load_session(args.session_id_b)
+    if not events_b:
+        sys.stderr.write(f"session {args.session_id_b} not found or empty.\n")
+        return 1
+
+    kind_filter = getattr(args, "kind", None)
+    if kind_filter is not None:
+        events_a = [e for e in events_a if e.kind == kind_filter]
+        events_b = [e for e in events_b if e.kind == kind_filter]
+
+    lines_a = [_event_summary(e) for e in events_a]
+    lines_b = [_event_summary(e) for e in events_b]
+
+    if lines_a == lines_b:
+        sys.stdout.write("Sessions are identical.\n")
+        return 0
+
+    diff_lines = list(
+        difflib.unified_diff(
+            lines_a,
+            lines_b,
+            fromfile=args.session_id_a,
+            tofile=args.session_id_b,
+            lineterm="",
+            n=3,
+        )
+    )
+
+    if diff_lines:
+        diff_text = "\n".join(diff_lines) + "\n"
+    else:
+        diff_text = ""
+
+    if args.out:
+        Path(args.out).write_text(diff_text, encoding="utf-8")
+    else:
+        sys.stdout.write(diff_text)
+
+    return 1
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="foundry-trace",
@@ -1143,6 +1330,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Append a JSONL audit-log record to this path.",
     )
+    redact_session_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would be redacted without modifying the store (issue #1122).",
+    )
     redact_session_parser.set_defaults(func=_redact_session)
 
     redact_key_parser = sub.add_parser(
@@ -1178,6 +1370,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--db",
         default="logs/traces.db",
         help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    delete_session_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would be deleted without modifying the store (issue #1122).",
     )
     delete_session_parser.set_defaults(func=_delete_session)
 
@@ -1346,6 +1543,62 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write the timeline to this path instead of stdout.",
     )
     timeline_parser.set_defaults(func=_timeline)
+
+    # Issue #1123: single-task benchmark execution. Resolves a named benchmark
+    # task to its pytest path and invokes it with correct isolation and the
+    # benchmark marker. ``--fixture`` seeds the workspace from the named
+    # fixture directory. Exit code mirrors pytest's exit code.
+    run_benchmark_parser = sub.add_parser(
+        "run-benchmark",
+        help="Run a single benchmark task in isolation (issue #1123).",
+    )
+    run_benchmark_parser.add_argument(
+        "task_name",
+        help=(
+            "Benchmark task name (e.g. sort_a_list or test_sort_a_list). "
+            "The 'test_' prefix is optional and stripped automatically."
+        ),
+    )
+    run_benchmark_parser.add_argument(
+        "--fixture",
+        metavar="NAME",
+        default=None,
+        help=(
+            "Seed the benchmark workspace from benchmarks/fixtures/NAME/ "
+            "before running the task. If omitted the workspace starts empty."
+        ),
+    )
+    run_benchmark_parser.set_defaults(func=_run_benchmark)
+
+    # --- session-diff (issue #1121) ---
+    session_diff_parser = sub.add_parser(
+        "session-diff",
+        help="Diff two sessions' event sequences and print a unified diff (issue #1121).",
+    )
+    session_diff_parser.add_argument(
+        "session_id_a",
+        help="First session to diff (treated as 'before' / left side).",
+    )
+    session_diff_parser.add_argument(
+        "session_id_b",
+        help="Second session to diff (treated as 'after' / right side).",
+    )
+    session_diff_parser.add_argument(
+        "--kind",
+        default=None,
+        help="Filter both sessions to this event kind before diffing.",
+    )
+    session_diff_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    session_diff_parser.add_argument(
+        "--out",
+        default=None,
+        help="Write the unified diff to this path instead of stdout.",
+    )
+    session_diff_parser.set_defaults(func=_session_diff)
 
     return parser
 

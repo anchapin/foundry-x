@@ -506,6 +506,22 @@ def test_redact_session_unknown_session_exits_zero(tmp_path, capsys):
 
 
 @_BACKENDS
+def test_redact_session_dry_run_does_not_mutate(tmp_path, backend, capsys):
+    db, sid = _populate_leak(tmp_path, backend)
+
+    rc = main(["redact-session", sid, "--dry-run", "--db", db])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Dry run" in out
+    assert "would redact" in out
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    assert logger.load_session(sid) != []
+    assert sid in [s.session_id for s in logger.list_sessions()]
+
+
+@_BACKENDS
 def test_redact_key_rewrites_field(tmp_path, backend, capsys):
     db, sid = _populate_leak(tmp_path, backend)
 
@@ -671,6 +687,21 @@ def test_delete_session_empty_store_exits_zero(tmp_path, capsys):
 
     assert rc == 0
     assert "0 event(s) removed" in capsys.readouterr().out
+
+
+@_BACKENDS
+def test_delete_session_dry_run_does_not_mutate(tmp_path, backend, capsys):
+    db, sids = _populate_multi(tmp_path, backend, count=2)
+
+    rc = main(["delete-session", sids[0], "--dry-run", "--db", db])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Dry run" in out
+    assert "would delete" in out
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    assert sids[0] in [s.session_id for s in logger.list_sessions()]
 
 
 @_BACKENDS
@@ -1758,3 +1789,302 @@ def test_doctor_no_corrupt_lines(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "no corrupt lines" in out
+
+
+# --- Issue #1123: run-benchmark tests ------------------------------------------
+
+
+from unittest.mock import patch
+
+from foundry_x.trace.cli import _resolve_benchmark_task
+
+
+class TestResolveBenchmarkTask:
+    def test_bare_name_resolves_to_test_file(self):
+        test_file, test_func = _resolve_benchmark_task("sort_a_list")
+        assert test_file == Path("benchmarks/tasks/test_sort_a_list.py")
+        assert test_func == "test_sort_a_list"
+
+    def test_test_prefix_is_stripped(self):
+        test_file, test_func = _resolve_benchmark_task("test_sort_a_list")
+        assert test_file == Path("benchmarks/tasks/test_sort_a_list.py")
+        assert test_func == "test_sort_a_list"
+
+    def test_two_sum_resolves_correctly(self):
+        test_file, test_func = _resolve_benchmark_task("two_sum")
+        assert test_file == Path("benchmarks/tasks/test_two_sum.py")
+        assert test_func == "test_two_sum"
+
+    def test_two_sum_with_test_prefix(self):
+        test_file, test_func = _resolve_benchmark_task("test_two_sum")
+        assert test_file == Path("benchmarks/tasks/test_two_sum.py")
+        assert test_func == "test_two_sum"
+
+    def test_missing_task_raises_file_not_found(self):
+        with pytest.raises(FileNotFoundError) as exc_info:
+            _resolve_benchmark_task("does_not_exist")
+        assert "does_not_exist" in str(exc_info.value)
+        assert "Benchmark task not found" in str(exc_info.value)
+
+    def test_task_file_without_test_function_raises_value_error(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        with patch("foundry_x.trace.cli.Path") as mock_path_cls:
+            dummy_file = tmp_path / "test_no_func.py"
+            dummy_file.write_text("def wrong_name():\n    pass\n", encoding="utf-8")
+            mock_instance = MagicMock()
+            mock_instance.exists.return_value = True
+            mock_instance.read_text.return_value = dummy_file.read_text()
+            mock_path_cls.return_value = mock_instance
+
+            with pytest.raises(ValueError) as exc_info:
+                _resolve_benchmark_task("no_func")
+            assert "test_no_func" in str(exc_info.value)
+            assert "is not defined" in str(exc_info.value)
+
+
+class TestRunBenchmarkExitCodeParity:
+    def test_exit_code_matches_pytest_for_sort_a_list(self):
+        import subprocess
+
+        cli_result = subprocess.run(
+            ["uv", "run", "foundry-trace", "run-benchmark", "sort_a_list"],
+            cwd=Path(__file__).parent.parent,
+            capture_output=True,
+            check=False,
+        )
+        pytest_result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "pytest",
+                "benchmarks/tasks/test_sort_a_list.py::test_sort_a_list",
+                "-m",
+                "benchmark",
+            ],
+            cwd=Path(__file__).parent.parent,
+            capture_output=True,
+            check=False,
+        )
+        assert cli_result.returncode == pytest_result.returncode
+
+    def test_exit_code_matches_pytest_with_fixture(self):
+        import subprocess
+
+        cli_result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "foundry-trace",
+                "run-benchmark",
+                "sort_a_list",
+                "--fixture",
+                "sort_a_list",
+            ],
+            cwd=Path(__file__).parent.parent,
+            capture_output=True,
+            check=False,
+        )
+        env = dict(__import__("os").environ)
+        env["PYTEST_BENCHMARK_FIXTURE"] = "sort_a_list"
+        pytest_result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "pytest",
+                "benchmarks/tasks/test_sort_a_list.py::test_sort_a_list",
+                "-m",
+                "benchmark",
+            ],
+            cwd=Path(__file__).parent.parent,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        assert cli_result.returncode == pytest_result.returncode
+
+
+class TestRunBenchmarkTaskNameResolution:
+    def test_error_message_on_missing_task(self, capsys):
+        rc = main(["run-benchmark", "nonexistent_task_xyz"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "Benchmark task not found" in err
+        assert "nonexistent_task_xyz" in err
+
+    def test_error_message_on_task_file_missing_function(self, tmp_path, capsys):
+        from unittest.mock import MagicMock
+
+        with patch("foundry_x.trace.cli.Path") as mock_path_cls:
+            dummy_file = tmp_path / "test_exists.py"
+            dummy_file.write_text("def other():\n    pass\n", encoding="utf-8")
+            mock_instance = MagicMock()
+            mock_instance.exists.return_value = True
+            mock_instance.read_text.return_value = dummy_file.read_text()
+            mock_path_cls.return_value = mock_instance
+
+            rc = main(["run-benchmark", "exists"])
+            assert rc == 1
+            err = capsys.readouterr().err
+            assert "is not defined" in err
+
+
+# --- Issue #1121: session-diff -------------------------------------------------
+# Diffs two sessions' event sequences. Exit 0 when identical, exit 1 when
+# different. --kind filters both sessions, --out writes diff to file.
+# Both sqlite and jsonl backends must work.
+
+
+def _populate_two_sessions(
+    db_path: Path,
+    backend: str = "sqlite",
+) -> tuple[str, str]:
+    """Plant two distinguishable sessions and return their session_ids.
+
+    ``sid_a`` has ``user_prompt`` + ``tool_call``. ``sid_b`` has the same
+    two event kinds but with different payloads so the diff is non-empty.
+    """
+    logger = TraceLogger(db_path, backend=backend)
+    with logger.session(harness_version="0.1.0", model_id="model-a") as sid_a:
+        logger.record(sid_a, "user_prompt", {"prompt": "Fix the bug in auth.py"})
+        logger.record(sid_a, "tool_call", {"name": "read_file", "path": "src/auth.py"})
+    with logger.session(harness_version="0.2.0", model_id="model-b") as sid_b:
+        logger.record(sid_b, "user_prompt", {"prompt": "Refactor renderer"})
+        logger.record(sid_b, "tool_call", {"name": "write_file", "path": "src/renderer.py"})
+    return sid_a, sid_b
+
+
+def test_session_diff_identical_sessions_exit_zero(tmp_path, capsys):
+    """When both sessions are identical, exit code is 0 and output says so."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "user_prompt", {"prompt": "same prompt"})
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    rc = main(["session-diff", sid, sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "identical" in out.lower()
+
+
+def test_session_diff_different_sessions_exit_nonzero(tmp_path, capsys):
+    """When sessions differ, exit code is 1 and the unified diff is printed."""
+    db = tmp_path / "traces.db"
+    sid_a, sid_b = _populate_two_sessions(db)
+
+    rc = main(["session-diff", sid_a, sid_b, "--db", str(db)])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert sid_a in out
+    assert sid_b in out
+    assert "user_prompt" in out or "tool_call" in out
+
+
+def test_session_diff_unknown_first_session_returns_nonzero(tmp_path, capsys):
+    """An unknown first session_id exits 1 with an error on stderr."""
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["session-diff", "does-not-exist-a", "does-not-exist-b", "--db", str(db)])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "does-not-exist-a" in err
+
+
+def test_session_diff_unknown_second_session_returns_nonzero(tmp_path, capsys):
+    """An unknown second session_id exits 1 with an error on stderr."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="0.1.0") as sid_a:
+        logger.record(sid_a, "user_prompt", {"prompt": "hello"})
+
+    rc = main(["session-diff", sid_a, "does-not-exist-b", "--db", str(db)])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "does-not-exist-b" in err
+
+
+def test_session_diff_kind_filter(tmp_path, capsys):
+    """--kind filters both sessions to only matching event kinds before diffing."""
+    db = tmp_path / "traces.db"
+    sid_a, sid_b = _populate_two_sessions(db)
+
+    rc = main(["session-diff", sid_a, sid_b, "--db", str(db), "--kind", "tool_call"])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "tool_call" in out
+    assert "user_prompt" not in out
+
+
+def test_session_diff_output_file(tmp_path):
+    """--out writes the unified diff to the given path instead of stdout."""
+    db = tmp_path / "traces.db"
+    sid_a, sid_b = _populate_two_sessions(db)
+    out_file = tmp_path / "diff.txt"
+
+    rc = main(["session-diff", sid_a, sid_b, "--db", str(db), "--out", str(out_file)])
+
+    assert rc == 1
+    text = out_file.read_text("utf-8")
+    assert sid_a in text or "user_prompt" in text
+
+
+def test_session_diff_jsonl_backend(tmp_path, capsys):
+    """session-diff works on the jsonl backend (acceptance criterion)."""
+    db = tmp_path / "traces.jsonl"
+    sid_a, sid_b = _populate_two_sessions(db, backend="jsonl")
+
+    rc = main(["session-diff", sid_a, sid_b, "--db", str(db)])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert sid_a in out
+    assert sid_b in out
+
+
+def test_session_diff_payload_delta_shown(tmp_path, capsys):
+    """Changed payloads appear as diff lines showing the old vs new JSON."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="0.1.0") as sid_a:
+        logger.record(sid_a, "tool_call", {"name": "read_file", "path": "a.py"})
+    with logger.session(harness_version="0.1.0") as sid_b:
+        logger.record(sid_b, "tool_call", {"name": "read_file", "path": "b.py"})
+
+    rc = main(["session-diff", sid_a, sid_b, "--db", str(db)])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "a.py" in out or "b.py" in out
+
+
+def test_session_diff_identical_with_kind_filter_exit_zero(tmp_path, capsys):
+    """When filtered sessions are identical, exit code is 0."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "user_prompt", {"prompt": "same"})
+        logger.record(sid, "tool_call", {"name": "read_file", "path": "a.py"})
+
+    rc = main(["session-diff", sid, sid, "--db", str(db), "--kind", "user_prompt"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "identical" in out.lower()
+
+
+def test_session_diff_help_discoverable(tmp_path, capsys):
+    """The subcommand appears in --help output."""
+    try:
+        main(["--help"])
+    except SystemExit:
+        pass
+
+    out = capsys.readouterr().out
+    assert "session-diff" in out

@@ -1,5 +1,11 @@
 """Benchmark task: gate the prompt-injection firewall hook (issue #109).
 
+INFRASTRUCTURE CHECK (issue #1120)
+==================================
+This task uses run_solution to plant a complete golden solution. It tests
+whether the execution infrastructure works correctly -- NOT whether the
+agent can independently detect and redact prompt-injection patterns.
+
 Background
 ----------
 ``docs/SECURITY.md`` line 46-50 ("Prompt-input firewall") requires that
@@ -84,7 +90,7 @@ TASK = BenchmarkTask(
         "three reconstructed injection patterns appears verbatim in "
         "output.txt."
     ),
-    tags=["security", "injection", "benchmark"],
+    tags=["security", "injection", "benchmark", "infrastructure"],
     timeout_seconds=20,
 )
 

@@ -229,7 +229,9 @@ def benchmark_workspace(request: pytest.FixtureRequest, tmp_path: Path) -> Itera
     workspace = tmp_path / "benchmark_workspace"
     workspace.mkdir()
 
-    seed_name = getattr(request, "param", None)
+    seed_name: str | None = getattr(request, "param", None)
+    if not seed_name:
+        seed_name = os.environ.get("PYTEST_BENCHMARK_FIXTURE")
     if seed_name:
         _seed_workspace(workspace, seed_name)
 

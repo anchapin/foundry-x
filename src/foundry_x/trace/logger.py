@@ -414,7 +414,14 @@ _VALID_BACKENDS = ("sqlite", "jsonl")
 
 
 class TraceLogger:
-    def __init__(self, path: str | Path, backend: str = "sqlite") -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        backend: str = "sqlite",
+        *,
+        batch_mode: bool = False,
+        flush_threshold: int = 50,
+    ) -> None:
         # Fail fast on an unknown backend (issue #272): previously an
         # invalid value (e.g. a misspelled ``"csv"``) was stored unchecked
         # and then silently dropped every event in ``record()`` (whose
@@ -432,6 +439,14 @@ class TraceLogger:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.backend = backend
+        # Issue #1124 — batch accumulation for streaming workloads.
+        # When ``batch_mode=True`` the sqlite backend accumulates events in
+        # ``_pending`` and flushes via ``executemany`` when
+        # ``flush_threshold`` events have been collected or on session close.
+        # Non-batch mode (default) uses the original one-INSERT-at-a-time path.
+        self.batch_mode = batch_mode
+        self.flush_threshold = flush_threshold
+        self._pending: dict[str, list[tuple[str, str, str, str, str]]] = {}
         # Issue #1077 — counters for throttled skip signalling in JSONL read paths.
         # Each time a JSONDecodeError is caught, _record_jsonl_skip increments
         # _jsonl_skip_count and records the session_id + line_number of the skip.
@@ -477,7 +492,12 @@ class TraceLogger:
         that never call ``close()`` keep working. Tests and long-running
         services that construct many loggers can call this to release the
         connection (and its ``-wal``/``-shm`` sidecar handles) deterministically.
+
+        Also flushes any pending batched events (issue #1124).
         """
+        if self.batch_mode:
+            for session_id in list(self._pending.keys()):
+                self._flush_session(session_id)
         if self._conn is not None:
             self._conn.close()
             self._conn = None
@@ -593,6 +613,8 @@ class TraceLogger:
         suppressed — leaving ``ended_at`` null, which degrades gracefully
         downstream rather than corrupting the caller's stack trace.
         """
+        if self.batch_mode and session_id in self._pending:
+            self._flush_session(session_id)
         ended_at = _now()
         masking_active_exception = sys.exc_info()[1] is not None
         try:
@@ -798,21 +820,46 @@ class TraceLogger:
         if self.backend == "sqlite":
             data = event.model_dump()
             assert self._conn is not None  # backend == "sqlite"
-            with self._conn:
-                self._conn.execute(
-                    "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
-                    (
-                        data["event_id"],
-                        data["session_id"],
-                        data["timestamp"],
-                        data["kind"],
-                        json.dumps(data["payload"]),
-                    ),
-                )
+            row = (
+                data["event_id"],
+                data["session_id"],
+                data["timestamp"],
+                data["kind"],
+                json.dumps(data["payload"]),
+            )
+            if self.batch_mode:
+                pending = self._pending.setdefault(session_id, [])
+                pending.append(row)
+                if len(pending) >= self.flush_threshold:
+                    self._flush_session(session_id)
+            else:
+                with self._conn:
+                    self._conn.execute(
+                        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+                        row,
+                    )
         elif self.backend == "jsonl":
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(event.model_dump_json() + "\n")
         return event
+
+    def _flush_session(self, session_id: str) -> None:
+        """Flush accumulated pending events for *session_id* via executemany (issue #1124).
+
+        Called automatically by ``record()`` when the pending queue reaches
+        ``flush_threshold`` and by ``_end_session`` on session close.
+        """
+        if session_id not in self._pending:
+            return
+        rows = self._pending.pop(session_id)
+        if not rows:
+            return
+        assert self._conn is not None
+        with self._conn:
+            self._conn.executemany(
+                "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+                rows,
+            )
 
     def load_session(self, session_id: str) -> Sequence[TraceEvent]:
         if self.backend == "jsonl":

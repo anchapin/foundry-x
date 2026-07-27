@@ -14,6 +14,29 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 DifficultyTier = Literal["smoke", "easy", "medium", "hard"]
+"""Tier ladder for benchmark tasks (ADR-0028, ADR-0034).
+
+smoke
+    Pure infrastructure or hygiene check. Runs in <5 s, performs no model
+    inference. Exercises trace wiring, hook registration, manifest consistency,
+    or a single deterministic function with a binary pass/fail. Excluded from
+    the improvement-rate KPI (ADR-0005 §Consequences); included in regression-rate.
+    Examples: server_unavailable, web_fetch_skill, smoke_marker_and_fixture_resolve,
+    quantization_v4_sweep.
+easy
+    Full agent session with 1–3 tool-call rounds and no multi-step reasoning.
+    Typical runtime 30–120 s. Included in improvement-rate KPI.
+    Example: implementation_fizzbuzz.
+medium
+    Multi-step reasoning or coordinated cross-file read/edit. Not yet
+    requiring the multi-phase hypothesis-revision loop of the hard tier.
+    Included in improvement-rate KPI.
+    Examples: grep_search_fix, cross_file_refactor (ADR-0028).
+hard
+    Multi-phase reasoning, cross-module scope (4+ files, 2+ packages),
+    non-trivial state management, and deterministic pass/fail. Included in
+    improvement-rate KPI. See ADR-0028 §2 for the full definition.
+"""
 
 
 class ModelRequirements(BaseModel):

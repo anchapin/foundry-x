@@ -1,5 +1,11 @@
 """Benchmark task: navigate a nested directory tree to find and fix a bug.
 
+INFRASTRUCTURE CHECK (issue #1120)
+==================================
+This task uses run_solution to plant a complete golden solution. It tests
+whether the execution infrastructure works correctly -- NOT whether the
+agent can independently navigate a directory tree and fix a bug.
+
 This is the first benchmark task that exercises the ``list_dir`` skill
 (issue #263). Until now every task in the suite either names the target
 file in the prompt (``fix_import_error``, ``cross_file_refactor``) or
@@ -67,7 +73,7 @@ TASK = BenchmarkTask(
     ),
     timeout_seconds=30,
     requires_skills=["bash", "list_dir"],
-    tags=["navigation", "filesystem", "multi-file", "debugging"],
+    tags=["navigation", "filesystem", "multi-file", "debugging", "infrastructure"],
 )
 
 #: Root of the static fixture data for this task.

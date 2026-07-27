@@ -1,6 +1,6 @@
 """Benchmark task: debug a circular import across two packages (ADR-0028 H1).
 
-This is the first ``difficulty_tier='hard'`` task in the suite.  It
+This is a ``difficulty_tier='medium'`` task in the suite.  It
 implements Archetype H1 ("complex debugging across modules") from
 ADR-0028 §3:
 
@@ -82,7 +82,7 @@ TASK = BenchmarkTask(
         "After your fix, 'python -m pytest' must exit 0 with all tests "
         "passing."
     ),
-    difficulty_tier="hard",
+    difficulty_tier="medium",
     expected_outcome=(
         "After breaking the circular import, 'python -m pytest' exits 0 "
         "and both tests in tests/test_integration.py pass."

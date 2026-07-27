@@ -205,8 +205,9 @@ class TestLlmEvolverProducesEditsThatPassCriticGate:
         verdict = critic.evaluate(edits[0].unified_diff)
         assert verdict.verdict is True
 
-    def test_multiple_llm_edits_all_pass_critic(self, tmp_path: Path) -> None:
+    def test_multiple_llm_edits_all_pass_critic(self, tmp_path: Path, monkeypatch) -> None:
         """Multiple LLM-generated edits targeting different files all pass the gate."""
+        monkeypatch.setenv("FOUNDRY_EVOLVER_LLM_ENABLED", "true")
         harness = _make_harness_with_tests(tmp_path)
 
         diff1 = _system_prompt_diff("You are FoundryAgent v2.\n")
@@ -263,8 +264,9 @@ class TestLlmEvolverProducesEditsThatPassCriticGate:
 class TestLlmEvolverTraceEventsRecorded:
     """Acceptance criterion 4: Trace events from LLM calls are properly recorded."""
 
-    def test_propose_emits_proposed_edit_trace_event(self, tmp_path: Path) -> None:
+    def test_propose_emits_proposed_edit_trace_event(self, tmp_path: Path, monkeypatch) -> None:
         """Evolver.propose() with LLM adapter records PROPOSED_EDIT_KIND events."""
+        monkeypatch.setenv("FOUNDRY_EVOLVER_LLM_ENABLED", "true")
         logger = TraceLogger(tmp_path / "trace.db")
         harness = _make_harness_with_tests(tmp_path)
 
@@ -457,12 +459,15 @@ class TestLlmEvolverNoRegressions:
     These tests verify that the Critic gate rejects edits that would cause regressions.
     """
 
-    def test_llm_edit_with_injection_pattern_rejected_by_critic(self, tmp_path: Path) -> None:
+    def test_llm_edit_with_injection_pattern_rejected_by_critic(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         """An LLM-generated edit containing injection patterns is rejected by the Critic.
 
         This verifies that even if an LLM produces a syntactically valid edit,
         the Critic's security gate catches malicious content.
         """
+        monkeypatch.setenv("FOUNDRY_EVOLVER_LLM_ENABLED", "true")
         harness = _make_harness_with_tests(tmp_path)
 
         diff = (
@@ -599,8 +604,11 @@ class TestLlmEvolverNoRegressions:
 class TestLlmEvolverFallbackBehavior:
     """Verify fallback to template-based proposals when LLM path fails."""
 
-    def test_falls_back_to_template_when_llm_returns_empty_edits(self, tmp_path: Path) -> None:
+    def test_falls_back_to_template_when_llm_returns_empty_edits(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         """When LLM returns no valid edits, Evolver falls back to template-based proposal."""
+        monkeypatch.setenv("FOUNDRY_EVOLVER_LLM_ENABLED", "true")
         harness = _make_harness_with_tests(tmp_path)
 
         mock_response = json.dumps({"proposed_edits": []})
@@ -625,7 +633,9 @@ class TestLlmEvolverFallbackBehavior:
         assert len(edits) == 1
         assert edits[0].rationale == "address wrong-tool failure: reinforce tool list adherence"
 
-    def test_falls_back_to_template_when_llm_returns_bare_empty_array(self, tmp_path: Path) -> None:
+    def test_falls_back_to_template_when_llm_returns_bare_empty_array(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         """A bare ``[]`` array triggers template fallback and a trace event.
 
         Regression test for issue #973: previously ``_parse_edits_from_response``
@@ -634,6 +644,7 @@ class TestLlmEvolverFallbackBehavior:
         failure class was unobservable. Now the empty array raises so the
         template path produces an edit and the attempt is traced.
         """
+        monkeypatch.setenv("FOUNDRY_EVOLVER_LLM_ENABLED", "true")
         logger = TraceLogger(tmp_path / "trace.db")
         harness = _make_harness_with_tests(tmp_path)
 

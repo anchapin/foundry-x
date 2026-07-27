@@ -106,6 +106,48 @@ three PRD KPIs:
   window is being misspent. The raw session count
   (`token_budget_abort_count`) is retained as an auxiliary signal.
 
+## DifficultyTier
+
+The ``difficulty_tier`` field on ``BenchmarkTask`` classifies benchmark tasks
+by cognitive complexity.  The scale is defined in
+``benchmarks/models.py`` as:
+
+```python
+DifficultyTier = Literal["smoke", "easy", "medium", "hard"]
+```
+
+### smoke
+
+Single-step, well-defined outcome.  No branching or state tracking required.
+Example: ``test_real_llm_smoke``.
+
+### easy
+
+Single-pass task.  The agent reads one or two files, locates the target,
+and makes one edit in one round.  No cross-file reasoning required.
+Example: ``test_fix_import_error``.
+
+### medium
+
+Solvable in a single linear pass: read → locate → edit → verify.
+May require reading three or more files and editing two or more,
+but does not require the agent to form and test a hypothesis,
+observe a secondary failure, and revise its plan.
+Example: ``test_cross_file_refactor``, ``test_grep_search_fix``.
+
+### hard
+
+Requires **all** of: multi-phase reasoning (two or more distinct reasoning
+states), cross-module scope (four or more files across at least two
+distinct Python packages or module namespaces), non-trivial state management
+(state that spans multiple tool-call rounds and is not directly observable
+in a single file), and a deterministic pre/post-condition oracle.
+See ADR-0028 §2 for the full definition (status: Proposed).
+
+No tasks currently declare ``difficulty_tier="hard"``.  The tier exists
+in the schema to allow future hard-tier benchmarks to be added once
+ADR-0028 is Accepted and the implementation plan is complete.
+
 ## Event kinds
 
 The vocabulary of `kind` values persisted by the `TraceLogger` onto
