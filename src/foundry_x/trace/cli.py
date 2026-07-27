@@ -223,16 +223,16 @@ def _redact_session(args: argparse.Namespace) -> int:
     count = len(logger.load_session(args.session_id))
     if getattr(args, "dry_run", False):
         sessions = logger.list_sessions()
-        session_meta = next(
-            (s for s in sessions if s.session_id == args.session_id), None
-        )
+        session_meta = next((s for s in sessions if s.session_id == args.session_id), None)
         if session_meta:
             sys.stdout.write(
                 f"  would redact {session_meta.session_id}"
                 f"  started_at={session_meta.started_at}"
                 f"  harness_version={session_meta.harness_version}\n"
             )
-        sys.stdout.write(f"Dry run: would redact {count} event(s) from session {args.session_id}.\n")
+        sys.stdout.write(
+            f"Dry run: would redact {count} event(s) from session {args.session_id}.\n"
+        )
         return 0
     logger.delete_session(args.session_id)
     sys.stdout.write(f"Deleted session {args.session_id}: {count} event(s) removed.\n")
@@ -301,16 +301,16 @@ def _delete_session(args: argparse.Namespace) -> int:
     count = len(logger.load_session(args.session_id))
     if getattr(args, "dry_run", False):
         sessions = logger.list_sessions()
-        session_meta = next(
-            (s for s in sessions if s.session_id == args.session_id), None
-        )
+        session_meta = next((s for s in sessions if s.session_id == args.session_id), None)
         if session_meta:
             sys.stdout.write(
                 f"  would delete {session_meta.session_id}"
                 f"  started_at={session_meta.started_at}"
                 f"  harness_version={session_meta.harness_version}\n"
             )
-        sys.stdout.write(f"Dry run: would delete {count} event(s) from session {args.session_id}.\n")
+        sys.stdout.write(
+            f"Dry run: would delete {count} event(s) from session {args.session_id}.\n"
+        )
         return 0
     logger.delete_session(args.session_id)
     sys.stdout.write(f"Deleted session {args.session_id}: {count} event(s) removed.\n")
