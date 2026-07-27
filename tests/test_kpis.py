@@ -2298,17 +2298,11 @@ def test_compute_kpis_session_slices_by_harness_version(tmp_path):
     """compute_kpis populates per_harness_version when group_by='harness_version'."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
-    _seed_session_with_covariates(
-        logger, "v1", verdict=True, passed_checks=["a"]
-    )
+    _seed_session_with_covariates(logger, "v1", verdict=True, passed_checks=["a"])
     # v2: one approved, then one where task_a regresses (was passed in
     # the prior v2 session)
-    _seed_session_with_covariates(
-        logger, "v2", verdict=True, passed_checks=["a"]
-    )
-    _seed_session_with_covariates(
-        logger, "v2", verdict=False, failed_checks=["a"]
-    )
+    _seed_session_with_covariates(logger, "v2", verdict=True, passed_checks=["a"])
+    _seed_session_with_covariates(logger, "v2", verdict=False, failed_checks=["a"])
 
     summary = compute_kpis(logger, group_by="harness_version")
     assert summary.per_harness_version is not None
@@ -2328,9 +2322,7 @@ def test_compute_kpis_session_slices_excludes_none_values(tmp_path):
         logger, "v1", model_id="llama-7b", verdict=True, passed_checks=["a"]
     )
     # This session has model_id=None
-    _seed_session_with_covariates(
-        logger, "v1", verdict=False, failed_checks=["b"]
-    )
+    _seed_session_with_covariates(logger, "v1", verdict=False, failed_checks=["b"])
 
     summary = compute_kpis(logger, group_by="model_id")
     assert summary.per_model_id is not None
@@ -2418,17 +2410,18 @@ def test_session_slices_empty_when_no_group_by(tmp_path):
 def test_append_kpi_history_excludes_session_slice_fields(tmp_path):
     """append_kpi_history omits per_model_id/per_quantization/per_harness_version."""
     from foundry_x.observability.kpis import append_kpi_history
+
     db = tmp_path / "traces.db"
     logger = TraceLogger(db)
     _seed_session_with_covariates(
-        logger, "v1", model_id="llama-7b", quantization="Q5_K_M",
-        verdict=True, passed_checks=["a"]
+        logger, "v1", model_id="llama-7b", quantization="Q5_K_M", verdict=True, passed_checks=["a"]
     )
     summary = compute_kpis(logger, group_by="model_id")
     history_path = tmp_path / "kpi_history.jsonl"
     append_kpi_history(history_path, summary, harness_version="v1")
 
     import json
+
     line = json.loads(history_path.read_text().strip())
     assert "per_model_id" not in line
     assert "per_quantization" not in line

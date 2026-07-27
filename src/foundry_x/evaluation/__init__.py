@@ -14,6 +14,9 @@ under ``tests/`` and the real-model orchestrator under
 
 Members
 -------
+- :mod:`foundry_x.evaluation.aggregator` — per-config aggregation of
+  internal pass rates from the trace store, with paired-observation
+  output for :func:`~foundry_x.evaluation.correlation.pearson_binary`.
 - :mod:`foundry_x.evaluation.correlation` — pure Pearson correlation on
   paired binary pass/fail observations, with input validation that the
   ADR-0023 methodology requires.
