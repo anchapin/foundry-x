@@ -6,6 +6,7 @@ from foundry_x.evolution.critic import CriticVerdict
 from foundry_x.observability.cli import main as cli_main
 from foundry_x.observability.regression_report import (
     RegressionAnalysis,
+    TaskKpiMetadata,
     analyze_regressions,
     generate_regression_report,
     record_verdict,
@@ -637,3 +638,306 @@ def test_cli_regression_report_harness_version_no_match(tmp_path, capsys):
     assert rc == 0
     assert "Total verdicts: 0" in captured.out
     assert "_None._" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Issue #1114: --group-by regression breakdown
+# ---------------------------------------------------------------------------
+
+
+def _plant_mixed_sessions_with_metadata(logger: TraceLogger) -> None:
+    """Plant 4 sessions with known task metadata for group-by tests.
+
+    Sessions (verdicts recorded in order D, A, B, C due to with-block timing):
+      - D: fails task-A, task-B  (no regressions: first time for both)
+      - A: passes task-A, fails task-B  ← task-A passes, task-B fails
+      - B: fails task-A, passes task-B  ← task-A regresses (python/web/medium)
+      - C: passes task-A, fails task-B  ← task-B regresses (bash/cli/hard)
+
+    task-A: skill=["python"], task_family=["web"], difficulty_tier="medium"
+    task-B: skill=["bash"], task_family=["cli"], difficulty_tier="hard"
+
+    Expected regressions per group (from _slice_regression_counts):
+      - skill python: 1 (task-A regressed in session B)
+      - skill bash: 1 (task-B regressed in session C)
+      - task_family web: 1 (task-A regressed in session B)
+      - task_family cli: 1 (task-B regressed in session C)
+      - difficulty_tier medium: 1 (task-A regressed in session B)
+      - difficulty_tier hard: 1 (task-B regressed in session C)
+    """
+    sids = _three_sessions(logger)
+    sid_a, sid_b, sid_c = sids
+    with logger.session(harness_version="test-0.0") as sid_d:
+        record_verdict(
+            logger,
+            sid_d,
+            CriticVerdict(verdict=False, failed_checks=["task-A", "task-B"]),
+        )
+    record_verdict(
+        logger,
+        sid_a,
+        CriticVerdict(verdict=False, passed_checks=["task-A"], failed_checks=["task-B"]),
+    )
+    record_verdict(
+        logger,
+        sid_b,
+        CriticVerdict(verdict=False, failed_checks=["task-A"], passed_checks=["task-B"]),
+    )
+    record_verdict(
+        logger,
+        sid_c,
+        CriticVerdict(verdict=False, passed_checks=["task-A"], failed_checks=["task-B"]),
+    )
+
+
+def test_cli_regression_report_group_by_skill_markdown(tmp_path, capsys):
+    """--group-by skill appends a Per-Skill Regressions section."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions_with_metadata(logger)
+
+    import json
+
+    meta_path = tmp_path / "task_metadata.json"
+    meta_path.write_text(
+        json.dumps(
+            {
+                "task-A": {
+                    "skills": ["python"],
+                    "task_families": ["web"],
+                    "difficulty_tier": "medium",
+                },
+                "task-B": {"skills": ["bash"], "task_families": ["cli"], "difficulty_tier": "hard"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = cli_main(
+        [
+            "regression-report",
+            "--db",
+            str(db),
+            "--group-by",
+            "skill",
+            "--task-metadata",
+            str(meta_path),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "## Per-Skill Regressions" in captured.out
+    # task-A (skill: python) regressed twice; task-B (skill: bash) regressed once.
+    assert "python" in captured.out
+    assert "bash" in captured.out
+
+
+def test_cli_regression_report_group_by_task_family_markdown(tmp_path, capsys):
+    """--group-by task_family appends a Per-Task Family Regressions section."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions_with_metadata(logger)
+
+    import json
+
+    meta_path = tmp_path / "task_metadata.json"
+    meta_path.write_text(
+        json.dumps(
+            {
+                "task-A": {
+                    "skills": ["python"],
+                    "task_families": ["web"],
+                    "difficulty_tier": "medium",
+                },
+                "task-B": {"skills": ["bash"], "task_families": ["cli"], "difficulty_tier": "hard"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = cli_main(
+        [
+            "regression-report",
+            "--db",
+            str(db),
+            "--group-by",
+            "task_family",
+            "--task-metadata",
+            str(meta_path),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "## Per-Task Family Regressions" in captured.out
+    assert "web" in captured.out
+    assert "cli" in captured.out
+
+
+def test_cli_regression_report_group_by_difficulty_tier_markdown(tmp_path, capsys):
+    """--group-by difficulty_tier appends a Per-Difficulty Tier Regressions section."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions_with_metadata(logger)
+
+    import json
+
+    meta_path = tmp_path / "task_metadata.json"
+    meta_path.write_text(
+        json.dumps(
+            {
+                "task-A": {
+                    "skills": ["python"],
+                    "task_families": ["web"],
+                    "difficulty_tier": "medium",
+                },
+                "task-B": {"skills": ["bash"], "task_families": ["cli"], "difficulty_tier": "hard"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = cli_main(
+        [
+            "regression-report",
+            "--db",
+            str(db),
+            "--group-by",
+            "difficulty_tier",
+            "--task-metadata",
+            str(meta_path),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "## Per-Difficulty Tier Regressions" in captured.out
+    assert "medium" in captured.out
+    assert "hard" in captured.out
+
+
+def test_cli_regression_report_group_by_json_contains_slice_regressions(tmp_path, capsys):
+    """--group-by skill --format json emits slice_regressions key."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions_with_metadata(logger)
+
+    import json
+
+    meta_path = tmp_path / "task_metadata.json"
+    meta_path.write_text(
+        json.dumps(
+            {
+                "task-A": {
+                    "skills": ["python"],
+                    "task_families": ["web"],
+                    "difficulty_tier": "medium",
+                },
+                "task-B": {"skills": ["bash"], "task_families": ["cli"], "difficulty_tier": "hard"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = cli_main(
+        [
+            "regression-report",
+            "--db",
+            str(db),
+            "--group-by",
+            "skill",
+            "--task-metadata",
+            str(meta_path),
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert "slice_regressions" in payload
+    assert payload["slice_regressions"]["skill"]["python"] == 1
+    assert payload["slice_regressions"]["skill"]["bash"] == 1
+    # Other dimensions should be empty.
+    assert payload["slice_regressions"]["task_family"] == {}
+    assert payload["slice_regressions"]["difficulty_tier"] == {}
+
+
+def test_cli_regression_report_without_group_by_unchanged(tmp_path, capsys):
+    """Without --group-by, output is identical to current behavior."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _plant_mixed_sessions(logger)
+
+    rc = cli_main(["regression-report", "--db", str(db)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "## Regressed Tasks" in captured.out
+    assert "## New Passes" in captured.out
+    assert "## Token Budget Aborts" in captured.out
+    # No per-dimension section without --group-by.
+    assert "Per-" not in captured.out
+
+
+def test_analyze_regressions_group_by_skill(tmp_path):
+    """analyze_regressions with group_by=skill returns correct slice counts."""
+    logger = TraceLogger(tmp_path / "traces.db")
+    _plant_mixed_sessions_with_metadata(logger)
+
+    metadata = {
+        "task-A": TaskKpiMetadata(
+            name="task-A", skills=["python"], task_families=["web"], difficulty_tier="medium"
+        ),
+        "task-B": TaskKpiMetadata(
+            name="task-B", skills=["bash"], task_families=["cli"], difficulty_tier="hard"
+        ),
+    }
+
+    analysis = analyze_regressions(logger, group_by="skill", task_metadata=metadata)
+    assert analysis.slice_regressions.skill.get("python") == 1
+    assert analysis.slice_regressions.skill.get("bash") == 1
+
+
+def test_analyze_regressions_group_by_task_family(tmp_path):
+    """analyze_regressions with group_by=task_family returns correct slice counts."""
+    logger = TraceLogger(tmp_path / "traces.db")
+    _plant_mixed_sessions_with_metadata(logger)
+
+    metadata = {
+        "task-A": TaskKpiMetadata(
+            name="task-A", skills=["python"], task_families=["web"], difficulty_tier="medium"
+        ),
+        "task-B": TaskKpiMetadata(
+            name="task-B", skills=["bash"], task_families=["cli"], difficulty_tier="hard"
+        ),
+    }
+
+    analysis = analyze_regressions(logger, group_by="task_family", task_metadata=metadata)
+    assert analysis.slice_regressions.task_family.get("web") == 1
+    assert analysis.slice_regressions.task_family.get("cli") == 1
+
+
+def test_analyze_regressions_group_by_difficulty_tier(tmp_path):
+    """analyze_regressions with group_by=difficulty_tier returns correct slice counts."""
+    logger = TraceLogger(tmp_path / "traces.db")
+    _plant_mixed_sessions_with_metadata(logger)
+
+    metadata = {
+        "task-A": TaskKpiMetadata(
+            name="task-A", skills=["python"], task_families=["web"], difficulty_tier="medium"
+        ),
+        "task-B": TaskKpiMetadata(
+            name="task-B", skills=["bash"], task_families=["cli"], difficulty_tier="hard"
+        ),
+    }
+
+    analysis = analyze_regressions(logger, group_by="difficulty_tier", task_metadata=metadata)
+    assert analysis.slice_regressions.difficulty_tier.get("medium") == 1
+    assert analysis.slice_regressions.difficulty_tier.get("hard") == 1
+
+
+def test_analyze_regressions_group_by_no_metadata_empty(tmp_path):
+    """Without task_metadata, slice_regressions is empty (graceful degradation)."""
+    logger = TraceLogger(tmp_path / "traces.db")
+    _plant_mixed_sessions_with_metadata(logger)
+
+    analysis = analyze_regressions(logger, group_by="skill", task_metadata=None)
+    assert analysis.slice_regressions.skill == {}
