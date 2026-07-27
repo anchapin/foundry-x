@@ -42,6 +42,112 @@ The following benchmark tasks are expected to be **quantization-sensitive** — 
 
 *Pending live sweep execution to confirm these projections.*
 
+## GGUF v4 Quantization Extension (Issue #1050)
+
+### Motivation
+
+The llama.cpp GGUF format has evolved. GGUF v4 introduces
+importance-matrix (imatrix) quantization types that offer different
+quality/VRAM tradeoffs than the v3 K-quants studied above:
+
+| Quantization | Type | VRAM Est. (7B) | Notes |
+|--------------|------|-----------------|-------|
+| **IQ4_XS** | v4 (imatrix) | ~4.1 GB | Highest-quality IQ; comparable to Q4_K_M at lower VRAM |
+| **IQ3_S** | v4 (imatrix) | ~3.3 GB | Mid-range IQ; quality between Q3 and Q4 K-quants |
+| **IQ3_XXS** | v4 (imatrix) | ~3.1 GB | Aggressive; significant quality degradation expected |
+| **IQ2_XXS** | v4 (imatrix) | ~2.7 GB | Extreme compression; suitable only for smoke tests |
+| **Q2_K** | v3 (baseline) | ~2.6 GB | Baseline for the aggressive end; not imatrix-based |
+
+### Methodology
+
+The v4 quantization sweep uses the same `foundry-sweep` infrastructure
+(ADR-0016) but with v4 quantization labels:
+
+```bash
+FOUNDRY_MODEL_PATH=/srv/models \
+  foundry-sweep sweep \
+  --quantizations Q2_K,IQ2_XXS,IQ3_XXS,IQ3_S,IQ4_XS,Q4_K_M,Q5_K_M,Q8_0 \
+  --harness-dir harness \
+  --baseline Q8_0 \
+  --regression-threshold 2.0
+```
+
+The sweep code (`Critic.quantization_sweep`) accepts arbitrary
+quantization labels; the known v4 types are documented in
+`KNOWN_V4_QUANTIZATIONS` in `src/foundry_x/evolution/critic.py`.
+
+### v4 Intelligence Floor Table
+
+> **Status: PENDING** — requires GPU hardware and v4 model files. Tracked
+> in follow-up issue.
+
+| Quantization | VRAM Est. | Pass Rate | vs. Q8_0 | Status |
+|--------------|-----------|-----------|----------|--------|
+| **IQ4_XS** | ~4.1 GB | — | — | Pending |
+| **IQ3_S** | ~3.3 GB | — | — | Pending |
+| **IQ3_XXS** | ~3.1 GB | — | — | Pending |
+| **IQ2_XXS** | ~2.7 GB | — | — | Pending |
+| **Q2_K** | ~2.6 GB | — | — | Pending |
+
+The goal is to identify whether any IQ quantization offers a pass rate
+within 2 pp of the Q8_0 baseline at lower VRAM than the current
+recommended floor (Q5_K_M, ~5.5 GB). If so, it would allow 8 GB card
+operators to run a higher-quality model per VRAM dollar.
+
+## Context Window Sweep (Issue #1050)
+
+### Motivation
+
+ADR-0020's intelligence floor was studied at the default
+`FOUNDRY_CONTEXT_TOKENS=8192`. Larger context windows (16k, 32k, 128k)
+change the intelligence floor because:
+
+1. **KV cache growth**: larger contexts consume more VRAM for the KV
+   cache, reducing the VRAM budget available for model weights and
+   potentially forcing lower quantization.
+2. **Long-context quality degradation**: some quantizations degrade
+   more than others on long-context tasks (retrieval, summarization).
+3. **Context pruning interaction**: `FOUNDRY_CONTEXT_TOKENS` is the
+   pruning threshold (ADR-0021). A higher threshold means less pruning
+   but more VRAM usage; the tradeoff is quantization-sensitive.
+
+### Methodology
+
+The context window sweep uses the new `--context-tokens` flag to run
+the benchmark suite at different `FOUNDRY_CONTEXT_TOKENS` values:
+
+```bash
+# Sweep context windows at the recommended floor (Q5_K_M)
+for ctx in 8192 16384 32768; do
+  FOUNDRY_MODEL_PATH=/srv/models \
+    foundry-sweep sweep \
+    --quantizations Q5_K_M,Q8_0 \
+    --harness-dir harness \
+    --baseline Q8_0 \
+    --context-tokens $ctx \
+    --output logs/sweep_ctx_${ctx}.json
+done
+```
+
+For each context window size, identify the minimum viable quantization
+that stays within 2 pp of the Q8_0 baseline at that context window.
+
+### Context Window Intelligence Floor Table
+
+> **Status: PENDING** — requires GPU hardware with sufficient VRAM for
+> larger KV caches. Tracked in follow-up issue.
+
+| Context Window | Q8_0 Pass Rate | Q5_K_M Pass Rate | IQ4_XS Pass Rate | Notes |
+|----------------|----------------|------------------|------------------|-------|
+| **8192** (current) | — | — | — | Baseline from table above |
+| **16384** | — | — | — | Pending |
+| **32768** | — | — | — | Pending |
+| **131072** | — | — | — | Pending; may require >8 GB VRAM |
+
+The goal is to determine whether `FOUNDRY_CONTEXT_TOKENS=8192` remains
+the correct default, or whether larger context windows are viable at
+the recommended quantization floor without exceeding 8 GB VRAM.
+
 ## Token Efficiency Analysis
 
 Token efficiency = `total_tokens / avg_cycle_time_s` (tokens/second). This measures how fast the model processes tokens — a proxy for inference throughput on the target GPU.
@@ -105,6 +211,8 @@ The following are unresolved as of this writing and block full empirical validat
 | 4 | Does the real-LLM smoke job pass on CI with live model? | Issue #552 | Open |
 | 5 | Is `FOUNDRY_CONTEXT_TOKENS=8192` the correct default for 5600G/6600 XT? | Issue #553 | Open |
 | 6 | Are there benchmark tasks that remain intractable even at Q8_0? | Unknown | Unstudied |
+| 7 | Do GGUF v4 IQ quantizations (IQ4_XS, IQ3_S) offer a better quality/VRAM tradeoff than Q5_K_M? | Issue #1050 (follow-up pending) | Open |
+| 8 | Does the intelligence floor change at larger context windows (16k, 32k)? | Issue #1050 (follow-up pending) | Open |
 
 Issues #549–#553 must be resolved before this ADR can be updated from "projected" to "empirically confirmed" status.
 
@@ -115,3 +223,4 @@ Issues #549–#553 must be resolved before this ADR can be updated from "project
 - The `FOUNDRY_TOKEN_BUDGET` abort is a task-shaped failure classification, not a harness regression — it is excluded from the pass-rate denominator per ADR-0016 §6.
 - This ADR is a living document: it must be updated to replace projected values with live sweep data once issues #549–#553 are resolved.
 - If live data confirms Q4_K_M pass rate is within 2 pp of Q5_K_M, it may be promoted to the recommended floor for the 6600 XT.
+- **Issue #1050 extension**: GGUF v4 IQ quantizations (IQ4_XS, IQ3_S) and larger context windows (16k, 32k) are now in scope. The sweep code supports both via `KNOWN_V4_QUANTIZATIONS` constants and the `--context-tokens` CLI flag. Empirical results are pending GPU execution (see follow-up issues).

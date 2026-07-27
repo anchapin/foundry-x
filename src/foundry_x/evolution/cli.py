@@ -593,6 +593,17 @@ def _build_sweep_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--context-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Context window size in tokens to set via FOUNDRY_CONTEXT_TOKENS "
+            "for the sweep subprocesses (issue #1050). Use to study the "
+            "intelligence floor at different context window sizes (e.g. 16384, "
+            "32768). When omitted, the existing env value is left untouched."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default=None,
@@ -806,6 +817,16 @@ def _build_sweep_subparser(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--context-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Context window size in tokens to set via FOUNDRY_CONTEXT_TOKENS "
+            "for the sweep subprocesses (issue #1050). Use to study the "
+            "intelligence floor at different context window sizes."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default=None,
@@ -944,6 +965,7 @@ def _main_sweep(args: argparse.Namespace) -> int:
                 baseline_quantization=args.baseline,
                 regression_threshold_pp=args.regression_threshold,
                 cost_per_token=args.cost_per_token,
+                context_tokens=getattr(args, "context_tokens", None),
             )
     except (ValueError, FileNotFoundError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
@@ -1008,6 +1030,7 @@ def sweep_main(argv: list[str] | None = None) -> int:
                 baseline_quantization=args.baseline,
                 regression_threshold_pp=args.regression_threshold,
                 cost_per_token=args.cost_per_token,
+                context_tokens=getattr(args, "context_tokens", None),
             )
     except (ValueError, FileNotFoundError) as exc:
         sys.stderr.write(f"Error: {exc}\n")

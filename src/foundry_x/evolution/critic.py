@@ -21,6 +21,35 @@ DEFAULT_REGRESSION_THRESHOLD_PP = 2.0
 
 _NOTES_TAIL_CHARS = 4000
 
+#: GGUF v3 quantization types studied in ADR-0020 (K-quants and legacy
+#: types). These are the quantizations for which the intelligence floor
+#: table in ADR-0020 has (projected) pass-rate data.
+KNOWN_V3_QUANTIZATIONS: tuple[str, ...] = (
+    "Q8_0",
+    "Q6_K",
+    "Q5_K_M",
+    "Q5_K_S",
+    "Q4_K_M",
+    "Q4_K_S",
+)
+
+#: GGUF v4 quantization types (IQ family) added in issue #1050. These use
+#: importance-matrix (imatrix) based quantization and offer different
+#: quality/VRAM tradeoffs than the v3 K-quants. ``Q2_K`` is included as a
+#: baseline at the aggressive end of the VRAM/compression spectrum.
+KNOWN_V4_QUANTIZATIONS: tuple[str, ...] = (
+    "IQ4_XS",
+    "IQ3_S",
+    "IQ3_XXS",
+    "IQ2_XXS",
+    "Q2_K",
+)
+
+#: All known GGUF quantization types (v3 + v4). Used for documentation and
+#: optional validation; the sweep accepts arbitrary labels so non-standard
+#: or future quantizations are not blocked.
+KNOWN_QUANTIZATIONS: tuple[str, ...] = (*KNOWN_V3_QUANTIZATIONS, *KNOWN_V4_QUANTIZATIONS)
+
 # SECURITY.md Threat #2: prompt-injection patterns checked at the Critic gate
 # (issue #333). These are the same categories named in the firewall docstring
 # (harness/hooks/injection_firewall.py INJECTION_PATTERNS) but expressed as
@@ -329,6 +358,7 @@ class Critic:
         baseline_quantization: str | None = None,
         regression_threshold_pp: float = DEFAULT_REGRESSION_THRESHOLD_PP,
         cost_per_token: float | None = None,
+        context_tokens: int | None = None,
     ) -> QuantizationVerdict:
         """Run the benchmark suite against each quantization and produce a comparison.
 
@@ -349,6 +379,11 @@ class Critic:
             cost_per_token: cost per token in USD for cost-per-task computation.
                 When provided, ``cost_per_task`` is computed for each quantization
                 result. Can also be set via ``FOUNDRY_COST_PER_TOKEN`` env var.
+            context_tokens: context window size in tokens to set via the
+                ``FOUNDRY_CONTEXT_TOKENS`` environment variable for the sweep
+                subprocesses (issue #1050). When ``None``, the existing env
+                value is left untouched. Useful for studying the intelligence
+                floor at different context window sizes (16k, 32k, 128k).
 
         Returns:
             A ``QuantizationVerdict`` with per-quantization results and a
@@ -378,46 +413,62 @@ class Critic:
             if cost_env is not None:
                 effective_cost = float(cost_env)
 
+        # Set the context window for this sweep run (issue #1050). The
+        # env var propagates to the pytest subprocesses spawned in
+        # ``_run_sweep_for_quant`` (which inherit ``os.environ``). The
+        # original value is restored after the sweep so concurrent callers
+        # are unaffected.
+        original_context_tokens = os.environ.get("FOUNDRY_CONTEXT_TOKENS")
+        if context_tokens is not None:
+            os.environ["FOUNDRY_CONTEXT_TOKENS"] = str(context_tokens)
+
         results: list[QuantizationResult] = []
 
-        for quant in quantizations:
-            pattern = model_glob_patterns.get(quant, f"*.{quant}.gguf")
-            full_pattern = str(model_base / pattern)
-            matched = glob.glob(full_pattern)
+        try:
+            for quant in quantizations:
+                pattern = model_glob_patterns.get(quant, f"*.{quant}.gguf")
+                full_pattern = str(model_base / pattern)
+                matched = glob.glob(full_pattern)
 
-            if not matched:
-                raise FileNotFoundError(
-                    f"No model file found for quantization {quant!r} "
-                    f"using pattern {pattern!r} in {model_path_env}"
-                )
-            if len(matched) > 1:
-                raise ValueError(
-                    f"Multiple model files matched for quantization {quant!r}: {matched}"
-                )
+                if not matched:
+                    raise FileNotFoundError(
+                        f"No model file found for quantization {quant!r} "
+                        f"using pattern {pattern!r} in {model_path_env}"
+                    )
+                if len(matched) > 1:
+                    raise ValueError(
+                        f"Multiple model files matched for quantization {quant!r}: {matched}"
+                    )
 
-            model_file = matched[0]
-            model_id = f"{quant}"
+                model_file = matched[0]
+                model_id = f"{quant}"
 
-            original_model_path = os.environ.get("FOUNDRY_MODEL_PATH")
-            original_model_id = os.environ.get("FOUNDRY_MODEL_ID")
+                original_model_path = os.environ.get("FOUNDRY_MODEL_PATH")
+                original_model_id = os.environ.get("FOUNDRY_MODEL_ID")
 
-            os.environ["FOUNDRY_MODEL_PATH"] = str(model_base)
-            os.environ["FOUNDRY_MODEL_ID"] = model_id
+                os.environ["FOUNDRY_MODEL_PATH"] = str(model_base)
+                os.environ["FOUNDRY_MODEL_ID"] = model_id
 
-            try:
-                sweep_result = self._run_sweep_for_quant(
-                    model_file, model_id, cost_per_token=effective_cost
-                )
-                results.append(sweep_result)
-            finally:
-                if original_model_path is not None:
-                    os.environ["FOUNDRY_MODEL_PATH"] = original_model_path
+                try:
+                    sweep_result = self._run_sweep_for_quant(
+                        model_file, model_id, cost_per_token=effective_cost
+                    )
+                    results.append(sweep_result)
+                finally:
+                    if original_model_path is not None:
+                        os.environ["FOUNDRY_MODEL_PATH"] = original_model_path
+                    else:
+                        os.environ.pop("FOUNDRY_MODEL_PATH", None)
+                    if original_model_id is not None:
+                        os.environ["FOUNDRY_MODEL_ID"] = original_model_id
+                    else:
+                        os.environ.pop("FOUNDRY_MODEL_ID", None)
+        finally:
+            if context_tokens is not None:
+                if original_context_tokens is not None:
+                    os.environ["FOUNDRY_CONTEXT_TOKENS"] = original_context_tokens
                 else:
-                    os.environ.pop("FOUNDRY_MODEL_PATH", None)
-                if original_model_id is not None:
-                    os.environ["FOUNDRY_MODEL_ID"] = original_model_id
-                else:
-                    os.environ.pop("FOUNDRY_MODEL_ID", None)
+                    os.environ.pop("FOUNDRY_CONTEXT_TOKENS", None)
 
         baseline = baseline_quantization if baseline_quantization else quantizations[0]
         baseline_result = next(r for r in results if r.quantization == baseline)

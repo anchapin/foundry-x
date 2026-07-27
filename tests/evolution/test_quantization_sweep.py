@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +15,10 @@ from foundry_x.evolution.cli import (
 )
 from foundry_x.evolution.critic import (
     DEFAULT_REGRESSION_THRESHOLD_PP,
+    KNOWN_QUANTIZATIONS,
+    KNOWN_V3_QUANTIZATIONS,
+    KNOWN_V4_QUANTIZATIONS,
+    Critic,
     QuantizationResult,
     QuantizationVerdict,
     TaskResult,
@@ -779,13 +784,33 @@ class TestSweepGateTimeout:
         assert result.pass_rate == 1.0
 
 
+class TestKnownQuantizations:
+    """GGUF v4 quantization constants added in issue #1050."""
+
+    def test_v3_quantizations_include_core_types(self):
+        assert "Q8_0" in KNOWN_V3_QUANTIZATIONS
+        assert "Q5_K_M" in KNOWN_V3_QUANTIZATIONS
+        assert "Q4_K_S" in KNOWN_V3_QUANTIZATIONS
+
+    def test_v4_quantizations_include_iq_family(self):
+        assert "IQ4_XS" in KNOWN_V4_QUANTIZATIONS
+        assert "IQ3_S" in KNOWN_V4_QUANTIZATIONS
+        assert "Q2_K" in KNOWN_V4_QUANTIZATIONS
+
+    def test_all_combines_v3_and_v4(self):
+        assert set(KNOWN_QUANTIZATIONS) == set(KNOWN_V3_QUANTIZATIONS) | set(KNOWN_V4_QUANTIZATIONS)
+
+    def test_no_overlap_between_v3_and_v4(self):
+        v3_set = set(KNOWN_V3_QUANTIZATIONS)
+        v4_set = set(KNOWN_V4_QUANTIZATIONS)
+        assert v3_set.isdisjoint(v4_set)
+
+
 class TestModelFamiliesCLI:
     """Tests for --model-families flag (ADR-0025)."""
 
     def test_build_sweep_parser_with_model_families(self):
         """Parser accepts --model-families flag."""
-        from foundry_x.evolution.cli import _build_sweep_parser
-
         parser = _build_sweep_parser()
         args = parser.parse_args(
             [
@@ -802,8 +827,6 @@ class TestModelFamiliesCLI:
 
     def test_build_sweep_parser_model_families_defaults_to_none(self):
         """--model-families defaults to None when not provided."""
-        from foundry_x.evolution.cli import _build_sweep_parser
-
         parser = _build_sweep_parser()
         args = parser.parse_args(
             [
@@ -814,6 +837,46 @@ class TestModelFamiliesCLI:
             ]
         )
         assert args.model_families is None
+
+
+class TestContextTokensParserFlag:
+    """The --context-tokens flag is accepted by both sweep parsers (issue #1050)."""
+
+    def test_context_tokens_in_standalone_parser(self):
+        parser = _build_sweep_parser()
+        args = parser.parse_args(
+            [
+                "--quantizations",
+                "Q5_K_M",
+                "--harness-dir",
+                "/tmp/harness",
+                "--context-tokens",
+                "16384",
+            ]
+        )
+        assert args.context_tokens == 16384
+
+    def test_context_tokens_default_none(self):
+        parser = _build_sweep_parser()
+        args = parser.parse_args(["--quantizations", "Q5_K_M", "--harness-dir", "/tmp/harness"])
+        assert args.context_tokens is None
+
+    def test_context_tokens_in_subparser(self):
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        _build_sweep_subparser(parser)
+        args = parser.parse_args(
+            [
+                "--quantizations",
+                "IQ4_XS,IQ3_S",
+                "--harness-dir",
+                "/tmp/harness",
+                "--context-tokens",
+                "32768",
+            ]
+        )
+        assert args.context_tokens == 32768
 
 
 class TestModelFamilySweepRenderers:
@@ -957,3 +1020,159 @@ class TestModelFamilySweepRenderers:
         )
         output = _render_model_family_verdict(verdict)
         assert "REGRESSION DETECTED" in output
+
+
+class TestContextTokensEnvPropagation:
+    """quantization_sweep sets/restores FOUNDRY_CONTEXT_TOKENS (issue #1050)."""
+
+    def test_context_tokens_sets_env_during_sweep(self, tmp_path):
+        """When context_tokens is provided, FOUNDRY_CONTEXT_TOKENS is set
+        for the sweep subprocesses and restored afterward."""
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        (model_dir / "test.Q5_K_M.gguf").touch()
+
+        captured_env: dict[str, str | None] = {}
+
+        original = QuantizationResult(
+            quantization="Q5_K_M",
+            model_path=str(model_dir / "test.Q5_K_M.gguf"),
+            model_id="Q5_K_M",
+            pass_rate=0.95,
+        )
+
+        def _capture_env(self, model_file, model_id, cost_per_token=None):
+            captured_env["FOUNDRY_CONTEXT_TOKENS"] = os.environ.get("FOUNDRY_CONTEXT_TOKENS")
+            return original
+
+        critic = Critic(harness_dir=harness)
+
+        with (
+            patch.dict(
+                os.environ,
+                {"FOUNDRY_MODEL_PATH": str(model_dir)},
+                clear=False,
+            ),
+            patch.object(Critic, "_run_sweep_for_quant", _capture_env),
+        ):
+            verdict = critic.quantization_sweep(
+                quantizations=["Q5_K_M"],
+                context_tokens=16384,
+            )
+
+        assert verdict.recommended == "Q5_K_M"
+        assert captured_env["FOUNDRY_CONTEXT_TOKENS"] == "16384"
+
+    def test_context_tokens_restored_after_sweep(self, tmp_path):
+        """FOUNDRY_CONTEXT_TOKENS is restored to its original value after sweep."""
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        (model_dir / "test.Q5_K_M.gguf").touch()
+
+        original = QuantizationResult(
+            quantization="Q5_K_M",
+            model_path=str(model_dir / "test.Q5_K_M.gguf"),
+            model_id="Q5_K_M",
+            pass_rate=0.95,
+        )
+
+        critic = Critic(harness_dir=harness)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "FOUNDRY_MODEL_PATH": str(model_dir),
+                    "FOUNDRY_CONTEXT_TOKENS": "8192",
+                },
+                clear=False,
+            ),
+            patch.object(
+                Critic,
+                "_run_sweep_for_quant",
+                return_value=original,
+            ),
+        ):
+            critic.quantization_sweep(
+                quantizations=["Q5_K_M"],
+                context_tokens=32768,
+            )
+            # Original value restored after the sweep (inside patch.dict so
+            # the pre-existing env is what we check against).
+            assert os.environ.get("FOUNDRY_CONTEXT_TOKENS") == "8192"
+
+    def test_context_tokens_cleared_when_originally_unset(self, tmp_path):
+        """FOUNDRY_CONTEXT_TOKENS is removed when it was unset before the sweep."""
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        (model_dir / "test.Q5_K_M.gguf").touch()
+
+        original = QuantizationResult(
+            quantization="Q5_K_M",
+            model_path=str(model_dir / "test.Q5_K_M.gguf"),
+            model_id="Q5_K_M",
+            pass_rate=0.95,
+        )
+
+        critic = Critic(harness_dir=harness)
+
+        with (
+            patch.dict(
+                os.environ,
+                {"FOUNDRY_MODEL_PATH": str(model_dir)},
+                clear=False,
+            ),
+            patch.object(
+                Critic,
+                "_run_sweep_for_quant",
+                return_value=original,
+            ),
+        ):
+            # Ensure it's not set before the sweep
+            os.environ.pop("FOUNDRY_CONTEXT_TOKENS", None)
+            critic.quantization_sweep(
+                quantizations=["Q5_K_M"],
+                context_tokens=16384,
+            )
+            assert "FOUNDRY_CONTEXT_TOKENS" not in os.environ
+
+    def test_no_context_tokens_leaves_env_untouched(self, tmp_path):
+        """When context_tokens=None, the existing env value is left untouched."""
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        (model_dir / "test.Q5_K_M.gguf").touch()
+
+        original = QuantizationResult(
+            quantization="Q5_K_M",
+            model_path=str(model_dir / "test.Q5_K_M.gguf"),
+            model_id="Q5_K_M",
+            pass_rate=0.95,
+        )
+
+        critic = Critic(harness_dir=harness)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "FOUNDRY_MODEL_PATH": str(model_dir),
+                    "FOUNDRY_CONTEXT_TOKENS": "4096",
+                },
+                clear=False,
+            ),
+            patch.object(
+                Critic,
+                "_run_sweep_for_quant",
+                return_value=original,
+            ),
+        ):
+            critic.quantization_sweep(quantizations=["Q5_K_M"])
+            assert os.environ.get("FOUNDRY_CONTEXT_TOKENS") == "4096"
