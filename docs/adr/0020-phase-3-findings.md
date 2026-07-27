@@ -27,7 +27,7 @@ The table below records the pass rate for each quantization on the benchmark sui
 | **Q4_K_M** | ~4.5 GB | ~88–95% | Projected | Measurable degradation on complex instruction-following tasks |
 | **Q4_K_S** | ~4.0 GB | ~85–92% | Projected | Intelligence floor; suitable for smoke tests to maximise CI throughput |
 
-*Pass rates are benchmarks under `benchmarks/tasks/` as defined in ADR-0005. "Projected" values are estimates from llama.cpp community benchmarks and the llama.cpp Discord; they must be replaced with live sweep results when issues #549–#553 are resolved.*
+*Pass rates are benchmarks under `benchmarks/tasks/` as defined in ADR-0005. "Projected" values are estimates from llama.cpp community benchmarks and the llama.cpp Discord; per-quantization empirical pass rates require a live GPU sweep run on the target hardware (5600G / 6600 XT). Issues #549–#553 are closed — the sweep infrastructure and KPI wiring are confirmed, but a full empirical pass-rate table requires a dedicated GPU sweep (tracked in issue #1050).*
 
 ### Task-Level Failures
 
@@ -162,7 +162,7 @@ Token efficiency = `total_tokens / avg_cycle_time_s` (tokens/second). This measu
 | **Q4_K_M** | ~1.4–1.5x | ~22–27 t/s | +50% |
 | **Q4_K_S** | ~1.5–1.6x | ~24–29 t/s | +65% |
 
-*Measured at 6600 XT 8 GB VRAM. Actual throughput depends on GPU clock, ROCm version, and batch size. Token efficiency will be confirmed by issue #549 once `QuantizationResult.token_efficiency` is wired up from the trace store.*
+*Token efficiency = `total_tokens / avg_cycle_time_s` (tokens/sec), wired up by issue #549 (PRs #560, #574) via `QuantizationResult.token_efficiency`. Actual throughput varies by GPU model, GPU clock, ROCm version, and batch size; the values above are from llama.cpp community benchmarks on the RX 6600 XT. Per-quantization token efficiency is now captured automatically during sweep runs and stored in `QuantizationResult.token_efficiency`.*
 
 ### Cost-Efficiency Analysis
 
