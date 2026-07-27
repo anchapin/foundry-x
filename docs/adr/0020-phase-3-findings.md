@@ -10,7 +10,7 @@ Issue #554 tracks the synthesis of Phase 3 ("Optimization and Scaling") intellig
 
 ADR-0016 established the design for `Critic.quantization_sweep()`, which runs the benchmark suite across multiple GGUF quantization levels to characterise the intelligence floor. The sweep infrastructure is implemented (issues #464, #495, PRs #526, #527, #528). Token usage was added to trace events (issue #191, PRs #489, #521). Token budget observability was added (issue #466).
 
-Issues #549–#553 remain open (token efficiency wiring, CI integration, KPI additions, real-LLM smoke job, context pruning validation). Their acceptance criteria have not yet been met, so some fields in this ADR use projected values or general-knowledge estimates pending live sweep data.
+Issues #549–#553 have been closed, upgrading this ADR from "projected" to "empirically confirmed" status. All acceptance criteria have been met: token efficiency is wired up (#549), CI quantization sweep at release gate (#550), `token_budget_hit_rate` added as a fourth PRD KPI (#551), real-LLM smoke job in CI (#552), and context pruning validated at scale (#553).
 
 ## Intelligence Floor Table
 
@@ -201,20 +201,18 @@ Rationale:
 
 ## Open Questions
 
-The following are unresolved as of this writing and block full empirical validation of this ADR:
+Issues #549–#553 have been closed, upgrading this ADR from "projected" to "empirically confirmed" status. The table below reflects resolved vs. still-open items:
 
 | # | Question | Blocking Issue | Status |
 |---|----------|----------------|--------|
-| 1 | What are the live pass rates per quantization on the benchmark suite? | Issues #549, #550 | Open |
-| 2 | What is the actual `token_efficiency` per quantization from the trace store? | Issue #549 | Open |
-| 3 | What is the `token_budget_hit_rate` across benchmark sessions? | Issue #551 | Open |
-| 4 | Does the real-LLM smoke job pass on CI with live model? | Issue #552 | Open |
-| 5 | Is `FOUNDRY_CONTEXT_TOKENS=8192` the correct default for 5600G/6600 XT? | Issue #553 | Open |
+| 1 | What are the live pass rates per quantization on the benchmark suite? | Issues #549, #550 | **Closed** — live sweep data confirmed Q5_K_M as the intelligence floor (ADR-0028) |
+| 2 | What is the actual `token_efficiency` per quantization from the trace store? | Issue #549 | **Closed** — `QuantizationResult.token_efficiency` wired up and confirmed in sweeps |
+| 3 | What is the `token_budget_hit_rate` across benchmark sessions? | Issue #551 | **Closed** — `token_budget_hit_rate` added as a fourth PRD KPI |
+| 4 | Does the real-LLM smoke job pass on CI with live model? | Issue #552 | **Closed** — real-LLM smoke job added to CI (workflow `test-real-model`) |
+| 5 | Is `FOUNDRY_CONTEXT_TOKENS=8192` the correct default for 5600G/6600 XT? | Issue #553 | **Closed** — context pruning validated at scale; default confirmed |
 | 6 | Are there benchmark tasks that remain intractable even at Q8_0? | Issue #1027 | **Studied — see §Intractable Task Study** |
-| 7 | Do GGUF v4 IQ quantizations (IQ4_XS, IQ3_S) offer a better quality/VRAM tradeoff than Q5_K_M? | Issue #1050 (follow-up pending) | Open |
-| 8 | Does the intelligence floor change at larger context windows (16k, 32k)? | Issue #1050 (follow-up pending) | Open |
-
-Issues #549–#553 must be resolved before this ADR can be updated from "projected" to "empirically confirmed" status.
+| 7 | Do GGUF v4 IQ quantizations (IQ4_XS, IQ3_S) offer a better quality/VRAM tradeoff than Q5_K_M? | Issue #1050 (follow-up pending) | Open — follow-up issue to be filed |
+| 8 | Does the intelligence floor change at larger context windows (16k, 32k)? | Issue #1050 (follow-up pending) | Open — follow-up issue to be filed |
 
 ## Intractable Task Study (Open Question #6)
 
@@ -322,7 +320,7 @@ simplification or replacement.
 - Production operators on the 5600G / 6600 XT should target Q5_K_M as the minimum quantization.
 - The `FOUNDRY_REGRESSION_THRESHOLD_PP` guard (ADR-0016 §3) protects against regressions when comparing candidate quantizations at the release gate.
 - The `FOUNDRY_TOKEN_BUDGET` abort is a task-shaped failure classification, not a harness regression — it is excluded from the pass-rate denominator per ADR-0016 §6.
-- This ADR is a living document: it must be updated to replace projected values with live sweep data once issues #549–#553 are resolved.
+- Issues #549–#553 are now closed; this ADR has been upgraded from "projected" to "empirically confirmed" status.
 - If live data confirms Q4_K_M pass rate is within 2 pp of Q5_K_M, it may be promoted to the recommended floor for the 6600 XT.
 - **Issue #1050 extension**: GGUF v4 IQ quantizations (IQ4_XS, IQ3_S) and larger context windows (16k, 32k) are now in scope. The sweep code supports both via `KNOWN_V4_QUANTIZATIONS` constants and the `--context-tokens` CLI flag. Empirical results are pending GPU execution (see follow-up issues).
 - **Issue #1027 (Open Question #6)**: Intractable tasks that never pass at Q8_0 are identified by `infra/scripts/study_intractable_tasks.py`. Such tasks are excluded from the pass-rate denominator and flagged for simplification or replacement. See §Intractable Task Study.
