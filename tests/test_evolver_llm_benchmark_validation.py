@@ -459,7 +459,9 @@ class TestLlmEvolverNoRegressions:
     These tests verify that the Critic gate rejects edits that would cause regressions.
     """
 
-    def test_llm_edit_with_injection_pattern_rejected_by_critic(self, tmp_path: Path, monkeypatch) -> None:
+    def test_llm_edit_with_injection_pattern_rejected_by_critic(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         """An LLM-generated edit containing injection patterns is rejected by the Critic.
 
         This verifies that even if an LLM produces a syntactically valid edit,
@@ -602,7 +604,9 @@ class TestLlmEvolverNoRegressions:
 class TestLlmEvolverFallbackBehavior:
     """Verify fallback to template-based proposals when LLM path fails."""
 
-    def test_falls_back_to_template_when_llm_returns_empty_edits(self, tmp_path: Path, monkeypatch) -> None:
+    def test_falls_back_to_template_when_llm_returns_empty_edits(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         """When LLM returns no valid edits, Evolver falls back to template-based proposal."""
         monkeypatch.setenv("FOUNDRY_EVOLVER_LLM_ENABLED", "true")
         harness = _make_harness_with_tests(tmp_path)
@@ -629,7 +633,9 @@ class TestLlmEvolverFallbackBehavior:
         assert len(edits) == 1
         assert edits[0].rationale == "address wrong-tool failure: reinforce tool list adherence"
 
-    def test_falls_back_to_template_when_llm_returns_bare_empty_array(self, tmp_path: Path, monkeypatch) -> None:
+    def test_falls_back_to_template_when_llm_returns_bare_empty_array(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         """A bare ``[]`` array triggers template fallback and a trace event.
 
         Regression test for issue #973: previously ``_parse_edits_from_response``
