@@ -936,6 +936,47 @@ def build_graphical_timeline(
     return "\n".join(lines) + "\n"
 
 
+def _doctor(args: argparse.Namespace) -> int:
+    """Implement ``doctor`` (issue #1077).
+
+    Scans a JSONL trace file for irrecoverably corrupted lines
+    (those that raise JSONDecodeError on parse) and — with ``--apply`` —
+    rewrites the file atomically via tempfile + os.replace, dropping the
+    bad lines. Without ``--apply`` this is a dry-run that reports what
+    would be dropped.
+    """
+    from foundry_x.trace.logger import TraceLogger
+
+    if not args.db.endswith(".jsonl"):
+        sys.stderr.write("doctor: jsonl backend required; sqlite is not supported.\n")
+        return 1
+    logger = TraceLogger(args.db, backend="jsonl")
+    result = logger.doctor(apply=args.apply)
+    if not result["applied"]:
+        if result["skipped_lines"]:
+            sys.stdout.write(
+                f"doctor: dry-run — {len(result['skipped_lines'])} line(s) would be dropped:\n"
+            )
+            for lineno, sid in zip(result["skipped_lines"], result["skipped_session_ids"]):
+                sid_str = sid if sid else "(no session_id)"
+                sys.stdout.write(f"  line {lineno}  session_id={sid_str}\n")
+            sys.stdout.write(
+                f"doctor: dry-run — {result['kept_lines']} valid line(s) would be kept.\n"
+            )
+            sys.stdout.write("Run with --apply to rewrite the file.\n")
+        else:
+            sys.stdout.write("doctor: no corrupt lines found.\n")
+    else:
+        sys.stdout.write(
+            f"doctor: applied — {len(result['skipped_lines'])} line(s) dropped, "
+            f"{result['kept_lines']} line(s) kept.\n"
+        )
+        for lineno, sid in zip(result["skipped_lines"], result["skipped_session_ids"]):
+            sid_str = sid if sid else "(no session_id)"
+            sys.stdout.write(f"  dropped: line {lineno}  session_id={sid_str}\n")
+    return 0
+
+
 def _timeline(args: argparse.Namespace) -> int:
     """Implement ``timeline`` (issue #1036).
 
@@ -1231,6 +1272,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print orphaned markers without modifying the file.",
     )
     compact_parser.set_defaults(func=_compact)
+
+    # Issue #1077: repair a JSONL trace file by dropping irrecoverably
+    # corrupted lines. Dry-run by default; --apply to rewrite atomically.
+    doctor_parser = sub.add_parser(
+        "doctor",
+        help="Drop irrecoverably corrupted JSONL lines (json_decode_error) from a trace file.",
+    )
+    doctor_parser.add_argument(
+        "--db",
+        required=True,
+        help="Path to the JSONL trace file.",
+    )
+    doctor_parser.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help=(
+            "Rewrite the file, dropping corrupt lines. Without this flag "
+            "the command is a dry-run that reports what would be dropped."
+        ),
+    )
+    doctor_parser.set_defaults(func=_doctor)
 
     # Issue #1044: guided failure-mode triage. Runs all six
     # ARCHITECTURE.md failure-mode checks in one pass and prints a

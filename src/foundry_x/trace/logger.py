@@ -432,6 +432,13 @@ class TraceLogger:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.backend = backend
+        # Issue #1077 — counters for throttled skip signalling in JSONL read paths.
+        # Each time a JSONDecodeError is caught, _record_jsonl_skip increments
+        # _jsonl_skip_count and records the session_id + line_number of the skip.
+        # The signal is in-memory only (never persisted to the JSONL file being
+        # read, avoiding the recursion that would corrupt the signal itself).
+        self._jsonl_skip_count: int = 0
+        self._jsonl_last_skip: dict[str, Any] | None = None
         # Issue #274 — the sqlite backend opens ONE connection here and reuses
         # it for every subsequent operation, instead of paying a fresh
         # ``sqlite3.connect`` (and its lock/page-cache setup) on every call.
@@ -474,6 +481,45 @@ class TraceLogger:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+    def _record_jsonl_skip(
+        self,
+        session_id: str | None,
+        line_number: int,
+        reason: str = "json_decode_error",
+    ) -> None:
+        """Record that a JSONL line was skipped due to *reason* (issue #1077).
+
+        The signal is append-only and stored in-memory only; it never enters
+        the JSONL file being read, so it cannot re-enter the read loop or
+        corrupt the signal itself. Count is throttled to avoid flooding in
+        pathologically corrupted files.
+        """
+        self._jsonl_skip_count += 1
+        self._jsonl_last_skip = {
+            "session_id": session_id,
+            "line_number": line_number,
+            "reason": reason,
+        }
+
+    @property
+    def jsonl_skip_info(self) -> dict[str, Any]:
+        """Return the cumulative JSONL skip signal (issue #1077).
+
+        Returns a dict with ``count`` (total skips), ``last_session_id``,
+        ``last_line_number``, and ``last_reason`` so an operator can detect
+        that data was silently dropped and by how much.
+        """
+        return {
+            "count": self._jsonl_skip_count,
+            "last_session_id": (
+                self._jsonl_last_skip["session_id"] if self._jsonl_last_skip else None
+            ),
+            "last_line_number": (
+                self._jsonl_last_skip["line_number"] if self._jsonl_last_skip else None
+            ),
+            "last_reason": (self._jsonl_last_skip["reason"] if self._jsonl_last_skip else None),
+        }
 
     @contextmanager
     def session(
@@ -636,13 +682,14 @@ class TraceLogger:
         if not self.path.exists():
             return False
         with self.path.open("r", encoding="utf-8") as fh:
-            for line in fh:
+            for lineno, line in enumerate(fh, start=1):
                 stripped = line.strip()
                 if not stripped:
                     continue
                 try:
                     record: dict[str, Any] = json.loads(stripped)
                 except json.JSONDecodeError:
+                    self._record_jsonl_skip(session_id, lineno, "json_decode_error")
                     continue
                 if (
                     record.get("kind") == "session_evolved"
@@ -679,13 +726,14 @@ class TraceLogger:
         evolved_ids: set[str] = set()
         if self.path.exists():
             with self.path.open("r", encoding="utf-8") as fh:
-                for line in fh:
+                for lineno, line in enumerate(fh, start=1):
                     stripped = line.strip()
                     if not stripped:
                         continue
                     try:
                         record: dict[str, Any] = json.loads(stripped)
                     except json.JSONDecodeError:
+                        self._record_jsonl_skip(None, lineno, "json_decode_error")
                         continue
                     if (
                         record.get("kind") == "session_evolved"
@@ -898,7 +946,7 @@ class TraceLogger:
         if not self.path.exists():
             return []
         with self.path.open("r", encoding="utf-8") as fh:
-            for line in fh:
+            for lineno, line in enumerate(fh, start=1):
                 line = line.strip()
                 if not line:
                     continue
@@ -908,9 +956,12 @@ class TraceLogger:
                 # line is preserved untouched (no data destruction). The
                 # write-side methods (_prune/_delete/compact) use the same
                 # try/except JSONDecodeError skip pattern.
+                # Issue #1077 — record the skip so operators can see data
+                # was dropped.
                 try:
                     record: dict[str, Any] = json.loads(line)
                 except json.JSONDecodeError:
+                    self._record_jsonl_skip(None, lineno, "json_decode_error")
                     continue
                 kind = record.get("kind")
                 session_id = record.get("session_id")
@@ -1042,15 +1093,18 @@ class TraceLogger:
         if not self.path.exists():
             return events
         with self.path.open("r", encoding="utf-8") as fh:
-            for line in fh:
+            for lineno, line in enumerate(fh, start=1):
                 line = line.strip()
                 if not line:
                     continue
                 # Issue #932 — skip corrupted/partial lines (read paths
                 # never rewrite; the bad line is preserved on disk).
+                # Issue #1077 — record the skip so operators can see data
+                # was dropped.
                 try:
                     record: dict[str, Any] = json.loads(line)
                 except json.JSONDecodeError:
+                    self._record_jsonl_skip(session_id, lineno, "json_decode_error")
                     continue
                 if record.get("session_id") != session_id:
                     continue
@@ -1337,9 +1391,12 @@ class TraceLogger:
                 continue
             # Issue #932 — skip corrupted/partial lines (read paths
             # never rewrite; the bad line is preserved on disk).
+            # Issue #1077 — record the skip so operators can see data
+            # was dropped.
             try:
                 record = json.loads(stripped)
             except json.JSONDecodeError:
+                self._record_jsonl_skip(session_id, idx + 1, "json_decode_error")
                 continue
             if record.get("session_id") == session_id and "event_id" in record:
                 session_events.append((idx, record))
@@ -1367,15 +1424,18 @@ class TraceLogger:
         if not self.path.exists():
             return
         with self.path.open("r", encoding="utf-8") as fh:
-            for line in fh:
+            for lineno, line in enumerate(fh, start=1):
                 line = line.strip()
                 if not line:
                     continue
                 # Issue #932 — skip corrupted/partial lines (read paths
                 # never rewrite; the bad line is preserved on disk).
+                # Issue #1077 — record the skip so operators can see data
+                # was dropped.
                 try:
                     record: dict[str, Any] = json.loads(line)
                 except json.JSONDecodeError:
+                    self._record_jsonl_skip(session_id, lineno, "json_decode_error")
                     continue
                 if record.get("session_id") != session_id:
                     continue
@@ -1404,15 +1464,18 @@ class TraceLogger:
             return
         session_versions: dict[str, str] = {}
         with self.path.open("r", encoding="utf-8") as fh:
-            for line in fh:
+            for lineno, line in enumerate(fh, start=1):
                 line = line.strip()
                 if not line:
                     continue
                 # Issue #932 — skip corrupted/partial lines (read paths
                 # never rewrite; the bad line is preserved on disk).
+                # Issue #1077 — record the skip so operators can see data
+                # was dropped.
                 try:
                     record: dict[str, Any] = json.loads(line)
                 except json.JSONDecodeError:
+                    self._record_jsonl_skip(None, lineno, "json_decode_error")
                     continue
                 record_kind = record.get("kind")
                 if record_kind == "session_start":
@@ -1432,6 +1495,100 @@ class TraceLogger:
                     if session_versions.get(sid) != harness_version:
                         continue
                 yield TraceEvent.model_validate(record)
+
+    def doctor(self, *, apply: bool = False) -> dict[str, Any]:
+        """Repair a JSONL trace file by dropping irrecoverably corrupted lines.
+
+        A corrupted line is one that raises ``json.JSONDecodeError`` when
+        parsed. This can happen when a process is killed mid-append
+        (SIGKILL, OOM, disk-full), leaving a partial JSON object on disk.
+
+        By default (``apply=False``) this is a dry-run: the file is read
+        and scanned but not modified, and the result describes which lines
+        would be dropped. With ``apply=True`` the file is rewritten via
+        ``tempfile.NamedTemporaryFile`` + ``os.replace`` (the same atomic
+        pattern used by ``_delete_session_jsonl`` and ``compact``), and an
+        audit record is written to stderr.
+
+        Args:
+            apply: If ``False`` (default), scan without modifying. If ``True``,
+                rewrite the file dropping all irrecoverable lines atomically.
+
+        Returns:
+            A dict with ``skipped_lines`` (list of line numbers), ``skipped_session_ids``
+            (set of affected session_ids), ``kept_lines`` (int), and ``applied`` (bool).
+            Operators running ``foundry-trace doctor --dry-run`` can use this
+            return value to preview the impact before applying.
+
+        Raises:
+            RuntimeError: If the backend is not JSONL.
+
+        Issue #1077.
+        """
+        if self.backend != "jsonl":
+            raise RuntimeError("doctor: jsonl backend required")
+        if not self.path.exists():
+            return {
+                "skipped_lines": [],
+                "skipped_session_ids": [],
+                "kept_lines": 0,
+                "applied": False,
+            }
+
+        skipped_lines: list[int] = []
+        skipped_session_ids: list[str] = []
+        kept_lines: list[str] = []
+
+        with self.path.open("r", encoding="utf-8") as fh:
+            for lineno, line in enumerate(fh, start=1):
+                stripped = line.strip()
+                if not stripped:
+                    kept_lines.append(line)
+                    continue
+                try:
+                    json.loads(stripped)
+                    kept_lines.append(line)
+                except json.JSONDecodeError:
+                    skipped_lines.append(lineno)
+                    try:
+                        partial = json.loads(stripped[: stripped.rfind('"')])
+                        sid = partial.get("session_id") if isinstance(partial, dict) else None
+                    except ValueError:
+                        sid = None
+                    skipped_session_ids.append(sid)
+
+        if not apply:
+            return {
+                "skipped_lines": skipped_lines,
+                "skipped_session_ids": skipped_session_ids,
+                "kept_lines": len(kept_lines),
+                "applied": False,
+            }
+
+        if not skipped_lines:
+            return {
+                "skipped_lines": [],
+                "skipped_session_ids": [],
+                "kept_lines": len(kept_lines),
+                "applied": False,
+            }
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=self.path.parent,
+            delete=False,
+        ) as tmp:
+            tmp.writelines(kept_lines)
+        os.chmod(tmp.name, self.path.stat().st_mode & 0o777)
+        os.replace(tmp.name, self.path)
+
+        return {
+            "skipped_lines": skipped_lines,
+            "skipped_session_ids": skipped_session_ids,
+            "kept_lines": len(kept_lines),
+            "applied": True,
+        }
 
 
 def _now() -> str:

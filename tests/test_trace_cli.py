@@ -1672,3 +1672,89 @@ def test_with_token_total(tmp_path):
 
     result_no_tok = _with_token_total("response", {})
     assert result_no_tok == "response"
+
+
+def test_doctor_dry_run_reports_skipped_lines(tmp_path, capsys):
+    """doctor --dry-run reports corrupt lines without modifying the file."""
+    db = tmp_path / "traces.jsonl"
+    lines = [
+        '{"kind": "session_start", "session_id": "abc", "started_at": "2025-01-01T00:00:00Z", "harness_version": "0.1.0"}',
+        '{"kind": "task_received", "event_id": "e1", "session_id": "abc", "timestamp": "2025-01-01T00:00:01Z", "payload": {}}',
+        '{"kind": "tool_call", "session_id": "abc", "payload":',  # truncated — invalid JSON
+        '{"kind": "task_completed", "event_id": "e2", "session_id": "abc", "timestamp": "2025-01-01T00:00:02Z", "payload": {}}',
+        '{"kind": "session_end", "session_id": "abc", "ended_at": "2025-01-01T00:00:03Z"}',
+    ]
+    db.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    original = db.read_text("utf-8")
+    rc = main(["doctor", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "dry-run" in out
+    assert "1" in out  # one corrupted line
+    assert db.read_text("utf-8") == original
+
+
+def test_doctor_apply_removes_corrupt_lines(tmp_path, capsys):
+    """doctor --apply rewrites the file, dropping corrupt lines."""
+    db = tmp_path / "traces.jsonl"
+    lines = [
+        '{"kind": "session_start", "session_id": "abc", "started_at": "2025-01-01T00:00:00Z", "harness_version": "0.1.0"}',
+        '{"kind": "task_received", "event_id": "e1", "session_id": "abc", "timestamp": "2025-01-01T00:00:01Z", "payload": {}}',
+        '{"kind": "tool_call", "session_id": "abc", "payload":',  # truncated — invalid JSON
+        '{"kind": "task_completed", "event_id": "e2", "session_id": "abc", "timestamp": "2025-01-01T00:00:02Z", "payload": {}}',
+        '{"kind": "session_end", "session_id": "abc", "ended_at": "2025-01-01T00:00:03Z"}',
+    ]
+    db.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rc = main(["doctor", "--db", str(db), "--apply"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "applied" in out
+    assert "1" in out  # one corrupted line dropped
+
+    result_lines = db.read_text("utf-8").splitlines()
+    assert len(result_lines) == 4  # session_start, task_received, task_completed, session_end
+
+
+def test_doctor_sqlite_rejected(tmp_path, capsys):
+    """doctor on sqlite backend exits 1 with a message."""
+    db = tmp_path / "traces.db"
+    TraceLogger(db, backend="sqlite")
+
+    rc = main(["doctor", "--db", str(db)])
+
+    assert rc == 1
+    assert "jsonl backend required" in capsys.readouterr().err
+
+
+def test_doctor_no_corrupt_lines(tmp_path, capsys):
+    """doctor on a clean file exits 0 with no corrupt lines message."""
+    db = tmp_path / "traces.jsonl"
+    _write_jsonl(
+        db,
+        [
+            {
+                "kind": "session_start",
+                "session_id": "abc",
+                "started_at": "2025-01-01T00:00:00Z",
+                "harness_version": "0.1.0",
+            },
+            {
+                "kind": "task_received",
+                "event_id": "e1",
+                "session_id": "abc",
+                "timestamp": "2025-01-01T00:00:01Z",
+                "payload": {},
+            },
+            {"kind": "session_end", "session_id": "abc", "ended_at": "2025-01-01T00:00:02Z"},
+        ],
+    )
+
+    rc = main(["doctor", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no corrupt lines" in out
