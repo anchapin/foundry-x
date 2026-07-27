@@ -32,6 +32,52 @@ the named fixture directory does not exist, the fixture raises
 than silently producing a false pass (PHILOSOPHY.md, "Evidence over
 opinion").
 
+Skip patterns
+-------------
+:func:`_seed_workspace` accepts a ``skip`` keyword — a set of directory/file
+names to exclude while copying. It defaults to
+:data:`DEFAULT_SKIP` (``{"__pycache__", ".git", ".venv"}``) so tasks no
+longer reimplement the same boilerplate::
+
+    _seed_workspace(workspace, "my_fixture", skip={"node_modules", "build"})
+
+An explicit ``skip`` **replaces** the default set (it does not merge), giving
+the caller full control.
+
+Template expansion (optional)
+-----------------------------
+If the fixture directory contains a ``template.env`` file, each non-empty,
+non-comment line is treated as a relative path to a file already copied into
+the workspace. ``{{ENV_VAR}}`` placeholders inside those files are replaced
+with the value of the corresponding environment variable::
+
+    # template.env
+    config/settings.toml
+
+    # config/settings.toml (inside the fixture, before expansion)
+    api_key = "{{BENCHMARK_API_KEY}}"
+
+If a referenced environment variable is unset, ``_seed_workspace`` raises
+``KeyError`` with a clear message. When no ``template.env`` exists the
+fixture behaves exactly as before (backwards compatible).
+
+Fixture manifest (optional)
+---------------------------
+A ``fixture.toml`` or ``fixture.json`` placed in the fixture root describes
+how to seed the workspace. Recognised top-level keys:
+
+``skip`` (list[str])
+    Directory/file names to exclude. Used only when no explicit ``skip``
+    argument is passed to :func:`_seed_workspace`; it **replaces** the
+    default skip set.
+
+Example ``fixture.toml``::
+
+    skip = ["__pycache__", ".git", ".venv", "node_modules"]
+
+The manifest file (``fixture.toml`` / ``fixture.json``) and ``template.env``
+are metadata: they are never copied into the workspace.
+
 Isolation guarantee
 -------------------
 The yielded path is unique per test invocation; no two tests share it and
@@ -44,7 +90,11 @@ ADR-0004 / ADR-0005.
 
 from __future__ import annotations
 
+import json
+import os
+import re
 import shutil
+import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -53,13 +103,85 @@ import pytest
 #: Root directory for static benchmark fixture data (``benchmarks/fixtures/``).
 FIXTURES_ROOT = Path(__file__).parent / "fixtures"
 
+#: Directory/file names excluded by default when seeding a workspace.
+DEFAULT_SKIP: frozenset[str] = frozenset({"__pycache__", ".git", ".venv"})
 
-def _seed_workspace(workspace: Path, seed_name: str) -> None:
+#: Seed-control metadata files that must never leak into the workspace.
+_SEED_METADATA_FILES: frozenset[str] = frozenset({"template.env", "fixture.toml", "fixture.json"})
+
+#: Matches ``{{ENV_VAR}}`` placeholders inside templated fixture files.
+_TEMPLATE_RE = re.compile(r"\{\{(\w+)\}\}")
+
+
+def _read_manifest(source: Path) -> dict[str, object]:
+    """Parse ``fixture.toml`` / ``fixture.json`` from *source* if present.
+
+    Returns an empty dict when neither file exists.
+    """
+    toml_path = source / "fixture.toml"
+    if toml_path.is_file():
+        with open(toml_path, "rb") as fh:
+            return tomllib.load(fh)  # type: ignore[return-value]
+    json_path = source / "fixture.json"
+    if json_path.is_file():
+        return json.loads(json_path.read_text(encoding="utf-8"))
+    return {}
+
+
+def _expand_templates(workspace: Path, source: Path) -> None:
+    """Expand ``{{ENV_VAR}}`` placeholders in files listed by ``template.env``.
+
+    ``template.env`` (if present in *source*) contains one relative file path
+    per line (``#`` comments and blank lines are ignored). Each referenced
+    file is read from *workspace* and every ``{{VAR}}`` token replaced with
+    ``os.environ[VAR]``.
+
+    Raises:
+        KeyError: if a placeholder references an unset environment variable.
+    """
+    template_manifest = source / "template.env"
+    if not template_manifest.is_file():
+        return
+    for line in template_manifest.read_text(encoding="utf-8").splitlines():
+        rel = line.strip()
+        if not rel or rel.startswith("#"):
+            continue
+        target = workspace / rel
+        if not target.is_file():
+            continue
+        content = target.read_text(encoding="utf-8")
+        missing = [var for var in _TEMPLATE_RE.findall(content) if var not in os.environ]
+        if missing:
+            raise KeyError(
+                f"template expansion failed: environment variable(s) "
+                f"{missing!r} not set (required by {rel} in template.env)"
+            )
+        expanded = _TEMPLATE_RE.sub(lambda m: os.environ[m.group(1)], content)
+        target.write_text(expanded, encoding="utf-8")
+
+
+def _seed_workspace(
+    workspace: Path,
+    seed_name: str,
+    *,
+    skip: set[str] | None = None,
+) -> None:
     """Copy ``benchmarks/fixtures/<seed_name>/`` into ``workspace``.
 
-    Raises ``FileNotFoundError`` if the named fixture directory is missing so
-    that a typo in a task's ``indirect`` parameter fails fast instead of
-    yielding an empty workspace that masks the mistake.
+    Supports optional skip patterns, ``template.env`` expansion, and a
+    ``fixture.toml``/``fixture.json`` manifest. See the module docstring for
+    full details.
+
+    Args:
+        workspace: destination directory (created by ``shutil.copytree``).
+        seed_name: subdirectory of ``benchmarks/fixtures/`` to copy.
+        skip: directory/file names to exclude. When ``None`` the skip set is
+            read from the fixture manifest, falling back to
+            :data:`DEFAULT_SKIP`. An explicit value **replaces** both.
+
+    Raises:
+        FileNotFoundError: if the named fixture directory is missing.
+        KeyError: if a ``template.env`` placeholder references an unset env var.
     """
     source = FIXTURES_ROOT / seed_name
     if not source.is_dir():
@@ -67,7 +189,26 @@ def _seed_workspace(workspace: Path, seed_name: str) -> None:
             f"benchmark fixture directory not found: {source} "
             "(requested via @pytest.mark.parametrize(..., indirect=True))"
         )
-    shutil.copytree(source, workspace, dirs_exist_ok=True)
+
+    # Resolve the effective skip set: explicit param > manifest > defaults.
+    if skip is not None:
+        effective_skip = set(skip)
+    else:
+        manifest = _read_manifest(source)
+        manifest_skip = manifest.get("skip")
+        if isinstance(manifest_skip, list):
+            effective_skip = set(manifest_skip)
+        else:
+            effective_skip = set(DEFAULT_SKIP)
+
+    # Metadata files must never leak into the agent's workspace.
+    effective_skip |= set(_SEED_METADATA_FILES)
+
+    def _ignore(_directory: str, names: list[str]) -> set[str]:
+        return {name for name in names if name in effective_skip}
+
+    shutil.copytree(source, workspace, dirs_exist_ok=True, ignore=_ignore)
+    _expand_templates(workspace, source)
 
 
 @pytest.fixture
