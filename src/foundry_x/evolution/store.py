@@ -265,3 +265,210 @@ class ProposedEditStore:
         if reason:
             msg += f" — reason: {reason}"
         sys.stderr.write(msg + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Cross-session failure-pattern accumulator (ADR-0030, issue #1038)
+# ---------------------------------------------------------------------------
+
+PATTERN_MIN_SESSIONS: int = 3
+PATTERN_AGE_CUTOFF_DAYS: int = 30
+
+_PATTERN_SCHEMA = """
+CREATE TABLE IF NOT EXISTS failure_patterns (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    proposed_class  TEXT    NOT NULL,
+    session_id      TEXT    NOT NULL,
+    timestamp       TEXT    NOT NULL,
+    context_hash    TEXT    NOT NULL,
+    resolution      TEXT    NOT NULL DEFAULT '',
+    edit_id         TEXT    NOT NULL DEFAULT '',
+    created_at      TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fp_class_hash
+    ON failure_patterns(proposed_class, context_hash);
+CREATE INDEX IF NOT EXISTS idx_fp_session
+    ON failure_patterns(session_id);
+"""
+
+
+class CrossSessionPattern(BaseModel):
+    """Result of a cross-session pattern query (ADR-0030 §4).
+
+    Carries ``session_count`` and ``session_ids`` so the ``Evolver`` can
+    include evidence in the ``ProposedEdit.rationale``.
+    """
+
+    proposed_class: str
+    context_hash: str
+    session_count: int
+    latest_timestamp: str
+    session_ids: list[str]
+
+
+class FailurePatternEntry(BaseModel):
+    """A single row in the ``failure_patterns`` table (ADR-0030 §4)."""
+
+    id: int
+    proposed_class: str
+    session_id: str
+    timestamp: str
+    context_hash: str
+    resolution: str
+    edit_id: str
+    created_at: str
+
+
+def pattern_confidence_label(session_count: int) -> str:
+    """Map a session count to a confidence tier (ADR-0030 §3).
+
+    | session_count | label     |
+    |---------------|-----------|
+    | 1             | isolated  |
+    | 2             | emerging  |
+    | 3–5           | recurring |
+    | > 5           | chronic   |
+    """
+    if session_count <= 1:
+        return "isolated"
+    if session_count == 2:
+        return "emerging"
+    if session_count <= 5:
+        return "recurring"
+    return "chronic"
+
+
+class FailurePatternStore:
+    """SQLite-backed accumulator for cross-session failure patterns (ADR-0030).
+
+    Persists failure events keyed by ``(proposed_class, context_hash)`` so the
+    ``Evolver`` can distinguish one-off failures from recurring structural
+    patterns. The store mirrors :class:`ProposedEditStore`: same SQLite
+    connection lifecycle (``PRAGMA journal_mode=WAL``, ``CREATE TABLE IF NOT
+    EXISTS``), same idempotent-write philosophy.
+
+    The table lives in its own sidecar database (or the trace store — both
+    are SQLite). The default path is a sidecar beside the trace database so
+    it can be pruned independently.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(self.path)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.executescript(_PATTERN_SCHEMA)
+        self._conn.commit()
+
+    def close(self) -> None:
+        """Release the sqlite connection."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def record(
+        self,
+        proposed_class: str,
+        session_id: str,
+        timestamp: str,
+        context_hash: str,
+        resolution: str = "",
+    ) -> int:
+        """Insert a failure event into the pattern store.
+
+        Returns the auto-incremented row ``id``. Called by the evolution
+        loop after :meth:`Digester.digest` produces a non-``clean`` report
+        (issue #1038).
+        """
+        created_at = _now()
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO failure_patterns "
+                "(proposed_class, session_id, timestamp, context_hash, resolution, "
+                " edit_id, created_at) VALUES (?, ?, ?, ?, ?, '', ?)",
+                (proposed_class, session_id, timestamp, context_hash, resolution, created_at),
+            )
+            return int(cursor.lastrowid)
+
+    def find_pattern(
+        self,
+        proposed_class: str,
+        context_hash: str,
+        min_sessions: int = PATTERN_MIN_SESSIONS,
+        age_cutoff: datetime | None = None,
+    ) -> CrossSessionPattern | None:
+        """Query for a cross-session pattern matching the given bucket.
+
+        Returns ``None`` when fewer than ``min_sessions`` distinct sessions
+        have recorded this ``(proposed_class, context_hash)`` within the
+        age cutoff window (default: 30 days, ADR-0030 §3).
+        """
+        from datetime import UTC, timedelta
+
+        cutoff = age_cutoff or (datetime.now(UTC) - timedelta(days=PATTERN_AGE_CUTOFF_DAYS))
+        rows = self._conn.execute(
+            """
+            SELECT proposed_class, context_hash,
+                   COUNT(DISTINCT session_id)  AS session_count,
+                   MAX(timestamp)               AS latest_timestamp,
+                   GROUP_CONCAT(DISTINCT session_id) AS session_ids
+            FROM   failure_patterns
+            WHERE  proposed_class = ?
+              AND  context_hash   = ?
+              AND  timestamp     >= ?
+            GROUP BY proposed_class, context_hash
+            HAVING COUNT(DISTINCT session_id) >= ?
+            """,
+            (proposed_class, context_hash, cutoff.isoformat(), min_sessions),
+        ).fetchall()
+        if not rows:
+            return None
+        row = rows[0]
+        return CrossSessionPattern(
+            proposed_class=row["proposed_class"],
+            context_hash=row["context_hash"],
+            session_count=row["session_count"],
+            latest_timestamp=row["latest_timestamp"],
+            session_ids=row["session_ids"].split(","),
+        )
+
+    def link_edit(self, pattern_id: int, edit_id: str, resolution: str) -> None:
+        """Link a ProposedEdit to a pattern entry and update resolution."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE failure_patterns SET edit_id = ?, resolution = ? WHERE id = ?",
+                (edit_id, resolution, pattern_id),
+            )
+
+    def get_pattern_history(
+        self,
+        proposed_class: str,
+        context_hash: str,
+        limit: int = 10,
+    ) -> list[FailurePatternEntry]:
+        """Return the most recent pattern entries for audit/review."""
+        rows = self._conn.execute(
+            """
+            SELECT id, proposed_class, session_id, timestamp, context_hash,
+                   resolution, edit_id, created_at
+            FROM   failure_patterns
+            WHERE  proposed_class = ? AND context_hash = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (proposed_class, context_hash, limit),
+        ).fetchall()
+        return [
+            FailurePatternEntry(
+                id=row["id"],
+                proposed_class=row["proposed_class"],
+                session_id=row["session_id"],
+                timestamp=row["timestamp"],
+                context_hash=row["context_hash"],
+                resolution=row["resolution"],
+                edit_id=row["edit_id"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]

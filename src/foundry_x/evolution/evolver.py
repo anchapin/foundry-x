@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from pydantic import BaseModel, Field, field_validator
 
 from foundry_x.evolution.digester import FailureReport
+from foundry_x.evolution.store import PATTERN_MIN_SESSIONS
 
 if TYPE_CHECKING:
     from foundry_x.execution.model_adapter import ModelAdapter, ModelMessage
@@ -260,6 +261,137 @@ _PROPOSED_CLASS_EDIT_TEMPLATES: dict[str, tuple[str, str, list[str], dict[str, A
         "address unknown-class failure: add clarification guidance",
         [
             "  - When in doubt about the task or context, surface the ambiguity explicitly instead of guessing.",
+        ],
+        None,
+    ),
+}
+
+
+# Structural edit templates for recurring failures (ADR-0030, issue #1038).
+#
+# When ``failure.seen_across_n_sessions >= PATTERN_MIN_SESSIONS`` the Evolver
+# prefers a *structural* fix — a hook that enforces the constraint in code —
+# over a prompt-level patch. Each entry is the same tuple shape as
+# ``_PROPOSED_CLASS_EDIT_TEMPLATES`` but targets a hook file. The
+# ``extra_lines`` are the full content of a new hook module (these hooks do
+# not exist yet, so the diff is a new-file creation).
+_STRUCTURAL_EDIT_TEMPLATES: dict[str, tuple[str, str, list[str], dict[str, Any] | None]] = {
+    "wrong-tool": (
+        "hooks/tool_validator.py",
+        "add structural tool-name validation hook for recurring wrong-tool pattern",
+        [
+            '"""Structural guard: reject tool calls whose name is not in the registered skill set."""',
+            "from harness.hooks.base import Hook, HookContext, HookResult",
+            "",
+            "",
+            "class ToolValidatorHook(Hook):",
+            "    async def on_tool_call(self, ctx: HookContext) -> HookResult:",
+            "        allowed = ctx.metadata.get('allowed_tools', [])",
+            "        if ctx.tool_name not in allowed:",
+            "            return HookResult(block=True, reason=f'tool {ctx.tool_name} not registered')",
+            "        return HookResult(block=False)",
+        ],
+        None,
+    ),
+    "bad-prompt": (
+        "hooks/prompt_clarifier.py",
+        "add structural prompt-clarity check hook for recurring bad-prompt pattern",
+        [
+            '"""Structural guard: reject ambiguous prompts lacking concrete acceptance criteria."""',
+            "from harness.hooks.base import Hook, HookContext, HookResult",
+            "",
+            "",
+            "class PromptClarifierHook(Hook):",
+            "    async def on_user_prompt(self, ctx: HookContext) -> HookResult:",
+            "        prompt = ctx.metadata.get('prompt', '')",
+            "        if len(prompt.strip()) < 20:",
+            "            return HookResult(block=True, reason='prompt too vague; add concrete acceptance criteria')",
+            "        return HookResult(block=False)",
+        ],
+        None,
+    ),
+    "state-leak": (
+        "hooks/sandbox_cleanup.py",
+        "add structural sandbox cleanup hook for recurring state-leak pattern",
+        [
+            '"""Structural guard: enforce sandbox state cleanup between steps."""',
+            "from harness.hooks.base import Hook, HookContext, HookResult",
+            "",
+            "",
+            "class SandboxCleanupHook(Hook):",
+            "    async def on_tool_result(self, ctx: HookContext) -> HookResult:",
+            "        # Verify sandbox is clean before the next step proceeds",
+            "        stale = ctx.metadata.get('stale_artifacts', [])",
+            "        if stale:",
+            "            return HookResult(block=True, reason=f'stale state detected: {stale}')",
+            "        return HookResult(block=False)",
+        ],
+        None,
+    ),
+    "tool-error": (
+        "hooks/error_guard.py",
+        "add structural error-handling guard hook for recurring tool-error pattern",
+        [
+            '"""Structural guard: inspect tool errors and prevent blind retries."""',
+            "from harness.hooks.base import Hook, HookContext, HookResult",
+            "",
+            "",
+            "class ErrorGuardHook(Hook):",
+            "    async def on_tool_result(self, ctx: HookContext) -> HookResult:",
+            "        error = ctx.metadata.get('error')",
+            "        if error and 'traceback' in str(error).lower():",
+            "            return HookResult(block=True, reason='inspect traceback before retry')",
+            "        return HookResult(block=False)",
+        ],
+        None,
+    ),
+    "injection-attempt": (
+        "hooks/injection_guard.py",
+        "add structural injection-hardening hook for recurring injection-attempt pattern",
+        [
+            '"""Structural guard: additional injection marker scrubbing."""',
+            "from harness.hooks.base import Hook, HookContext, HookResult",
+            "",
+            "",
+            "class InjectionGuardHook(Hook):",
+            "    async def on_tool_result(self, ctx: HookContext) -> HookResult:",
+            '        output = str(ctx.metadata.get("output", ""))',
+            '        markers = ["ignore previous", "system:", "new instruction"]',
+            "        if any(m in output.lower() for m in markers):",
+            "            return HookResult(block=True, reason='suspected injection payload')",
+            "        return HookResult(block=False)",
+        ],
+        None,
+    ),
+    "context-overflow": (
+        "hooks/context_guard.py",
+        "add structural context-pressure guard hook for recurring context-overflow pattern",
+        [
+            '"""Structural guard: detect repetitive tool-call loops before context exhaustion."""',
+            "from harness.hooks.base import Hook, HookContext, HookResult",
+            "",
+            "",
+            "class ContextGuardHook(Hook):",
+            "    async def on_tool_call(self, ctx: HookContext) -> HookResult:",
+            "        recent = ctx.metadata.get('recent_calls', [])",
+            "        if len(recent) > 5 and len(set(recent[-5:])) == 1:",
+            "            return HookResult(block=True, reason='repetitive tool-call loop detected')",
+            "        return HookResult(block=False)",
+        ],
+        None,
+    ),
+    "unknown": (
+        "hooks/structural_guard.py",
+        "add structural guard hook for recurring unknown-class pattern",
+        [
+            '"""Structural guard: surface ambiguity explicitly before proceeding."""',
+            "from harness.hooks.base import Hook, HookContext, HookResult",
+            "",
+            "",
+            "class StructuralGuardHook(Hook):",
+            "    async def on_user_prompt(self, ctx: HookContext) -> HookResult:",
+            "        # Surface ambiguity when in doubt rather than guessing",
+            "        return HookResult(block=False)",
         ],
         None,
     ),
@@ -726,6 +858,20 @@ class Evolver:
             f"Failure class: {failure.proposed_class}",
             "",
         ]
+        if failure.seen_across_n_sessions >= PATTERN_MIN_SESSIONS:
+            lines.extend(
+                [
+                    "CROSS-SESSION PATTERN DETECTED",
+                    "=" * 50,
+                    (
+                        f"This failure class+context has been observed in "
+                        f"{failure.seen_across_n_sessions} sessions. The pattern "
+                        f"is recurring and warrants a targeted, high-confidence "
+                        f"structural edit (e.g. a hook) rather than a prompt patch."
+                    ),
+                    "",
+                ]
+            )
         if failure.suspected_causes:
             lines.append("Suspected causes:")
             for cause in failure.suspected_causes:
@@ -974,11 +1120,20 @@ class Evolver:
         so the result remains syntactically valid JSON (issue #892);
         plain-text targets get ``extra_lines`` appended.
 
+        For recurring failures (``seen_across_n_sessions >=
+        PATTERN_MIN_SESSIONS``) a *structural* fix targeting a hook file
+        is preferred over a prompt patch (ADR-0030, issue #1038).
+
         Every early-return path emits a ``generation_attempt`` trace event
         followed by a ``generation_exhausted`` event so the failure is
         observable in KPI rollups (issue #974). Previously these paths
         returned ``[]`` silently.
         """
+        if failure.seen_across_n_sessions >= PATTERN_MIN_SESSIONS:
+            structural = _STRUCTURAL_EDIT_TEMPLATES.get(failure.proposed_class)
+            if structural is not None:
+                return self._propose_structural_edit(harness_dir, failure, structural)
+
         template = _PROPOSED_CLASS_EDIT_TEMPLATES.get(failure.proposed_class)
         if template is None:
             self._emit_template_failure(
@@ -1038,6 +1193,64 @@ class Evolver:
         except EvolverGuardError as exc:
             self._emit_template_failure(
                 f"template edit for {failure.proposed_class!r} failed validation: {exc}"
+            )
+            return []
+        self._record_proposals(edit=edit, failure_class=failure.proposed_class)
+        return [edit]
+
+    def _propose_structural_edit(
+        self,
+        harness_dir: Path,
+        failure: FailureReport,
+        template: tuple[str, str, list[str], dict[str, Any] | None],
+    ) -> list[ProposedEdit]:
+        """Generate a structural (hook-based) fix for a recurring pattern.
+
+        Targets a hook file instead of ``system_prompt.txt`` so the fix is
+        enforced in code rather than relying on prompt compliance
+        (ADR-0030, issue #1038). When the hook file does not exist yet,
+        the diff is a new-file creation; when it does, ``extra_lines`` are
+        appended to the existing content.
+        """
+        relative_target, rationale, extra_lines, _json_patch = template
+        prefix = f"[cross-session pattern: {failure.seen_across_n_sessions} sessions] "
+        full_rationale = prefix + rationale
+
+        file_path = harness_dir / relative_target
+        if file_path.exists():
+            original = file_path.read_text(encoding="utf-8")
+            modified = original.rstrip("\n") + "\n" + "\n".join(extra_lines) + "\n"
+        else:
+            original = ""
+            modified = "\n".join(extra_lines) + "\n"
+
+        confined_target = f"{_HARNESS_ROOT}/{relative_target}"
+        diff_lines = list(
+            difflib.unified_diff(
+                original.splitlines(keepends=True),
+                modified.splitlines(keepends=True),
+                fromfile=f"a/{confined_target}",
+                tofile=f"b/{confined_target}",
+                lineterm="\n",
+            )
+        )
+        unified_diff = "".join(diff_lines)
+        if not unified_diff:
+            self._emit_template_failure(
+                f"structural template for {failure.proposed_class!r} produced an "
+                f"empty diff (content already matches)"
+            )
+            return []
+        edit = ProposedEdit(
+            target_file=confined_target,
+            rationale=full_rationale,
+            unified_diff=unified_diff,
+        )
+        try:
+            self._validate_edit(edit)
+        except EvolverGuardError as exc:
+            self._emit_template_failure(
+                f"structural edit for {failure.proposed_class!r} failed validation: {exc}"
             )
             return []
         self._record_proposals(edit=edit, failure_class=failure.proposed_class)
