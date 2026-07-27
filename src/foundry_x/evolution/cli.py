@@ -688,6 +688,21 @@ def _build_sweep_parser() -> argparse.ArgumentParser:
             "FOUNDRY_POOL_MANIFEST env var (issue #1046, ADR-0026)."
         ),
     )
+    parser.add_argument(
+        "--path-or-endpoint",
+        type=str,
+        default=None,
+        dest="path_or_endpoint",
+        help=(
+            "Path or endpoint override passed to the model adapter (ADR-0014). "
+            "When set to a URL (http:// or https://) it is used as the model "
+            "endpoint. When the model carries a cloud-provider prefix "
+            "(anthropic/ or openai/ per ADR-0029) it overrides the provider's "
+            "default API base, letting foundry-sweep target a cloud model "
+            "(e.g. --quantizations openai/ --path-or-endpoint "
+            "https://api.openai.com)."
+        ),
+    )
     return parser
 
 
@@ -1192,5 +1207,25 @@ def sweep_main(argv: list[str] | None = None) -> int:
     """
     parser = _build_sweep_parser()
     args = parser.parse_args(argv)
+
+    quantizations = [q.strip() for q in args.quantizations.split(",") if q.strip()]
+    if not quantizations:
+        sys.stderr.write("--quantizations must specify at least one quantization label.\n")
+        return 2
+
+    # Propagate --path-or-endpoint into the subprocess environment so the
+    # sweep's benchmark subprocesses inherit it (ADR-0014, ADR-0029). When
+    # the value is a URL and a quantization label carries a cloud-provider
+    # prefix (anthropic/, openai/) the runner resolves a CloudModelAdapter
+    # and overrides the provider's default API base with this URL.
+    path_or_endpoint = getattr(args, "path_or_endpoint", None)
+    if path_or_endpoint:
+        os.environ["FOUNDRY_PATH_OR_ENDPOINT"] = str(path_or_endpoint)
+        path_str = str(path_or_endpoint).strip()
+        if path_str.startswith(("http://", "https://")) and not os.environ.get(
+            "OPENCODE_SERVER_URL"
+        ):
+            os.environ["OPENCODE_SERVER_URL"] = path_str.rstrip("/")
+
     critic = Critic(harness_dir=args.harness_dir)
     return _execute_sweep(args, critic)

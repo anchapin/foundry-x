@@ -4,6 +4,8 @@ import asyncio
 import json
 import os
 import random
+import re
+from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Literal, Protocol, Self, TypeAlias, runtime_checkable
 
@@ -575,3 +577,846 @@ def _parse_sse_line(line: str) -> ModelResponseChunk | None:
     if parsed.usage is not None:
         return ModelResponseChunk(usage=parsed.usage)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Cloud-native model adapters (issue #1041, ADR-0029)
+#
+# `CloudModelAdapter` is an ABC that formalises provider-specific override
+# points (`build_request`, `parse_response`, `parse_stream_chunk`,
+# `rate_limit_headers`, `token_pricing`). It shares the bounded-retry and
+# SSE plumbing with `OpenAICompatibleAdapter` so callers see the same
+# `ModelResponse` / `ModelResponseChunk` contract regardless of provider.
+#
+# The implementation talks to provider HTTP endpoints directly via
+# `httpx` (no SDK dependency). ADR-0029 lists SDKs as one option; we chose
+# `httpx` for consistency with `OpenAICompatibleAdapter`, a smaller change
+# (AGENTS.md §2 — never widen scope), and zero new dependencies.
+# ---------------------------------------------------------------------------
+
+
+class ModelRateLimitInfo(BaseModel):
+    """Provider rate-limit window snapshot parsed from response headers.
+
+    Anthropic surfaces ``anthropic-ratelimit-requests-remaining`` /
+    ``anthropic-ratelimit-tokens-remaining``; OpenAI surfaces
+    ``x-ratelimit-remaining-requests`` / ``x-ratelimit-remaining-tokens``.
+    Adapters normalise both into this single shape so the trace store can
+    reason about headroom without branching on provider.
+    """
+
+    requests_remaining: int | None = Field(
+        default=None,
+        description="Remaining requests in the current window, or null when the provider omits it.",
+    )
+    tokens_remaining: int | None = Field(
+        default=None,
+        description="Remaining tokens in the current window, or null when the provider omits it.",
+    )
+    requests_reset_seconds: float | None = Field(
+        default=None,
+        description="Seconds until the request-window resets, or null when unknown.",
+    )
+    tokens_reset_seconds: float | None = Field(
+        default=None,
+        description="Seconds until the token-window resets, or null when unknown.",
+    )
+
+
+class ModelCostEvent(BaseModel):
+    """Per-response cost attribution emitted on each successful response.
+
+    Cost is computed from the provider's per-token pricing table
+    (`token_pricing`) and the reported `ModelUsage`. The Runner forwards
+    this to the trace store so the improvement-rate KPI can attribute
+    spend to harness quality, not just model price.
+    """
+
+    provider: str = Field(
+        min_length=1, description="Adapter provider tag (e.g. 'anthropic', 'openai')."
+    )
+    model: str = Field(min_length=1, description="Model identifier as sent in the request body.")
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    estimated_cost_usd: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Best-effort cost estimate in USD; 0.0 when pricing is unknown.",
+    )
+
+
+CostCallback: TypeAlias = Callable[[ModelCostEvent], None]
+RateLimitCallback: TypeAlias = Callable[[ModelRateLimitInfo], None]
+
+
+class CloudModelAdapter(ABC):
+    """Base class for cloud-provider model adapters (ADR-0029, issue #1041).
+
+    Concrete subclasses implement the provider-specific override points
+    (`build_request`, `parse_response`, `parse_stream_chunk`,
+    `rate_limit_headers`, `token_pricing`). The shared `complete` /
+    `stream` / `chat` machinery owns the bounded retry loop, SSE framing,
+    and cost/rate-limit trace emission so subclasses stay focused on
+    wire-format translation.
+
+    The class implements the `ModelAdapter` protocol structurally; it is
+    not registered as a Protocol implementation because `ModelAdapter`
+    is a `@runtime_checkable` structural protocol and concrete subclasses
+    will pass `isinstance` checks by virtue of method shape.
+    """
+
+    #: Short provider tag stamped into `ModelCostEvent.provider`.
+    provider: str = "cloud"
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        base_url: str,
+        api_key: str | None = None,
+        client: httpx.AsyncClient | None = None,
+        timeout: float = 60.0,
+        max_retries: int = _DEFAULT_ADAPTER_MAX_RETRIES,
+        on_retry: RetryCallback | None = None,
+        on_cost: CostCallback | None = None,
+        on_rate_limit: RateLimitCallback | None = None,
+    ) -> None:
+        model_name = model.strip()
+        if not model_name:
+            raise ValueError("model must be a non-empty model identifier")
+        base = base_url.strip().rstrip("/")
+        if not base:
+            raise ValueError("base_url must be a non-empty provider endpoint URL")
+        self.model = model_name
+        self.base_url = base
+        self._client = client or httpx.AsyncClient(timeout=timeout)
+        self._owns_client = client is None
+        self._auth_headers = self._build_auth_headers(api_key)
+        self.max_retries = max_retries
+        self.on_retry = on_retry
+        self.on_cost = on_cost
+        self.on_rate_limit = on_rate_limit
+
+    # --- provider-specific override points -------------------------------
+
+    @abstractmethod
+    def _build_auth_headers(self, api_key: str | None) -> dict[str, str]:
+        """Return provider-specific auth headers from *api_key*."""
+
+    @abstractmethod
+    def build_request(
+        self,
+        messages: Sequence[MessageInput],
+        tools: Sequence[ToolInput] | None,
+        *,
+        stream: bool,
+        extra_params: dict[str, JsonValue],
+    ) -> JsonObject:
+        """Translate the normalised inputs into the provider's request body."""
+
+    @abstractmethod
+    def request_url(self, *, stream: bool) -> str:
+        """Absolute URL for the provider's chat/messages endpoint."""
+
+    @abstractmethod
+    def request_headers(self, *, stream: bool) -> dict[str, str]:
+        """Return per-request headers (auth + content type + version)."""
+
+    @abstractmethod
+    def parse_response(self, data: JsonObject) -> ModelResponse:
+        """Translate the provider's non-streaming JSON body into `ModelResponse`."""
+
+    @abstractmethod
+    def parse_stream_chunk(self, data: JsonObject) -> ModelResponseChunk | None:
+        """Translate one decoded SSE event payload into a chunk, or None to skip."""
+
+    @abstractmethod
+    def rate_limit_headers(self) -> tuple[str, ...]:
+        """Header names this provider exposes rate-limit info under."""
+
+    @abstractmethod
+    def token_pricing(self) -> tuple[float, float]:
+        """Return ``(input_per_1m_usd, output_per_1m_usd)``; ``(0.0, 0.0)`` when unknown."""
+
+    # --- shared infrastructure -------------------------------------------
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+    async def complete(
+        self,
+        messages: Sequence[MessageInput],
+        tools: Sequence[ToolInput] | None = None,
+        **kwargs: JsonValue,
+    ) -> ModelResponse:
+        payload = self.build_request(messages, tools, stream=False, extra_params=dict(kwargs))
+        data, headers = await self._post_json(payload, stream=False)
+        response = self.parse_response(data)
+        self._emit_cost_and_rate_limit(response, headers)
+        return response
+
+    async def chat(
+        self,
+        messages: Sequence[MessageInput],
+        tools: Sequence[ToolInput] | None = None,
+        **kwargs: JsonValue,
+    ) -> ModelResponse:
+        return await self.complete(messages, tools, **kwargs)
+
+    async def stream(
+        self,
+        messages: Sequence[MessageInput],
+        tools: Sequence[ToolInput] | None = None,
+        **kwargs: JsonValue,
+    ) -> AsyncIterator[ModelResponseChunk]:
+        payload = self.build_request(messages, tools, stream=True, extra_params=dict(kwargs))
+        headers = {**self.request_headers(stream=True)}
+        final_usage: ModelUsage | None = None
+        last_headers: httpx.Headers | None = None
+
+        for attempt in range(self.max_retries + 1):
+            cm = self._client.stream(
+                "POST",
+                self.request_url(stream=True),
+                json=payload,
+                headers=headers,
+            )
+            try:
+                response = await cm.__aenter__()
+            except _RETRYABLE_TRANSPORT_ERRORS as exc:
+                if attempt >= self.max_retries:
+                    raise ModelAdapterError(
+                        f"model endpoint request failed: {exc}",
+                    ) from exc
+                backoff_ms = _compute_backoff_ms(attempt)
+                self._emit_retry(attempt + 1, exc, backoff_ms)
+                await asyncio.sleep(backoff_ms / 1000)
+                continue
+            except httpx.HTTPError as exc:
+                raise ModelAdapterError(
+                    f"model endpoint request failed: {exc}",
+                ) from exc
+
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                await cm.__aexit__(type(exc), exc, exc.__traceback__)
+                status = exc.response.status_code
+                if not _is_retryable_status(status) or attempt >= self.max_retries:
+                    raise ModelAdapterHTTPError(
+                        status_code=status,
+                        response_body=exc.response.text,
+                    ) from exc
+                backoff_ms = _compute_backoff_ms(attempt)
+                self._emit_retry(attempt + 1, exc, backoff_ms)
+                await asyncio.sleep(backoff_ms / 1000)
+                continue
+
+            try:
+                last_headers = response.headers
+                async for chunk_data in self._iter_provider_stream(response):
+                    if chunk_data.get("usage") is not None:
+                        try:
+                            final_usage = ModelUsage.model_validate(chunk_data["usage"])
+                        except ValueError:
+                            final_usage = None
+                    chunk = self.parse_stream_chunk(chunk_data)
+                    if chunk is None:
+                        continue
+                    if chunk.usage is not None:
+                        final_usage = chunk.usage
+                    yield chunk
+            finally:
+                await cm.__aexit__(None, None, None)
+            break
+
+        if final_usage is not None and last_headers is not None:
+            self._emit_cost_and_rate_limit(
+                ModelResponse(
+                    message=ModelMessage(role="assistant"),
+                    usage=final_usage,
+                ),
+                last_headers,
+            )
+
+    def _emit_retry(self, attempt: int, exc: Exception, backoff_ms: int) -> None:
+        if self.on_retry is None:
+            return
+        self.on_retry(
+            ModelRetryEvent(
+                attempt=attempt,
+                error_type=type(exc).__name__,
+                backoff_ms=backoff_ms,
+            )
+        )
+
+    def _emit_cost_and_rate_limit(
+        self,
+        response: ModelResponse,
+        headers: httpx.Headers | Mapping[str, str],
+    ) -> None:
+        """Fire ``on_cost`` / ``on_rate_limit`` callbacks when wired."""
+        if self.on_cost is not None and response.usage is not None:
+            prompt_tokens = response.usage.prompt_tokens
+            completion_tokens = response.usage.completion_tokens
+            in_price, out_price = self.token_pricing()
+            cost = (prompt_tokens * in_price + completion_tokens * out_price) / 1_000_000.0
+            self.on_cost(
+                ModelCostEvent(
+                    provider=self.provider,
+                    model=self.model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    estimated_cost_usd=round(cost, 8),
+                )
+            )
+        if self.on_rate_limit is not None:
+            info = self._extract_rate_limit(headers)
+            if info is not None:
+                self.on_rate_limit(info)
+
+    def _extract_rate_limit(
+        self, headers: httpx.Headers | Mapping[str, str]
+    ) -> ModelRateLimitInfo | None:
+        names = self.rate_limit_headers()
+        present = {name.lower() for name in names}
+        lowered = {key.lower(): value for key, value in headers.items()}
+        if not present.intersection(lowered):
+            return None
+        return self.parse_rate_limit(lowered)
+
+    def parse_rate_limit(self, headers_lower: Mapping[str, str]) -> ModelRateLimitInfo:
+        """Default no-op rate-limit parser; providers override as needed."""
+        return ModelRateLimitInfo()
+
+    async def _iter_provider_stream(self, response: httpx.Response) -> AsyncIterator[JsonObject]:
+        """Default SSE parser that decodes ``data: <json>`` frames.
+
+        Providers whose SSE framing differs (Anthropic emits
+        ``event:`` / ``data:`` pairs) override this.
+        """
+        async for line in response.aiter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            payload = line.removeprefix("data:").strip()
+            if payload == "[DONE]" or not payload:
+                continue
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                raise ModelAdapterResponseError("stream chunk was not valid JSON") from exc
+            yield _JSON_OBJECT_ADAPTER.validate_python(data)
+
+    async def _post_json(
+        self,
+        payload: JsonObject,
+        *,
+        stream: bool,
+    ) -> tuple[JsonObject, httpx.Headers]:
+        """POST *payload* with bounded retry; return (json_body, response_headers)."""
+        headers = self.request_headers(stream=stream)
+        url = self.request_url(stream=stream)
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = await self._client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if not _is_retryable_status(status) or attempt >= self.max_retries:
+                    raise ModelAdapterHTTPError(
+                        status_code=status,
+                        response_body=exc.response.text,
+                    ) from exc
+                backoff_ms = _compute_backoff_ms(attempt)
+                self._emit_retry(attempt + 1, exc, backoff_ms)
+                await asyncio.sleep(backoff_ms / 1000)
+                continue
+            except _RETRYABLE_TRANSPORT_ERRORS as exc:
+                if attempt >= self.max_retries:
+                    raise ModelAdapterError(
+                        f"model endpoint request failed: {exc}",
+                    ) from exc
+                backoff_ms = _compute_backoff_ms(attempt)
+                self._emit_retry(attempt + 1, exc, backoff_ms)
+                await asyncio.sleep(backoff_ms / 1000)
+                continue
+            except httpx.HTTPError as exc:
+                raise ModelAdapterError(
+                    f"model endpoint request failed: {exc}",
+                ) from exc
+
+            try:
+                data = response.json()
+            except json.JSONDecodeError as exc:
+                raise ModelAdapterResponseError("model endpoint returned invalid JSON") from exc
+            return _JSON_OBJECT_ADAPTER.validate_python(data), response.headers
+
+        raise ModelAdapterError("model endpoint request failed: retries exhausted")
+
+
+def _validate_messages(
+    messages: Sequence[MessageInput],
+) -> list[ModelMessage]:
+    if not messages:
+        raise ValueError("messages must be a non-empty sequence")
+    return [ModelMessage.model_validate(message) for message in messages]
+
+
+def _validate_tools(
+    tools: Sequence[ToolInput] | None,
+) -> list[ToolDefinition] | None:
+    if tools is None:
+        return None
+    return [ToolDefinition.model_validate(tool) for tool in tools]
+
+
+_GO_DURATION_RE = re.compile(
+    r"(?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)m)?(?:(?P<seconds>\d+)s)?(?:(?P<ms>\d+)ms)?"
+)
+
+
+def _parse_go_duration(value: str | None) -> float | None:
+    """Parse Go ``time.Duration.String()`` output (e.g. ``2h30m``, ``1m0s``, ``500ms``)."""
+    if value is None or value == "":
+        return None
+    match = _GO_DURATION_RE.fullmatch(value.strip())
+    if match is None:
+        return None
+    parts = {k: int(v) for k, v in match.groupdict(default="0").items()}
+    total = parts["hours"] * 3600 + parts["minutes"] * 60 + parts["seconds"] + parts["ms"] / 1000.0
+    return float(total) if total > 0 else 0.0
+
+
+class AnthropicAdapter(CloudModelAdapter):
+    """CloudModelAdapter for Anthropic's native `/v1/messages` API.
+
+    - Endpoint: ``POST {base_url}/v1/messages``
+    - Auth: ``x-api-key`` header (NOT ``Authorization: Bearer``)
+    - Streaming: SSE frames with ``event:`` + ``data:`` lines
+      (``message_start``, ``content_block_delta``, ``message_delta``, ``message_stop``)
+    - Rate-limit headers: ``anthropic-ratelimit-requests-*`` / ``anthropic-ratelimit-tokens-*``
+    """
+
+    provider = "anthropic"
+    _ANTHROPIC_VERSION = "2023-06-01"
+
+    def _build_auth_headers(self, api_key: str | None) -> dict[str, str]:
+        if api_key is None or not api_key.strip():
+            raise ValueError("AnthropicAdapter requires an api_key (ANTHROPIC_API_KEY was not set)")
+        return {"x-api-key": api_key.strip()}
+
+    def request_url(self, *, stream: bool) -> str:
+        return f"{self.base_url}/v1/messages"
+
+    def request_headers(self, *, stream: bool) -> dict[str, str]:
+        headers = {
+            "content-type": "application/json",
+            "anthropic-version": self._ANTHROPIC_VERSION,
+        }
+        if stream:
+            headers["accept"] = "text/event-stream"
+        headers.update(self._auth_headers)
+        return headers
+
+    def build_request(
+        self,
+        messages: Sequence[MessageInput],
+        tools: Sequence[ToolInput] | None,
+        *,
+        stream: bool,
+        extra_params: dict[str, JsonValue],
+    ) -> JsonObject:
+        validated = _validate_messages(messages)
+        system_parts = [m.content for m in validated if m.role == "system" and m.content]
+        system_text = "\n\n".join(system_parts) if system_parts else None
+        convo = [m for m in validated if m.role != "system"]
+
+        payload: dict[str, JsonValue] = {
+            "model": self.model,
+            "messages": [
+                m.model_dump(mode="json", exclude_none=True, exclude={"name", "tool_call_id"})
+                for m in convo
+            ],
+            "stream": stream,
+        }
+        if system_text is not None:
+            payload["system"] = system_text
+        validated_tools = _validate_tools(tools)
+        if validated_tools:
+            payload["tools"] = [
+                {
+                    "name": t.function.name,
+                    "description": t.function.description,
+                    "input_schema": t.function.parameters,
+                }
+                for t in validated_tools
+            ]
+        conflicts = sorted(_RESERVED_REQUEST_KEYS.intersection(extra_params))
+        if conflicts:
+            raise ValueError(
+                f"extra request parameters conflict with reserved keys: {', '.join(conflicts)}"
+            )
+        payload.update(extra_params)
+        return _JSON_OBJECT_ADAPTER.validate_python(payload)
+
+    def parse_response(self, data: JsonObject) -> ModelResponse:
+        try:
+            role = str(data.get("role", "assistant"))
+            content_blocks = data.get("content")
+            text_parts: list[str] = []
+            tool_calls: list[ModelToolCall] = []
+            if isinstance(content_blocks, list):
+                for block in content_blocks:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type")
+                    if block_type == "text" and isinstance(block.get("text"), str):
+                        text_parts.append(str(block["text"]))
+                    elif block_type == "tool_use":
+                        tool_calls.append(
+                            ModelToolCall(
+                                id=str(block.get("id", "")),
+                                type="function",
+                                function=ToolCallFunction(
+                                    name=str(block.get("name", "")),
+                                    arguments=json.dumps(block.get("input", {})),
+                                ),
+                            )
+                        )
+            stop_reason = data.get("stop_reason")
+            usage_obj = data.get("usage")
+            usage: ModelUsage | None = None
+            if isinstance(usage_obj, dict):
+                usage = ModelUsage(
+                    prompt_tokens=int(usage_obj.get("input_tokens", 0) or 0),
+                    completion_tokens=int(usage_obj.get("output_tokens", 0) or 0),
+                    total_tokens=int(usage_obj.get("input_tokens", 0) or 0)
+                    + int(usage_obj.get("output_tokens", 0) or 0),
+                )
+            message = ModelMessage(role=role, content="".join(text_parts) or None)
+            return ModelResponse(
+                message=message,
+                tool_calls=tool_calls,
+                finish_reason=str(stop_reason) if stop_reason is not None else None,
+                usage=usage,
+            )
+        except (ValueError, TypeError) as exc:
+            raise ModelAdapterResponseError(
+                "Anthropic response did not match the /v1/messages schema"
+            ) from exc
+
+    def parse_stream_chunk(self, data: JsonObject) -> ModelResponseChunk | None:
+        event_type = str(data.get("__event_type", "") or data.get("type", ""))
+        if event_type == "content_block_delta":
+            delta = data.get("delta")
+            if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                text = delta.get("text")
+                if isinstance(text, str) and text:
+                    return ModelResponseChunk(content=text)
+            return None
+        if event_type == "message_delta":
+            delta = data.get("delta")
+            usage_data = data.get("usage")
+            stop_reason: str | None = None
+            if isinstance(delta, dict) and delta.get("stop_reason") is not None:
+                stop_reason = str(delta["stop_reason"])
+            usage: ModelUsage | None = None
+            if isinstance(usage_data, dict) and "output_tokens" in usage_data:
+                usage = ModelUsage(
+                    prompt_tokens=0,
+                    completion_tokens=int(usage_data.get("output_tokens", 0) or 0),
+                    total_tokens=int(usage_data.get("output_tokens", 0) or 0),
+                )
+            if stop_reason is None and usage is None:
+                return None
+            return ModelResponseChunk(finish_reason=stop_reason, usage=usage)
+        if event_type == "message_start":
+            message = data.get("message")
+            if isinstance(message, dict):
+                usage_obj = message.get("usage")
+                if isinstance(usage_obj, dict) and "input_tokens" in usage_obj:
+                    return ModelResponseChunk(
+                        usage=ModelUsage(
+                            prompt_tokens=int(usage_obj.get("input_tokens", 0) or 0),
+                            completion_tokens=0,
+                            total_tokens=int(usage_obj.get("input_tokens", 0) or 0),
+                        )
+                    )
+            return None
+        if event_type == "message_stop":
+            return None
+        return None
+
+    async def _iter_provider_stream(self, response: httpx.Response) -> AsyncIterator[JsonObject]:
+        event_name = ""
+        async for line in response.aiter_lines():
+            stripped = line.strip()
+            if not stripped:
+                event_name = ""
+                continue
+            if stripped.startswith("event:"):
+                event_name = stripped.removeprefix("event:").strip()
+                continue
+            if stripped.startswith("data:"):
+                payload = stripped.removeprefix("data:").strip()
+                if not payload:
+                    continue
+                try:
+                    data = json.loads(payload)
+                except json.JSONDecodeError as exc:
+                    raise ModelAdapterResponseError(
+                        "Anthropic stream chunk was not valid JSON"
+                    ) from exc
+                obj = _JSON_OBJECT_ADAPTER.validate_python(data)
+                if isinstance(obj, dict) and event_name:
+                    obj["__event_type"] = event_name
+                yield obj
+
+    def rate_limit_headers(self) -> tuple[str, ...]:
+        return (
+            "anthropic-ratelimit-requests-remaining",
+            "anthropic-ratelimit-requests-reset",
+            "anthropic-ratelimit-tokens-remaining",
+            "anthropic-ratelimit-tokens-reset",
+        )
+
+    def parse_rate_limit(self, headers_lower: Mapping[str, str]) -> ModelRateLimitInfo:
+        def _to_int(value: str | None) -> int | None:
+            if value is None or value == "":
+                return None
+            try:
+                return int(value)
+            except ValueError:
+                return None
+
+        return ModelRateLimitInfo(
+            requests_remaining=_to_int(headers_lower.get("anthropic-ratelimit-requests-remaining")),
+            tokens_remaining=_to_int(headers_lower.get("anthropic-ratelimit-tokens-remaining")),
+            requests_reset_seconds=_parse_go_duration(
+                headers_lower.get("anthropic-ratelimit-requests-reset")
+            ),
+            tokens_reset_seconds=_parse_go_duration(
+                headers_lower.get("anthropic-ratelimit-tokens-reset")
+            ),
+        )
+
+    def token_pricing(self) -> tuple[float, float]:
+        return _ANTHROPIC_PRICING_PER_1M.get(self.model, (0.0, 0.0))
+
+
+_ANTHROPIC_PRICING_PER_1M: dict[str, tuple[float, float]] = {
+    "claude-3-5-sonnet-20241022": (3.0, 15.0),
+    "claude-3-5-haiku-20241022": (0.8, 4.0),
+    "claude-3-opus-20240229": (15.0, 75.0),
+    "claude-3-sonnet-20240229": (3.0, 15.0),
+    "claude-3-haiku-20240307": (0.25, 1.25),
+}
+
+
+class OpenAINativeAdapter(CloudModelAdapter):
+    """CloudModelAdapter for OpenAI's native chat-completions API.
+
+    Differs from `OpenAICompatibleAdapter` in that it surfaces the
+    OpenAI-native rate-limit headers (``x-ratelimit-*``) and the
+    OpenAI-native error envelope (``{"error": {"message", "type", "code"}}``),
+    which the OpenAI-compatible adapter does not model. The wire body is
+    still the OpenAI `/chat/completions` shape, so `build_request`
+    reuses `ModelRequest.to_openai_payload()`.
+    """
+
+    provider = "openai"
+
+    def _build_auth_headers(self, api_key: str | None) -> dict[str, str]:
+        if api_key is None or not api_key.strip():
+            raise ValueError("OpenAINativeAdapter requires an api_key (OPENAI_API_KEY was not set)")
+        token = api_key.strip()
+        if token.lower().startswith("bearer "):
+            return {"Authorization": token}
+        return {"Authorization": f"Bearer {token}"}
+
+    def request_url(self, *, stream: bool) -> str:
+        base = self.base_url.rstrip("/")
+        if base.endswith("/v1"):
+            return f"{base}/chat/completions"
+        return f"{base}/v1/chat/completions"
+
+    def request_headers(self, *, stream: bool) -> dict[str, str]:
+        headers = {"content-type": "application/json"}
+        if stream:
+            headers["accept"] = "text/event-stream"
+        headers.update(self._auth_headers)
+        return headers
+
+    def build_request(
+        self,
+        messages: Sequence[MessageInput],
+        tools: Sequence[ToolInput] | None,
+        *,
+        stream: bool,
+        extra_params: dict[str, JsonValue],
+    ) -> JsonObject:
+        request = _build_request(
+            self.model, messages, tools, stream=stream, extra_params=extra_params
+        )
+        return request.to_openai_payload()
+
+    def parse_response(self, data: JsonObject) -> ModelResponse:
+        error = data.get("error")
+        if isinstance(error, dict):
+            raise ModelAdapterResponseError(
+                f"OpenAI native error: {error.get('message', 'unknown')}"
+            )
+        return _parse_completion_response(data)
+
+    def parse_stream_chunk(self, data: JsonObject) -> ModelResponseChunk | None:
+        return _parse_openai_stream_chunk(data)
+
+    def rate_limit_headers(self) -> tuple[str, ...]:
+        return (
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-remaining-tokens",
+            "x-ratelimit-reset-requests",
+            "x-ratelimit-reset-tokens",
+        )
+
+    def parse_rate_limit(self, headers_lower: Mapping[str, str]) -> ModelRateLimitInfo:
+        def _to_int(value: str | None) -> int | None:
+            if value is None or value == "":
+                return None
+            try:
+                return int(value)
+            except ValueError:
+                return None
+
+        def _parse_duration(value: str | None) -> float | None:
+            if value is None or value == "":
+                return None
+            try:
+                return float(value.rstrip("s").rstrip("ms"))
+            except ValueError:
+                return None
+
+        return ModelRateLimitInfo(
+            requests_remaining=_to_int(headers_lower.get("x-ratelimit-remaining-requests")),
+            tokens_remaining=_to_int(headers_lower.get("x-ratelimit-remaining-tokens")),
+            requests_reset_seconds=_parse_duration(headers_lower.get("x-ratelimit-reset-requests")),
+            tokens_reset_seconds=_parse_duration(headers_lower.get("x-ratelimit-reset-tokens")),
+        )
+
+    def token_pricing(self) -> tuple[float, float]:
+        return _OPENAI_PRICING_PER_1M.get(self.model, (0.0, 0.0))
+
+
+_OPENAI_PRICING_PER_1M: dict[str, tuple[float, float]] = {
+    "gpt-4o": (2.5, 10.0),
+    "gpt-4o-mini": (0.15, 0.6),
+    "gpt-4-turbo": (10.0, 30.0),
+    "gpt-4": (30.0, 60.0),
+    "o1": (15.0, 60.0),
+    "o1-mini": (3.0, 12.0),
+}
+
+
+def _parse_openai_stream_chunk(data: JsonObject) -> ModelResponseChunk | None:
+    try:
+        parsed = _OpenAIChatCompletionChunk.model_validate(data)
+    except ValueError as exc:
+        raise ModelAdapterResponseError("stream chunk did not match chat schema") from exc
+    if parsed.choices:
+        choice = parsed.choices[0]
+        delta = choice.delta or _OpenAIStreamDelta()
+        return ModelResponseChunk(
+            content=delta.content,
+            tool_calls=delta.tool_calls or [],
+            finish_reason=choice.finish_reason,
+            usage=parsed.usage,
+        )
+    if parsed.usage is not None:
+        return ModelResponseChunk(usage=parsed.usage)
+    return None
+
+
+_ADAPTER_PREFIXES: dict[str, str] = {
+    "anthropic/": "anthropic",
+    "openai/": "openai",
+}
+
+
+def resolve_model_adapter(
+    model_id: str,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    timeout: float = 60.0,
+    max_retries: int = _DEFAULT_ADAPTER_MAX_RETRIES,
+    client: httpx.AsyncClient | None = None,
+    on_retry: RetryCallback | None = None,
+    on_cost: CostCallback | None = None,
+    on_rate_limit: RateLimitCallback | None = None,
+) -> ModelAdapter:
+    """Resolve the adapter class for *model_id* and construct it (ADR-0029 §5).
+
+    Prefix matching (highest precedence first):
+
+    | Prefix        | Adapter                |
+    | ------------- | ---------------------- |
+    | ``anthropic/``| `AnthropicAdapter`     |
+    | ``openai/``   | `OpenAINativeAdapter`  |
+    | (otherwise)   | `OpenAICompatibleAdapter` |
+
+    The prefix is stripped from *model_id* before it is forwarded to the
+    provider so the request body carries the bare provider model name
+    (e.g. ``claude-3-5-sonnet-20241022`` not ``anthropic/claude-...``).
+    """
+    for prefix, provider in _ADAPTER_PREFIXES.items():
+        if model_id.startswith(prefix):
+            bare = model_id.removeprefix(prefix)
+            if provider == "anthropic":
+                resolved_base = base_url or "https://api.anthropic.com"
+                return AnthropicAdapter(
+                    model=bare,
+                    base_url=resolved_base,
+                    api_key=api_key,
+                    client=client,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                    on_retry=on_retry,
+                    on_cost=on_cost,
+                    on_rate_limit=on_rate_limit,
+                )
+            if provider == "openai":
+                resolved_base = base_url or "https://api.openai.com"
+                return OpenAINativeAdapter(
+                    model=bare,
+                    base_url=resolved_base,
+                    api_key=api_key,
+                    client=client,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                    on_retry=on_retry,
+                    on_cost=on_cost,
+                    on_rate_limit=on_rate_limit,
+                )
+
+    resolved_base = base_url or ""
+    if not resolved_base:
+        raise ValueError(
+            "OpenAICompatibleAdapter resolution requires a base_url; "
+            "set OPENCODE_SERVER_URL or pass base_url explicitly"
+        )
+    return OpenAICompatibleAdapter(
+        base_url=resolved_base,
+        model=model_id,
+        api_key=api_key,
+        client=client,
+        timeout=timeout,
+        max_retries=max_retries,
+        on_retry=on_retry,
+    )
