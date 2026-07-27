@@ -1189,3 +1189,195 @@ def test_tool_result_error_with_ambiguous_not_misclassified_as_bad_prompt() -> N
     report = Digester().digest(_SESSION, events)
     assert report.proposed_class == "tool-error"
     assert report.failed_steps[0]["kind"] == "tool_result"
+
+
+# ---------------------------------------------------------------------------
+# Issue #1033: batch digest for processing multiple failures at once
+# ---------------------------------------------------------------------------
+
+
+class TestDigestBatch:
+    """Tests for the batch digest functionality (issue #1033)."""
+
+    def test_batch_clean_session_returns_single_clean_report(self):
+        """A clean session returns one clean report in the batch."""
+        batch = Digester().digest_batch(_SESSION, _CLEAN_EVENTS)
+        assert batch.total_failures == 0
+        assert len(batch.failure_reports) == 1
+        assert batch.failure_reports[0].proposed_class == "clean"
+
+    def test_batch_empty_events_returns_clean_report(self):
+        """An empty event list returns a clean report."""
+        batch = Digester().digest_batch(_SESSION, [])
+        assert batch.total_failures == 0
+        assert len(batch.failure_reports) == 1
+        assert batch.failure_reports[0].proposed_class == "clean"
+
+    def test_batch_single_failure_returns_one_report(self):
+        """A session with one failure returns one report in the batch."""
+        events = [
+            *_CLEAN_EVENTS,
+            _ev(
+                "tool_error",
+                {"error": "no such tool: frobnicate"},
+                event_id="e-fail",
+                seq=4,
+            ),
+        ]
+        batch = Digester().digest_batch(_SESSION, events)
+        assert batch.total_failures == 1
+        assert len(batch.failure_reports) == 1
+        assert batch.failure_reports[0].proposed_class == "wrong-tool"
+
+    def test_batch_multiple_failures_same_class_merges(self):
+        """Multiple failures of the same class are merged into one report."""
+        events = [
+            *_CLEAN_EVENTS,
+            _ev(
+                "tool_error",
+                {"error": "no such tool: frobnicate"},
+                event_id="e-fail1",
+                seq=4,
+            ),
+            _ev(
+                "tool_error",
+                {"error": "no such tool: other_tool"},
+                event_id="e-fail2",
+                seq=5,
+            ),
+        ]
+        batch = Digester().digest_batch(_SESSION, events)
+        assert batch.total_failures == 1
+        assert len(batch.failure_reports) == 1
+        assert batch.failure_reports[0].proposed_class == "wrong-tool"
+        assert len(batch.failure_reports[0].failed_steps) == 2
+
+    def test_batch_multiple_failures_different_classes(self):
+        """Multiple failures of different classes produce separate reports."""
+        events = [
+            _ev("user_prompt", {"text": "go"}, event_id="e1", seq=1),
+            _ev(
+                "tool_error",
+                {"error": "no such tool: frobnicate"},
+                event_id="e-wrong-tool",
+                seq=2,
+            ),
+            _ev(
+                "tool_error",
+                {"error": "some traceback happened"},
+                event_id="e-tool-err",
+                seq=3,
+            ),
+        ]
+        batch = Digester().digest_batch(_SESSION, events)
+        assert batch.total_failures == 2
+        assert len(batch.failure_reports) == 2
+        classes = {r.proposed_class for r in batch.failure_reports}
+        assert classes == {"wrong-tool", "tool-error"}
+
+    def test_batch_multiple_failures_ordered_by_first_occurrence(self):
+        """Failure reports are ordered by the first occurrence timestamp."""
+        events = [
+            _ev("user_prompt", {"text": "go"}, event_id="e1", seq=1),
+            _ev(
+                "tool_error",
+                {"error": "some traceback happened"},
+                event_id="e-tool-err-first",
+                seq=2,
+            ),
+            _ev(
+                "tool_error",
+                {"error": "no such tool: frobnicate"},
+                event_id="e-wrong-tool-second",
+                seq=3,
+            ),
+        ]
+        batch = Digester().digest_batch(_SESSION, events)
+        assert batch.failure_reports[0].proposed_class == "tool-error"
+        assert batch.failure_reports[1].proposed_class == "wrong-tool"
+
+    def test_batch_context_overflow_takes_precedence(self):
+        """A context-overflow failure is the only report even with other failures."""
+        events = [
+            _ev("user_prompt", {"text": "go"}, event_id="e1", seq=1),
+            _ev(
+                "tool_error",
+                {"error": "no such tool: frobnicate"},
+                event_id="e-wrong-tool",
+                seq=2,
+            ),
+            _ev(
+                "outcome",
+                {"status": "truncated", "reason": "max_steps", "steps": 10},
+                event_id="e-co",
+                seq=3,
+            ),
+        ]
+        batch = Digester().digest_batch(_SESSION, events)
+        assert batch.total_failures == 1
+        assert batch.failure_reports[0].proposed_class == "context-overflow"
+
+    def test_batch_injection_blocks_takes_precedence(self):
+        """Injection blocks aggregate and take precedence over later failures."""
+        events = [
+            _ev("user_prompt", {"text": "go"}, event_id="e1", seq=1),
+            _ev(
+                INJECTION_BLOCKED_KIND,
+                {"markers": ["ignore_previous"], "tool": "read_file"},
+                event_id="e-block",
+                seq=2,
+            ),
+            _ev(
+                "tool_error",
+                {"error": "exit code 1"},
+                event_id="e-tool-err",
+                seq=3,
+            ),
+        ]
+        batch = Digester().digest_batch(_SESSION, events)
+        assert batch.total_failures == 1
+        assert batch.failure_reports[0].proposed_class == INJECTION_ATTEMPT_CLASS
+
+    def test_batch_failure_reports_have_correct_session_id(self):
+        """All failure reports in the batch carry the correct session_id."""
+        events = [
+            *_CLEAN_EVENTS,
+            _ev(
+                "tool_error",
+                {"error": "no such tool: frobnicate"},
+                event_id="e-fail",
+                seq=4,
+            ),
+        ]
+        batch = Digester().digest_batch(_SESSION, events)
+        for report in batch.failure_reports:
+            assert report.session_id == _SESSION
+
+    def test_batch_reports_preserve_failed_steps(self):
+        """Each failure report preserves its failed_steps correctly."""
+        events = [
+            _ev("user_prompt", {"text": "go"}, event_id="e1", seq=1),
+            _ev(
+                "tool_error",
+                {"error": "no such tool: frobnicate"},
+                event_id="e-fail1",
+                seq=2,
+            ),
+            _ev(
+                "tool_error",
+                {"error": "traceback: something failed"},
+                event_id="e-fail2",
+                seq=3,
+            ),
+        ]
+        batch = Digester().digest_batch(_SESSION, events)
+        wrong_tool_report = next(
+            r for r in batch.failure_reports if r.proposed_class == "wrong-tool"
+        )
+        assert len(wrong_tool_report.failed_steps) == 1
+        assert wrong_tool_report.failed_steps[0]["event_id"] == "e-fail1"
+        tool_error_report = next(
+            r for r in batch.failure_reports if r.proposed_class == "tool-error"
+        )
+        assert len(tool_error_report.failed_steps) == 1
+        assert tool_error_report.failed_steps[0]["event_id"] == "e-fail2"

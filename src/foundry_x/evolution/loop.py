@@ -21,7 +21,12 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from foundry_x.evolution.critic import Critic, CriticVerdict
-from foundry_x.evolution.digester import Digester, FailureReport, context_hash_bucket
+from foundry_x.evolution.digester import (
+    BatchFailureReport,
+    Digester,
+    FailureReport,
+    context_hash_bucket,
+)
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
 from foundry_x.evolution.store import FailurePatternStore
 from foundry_x.execution.runner import resolve_harness_version
@@ -53,6 +58,25 @@ class EvolutionResult(BaseModel):
     proposed_edits: list[ProposedEdit] = Field(default_factory=list)
     verdict: CriticVerdict | None = None
     evolver_duration_ms: float | None = None
+    harness_version: str | None = None
+    started_at: str
+    completed_at: str
+
+
+class BatchEvolutionResult(BaseModel):
+    """Structured result of a batch evolution-step pipeline run (issue #1033).
+
+    Returned by :func:`run_evolution_batch`. The ``results`` field contains
+    individual :class:`EvolutionResult` objects for each failure class in the batch.
+    The ``total_failures`` field reflects how many distinct failure classes were
+    found and processed.
+    """
+
+    session_id: str
+    batch_report: BatchFailureReport
+    results: list[EvolutionResult] = Field(default_factory=list)
+    total_failures: int = 0
+    proposed_edits: list[ProposedEdit] = Field(default_factory=list)
     harness_version: str | None = None
     started_at: str
     completed_at: str
@@ -377,6 +401,267 @@ async def run_evolution_step_async(
         proposed_edits=proposed_edits,
         verdict=verdict,
         evolver_duration_ms=evolver_duration_ms,
+        harness_version=harness_version,
+        started_at=started_at,
+        completed_at=_now_iso(),
+    )
+
+
+def run_evolution_batch(
+    session_id: str,
+    events: list[TraceEvent],
+    harness_dir: Path,
+    *,
+    critic: Critic | None = None,
+    evolver: Evolver | None = None,
+    no_verify: bool = False,
+    trace_logger: TraceLogger | None = None,
+    critic_tier: Literal["smoke", "full"] = "full",
+    failure_pattern_store: FailurePatternStore | None = None,
+) -> BatchEvolutionResult:
+    """Run batch evolution processing over a session's trace events (issue #1033).
+
+    Unlike :func:`run_evolution_step` which processes only the first failure,
+    this function processes all failures found in the session and proposes
+    edits for each distinct failure class simultaneously.
+
+    Pipeline::
+
+        Digester.digest_batch → Evolver.propose_batch → Critic.evaluate (per failure)
+
+    The Critic is invoked for each failure class that produces proposed edits.
+
+    Parameters
+    ----------
+    session_id:
+        Identifier of the session these events belong to.
+    events:
+        Ordered list of :class:`TraceEvent` objects for the session.
+    harness_dir:
+        Path to the live harness directory.
+    critic:
+        Optional :class:`Critic` instance.
+    evolver:
+        Optional :class:`Evolver` instance. When omitted a default instance is
+        constructed.
+    no_verify:
+        When ``True``, skip the Critic gate.
+    trace_logger:
+        Optional :class:`TraceLogger` passed to the default :class:`Evolver`.
+    critic_tier:
+        Which benchmark subset the Critic pytest gate runs.
+    failure_pattern_store:
+        Optional :class:`FailurePatternStore` for cross-session pattern
+        accumulation.
+
+    Returns
+    -------
+    BatchEvolutionResult
+        A pydantic model containing the batch report, individual results per
+        failure class, and all proposed edits.
+    """
+    harness_version = resolve_harness_version(harness_dir).version
+    started_at = _now_iso()
+    batch_report = Digester().digest_batch(session_id, events)
+
+    if evolver is None:
+        evolver = Evolver(trace_logger=trace_logger, session_id=session_id)
+
+    results: list[EvolutionResult] = []
+    all_edits: list[ProposedEdit] = []
+
+    for failure_report in batch_report.failure_reports:
+        if failure_report.proposed_class == "clean":
+            continue
+
+        if failure_pattern_store is not None:
+            _record_and_annotate_pattern(failure_report, failure_pattern_store)
+
+        evolver_duration_ms: float | None = None
+        try:
+            t0 = time.time()
+            proposed_edits = evolver.propose(
+                harness_dir=harness_dir,
+                failure=failure_report,
+                current_diff=None,
+            )
+            evolver_duration_ms = (time.time() - t0) * 1000
+        except NotImplementedError:
+            proposed_edits = []
+
+        if not proposed_edits:
+            results.append(
+                EvolutionResult(
+                    session_id=session_id,
+                    failure_report=failure_report,
+                    failure_class=failure_report.proposed_class,
+                    proposed_edits=[],
+                    verdict=None,
+                    evolver_duration_ms=evolver_duration_ms,
+                    harness_version=harness_version,
+                    started_at=started_at,
+                    completed_at=_now_iso(),
+                )
+            )
+            continue
+
+        verdict = None
+        if no_verify:
+            for idx, edit in enumerate(proposed_edits):
+                verdict = CriticVerdict(
+                    verdict=None,
+                    passed_checks=[],
+                    failed_checks=[],
+                    notes="--no-verify: skipped",
+                    edit_index=idx,
+                    failure_class=failure_report.proposed_class,
+                )
+        else:
+            if critic is None:
+                critic = Critic(harness_dir=harness_dir)
+            for idx, edit in enumerate(proposed_edits):
+                verdict = critic.evaluate(
+                    edit.unified_diff,
+                    edit_index=idx,
+                    failure_class=failure_report.proposed_class,
+                    tier=critic_tier,
+                )
+
+        results.append(
+            EvolutionResult(
+                session_id=session_id,
+                failure_report=failure_report,
+                failure_class=failure_report.proposed_class,
+                proposed_edits=proposed_edits,
+                verdict=verdict,
+                evolver_duration_ms=evolver_duration_ms,
+                harness_version=harness_version,
+                started_at=started_at,
+                completed_at=_now_iso(),
+            )
+        )
+        all_edits.extend(proposed_edits)
+
+    return BatchEvolutionResult(
+        session_id=session_id,
+        batch_report=batch_report,
+        results=results,
+        total_failures=batch_report.total_failures,
+        proposed_edits=all_edits,
+        harness_version=harness_version,
+        started_at=started_at,
+        completed_at=_now_iso(),
+    )
+
+
+async def run_evolution_batch_async(
+    session_id: str,
+    events: list[TraceEvent],
+    harness_dir: Path,
+    *,
+    critic: Critic | None = None,
+    evolver: Evolver | None = None,
+    no_verify: bool = False,
+    trace_logger: TraceLogger | None = None,
+    critic_tier: Literal["smoke", "full"] = "full",
+    failure_pattern_store: FailurePatternStore | None = None,
+) -> BatchEvolutionResult:
+    """Async variant of :func:`run_evolution_batch`.
+
+    Awaits ``evolver.propose_batch_async()`` instead of calling ``evolver.propose()``.
+    """
+    harness_version = resolve_harness_version(harness_dir).version
+    started_at = _now_iso()
+    batch_report = Digester().digest_batch(session_id, events)
+
+    if evolver is None:
+        evolver = Evolver(trace_logger=trace_logger, session_id=session_id)
+
+    results: list[EvolutionResult] = []
+    all_edits: list[ProposedEdit] = []
+
+    for failure_report in batch_report.failure_reports:
+        if failure_report.proposed_class == "clean":
+            continue
+
+        if failure_pattern_store is not None:
+            _record_and_annotate_pattern(failure_report, failure_pattern_store)
+
+        evolver_duration_ms: float | None = None
+        try:
+            t0 = time.time()
+            proposed_edits = await evolver.propose_batch_async(
+                harness_dir=harness_dir,
+                batch_report=BatchFailureReport(
+                    session_id=session_id,
+                    failure_reports=[failure_report],
+                    total_failures=1,
+                ),
+                current_diff=None,
+            )
+            evolver_duration_ms = (time.time() - t0) * 1000
+        except NotImplementedError:
+            proposed_edits = []
+
+        if not proposed_edits:
+            results.append(
+                EvolutionResult(
+                    session_id=session_id,
+                    failure_report=failure_report,
+                    failure_class=failure_report.proposed_class,
+                    proposed_edits=[],
+                    verdict=None,
+                    evolver_duration_ms=evolver_duration_ms,
+                    harness_version=harness_version,
+                    started_at=started_at,
+                    completed_at=_now_iso(),
+                )
+            )
+            continue
+
+        verdict = None
+        if no_verify:
+            for idx, edit in enumerate(proposed_edits):
+                verdict = CriticVerdict(
+                    verdict=None,
+                    passed_checks=[],
+                    failed_checks=[],
+                    notes="--no-verify: skipped",
+                    edit_index=idx,
+                    failure_class=failure_report.proposed_class,
+                )
+        else:
+            if critic is None:
+                critic = Critic(harness_dir=harness_dir)
+            for idx, edit in enumerate(proposed_edits):
+                verdict = critic.evaluate(
+                    edit.unified_diff,
+                    edit_index=idx,
+                    failure_class=failure_report.proposed_class,
+                    tier=critic_tier,
+                )
+
+        results.append(
+            EvolutionResult(
+                session_id=session_id,
+                failure_report=failure_report,
+                failure_class=failure_report.proposed_class,
+                proposed_edits=proposed_edits,
+                verdict=verdict,
+                evolver_duration_ms=evolver_duration_ms,
+                harness_version=harness_version,
+                started_at=started_at,
+                completed_at=_now_iso(),
+            )
+        )
+        all_edits.extend(proposed_edits)
+
+    return BatchEvolutionResult(
+        session_id=session_id,
+        batch_report=batch_report,
+        results=results,
+        total_failures=batch_report.total_failures,
+        proposed_edits=all_edits,
         harness_version=harness_version,
         started_at=started_at,
         completed_at=_now_iso(),

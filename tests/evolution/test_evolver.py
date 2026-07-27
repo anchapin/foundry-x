@@ -163,3 +163,153 @@ def test_generate_edits_injects_few_shot_examples_into_prompt(tmp_path: Path) ->
     assert "PREVIOUSLY SUCCESSFUL EDITS" in prompt_content
     assert "previously successful change" in prompt_content
     assert "wrong-tool" in prompt_content
+
+
+# ---------------------------------------------------------------------------
+# Issue #1033: batch propose for processing multiple failures at once
+# ---------------------------------------------------------------------------
+
+
+class TestProposeBatch:
+    """Tests for the batch propose functionality (issue #1033)."""
+
+    def test_propose_batch_empty_reports_returns_empty(self, tmp_path: Path) -> None:
+        """An empty batch returns no edits."""
+        from foundry_x.evolution.digester import BatchFailureReport
+
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        (harness_dir / "system_prompt.txt").write_text("original\n", encoding="utf-8")
+
+        evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+        batch = BatchFailureReport(session_id="s", failure_reports=[], total_failures=0)
+        edits = evolver.propose_batch(harness_dir, batch)
+        assert edits == []
+
+    def test_propose_batch_clean_report_returns_empty(self, tmp_path: Path) -> None:
+        """A batch with only a clean report returns no edits."""
+        from foundry_x.evolution.digester import BatchFailureReport, FailureReport
+
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        (harness_dir / "system_prompt.txt").write_text("original\n", encoding="utf-8")
+
+        evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+        batch = BatchFailureReport(
+            session_id="s",
+            failure_reports=[
+                FailureReport(session_id="s", summary="No failures", proposed_class="clean")
+            ],
+            total_failures=0,
+        )
+        edits = evolver.propose_batch(harness_dir, batch)
+        assert edits == []
+
+    def test_propose_batch_single_failure_returns_edit(self, tmp_path: Path) -> None:
+        """A batch with one failure returns one edit."""
+        from foundry_x.evolution.digester import BatchFailureReport, FailureReport
+
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        (harness_dir / "system_prompt.txt").write_text("original\n", encoding="utf-8")
+
+        evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+        batch = BatchFailureReport(
+            session_id="s",
+            failure_reports=[
+                FailureReport(
+                    session_id="s",
+                    summary="no such tool: frobnicate",
+                    proposed_class="wrong-tool",
+                    failed_steps=[{"kind": "tool_error"}],
+                )
+            ],
+            total_failures=1,
+        )
+        edits = evolver.propose_batch(harness_dir, batch)
+        assert len(edits) == 1
+        assert edits[0].target_file == "harness/system_prompt.txt"
+
+    def test_propose_batch_multiple_failures_same_class_deduplicates(
+        self, tmp_path: Path
+    ) -> None:
+        """Multiple failures of the same class produce only one edit (dedup by target)."""
+        from foundry_x.evolution.digester import BatchFailureReport, FailureReport
+
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        (harness_dir / "system_prompt.txt").write_text("original\n", encoding="utf-8")
+
+        evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+        batch = BatchFailureReport(
+            session_id="s",
+            failure_reports=[
+                FailureReport(
+                    session_id="s",
+                    summary="first wrong-tool",
+                    proposed_class="wrong-tool",
+                    failed_steps=[{"kind": "tool_error"}],
+                ),
+                FailureReport(
+                    session_id="s",
+                    summary="second wrong-tool",
+                    proposed_class="wrong-tool",
+                    failed_steps=[{"kind": "tool_error"}],
+                ),
+            ],
+            total_failures=2,
+        )
+        edits = evolver.propose_batch(harness_dir, batch)
+        assert len(edits) == 1
+
+    def test_propose_batch_multiple_failures_different_classes(
+        self, tmp_path: Path
+    ) -> None:
+        """Multiple failures of different classes produce separate edits."""
+        from foundry_x.evolution.digester import BatchFailureReport, FailureReport
+
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        (harness_dir / "system_prompt.txt").write_text("original\n", encoding="utf-8")
+
+        evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+        batch = BatchFailureReport(
+            session_id="s",
+            failure_reports=[
+                FailureReport(
+                    session_id="s",
+                    summary="no such tool: frobnicate",
+                    proposed_class="wrong-tool",
+                    failed_steps=[{"kind": "tool_error"}],
+                ),
+                FailureReport(
+                    session_id="s",
+                    summary="some traceback happened",
+                    proposed_class="tool-error",
+                    failed_steps=[{"kind": "tool_error"}],
+                ),
+            ],
+            total_failures=2,
+        )
+        edits = evolver.propose_batch(harness_dir, batch)
+        assert len(edits) == 1
+
+    def test_propose_batch_all_clean_reports_returns_empty(self, tmp_path: Path) -> None:
+        """When all reports in the batch are clean, no edits are proposed."""
+        from foundry_x.evolution.digester import BatchFailureReport, FailureReport
+
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        (harness_dir / "system_prompt.txt").write_text("original\n", encoding="utf-8")
+
+        evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+        batch = BatchFailureReport(
+            session_id="s",
+            failure_reports=[
+                FailureReport(session_id="s", summary="clean", proposed_class="clean"),
+                FailureReport(session_id="s", summary="also clean", proposed_class="clean"),
+            ],
+            total_failures=0,
+        )
+        edits = evolver.propose_batch(harness_dir, batch)
+        assert edits == []
