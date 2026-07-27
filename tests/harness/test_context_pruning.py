@@ -38,6 +38,7 @@ from harness.hooks.context_pruning import (
     TokenCounter,
     Tracer,
     _sqlite_pruner,
+    _SqlitePruner,
     register_into,
     register_token_aware_into,
     resolve_context_tokens_threshold,
@@ -1027,3 +1028,87 @@ def test_token_aware_pruning_at_5600g_6600xt_context_window(tmp_path) -> None:
     assert prune_events[0].payload["dropped"] == 150
     assert prune_events[0].payload["threshold_tokens"] == 8192
     assert prune_events[0].payload["session_tokens"] == 9000
+
+
+# ---------------------------------------------------------------------------
+# _SqlitePruner connection-reuse tests (issue #1125)
+# ---------------------------------------------------------------------------
+
+
+class TestSqlitePrunerConnectionReuse:
+    def test_single_instance_reuses_connection_across_calls(self, tmp_path) -> None:
+        """Multiple ``count_tokens`` and ``prune`` calls on one _SqlitePruner
+        instance must reuse the same underlying sqlite3.Connection."""
+        import sqlite3
+
+        connect_count = 0
+        _original_connect = sqlite3.connect
+
+        def _counting_connect(path, **kwargs):
+            nonlocal connect_count
+            connect_count += 1
+            return _original_connect(path, **kwargs)
+
+        db = tmp_path / "traces.db"
+        logger = TraceLogger(db)
+        with logger.session(harness_version="test-0.0") as sid:
+            _plant(logger, sid, 50)
+
+        original = sqlite3.connect
+        sqlite3.connect = _counting_connect  # type: ignore[method-assign]
+
+        try:
+            pruner = _SqlitePruner(db)
+            for _ in range(10):
+                pruner.count_tokens(sid)
+            for _ in range(10):
+                pruner.prune(sid, frozenset({"tool_result", "user_prompt"}), 200)
+            pruner.close()
+            assert connect_count == 1, (
+                f"Expected 1 sqlite3.connect call (connection reuse), got {connect_count}"
+            )
+        finally:
+            sqlite3.connect = original  # type: ignore[method-assign]
+
+    def test_pruner_produces_correct_results_on_repeated_calls(self, tmp_path) -> None:
+        """Repeated ``prune`` calls on the same _SqlitePruner must return
+        identical results, confirming the connection is healthy between calls."""
+        db = tmp_path / "traces.db"
+        logger = TraceLogger(db)
+        with logger.session(harness_version="test-0.0") as sid:
+            _plant(logger, sid, _PLANTS)
+
+        pruner = _SqlitePruner(db)
+        try:
+            results = []
+            for _ in range(5):
+                dropped = pruner.prune(sid, frozenset({"tool_result", "user_prompt"}), 200)
+                results.append(dropped)
+            assert results == [50, 0, 0, 0, 0], (
+                f"Expected [50, 0, 0, 0, 0] (first call drops to 200, rest are "
+                f"no-ops), got {results}"
+            )
+        finally:
+            pruner.close()
+
+    def test_count_tokens_returns_zero_for_unknown_session(self, tmp_path) -> None:
+        """``count_tokens`` on an unknown session_id must return 0 without
+        error, confirming the connection handles empty result sets cleanly."""
+        db = tmp_path / "traces.db"
+        logger = TraceLogger(db)
+        with logger.session(harness_version="test-0.0") as sid:
+            pass
+
+        pruner = _SqlitePruner(db)
+        try:
+            assert pruner.count_tokens("unknown-session") == 0
+            assert pruner.count_tokens(sid) == 0
+        finally:
+            pruner.close()
+
+    def test_close_idempotent(self, tmp_path) -> None:
+        """``close()`` must not raise; calling it twice must be safe."""
+        db = tmp_path / "traces.db"
+        pruner = _SqlitePruner(db)
+        pruner.close()
+        pruner.close()

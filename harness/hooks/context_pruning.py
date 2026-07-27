@@ -96,23 +96,62 @@ Tracer = Callable[[str, str, dict[str, object]], None]
 TokenCounter = Callable[[str], int]
 
 
-def _sqlite_token_counter(db_path: str | os.PathLike) -> TokenCounter:
-    """Build a :data:`TokenCounter` backed by direct SQLite."""
+class _SqlitePruner:
+    """SQLite-backed pruner and token counter with a single persistent connection.
 
-    def _count(session_id: str) -> int:
-        with sqlite3.connect(db_path) as conn:
-            row = conn.execute(
-                "SELECT payload FROM events "
-                "WHERE session_id = ? AND kind = 'model_response' "
-                "ORDER BY timestamp DESC LIMIT 1",
-                (session_id,),
-            ).fetchone()
+    Opens one ``sqlite3.Connection`` at construction time and reuses it for
+    all ``count_tokens`` and ``prune`` calls. This eliminates the per-call
+    ``sqlite3.connect()`` overhead that the original module-level
+    ``_sqlite_token_counter`` and ``_sqlite_pruner`` factory functions
+    incurred on every ``pre_tool`` invocation (issue #1125).
+    """
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, db_path: str | os.PathLike) -> None:
+        self._conn = sqlite3.connect(db_path)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+
+    def count_tokens(self, session_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT payload FROM events "
+            "WHERE session_id = ? AND kind = 'model_response' "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
         if not row:
             return 0
         payload = json.loads(row[0])
         return payload.get("tokens_used", 0)
 
-    return _count
+    def prune(self, session_id: str, keep_kinds: frozenset[str], target_count: int) -> int:
+        not_in_clause = ", ".join("?" for _ in keep_kinds)
+        total = self._conn.execute(
+            "SELECT COUNT(*) FROM events WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+        if total <= target_count:
+            return 0
+        to_drop = total - target_count
+        params: list[object] = [session_id, *keep_kinds, to_drop]
+        cursor = self._conn.execute(
+            "SELECT event_id FROM events "
+            "WHERE session_id = ? AND kind NOT IN (" + not_in_clause + ") "
+            "ORDER BY timestamp LIMIT ?",
+            params,
+        )
+        ids = [row[0] for row in cursor.fetchall()]
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        self._conn.execute(
+            "DELETE FROM events WHERE event_id IN (" + placeholders + ")",
+            ids,
+        )
+        return len(ids)
+
+    def close(self) -> None:
+        self._conn.close()
 
 
 def _sqlite_pruner(db_path: str | os.PathLike) -> Pruner:
@@ -334,8 +373,8 @@ class TokenAwarePruningHook:
     get_tokens:
         Callable returning the current cumulative token count for the
         session. The runner supplies a closure over its ``tokens_used``
-        variable; tests supply a lambda or the
-        :func:`_sqlite_token_counter` helper.
+        variable; tests supply a lambda or
+        :meth:`_SqlitePruner.count_tokens`.
     """
 
     def __init__(
@@ -440,6 +479,7 @@ __all__ = [
     "TokenAwarePruningHook",
     "TokenCounter",
     "Tracer",
+    "_SqlitePruner",
     "register_into",
     "register_token_aware_into",
     "resolve_context_tokens_threshold",
