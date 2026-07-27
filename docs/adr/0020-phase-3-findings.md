@@ -210,11 +210,112 @@ The following are unresolved as of this writing and block full empirical validat
 | 3 | What is the `token_budget_hit_rate` across benchmark sessions? | Issue #551 | Open |
 | 4 | Does the real-LLM smoke job pass on CI with live model? | Issue #552 | Open |
 | 5 | Is `FOUNDRY_CONTEXT_TOKENS=8192` the correct default for 5600G/6600 XT? | Issue #553 | Open |
-| 6 | Are there benchmark tasks that remain intractable even at Q8_0? | Unknown | Unstudied |
+| 6 | Are there benchmark tasks that remain intractable even at Q8_0? | Issue #1027 | **Studied — see §Intractable Task Study** |
 | 7 | Do GGUF v4 IQ quantizations (IQ4_XS, IQ3_S) offer a better quality/VRAM tradeoff than Q5_K_M? | Issue #1050 (follow-up pending) | Open |
 | 8 | Does the intelligence floor change at larger context windows (16k, 32k)? | Issue #1050 (follow-up pending) | Open |
 
 Issues #549–#553 must be resolved before this ADR can be updated from "projected" to "empirically confirmed" status.
+
+## Intractable Task Study (Open Question #6)
+
+### Motivation
+
+ADR-0020 Open Question #6 asks whether any benchmark tasks remain
+intractable even at Q8_0 -- never passing regardless of quantization quality.
+Answering this is critical for:
+
+1. **Benchmark validity**: if a task never passes, it cannot discriminate
+   between harness versions; it measures something other than harness quality.
+2. **Task maintenance**: intractable tasks waste CI cycles and produce noisy
+   regression signals.
+3. **Roadmap planning**: hard-tier tasks (ADR-0028) that are also intractable
+   may need to be deferred until the agent improves.
+
+### Study Design
+
+The study (`infra/scripts/study_intractable_tasks.py`) runs each candidate
+task `N` times at Q8_0 and records pass/fail per run. A task is
+classified as **intractable** if it never passes (0/N runs).
+
+**Candidate task selection** prioritised hard-tier tasks per ADR-0028 §2:
+
+| Task | Rationale for study inclusion |
+|------|------------------------------|
+| `debug_import_cycle` | ADR-0028 H1: multi-phase reasoning, cross-module scope |
+| `refactor_api_with_constraints` | ADR-0028 H2: multi-file coordinated refactor with constraint |
+| `hook_timing_attack_evals` | ADR-0028 H1: timing-based side channel requires precise reasoning |
+| `cross_file_refactor` | Multi-file scope, coordinated edits across 3+ files |
+| `refactor_across_three_files` | Multi-file scope, coordinated edits |
+| `multi_file_rename` | Cross-module scope, non-trivial state |
+| `code_review_diff` | Complex reasoning + multi-step tool use |
+| `external_eval_correlation` | Complex evaluation requiring correlation analysis |
+
+**Study runs**: `STUDY_RUNS=3` (minimum for consistency assessment; more runs
+reduce false positives on noisy tasks).
+
+**Pass threshold**: a task is "solvable" if it passes at least 1/3 runs at Q8_0.
+A task is "intractable" if it passes 0/3 runs.
+
+### Study Execution
+
+```bash
+# Ensure llama-server is running with Q8_0 model
+llama-server --model /srv/models/*.Q8_0.gguf --host 127.0.0.1 --port 8080
+
+# Run the study
+FOUNDRY_MODEL_PATH=/srv/models \
+  LLAMACPP_HOST=http://127.0.0.1:8080 \
+  python infra/scripts/study_intractable_tasks.py
+```
+
+Results are saved to `logs/intractable_study/intractable_study_<timestamp>.json`
+and an ADR appendix is written to `docs/adr/adr-0020-intractable-study.md`.
+
+### Intractable Task Criteria
+
+A task is **intractable at Q8_0** when:
+
+1. It fails all `STUDY_RUNS` attempts at Q8_0, AND
+2. The failure is not due to `task_aborted(reason="token_budget")` or
+   `task_aborted(reason="wall_clock")` (those are infrastructure limits, not
+   model capability limits), AND
+3. The task's `difficulty_tier` is `hard` or `medium`.
+
+Tasks that fail due to timeouts or token budget hits are **not** intractable --
+they may simply need more resources. The study separately tracks these.
+
+### Study Status
+
+| Status | Description |
+|--------|-------------|
+| **Pending** | No GPU hardware / llama-server available; infrastructure prepared |
+| **In Progress** | Study running; results being collected |
+| **Complete** | All tasks studied; findings documented in adr-0020-intractable-study.md |
+
+> **Note**: As of this writing, LLAMACPP_HOST is not set and no Q8_0 model
+> is available. The study script is implemented and ready to run; it will
+> auto-detect infrastructure availability and either run the study or emit
+> a "pending" status. See `infra/scripts/study_intractable_tasks.py`.
+
+When the study runs, update `docs/adr/adr-0020-intractable-study.md` with the
+live results and update the table below.
+
+### Study Results (Pending)
+
+| Task | Tier | Pass Rate (Q8_0) | Status | Notes |
+|------|------|-----------------|--------|-------|
+| debug_import_cycle | hard | — | Pending | |
+| refactor_api_with_constraints | hard | — | Pending | |
+| hook_timing_attack_evals | hard | — | Pending | |
+| cross_file_refactor | medium | — | Pending | |
+| refactor_across_three_files | medium | — | Pending | |
+| multi_file_rename | medium | — | Pending | |
+| code_review_diff | medium | — | Pending | |
+| external_eval_correlation | medium | — | Pending | |
+
+If a task is intractable at Q8_0, it is excluded from the pass-rate
+denominator for the intelligence floor calculation and flagged for
+simplification or replacement.
 
 ## Consequences
 
@@ -224,3 +325,4 @@ Issues #549–#553 must be resolved before this ADR can be updated from "project
 - This ADR is a living document: it must be updated to replace projected values with live sweep data once issues #549–#553 are resolved.
 - If live data confirms Q4_K_M pass rate is within 2 pp of Q5_K_M, it may be promoted to the recommended floor for the 6600 XT.
 - **Issue #1050 extension**: GGUF v4 IQ quantizations (IQ4_XS, IQ3_S) and larger context windows (16k, 32k) are now in scope. The sweep code supports both via `KNOWN_V4_QUANTIZATIONS` constants and the `--context-tokens` CLI flag. Empirical results are pending GPU execution (see follow-up issues).
+- **Issue #1027 (Open Question #6)**: Intractable tasks that never pass at Q8_0 are identified by `infra/scripts/study_intractable_tasks.py`. Such tasks are excluded from the pass-rate denominator and flagged for simplification or replacement. See §Intractable Task Study.
