@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import sys
@@ -1011,6 +1012,77 @@ def _timeline(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- Issue #1121: session-diff -------------------------------------------------
+# Diffs two sessions' event sequences. Exit 0 when identical, exit 1 when
+# different — grep parity so operators can gate workflows on session parity.
+
+
+def _event_summary(event: TraceEvent) -> str:
+    """One-line summary of an event: kind + sorted single-line payload JSON."""
+    payload = json.dumps(event.payload, sort_keys=True)
+    return f"{event.kind}  {payload}"
+
+
+def _session_diff(args: argparse.Namespace) -> int:
+    """Implement ``session-diff`` (issue #1121).
+
+    Loads two sessions from the trace store, builds a unified diff of their
+    event summaries (kind + payload), and prints it. Exit code is 0 when
+    the sessions are identical, 1 when they differ — grep parity so operators
+    can gate CI workflows on session parity.
+
+    ``--kind`` filters both sessions to only events of that kind before
+    diffing. ``--out`` writes the diff to a file instead of stdout.
+    Both sqlite and jsonl backends are supported via :func:`_logger_for`.
+    """
+    logger = _logger_for(args.db)
+
+    events_a = logger.load_session(args.session_id_a)
+    if not events_a:
+        sys.stderr.write(f"session {args.session_id_a} not found or empty.\n")
+        return 1
+
+    events_b = logger.load_session(args.session_id_b)
+    if not events_b:
+        sys.stderr.write(f"session {args.session_id_b} not found or empty.\n")
+        return 1
+
+    kind_filter = getattr(args, "kind", None)
+    if kind_filter is not None:
+        events_a = [e for e in events_a if e.kind == kind_filter]
+        events_b = [e for e in events_b if e.kind == kind_filter]
+
+    lines_a = [_event_summary(e) for e in events_a]
+    lines_b = [_event_summary(e) for e in events_b]
+
+    if lines_a == lines_b:
+        sys.stdout.write("Sessions are identical.\n")
+        return 0
+
+    diff_lines = list(
+        difflib.unified_diff(
+            lines_a,
+            lines_b,
+            fromfile=args.session_id_a,
+            tofile=args.session_id_b,
+            lineterm="",
+            n=3,
+        )
+    )
+
+    if diff_lines:
+        diff_text = "\n".join(diff_lines) + "\n"
+    else:
+        diff_text = ""
+
+    if args.out:
+        Path(args.out).write_text(diff_text, encoding="utf-8")
+    else:
+        sys.stdout.write(diff_text)
+
+    return 1
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="foundry-trace",
@@ -1346,6 +1418,36 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write the timeline to this path instead of stdout.",
     )
     timeline_parser.set_defaults(func=_timeline)
+
+    # --- session-diff (issue #1121) ---
+    session_diff_parser = sub.add_parser(
+        "session-diff",
+        help="Diff two sessions' event sequences and print a unified diff (issue #1121).",
+    )
+    session_diff_parser.add_argument(
+        "session_id_a",
+        help="First session to diff (treated as 'before' / left side).",
+    )
+    session_diff_parser.add_argument(
+        "session_id_b",
+        help="Second session to diff (treated as 'after' / right side).",
+    )
+    session_diff_parser.add_argument(
+        "--kind",
+        default=None,
+        help="Filter both sessions to this event kind before diffing.",
+    )
+    session_diff_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    session_diff_parser.add_argument(
+        "--out",
+        default=None,
+        help="Write the unified diff to this path instead of stdout.",
+    )
+    session_diff_parser.set_defaults(func=_session_diff)
 
     return parser
 

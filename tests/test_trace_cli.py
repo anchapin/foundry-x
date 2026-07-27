@@ -1758,3 +1758,164 @@ def test_doctor_no_corrupt_lines(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "no corrupt lines" in out
+
+
+# --- Issue #1121: session-diff -------------------------------------------------
+# Diffs two sessions' event sequences. Exit 0 when identical, exit 1 when
+# different. --kind filters both sessions, --out writes diff to file.
+# Both sqlite and jsonl backends must work.
+
+
+def _populate_two_sessions(
+    db_path: Path,
+    backend: str = "sqlite",
+) -> tuple[str, str]:
+    """Plant two distinguishable sessions and return their session_ids.
+
+    ``sid_a`` has ``user_prompt`` + ``tool_call``. ``sid_b`` has the same
+    two event kinds but with different payloads so the diff is non-empty.
+    """
+    logger = TraceLogger(db_path, backend=backend)
+    with logger.session(harness_version="0.1.0", model_id="model-a") as sid_a:
+        logger.record(sid_a, "user_prompt", {"prompt": "Fix the bug in auth.py"})
+        logger.record(sid_a, "tool_call", {"name": "read_file", "path": "src/auth.py"})
+    with logger.session(harness_version="0.2.0", model_id="model-b") as sid_b:
+        logger.record(sid_b, "user_prompt", {"prompt": "Refactor renderer"})
+        logger.record(sid_b, "tool_call", {"name": "write_file", "path": "src/renderer.py"})
+    return sid_a, sid_b
+
+
+def test_session_diff_identical_sessions_exit_zero(tmp_path, capsys):
+    """When both sessions are identical, exit code is 0 and output says so."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "user_prompt", {"prompt": "same prompt"})
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    rc = main(["session-diff", sid, sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "identical" in out.lower()
+
+
+def test_session_diff_different_sessions_exit_nonzero(tmp_path, capsys):
+    """When sessions differ, exit code is 1 and the unified diff is printed."""
+    db = tmp_path / "traces.db"
+    sid_a, sid_b = _populate_two_sessions(db)
+
+    rc = main(["session-diff", sid_a, sid_b, "--db", str(db)])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert sid_a in out
+    assert sid_b in out
+    assert "user_prompt" in out or "tool_call" in out
+
+
+def test_session_diff_unknown_first_session_returns_nonzero(tmp_path, capsys):
+    """An unknown first session_id exits 1 with an error on stderr."""
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["session-diff", "does-not-exist-a", "does-not-exist-b", "--db", str(db)])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "does-not-exist-a" in err
+
+
+def test_session_diff_unknown_second_session_returns_nonzero(tmp_path, capsys):
+    """An unknown second session_id exits 1 with an error on stderr."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="0.1.0") as sid_a:
+        logger.record(sid_a, "user_prompt", {"prompt": "hello"})
+
+    rc = main(["session-diff", sid_a, "does-not-exist-b", "--db", str(db)])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "does-not-exist-b" in err
+
+
+def test_session_diff_kind_filter(tmp_path, capsys):
+    """--kind filters both sessions to only matching event kinds before diffing."""
+    db = tmp_path / "traces.db"
+    sid_a, sid_b = _populate_two_sessions(db)
+
+    rc = main(["session-diff", sid_a, sid_b, "--db", str(db), "--kind", "tool_call"])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "tool_call" in out
+    assert "user_prompt" not in out
+
+
+def test_session_diff_output_file(tmp_path):
+    """--out writes the unified diff to the given path instead of stdout."""
+    db = tmp_path / "traces.db"
+    sid_a, sid_b = _populate_two_sessions(db)
+    out_file = tmp_path / "diff.txt"
+
+    rc = main(["session-diff", sid_a, sid_b, "--db", str(db), "--out", str(out_file)])
+
+    assert rc == 1
+    text = out_file.read_text("utf-8")
+    assert sid_a in text or "user_prompt" in text
+
+
+def test_session_diff_jsonl_backend(tmp_path, capsys):
+    """session-diff works on the jsonl backend (acceptance criterion)."""
+    db = tmp_path / "traces.jsonl"
+    sid_a, sid_b = _populate_two_sessions(db, backend="jsonl")
+
+    rc = main(["session-diff", sid_a, sid_b, "--db", str(db)])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert sid_a in out
+    assert sid_b in out
+
+
+def test_session_diff_payload_delta_shown(tmp_path, capsys):
+    """Changed payloads appear as diff lines showing the old vs new JSON."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="0.1.0") as sid_a:
+        logger.record(sid_a, "tool_call", {"name": "read_file", "path": "a.py"})
+    with logger.session(harness_version="0.1.0") as sid_b:
+        logger.record(sid_b, "tool_call", {"name": "read_file", "path": "b.py"})
+
+    rc = main(["session-diff", sid_a, sid_b, "--db", str(db)])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "a.py" in out or "b.py" in out
+
+
+def test_session_diff_identical_with_kind_filter_exit_zero(tmp_path, capsys):
+    """When filtered sessions are identical, exit code is 0."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "user_prompt", {"prompt": "same"})
+        logger.record(sid, "tool_call", {"name": "read_file", "path": "a.py"})
+
+    rc = main(["session-diff", sid, sid, "--db", str(db), "--kind", "user_prompt"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "identical" in out.lower()
+
+
+def test_session_diff_help_discoverable(tmp_path, capsys):
+    """The subcommand appears in --help output."""
+    try:
+        main(["--help"])
+    except SystemExit:
+        pass
+
+    out = capsys.readouterr().out
+    assert "session-diff" in out
