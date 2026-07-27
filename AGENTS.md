@@ -44,18 +44,19 @@ Before you write code in this repo, read in this order:
     - `harness/` → ADR-0004 | `pyproject.toml` / deps → ADR-0002
     - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
     - Module-boundary models → ADR-0006 | `src/foundry_x/execution/` → ADR-0010
-     - `src/foundry_x/evolution/` → ADR-0010 | `evolution/loop.py` → ADR-0010
-    - Run `ls docs/adr/` for the full current set (0001–0033); key decisions:
-      - Conventional Commits → ADR-0008
-      - Security-eval benchmarks → ADR-0009
-      - Manifest as evolver target → ADR-0012
-      - Model abstraction → ADR-0014 (ADR-0015 merged into it)
-      - Review state machine → ADR-0017
-      - Context pruning at scale → ADR-0021
-      - External eval validation study → ADR-0023
-      - Cross-session failure accumulator → ADR-0030
-      - Security benchmark vectors → ADR-0031
-      - Cloud model adapters → ADR-0029
+    - `src/foundry_x/evolution/` → ADR-0010 | `evolution/loop.py` → ADR-0010
+      - Run `ls docs/adr/` for the full current set (0001–0034); key decisions:
+        - Conventional Commits → ADR-0008
+        - Security-eval benchmarks → ADR-0009
+        - Manifest as evolver target → ADR-0012
+        - Model abstraction → ADR-0014 (ADR-0015 merged into it)
+        - Review state machine → ADR-0017
+        - Context pruning at scale → ADR-0021
+        - External eval validation study → ADR-0023
+        - Cross-session failure accumulator → ADR-0030
+        - Security benchmark vectors → ADR-0031
+        - Smoke DifficultyTier definition → ADR-0034
+        - Cloud model adapters → ADR-0029
 11. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
@@ -133,15 +134,15 @@ mirrors the way our product works:
   include ruff, ruff-format, gitleaks (secret scan), and standard
   hygiene checks. See `.pre-commit-config.yaml`.
 - **Lint:** `uv run ruff check .` must pass before commit (also enforced
-  by pre-commit). Always run before pytest. The `lint.yml` workflow
-  additionally enforces `uv run ruff format --check` (note: this is a
-  separate workflow from `ci.yml`'s lint+test job, which only runs
-  `ruff check .`); fix locally with `uv run ruff format .`
-  (run `--check` first, then `format .` if it fails — never let unformatted
-  code reach PR review). Note `ruff` line-length is **100** here, not the
-  default 88 (see `[tool.ruff]` in `pyproject.toml`); pre-commit's `ruff`
-  hook auto-fixes with `--fix --exit-non-zero-on-fix`, so staged files get
-  modified and must be re-added.
+  by pre-commit). Always run before pytest. The `lint.yml` CI workflow
+  additionally runs `uv run ruff format --check` as a separate job; the
+  `ci.yml` lint+test job only runs `ruff check .`. Fix format locally
+  with `uv run ruff format .` (run `--check` first, then `format .` if
+  it fails — never let unformatted code reach PR review). Note `ruff`
+  line-length is **100** here, not the default 88 (see `[tool.ruff]`
+  in `pyproject.toml`); pre-commit's `ruff` hook auto-fixes with
+  `--fix --exit-non-zero-on-fix`, so staged files get modified and must
+  be re-added.
 - **Test:** `uv run pytest` — must pass before commit. Run after lint.
   Pytest discovers both `tests/` and `benchmarks/` (see `testpaths` in
   `pyproject.toml`); benchmark tasks under `benchmarks/tasks/` are gated
