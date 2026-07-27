@@ -45,6 +45,7 @@ format and process.
 | [0031](./0031-security-benchmark-vectors.md) | Security benchmark vectors — injection-via-filename and hook timing attack | Accepted |
 | [0032](./0032-external-eval-pearson-study-protocol.md) | External-eval Pearson correlation study protocol (issue #1028) | Proposed |
 | [0033](./0033-context-efficiency-kpi-definition.md) | `context_efficiency` KPI definition | Accepted |
+| [0034](./0034-smoke-difficulty-tier.md) | Define the "smoke" DifficultyTier | Accepted |
 
 When adding a new ADR, append it to this table in the same PR.
 Mark the status `Accepted` in the same PR that ships the implementation;
