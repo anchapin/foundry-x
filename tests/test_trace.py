@@ -810,3 +810,109 @@ def test_jsonl_skip_info_recorded_on_corrupted_read(tmp_path):
     assert info["count"] >= 1
     assert info["last_reason"] == "json_decode_error"
     assert info["last_session_id"] == sid
+
+
+def test_batch_mode_accumulates_and_flushes_on_threshold(tmp_path):
+    """Batch mode accumulates events and flushes via executemany at threshold (issue #1124).
+
+    With 200 events and flush_threshold=50, we expect 4 threshold-triggered
+    flushes (at events 50, 100, 150, 200). The pending buffer is empty after
+    each flush, so no additional flush occurs on session end.
+    Total INSERT round-trips: 4 (≤ 5 as required by issue #1124).
+    """
+    import unittest.mock
+
+    path = tmp_path / "traces.db"
+    logger = TraceLogger(path, backend="sqlite", batch_mode=True, flush_threshold=50)
+
+    flush_call_count = 0
+    original_flush = logger._flush_session
+
+    def counting_flush(session_id):
+        nonlocal flush_call_count
+        flush_call_count += 1
+        return original_flush(session_id)
+
+    with (
+        unittest.mock.patch.object(logger, "_flush_session", counting_flush),
+        logger.session(harness_version="0.1.0") as sid,
+    ):
+        for i in range(200):
+            logger.record(sid, kind="model_response_chunk", payload={"index": i})
+
+    assert flush_call_count == 4
+    events = logger.load_session(sid)
+    assert len(events) == 200
+    assert sid not in logger._pending
+
+
+def test_batch_mode_flushes_remaining_on_session_end(tmp_path):
+    """Any remaining pending events are flushed when the session ends (issue #1124).
+
+    With 37 events and flush_threshold=50, no threshold-triggered flush occurs
+    during recording. The 37 events are flushed once on session end.
+    """
+    import unittest.mock
+
+    path = tmp_path / "traces.db"
+    logger = TraceLogger(path, backend="sqlite", batch_mode=True, flush_threshold=50)
+
+    flush_call_count = 0
+    original_flush = logger._flush_session
+
+    def counting_flush(session_id):
+        nonlocal flush_call_count
+        flush_call_count += 1
+        return original_flush(session_id)
+
+    with (
+        unittest.mock.patch.object(logger, "_flush_session", counting_flush),
+        logger.session(harness_version="0.1.0") as sid,
+    ):
+        for i in range(37):
+            logger.record(sid, kind="model_response_chunk", payload={"index": i})
+
+    assert flush_call_count == 1
+    events = logger.load_session(sid)
+    assert len(events) == 37
+
+
+def test_batch_mode_non_chunk_events_also_batched(tmp_path):
+    """Non-chunk events (tool_call, model_request) are also correctly batched (issue #1124)."""
+    path = tmp_path / "traces.db"
+    logger = TraceLogger(path, backend="sqlite", batch_mode=True, flush_threshold=10)
+
+    with logger.session(harness_version="0.1.0") as sid:
+        for i in range(15):
+            logger.record(sid, kind="tool_call", payload={"name": f"tool_{i}"})
+
+    events = logger.load_session(sid)
+    assert len(events) == 15
+
+
+def test_batch_mode_false_unchanged_behavior(tmp_path):
+    """batch_mode=False (default) uses one INSERT per record (issue #1124)."""
+    path = tmp_path / "traces.db"
+    logger = TraceLogger(path, backend="sqlite", batch_mode=False, flush_threshold=50)
+
+    with logger.session(harness_version="0.1.0") as sid:
+        for i in range(10):
+            logger.record(sid, kind="tool_call", payload={"name": f"tool_{i}"})
+
+    events = logger.load_session(sid)
+    assert len(events) == 10
+
+
+def test_batch_mode_close_flushes_all_pending(tmp_path):
+    """close() flushes any remaining pending events (issue #1124)."""
+    path = tmp_path / "traces.db"
+    logger = TraceLogger(path, backend="sqlite", batch_mode=True, flush_threshold=50)
+
+    with logger.session(harness_version="0.1.0") as sid:
+        for i in range(75):
+            logger.record(sid, kind="model_response_chunk", payload={"index": i})
+
+    logger.close()
+    logger = TraceLogger(path, backend="sqlite")
+    events = logger.load_session(sid)
+    assert len(events) == 75
