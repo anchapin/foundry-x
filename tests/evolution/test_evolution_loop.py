@@ -1210,7 +1210,6 @@ class TestRunEvolutionBatch:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The evolver's propose method is called for each non-clean failure."""
-        from foundry_x.evolution.evolver import ProposedEdit
         from foundry_x.evolution.loop import run_evolution_batch
 
         harness_dir = _write_harness(tmp_path)
