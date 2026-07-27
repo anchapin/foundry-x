@@ -63,6 +63,37 @@ _BASE64_MAX_LEN = 4096
 _ZERO_WIDTH_RE = re.compile(r"[\u200B-\u200F\u2028-\u202F\u2060-\u2064\uFEFF]")
 
 
+def _parse_model_registry() -> dict[str, dict[str, str]] | None:
+    """Parse FOUNDRY_MODEL_REGISTRY env var into a family-config dict.
+
+    Returns None when the env var is absent or invalid. A missing key in
+    the registry is not fatal — the caller skips that family with a warning.
+    """
+    raw = os.environ.get("FOUNDRY_MODEL_REGISTRY")
+    if not raw:
+        return None
+    try:
+        import json
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            sys.stderr.write(
+                "FOUNDRY_MODEL_REGISTRY must be a JSON object mapping "
+                "family names to {path, quantization, endpoint} objects.\n"
+            )
+            return None
+        for key, value in parsed.items():
+            if not isinstance(value, dict):
+                sys.stderr.write(
+                    f"FOUNDRY_MODEL_REGISTRY entry for {key!r} must be an object "
+                    f"with 'path', 'quantization', and 'endpoint' keys.\n"
+                )
+                return None
+        return parsed
+    except json.JSONDecodeError as exc:
+        sys.stderr.write(f"FOUNDRY_MODEL_REGISTRY is not valid JSON: {exc}\n")
+        return None
+
+
 def _scan_diff_for_injection(diff: str) -> list[str]:
     """Return the names of any injection patterns found in *diff*.
 
@@ -204,6 +235,25 @@ class QuantizationVerdict(BaseModel):
     quantizations: list[QuantizationResult]
     recommended: str
     regression: bool
+
+
+class ModelFamilySweepResult(BaseModel):
+    """Per-family aggregation of QuantizationResult lists (ADR-0025)."""
+
+    model_family: str
+    results: list[QuantizationResult]
+    recommended: str
+    regression: bool
+
+
+class ModelFamilyVerdict(BaseModel):
+    """Cross-family verdict aggregating per-family sweep results (ADR-0025)."""
+
+    family_results: list[ModelFamilySweepResult]
+    recommended_family: str
+    recommended_quantization: str
+    regression: bool
+    regression_by_family: dict[str, bool] = Field(default_factory=dict)
 
 
 class Critic:
@@ -389,6 +439,103 @@ class Critic:
             quantizations=results,
             recommended=recommended,
             regression=regression,
+        )
+
+    def model_family_sweep(
+        self,
+        model_families: list[str],
+        quantizations: list[str],
+        baseline_quantization: str | None = None,
+        regression_threshold_pp: float = DEFAULT_REGRESSION_THRESHOLD_PP,
+        cost_per_token: float | None = None,
+    ) -> ModelFamilyVerdict:
+        """Run the benchmark suite across multiple model families and quantizations.
+
+        ADR-0025: two-axis sweep (model family + quantization) that enables
+        cross-model-family comparison. Each family is swept independently and
+        results are aggregated into a ModelFamilyVerdict.
+
+        Args:
+            model_families: list of model family identifiers to sweep.
+            quantizations: quantization labels to sweep within each family.
+            baseline_quantization: quantization to compare against per family.
+            regression_threshold_pp: regression threshold in percentage points.
+            cost_per_token: cost per token in USD for cost-per-task computation.
+
+        Returns:
+            A ``ModelFamilyVerdict`` with per-family results, recommended
+            family+quantization combination, and regression flags.
+        """
+        registry = _parse_model_registry()
+        family_results: list[ModelFamilySweepResult] = []
+        regression_by_family: dict[str, bool] = {}
+
+        for family in model_families:
+            family_config = registry.get(family) if registry else None
+
+            if family_config is None:
+                sys.stderr.write(
+                    f"Warning: family {family!r} not in FOUNDRY_MODEL_REGISTRY, "
+                    f"skipping. Set FOUNDRY_MODEL_REGISTRY to include it.\n"
+                )
+                continue
+
+            model_path = family_config.get("path", "")
+            model_endpoint = family_config.get("endpoint", "")
+
+            original_model_path = os.environ.get("FOUNDRY_MODEL_PATH")
+            original_model_id = os.environ.get("FOUNDRY_MODEL_ID")
+            original_endpoint = os.environ.get("FOUNDRY_LLAMACPP_HOST")
+
+            os.environ["FOUNDRY_MODEL_PATH"] = str(Path(model_path).parent) if model_path else ""
+            os.environ["FOUNDRY_MODEL_ID"] = family
+            if model_endpoint:
+                os.environ["FOUNDRY_LLAMACPP_HOST"] = model_endpoint
+
+            try:
+                verdict = self.quantization_sweep(
+                    quantizations=quantizations,
+                    baseline_quantization=baseline_quantization,
+                    regression_threshold_pp=regression_threshold_pp,
+                    cost_per_token=cost_per_token,
+                )
+                family_results.append(
+                    ModelFamilySweepResult(
+                        model_family=family,
+                        results=verdict.quantizations,
+                        recommended=verdict.recommended,
+                        regression=verdict.regression,
+                    )
+                )
+                regression_by_family[family] = verdict.regression
+            finally:
+                if original_model_path is not None:
+                    os.environ["FOUNDRY_MODEL_PATH"] = original_model_path
+                else:
+                    os.environ.pop("FOUNDRY_MODEL_PATH", None)
+                if original_model_id is not None:
+                    os.environ["FOUNDRY_MODEL_ID"] = original_model_id
+                else:
+                    os.environ.pop("FOUNDRY_MODEL_ID", None)
+                if original_endpoint is not None:
+                    os.environ["FOUNDRY_LLAMACPP_HOST"] = original_endpoint
+                elif model_endpoint:
+                    os.environ.pop("FOUNDRY_LLAMACPP_HOST", None)
+
+        if not family_results:
+            raise ValueError("No families could be swept. Check FOUNDRY_MODEL_REGISTRY.")
+
+        best_family_result = max(family_results, key=lambda f: max(r.pass_rate for r in f.results))
+        recommended_family = best_family_result.model_family
+        recommended_quantization = best_family_result.recommended
+        overall_regression = any(regression_by_family.values())
+
+        return ModelFamilyVerdict(
+            family_results=family_results,
+            recommended_family=recommended_family,
+            recommended_quantization=recommended_quantization,
+            regression=overall_regression,
+            regression_by_family=regression_by_family,
         )
 
     def _run_sweep_for_quant(

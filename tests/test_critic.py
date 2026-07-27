@@ -579,3 +579,130 @@ def test_timeout_notes_uses_wall_clock_message_when_no_output() -> None:
     notes = _timeout_notes(exc)
     assert "gate_timeout_s=9.0" in notes
     assert "killed" in notes
+
+
+class TestParseModelRegistry:
+    """Tests for FOUNDRY_MODEL_REGISTRY parsing (ADR-0025)."""
+
+    def test_parse_model_registry_returns_none_when_not_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Absent env var returns None."""
+        monkeypatch.delenv("FOUNDRY_MODEL_REGISTRY", raising=False)
+        from foundry_x.evolution.critic import _parse_model_registry
+
+        result = _parse_model_registry()
+        assert result is None
+
+    def test_parse_model_registry_parses_valid_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Valid JSON registry is parsed correctly."""
+        import json
+        registry = {
+            "qwen2.5-0.5b": {
+                "path": "/models/qwen2.5-0.5b-q4_k_m.gguf",
+                "quantization": "Q4_K_M",
+                "endpoint": "http://localhost:8080",
+            },
+            "llama-3.2-1b": {
+                "path": "/models/llama-3.2-1b-q4_k_m.gguf",
+                "quantization": "Q4_K_M",
+                "endpoint": "http://localhost:8081",
+            },
+        }
+        monkeypatch.setenv("FOUNDRY_MODEL_REGISTRY", json.dumps(registry))
+        from foundry_x.evolution.critic import _parse_model_registry
+
+        result = _parse_model_registry()
+        assert result is not None
+        assert "qwen2.5-0.5b" in result
+        assert result["qwen2.5-0.5b"]["path"] == "/models/qwen2.5-0.5b-q4_k_m.gguf"
+        assert result["llama-3.2-1b"]["endpoint"] == "http://localhost:8081"
+
+    def test_parse_model_registry_returns_none_for_invalid_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Invalid JSON returns None with a warning."""
+        monkeypatch.setenv("FOUNDRY_MODEL_REGISTRY", "not valid json")
+        from foundry_x.evolution.critic import _parse_model_registry
+
+        result = _parse_model_registry()
+        assert result is None
+
+    def test_parse_model_registry_returns_none_for_non_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Non-object JSON root returns None."""
+        monkeypatch.setenv("FOUNDRY_MODEL_REGISTRY", '["not", "an", "object"]')
+        from foundry_x.evolution.critic import _parse_model_registry
+
+        result = _parse_model_registry()
+        assert result is None
+
+
+class TestModelFamilySweepModels:
+    """Tests for ModelFamilySweepResult and ModelFamilyVerdict models (ADR-0025)."""
+
+    def test_model_family_sweep_result_model(self) -> None:
+        """ModelFamilySweepResult aggregates per-family results."""
+        from foundry_x.evolution.critic import ModelFamilySweepResult, QuantizationResult
+
+        qr = QuantizationResult(
+            quantization="Q4_K_M",
+            model_path="/models/test-q4_k_m.gguf",
+            model_id="test-q4_k_m",
+            total_tasks=10,
+            passed_tasks=8,
+            failed_tasks=2,
+            pass_rate=0.8,
+        )
+        result = ModelFamilySweepResult(
+            model_family="test-family",
+            results=[qr],
+            recommended="Q4_K_M",
+            regression=False,
+        )
+        assert result.model_family == "test-family"
+        assert len(result.results) == 1
+        assert result.recommended == "Q4_K_M"
+        assert result.regression is False
+
+    def test_model_family_verdict_model(self) -> None:
+        """ModelFamilyVerdict aggregates per-family sweep results."""
+        from foundry_x.evolution.critic import (
+            ModelFamilySweepResult,
+            ModelFamilyVerdict,
+            QuantizationResult,
+        )
+
+        qr = QuantizationResult(
+            quantization="Q4_K_M",
+            model_path="/models/test-q4_k_m.gguf",
+            model_id="test-q4_k_m",
+            total_tasks=10,
+            passed_tasks=8,
+            failed_tasks=2,
+            pass_rate=0.8,
+        )
+        family_result = ModelFamilySweepResult(
+            model_family="test-family",
+            results=[qr],
+            recommended="Q4_K_M",
+            regression=False,
+        )
+        verdict = ModelFamilyVerdict(
+            family_results=[family_result],
+            recommended_family="test-family",
+            recommended_quantization="Q4_K_M",
+            regression=False,
+            regression_by_family={"test-family": False},
+        )
+        assert verdict.recommended_family == "test-family"
+        assert verdict.recommended_quantization == "Q4_K_M"
+        assert verdict.regression is False
+        assert verdict.regression_by_family["test-family"] is False
+
+    def test_model_family_verdict_default_regression_by_family(self) -> None:
+        """regression_by_family defaults to empty dict."""
+        from foundry_x.evolution.critic import ModelFamilyVerdict
+
+        verdict = ModelFamilyVerdict(
+            family_results=[],
+            recommended_family="test",
+            recommended_quantization="Q4_K_M",
+            regression=False,
+        )
+        assert verdict.regression_by_family == {}

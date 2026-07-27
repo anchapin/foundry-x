@@ -777,3 +777,178 @@ class TestSweepGateTimeout:
 
         assert result.notes == ""
         assert result.pass_rate == 1.0
+
+
+class TestModelFamiliesCLI:
+    """Tests for --model-families flag (ADR-0025)."""
+
+    def test_build_sweep_parser_with_model_families(self):
+        """Parser accepts --model-families flag."""
+        from foundry_x.evolution.cli import _build_sweep_parser
+
+        parser = _build_sweep_parser()
+        args = parser.parse_args(
+            [
+                "--quantizations", "Q4_K_S,Q5_K_M",
+                "--harness-dir", "/tmp/harness",
+                "--model-families", "qwen2.5-0.5b,llama-3.2-1b",
+            ]
+        )
+        assert args.model_families == "qwen2.5-0.5b,llama-3.2-1b"
+        assert args.quantizations == "Q4_K_S,Q5_K_M"
+
+    def test_build_sweep_parser_model_families_defaults_to_none(self):
+        """--model-families defaults to None when not provided."""
+        from foundry_x.evolution.cli import _build_sweep_parser
+
+        parser = _build_sweep_parser()
+        args = parser.parse_args(
+            [
+                "--quantizations", "Q4_K_S",
+                "--harness-dir", "/tmp/harness",
+            ]
+        )
+        assert args.model_families is None
+
+
+class TestModelFamilySweepRenderers:
+    """Tests for ModelFamilySweepResult and ModelFamilyVerdict renderers (ADR-0025)."""
+
+    def test_render_model_family_sweep_result(self):
+        """_render_model_family_sweep_result produces expected output."""
+        from foundry_x.evolution.cli import _render_model_family_sweep_result
+        from foundry_x.evolution.critic import ModelFamilySweepResult, QuantizationResult
+
+        qr = QuantizationResult(
+            quantization="Q4_K_M",
+            model_path="/models/test-q4_k_m.gguf",
+            model_id="test-q4_k_m",
+            total_tasks=10,
+            passed_tasks=8,
+            failed_tasks=2,
+            pass_rate=0.8,
+            avg_cycle_time_s=42.5,
+            total_tokens=12345,
+            token_efficiency=290.0,
+            cost_per_task=0.0015,
+        )
+        result = ModelFamilySweepResult(
+            model_family="test-family",
+            results=[qr],
+            recommended="Q4_K_M",
+            regression=False,
+        )
+        output = _render_model_family_sweep_result(result)
+        assert "test-family" in output
+        assert "Q4_K_M" in output
+        assert "RECOMMENDED" not in output
+        assert "OK" in output
+
+    def test_render_model_family_sweep_result_with_regression(self):
+        """Regression status is shown in rendered output."""
+        from foundry_x.evolution.cli import _render_model_family_sweep_result
+        from foundry_x.evolution.critic import ModelFamilySweepResult, QuantizationResult
+
+        qr = QuantizationResult(
+            quantization="Q5_K_M",
+            model_path="/models/test-q5_k_m.gguf",
+            model_id="test-q5_k_m",
+            total_tasks=10,
+            passed_tasks=3,
+            failed_tasks=7,
+            pass_rate=0.3,
+        )
+        result = ModelFamilySweepResult(
+            model_family="low-perf-family",
+            results=[qr],
+            recommended="Q5_K_M",
+            regression=True,
+        )
+        output = _render_model_family_sweep_result(result)
+        assert "REGRESSION" in output
+
+    def test_render_model_family_verdict(self):
+        """_render_model_family_verdict produces cross-family comparison table."""
+        from foundry_x.evolution.cli import _render_model_family_verdict
+        from foundry_x.evolution.critic import (
+            ModelFamilySweepResult,
+            ModelFamilyVerdict,
+            QuantizationResult,
+        )
+
+        qr1 = QuantizationResult(
+            quantization="Q4_K_M",
+            model_path="/models/test1-q4_k_m.gguf",
+            model_id="test1-q4_k_m",
+            total_tasks=10,
+            passed_tasks=8,
+            failed_tasks=2,
+            pass_rate=0.8,
+        )
+        qr2 = QuantizationResult(
+            quantization="Q4_K_M",
+            model_path="/models/test2-q4_k_m.gguf",
+            model_id="test2-q4_k_m",
+            total_tasks=10,
+            passed_tasks=6,
+            failed_tasks=4,
+            pass_rate=0.6,
+        )
+        fr1 = ModelFamilySweepResult(
+            model_family="qwen-family",
+            results=[qr1],
+            recommended="Q4_K_M",
+            regression=False,
+        )
+        fr2 = ModelFamilySweepResult(
+            model_family="llama-family",
+            results=[qr2],
+            recommended="Q4_K_M",
+            regression=False,
+        )
+        verdict = ModelFamilyVerdict(
+            family_results=[fr1, fr2],
+            recommended_family="qwen-family",
+            recommended_quantization="Q4_K_M",
+            regression=False,
+            regression_by_family={"qwen-family": False, "llama-family": False},
+        )
+        output = _render_model_family_verdict(verdict)
+        assert "qwen-family" in output
+        assert "llama-family" in output
+        assert "Q4_K_M" in output
+        assert "Recommended:" in output
+
+    def test_render_model_family_verdict_with_regression(self):
+        """Regression status propagates to overall verdict rendering."""
+        from foundry_x.evolution.cli import _render_model_family_verdict
+        from foundry_x.evolution.critic import (
+            ModelFamilySweepResult,
+            ModelFamilyVerdict,
+            QuantizationResult,
+        )
+
+        qr = QuantizationResult(
+            quantization="Q4_K_M",
+            model_path="/models/test-q4_k_m.gguf",
+            model_id="test-q4_k_m",
+            total_tasks=10,
+            passed_tasks=3,
+            failed_tasks=7,
+            pass_rate=0.3,
+        )
+        fr = ModelFamilySweepResult(
+            model_family="low-perf",
+            results=[qr],
+            recommended="Q4_K_M",
+            regression=True,
+        )
+        verdict = ModelFamilyVerdict(
+            family_results=[fr],
+            recommended_family="low-perf",
+            recommended_quantization="Q4_K_M",
+            regression=True,
+            regression_by_family={"low-perf": True},
+        )
+        output = _render_model_family_verdict(verdict)
+        assert "REGRESSION DETECTED" in output
