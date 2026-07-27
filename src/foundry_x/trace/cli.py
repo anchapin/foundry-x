@@ -215,9 +215,25 @@ def _redact_session(args: argparse.Namespace) -> int:
     (idempotent), prints the count, and optionally appends an audit record
     to ``--out``. Exits 0 even when the session did not exist, mirroring
     the idempotent contract of ``delete_session``.
+
+    ``--dry-run`` (issue #1122) prints what would be removed without
+    calling ``delete_session``.
     """
     logger = _logger_for(args.db)
     count = len(logger.load_session(args.session_id))
+    if getattr(args, "dry_run", False):
+        sessions = logger.list_sessions()
+        session_meta = next(
+            (s for s in sessions if s.session_id == args.session_id), None
+        )
+        if session_meta:
+            sys.stdout.write(
+                f"  would redact {session_meta.session_id}"
+                f"  started_at={session_meta.started_at}"
+                f"  harness_version={session_meta.harness_version}\n"
+            )
+        sys.stdout.write(f"Dry run: would redact {count} event(s) from session {args.session_id}.\n")
+        return 0
     logger.delete_session(args.session_id)
     sys.stdout.write(f"Deleted session {args.session_id}: {count} event(s) removed.\n")
     _write_audit(
@@ -277,9 +293,25 @@ def _delete_session(args: argparse.Namespace) -> int:
     Removes one session and all its events via ``TraceLogger.delete_session``.
     Idempotent: exits 0 whether or not the session existed, mirroring the
     contract of the underlying primitive.
+
+    ``--dry-run`` (issue #1122) prints what would be removed without
+    calling ``delete_session``.
     """
     logger = _logger_for(args.db)
     count = len(logger.load_session(args.session_id))
+    if getattr(args, "dry_run", False):
+        sessions = logger.list_sessions()
+        session_meta = next(
+            (s for s in sessions if s.session_id == args.session_id), None
+        )
+        if session_meta:
+            sys.stdout.write(
+                f"  would delete {session_meta.session_id}"
+                f"  started_at={session_meta.started_at}"
+                f"  harness_version={session_meta.harness_version}\n"
+            )
+        sys.stdout.write(f"Dry run: would delete {count} event(s) from session {args.session_id}.\n")
+        return 0
     logger.delete_session(args.session_id)
     sys.stdout.write(f"Deleted session {args.session_id}: {count} event(s) removed.\n")
     return 0
@@ -1143,6 +1175,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Append a JSONL audit-log record to this path.",
     )
+    redact_session_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would be redacted without modifying the store (issue #1122).",
+    )
     redact_session_parser.set_defaults(func=_redact_session)
 
     redact_key_parser = sub.add_parser(
@@ -1178,6 +1215,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--db",
         default="logs/traces.db",
         help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    delete_session_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would be deleted without modifying the store (issue #1122).",
     )
     delete_session_parser.set_defaults(func=_delete_session)
 

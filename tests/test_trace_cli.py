@@ -506,6 +506,22 @@ def test_redact_session_unknown_session_exits_zero(tmp_path, capsys):
 
 
 @_BACKENDS
+def test_redact_session_dry_run_does_not_mutate(tmp_path, backend, capsys):
+    db, sid = _populate_leak(tmp_path, backend)
+
+    rc = main(["redact-session", sid, "--dry-run", "--db", db])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Dry run" in out
+    assert "would redact" in out
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    assert logger.load_session(sid) != []
+    assert sid in [s.session_id for s in logger.list_sessions()]
+
+
+@_BACKENDS
 def test_redact_key_rewrites_field(tmp_path, backend, capsys):
     db, sid = _populate_leak(tmp_path, backend)
 
@@ -671,6 +687,21 @@ def test_delete_session_empty_store_exits_zero(tmp_path, capsys):
 
     assert rc == 0
     assert "0 event(s) removed" in capsys.readouterr().out
+
+
+@_BACKENDS
+def test_delete_session_dry_run_does_not_mutate(tmp_path, backend, capsys):
+    db, sids = _populate_multi(tmp_path, backend, count=2)
+
+    rc = main(["delete-session", sids[0], "--dry-run", "--db", db])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Dry run" in out
+    assert "would delete" in out
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    assert sids[0] in [s.session_id for s in logger.list_sessions()]
 
 
 @_BACKENDS
