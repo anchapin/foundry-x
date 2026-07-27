@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -585,6 +586,175 @@ def _info(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- Issue #1044: diagnose — guided failure-mode triage ---------------------
+# Implements the six-row "Common failure modes" table from
+# docs/ARCHITECTURE.md §Common failure modes as a single automated pass.
+# One row per failure mode; columns: Failure | Detected | Evidence. The
+# table here and ARCHITECTURE.md stay in sync (acceptance criterion):
+# adding a failure mode to ARCHITECTURE.md requires adding it here too.
+
+# Max length of a payload JSON excerpt embedded in the Evidence column.
+_DIAGNOSE_EVIDENCE_LIMIT = 160
+
+
+def _payload_json(event: TraceEvent) -> str:
+    """Sorted single-line JSON of *event*'s payload, truncated for the table."""
+    text = json.dumps(event.payload, sort_keys=True)
+    if len(text) > _DIAGNOSE_EVIDENCE_LIMIT:
+        return text[: _DIAGNOSE_EVIDENCE_LIMIT - 1] + "\u2026"
+    return text
+
+
+def _payload_contains(event: TraceEvent, needle: str) -> bool:
+    """True when *needle* appears in the serialized payload JSON (case-sensitive)."""
+    return needle in json.dumps(event.payload, sort_keys=True)
+
+
+def _check_no_proposed_edit(events: Sequence[TraceEvent]) -> tuple[bool, str]:
+    """Row 1 — Evolver produces no ProposedEdit (ARCHITECTURE.md:136).
+
+    Signature: session ends after ``task_completed`` with no
+    ``critic_verdict`` event following it.
+    """
+    task_completed = [e for e in events if e.kind == "task_completed"]
+    critic_verdicts = [e for e in events if e.kind == "critic_verdict"]
+    if task_completed and not critic_verdicts:
+        return True, "task_completed present; no critic_verdict event follows."
+    if not task_completed:
+        return False, "no task_completed event."
+    return False, f"{len(critic_verdicts)} critic_verdict event(s)."
+
+
+def _check_critic_timeout(events: Sequence[TraceEvent]) -> tuple[bool, str]:
+    """Row 2 — Critic hangs / timeout (ARCHITECTURE.md:137).
+
+    Signature: ``task_aborted`` with ``reason == "wall_clock"`` (or
+    ``token_budget``). No ``critic_verdict`` follows.
+    """
+    aborted = [e for e in events if e.kind == "task_aborted"]
+    if not aborted:
+        return False, "no task_aborted event."
+    ev = aborted[0]
+    reason = ev.payload.get("reason", "?")
+    return True, f"task_aborted reason={reason} ({_payload_json(ev)})"
+
+
+def _check_oom(events: Sequence[TraceEvent]) -> tuple[bool, str]:
+    """Row 3 — Runner OOM (ARCHITECTURE.md:138).
+
+    Signature: ``task_failed`` / ``model_error`` whose payload carries
+    ``MemoryError``. The confirmation grep is ``MemoryError``.
+    """
+    oom_events = [e for e in events if _payload_contains(e, "MemoryError")]
+    if not oom_events:
+        return False, "no MemoryError signal in any event payload."
+    ev = oom_events[0]
+    return True, f"{ev.kind}: {_payload_json(ev)}"
+
+
+def _check_no_tool_calls(events: Sequence[TraceEvent]) -> tuple[bool, str]:
+    """Row 4 — No tool calls emitted / tool surface missing (ARCHITECTURE.md:139).
+
+    Signature: every ``model_response`` carries ``tool_calls: []``.
+    """
+    responses = [e for e in events if e.kind == "model_response"]
+    if not responses:
+        return False, "no model_response events."
+    all_empty = all(not e.payload.get("tool_calls") for e in responses)
+    if all_empty:
+        return True, (f"{len(responses)} model_response(s), all with empty tool_calls.")
+    return False, "at least one model_response has tool_calls."
+
+
+def _check_hook_registry_error(
+    events: Sequence[TraceEvent],
+) -> tuple[bool, str]:
+    """Row 5 — Hook registry error (ARCHITECTURE.md:140).
+
+    Signature: ``hook_registry_error`` with non-null ``error_type``.
+    Session continues in degraded mode with all hooks disabled.
+    """
+    hook_errors = [e for e in events if e.kind == "hook_registry_error"]
+    if not hook_errors:
+        return False, "no hook_registry_error event."
+    ev = hook_errors[0]
+    return True, f"hook_registry_error ({_payload_json(ev)})"
+
+
+def _check_injection_attempt(events: Sequence[TraceEvent]) -> tuple[bool, str]:
+    """Row 6 — Injection attempt (ARCHITECTURE.md:141).
+
+    Signature: ``injection_blocked`` events with markers/tool/preview.
+    Multiple blocks indicate an active adversarial attempt.
+    """
+    blocked = [e for e in events if e.kind == "injection_blocked"]
+    if not blocked:
+        return False, "no injection_blocked event."
+    ev = blocked[0]
+    return True, f"{len(blocked)} block(s); first: {_payload_json(ev)}"
+
+
+# Ordered to match ARCHITECTURE.md row order so the rendered table is a
+# faithful projection of the documentation.
+_DIAGNOSE_CHECKS: tuple[tuple[str, Any], ...] = (
+    ("Evolver produces no ProposedEdit", _check_no_proposed_edit),
+    ("Critic hangs / timeout", _check_critic_timeout),
+    ("Runner OOM", _check_oom),
+    ("No tool calls emitted (tool surface missing)", _check_no_tool_calls),
+    ("Hook registry error", _check_hook_registry_error),
+    ("Injection attempt", _check_injection_attempt),
+)
+
+
+def build_diagnose_report(
+    session_id: str,
+    events: Sequence[TraceEvent],
+) -> str:
+    """Render the six-row failure-mode triage table as Markdown (issue #1044).
+
+    Pure function: takes a session_id and an ordered event sequence and
+    returns a single Markdown string. Each of the six
+    ``ARCHITECTURE.md`` failure modes is one table row with columns
+    ``Failure | Detected | Evidence``. A footer cross-references the
+    Digester class taxonomy (ADR-0011) and the source-of-truth table in
+    ``ARCHITECTURE.md`` so the reader can confirm the two are in sync.
+    """
+    lines = [f"# Diagnose: session `{session_id}`", ""]
+    lines.append("| Failure | Detected | Evidence |")
+    lines.append("|---|---|---|")
+    for label, check in _DIAGNOSE_CHECKS:
+        detected, evidence = check(events)
+        mark = "yes" if detected else "no"
+        lines.append(f"| {label} | {mark} | {evidence} |")
+    lines.append("")
+    lines.append(
+        "_Six failure modes per docs/ARCHITECTURE.md §Common failure modes; "
+        "class taxonomy per [ADR-0011](../../docs/adr/0011-failure-report-class-taxonomy.md)._"
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _diagnose(args: argparse.Namespace) -> int:
+    """Implement ``diagnose`` (issue #1044).
+
+    Loads a session, runs all six failure-mode checks, and prints the
+    Markdown triage table. Unknown session_id exits 1 with a clear
+    error message (acceptance criterion). Works on both sqlite and
+    jsonl backends via :func:`_logger_for`.
+    """
+    logger = _logger_for(args.db)
+    events = logger.load_session(args.session_id)
+    if not events:
+        sys.stderr.write(f"session {args.session_id} not found or empty.\n")
+        return 1
+    report = build_diagnose_report(args.session_id, events)
+    if args.out:
+        Path(args.out).write_text(report, encoding="utf-8")
+    else:
+        sys.stdout.write(report)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="foundry-trace",
@@ -846,6 +1016,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print orphaned markers without modifying the file.",
     )
     compact_parser.set_defaults(func=_compact)
+
+    # Issue #1044: guided failure-mode triage. Runs all six
+    # ARCHITECTURE.md failure-mode checks in one pass and prints a
+    # Markdown table (Failure | Detected | Evidence).
+    diagnose_parser = sub.add_parser(
+        "diagnose",
+        help="Run all six ARCHITECTURE.md failure-mode checks (issue #1044).",
+    )
+    diagnose_parser.add_argument("session_id", help="Session to diagnose.")
+    diagnose_parser.add_argument(
+        "--db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    diagnose_parser.add_argument(
+        "--out",
+        default=None,
+        help="Write the report to this path instead of stdout.",
+    )
+    diagnose_parser.set_defaults(func=_diagnose)
 
     return parser
 

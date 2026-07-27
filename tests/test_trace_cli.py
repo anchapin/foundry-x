@@ -1292,3 +1292,240 @@ def test_info_empty_db_shows_zero_sessions(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "Sessions: 0" in out
+
+
+# --- Issue #1044: diagnose subcommand tests ---------------------------------
+# Each failure mode from ARCHITECTURE.md §Common failure modes gets a
+# dedicated check, plus coverage for the clean-session, unknown-session,
+# jsonl-backend, and --out paths.
+
+
+def _seed_failure_session(
+    db_path: Path,
+    *,
+    events: list[tuple[str, dict]],
+    backend: str = "sqlite",
+    harness_version: str = "0.1.0",
+) -> str:
+    """Plant a session with arbitrary events and return its session_id."""
+    logger = TraceLogger(db_path, backend=backend)
+    with logger.session(harness_version=harness_version, model_id="diag-model") as sid:
+        for kind, payload in events:
+            logger.record(sid, kind, payload)
+    return sid
+
+
+def test_diagnose_clean_session_all_no(tmp_path, capsys):
+    """A successful session with no failure signals reports every row as 'no'."""
+    db = tmp_path / "traces.db"
+    sid = _seed_failure_session(
+        db,
+        events=[
+            ("task_received", {"prompt": "hello"}),
+            ("task_completed", {"status": "success"}),
+            ("critic_verdict", {"approved": True}),
+        ],
+    )
+
+    rc = main(["diagnose", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "| Failure | Detected | Evidence |" in out
+    # No failure mode should fire on a healthy session.
+    assert out.count("| yes |") == 0
+    assert out.count("| no |") == 6
+
+
+def test_diagnose_table_has_exactly_six_failure_rows(tmp_path, capsys):
+    """The table must contain exactly the six ARCHITECTURE.md failure modes."""
+    db = tmp_path / "traces.db"
+    sid = _seed_failure_session(db, events=[("task_completed", {"status": "success"})])
+
+    rc = main(["diagnose", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Evolver produces no ProposedEdit" in out
+    assert "Critic hangs / timeout" in out
+    assert "Runner OOM" in out
+    assert "No tool calls emitted (tool surface missing)" in out
+    assert "Hook registry error" in out
+    assert "Injection attempt" in out
+
+
+def test_diagnose_no_proposed_edit_detected(tmp_path, capsys):
+    """Row 1: task_completed with no critic_verdict is detected as 'yes'."""
+    db = tmp_path / "traces.db"
+    sid = _seed_failure_session(db, events=[("task_completed", {"status": "success"})])
+
+    rc = main(["diagnose", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Evolver produces no ProposedEdit | yes" in out
+    assert "no critic_verdict event follows" in out
+
+
+def test_diagnose_critic_timeout_detected(tmp_path, capsys):
+    """Row 2: task_aborted with wall_clock reason is detected."""
+    db = tmp_path / "traces.db"
+    sid = _seed_failure_session(
+        db,
+        events=[
+            ("task_aborted", {"reason": "wall_clock", "timeout_s": 120}),
+        ],
+    )
+
+    rc = main(["diagnose", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Critic hangs / timeout | yes" in out
+    assert "wall_clock" in out
+
+
+def test_diagnose_oom_detected(tmp_path, capsys):
+    """Row 3: a MemoryError signal in a payload is detected."""
+    db = tmp_path / "traces.db"
+    sid = _seed_failure_session(
+        db,
+        events=[
+            ("task_failed", {"error_type": "MemoryError", "error": "out of mem"}),
+        ],
+    )
+
+    rc = main(["diagnose", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Runner OOM | yes" in out
+
+
+def test_diagnose_no_tool_calls_detected(tmp_path, capsys):
+    """Row 4: every model_response with empty tool_calls is detected."""
+    db = tmp_path / "traces.db"
+    sid = _seed_failure_session(
+        db,
+        events=[
+            ("model_response", {"step": 0, "tool_calls": []}),
+            ("model_response", {"step": 1, "tool_calls": []}),
+        ],
+    )
+
+    rc = main(["diagnose", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "No tool calls emitted (tool surface missing) | yes" in out
+
+
+def test_diagnose_hook_registry_error_detected(tmp_path, capsys):
+    """Row 5: a hook_registry_error event is detected."""
+    db = tmp_path / "traces.db"
+    sid = _seed_failure_session(
+        db,
+        events=[
+            ("hook_registry_error", {"error_type": "ImportError"}),
+        ],
+    )
+
+    rc = main(["diagnose", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Hook registry error | yes" in out
+
+
+def test_diagnose_injection_attempt_detected(tmp_path, capsys):
+    """Row 6: injection_blocked events are detected."""
+    db = tmp_path / "traces.db"
+    sid = _seed_failure_session(
+        db,
+        events=[
+            (
+                "injection_blocked",
+                {"markers": ["ignore previous"], "tool": "write_file", "preview": "..."},
+            ),
+        ],
+    )
+
+    rc = main(["diagnose", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Injection attempt | yes" in out
+
+
+def test_diagnose_unknown_session_returns_nonzero(tmp_path, capsys):
+    """An unknown session_id exits 1 with a clear error message."""
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["diagnose", "does-not-exist", "--db", str(db)])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "does-not-exist" in err
+
+
+def test_diagnose_jsonl_backend(tmp_path, capsys):
+    """Diagnose works on the jsonl backend (acceptance criterion)."""
+    db = tmp_path / "traces.jsonl"
+    sid = _seed_failure_session(
+        db,
+        backend="jsonl",
+        events=[("task_aborted", {"reason": "token_budget"})],
+    )
+
+    rc = main(["diagnose", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Critic hangs / timeout | yes" in out
+
+
+def test_diagnose_writes_to_out_file(tmp_path):
+    """--out writes the report to a file instead of stdout."""
+    db = tmp_path / "traces.db"
+    out_file = tmp_path / "report.md"
+    sid = _seed_failure_session(db, events=[("task_completed", {"status": "success"})])
+
+    rc = main(["diagnose", sid, "--db", str(db), "--out", str(out_file)])
+
+    assert rc == 0
+    text = out_file.read_text(encoding="utf-8")
+    assert "| Failure | Detected | Evidence |" in text
+    assert "Evolver produces no ProposedEdit" in text
+
+
+def test_diagnose_report_references_adr_0011(tmp_path, capsys):
+    """The report footer cross-references ADR-0011 (Digester taxonomy)."""
+    db = tmp_path / "traces.db"
+    sid = _seed_failure_session(db, events=[("task_received", {})])
+
+    rc = main(["diagnose", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ADR-0011" in out
+
+
+def test_diagnose_multiple_modes_fire(tmp_path, capsys):
+    """Multiple failure modes can fire in the same session."""
+    db = tmp_path / "traces.db"
+    sid = _seed_failure_session(
+        db,
+        events=[
+            ("task_completed", {"status": "degraded"}),
+            ("task_aborted", {"reason": "wall_clock"}),
+            ("hook_registry_error", {"error_type": "RuntimeError"}),
+            ("injection_blocked", {"markers": ["x"]}),
+        ],
+    )
+
+    rc = main(["diagnose", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.count("| yes |") == 4
