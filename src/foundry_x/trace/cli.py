@@ -1011,6 +1011,89 @@ def _timeline(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- Issue #1123: run-benchmark — single-task benchmark CLI --------------------
+
+
+def _resolve_benchmark_task(task_name: str) -> tuple[Path, str]:
+    """Resolve *task_name* to a (test_file_path, test_function_name) pair.
+
+    Accepts both bare names (``sort_a_list``) and ``test_``-prefixed names
+    (``test_sort_a_list``). Returns a tuple of the resolved pytest path and
+    the canonical test function name.
+
+    Raises:
+        FileNotFoundError: the task file does not exist.
+        ValueError: the task file exists but the corresponding test function
+            is not found inside it.
+    """
+    normalized = task_name
+    if task_name.startswith("test_"):
+        normalized = task_name[5:]
+    test_func_name = f"test_{normalized}"
+    test_file = Path("benchmarks/tasks") / f"test_{normalized}.py"
+
+    if not test_file.exists():
+        raise FileNotFoundError(
+            f"Benchmark task not found: '{task_name}' "
+            f"(tried {test_file}). "
+            f"Check the task name or browse benchmarks/tasks/ for available tasks."
+        )
+
+    source = test_file.read_text(encoding="utf-8")
+    if f"def {test_func_name}(" not in source:
+        raise ValueError(
+            f"Task '{task_name}' resolves to {test_file} but "
+            f"{test_func_name}() is not defined in that file. "
+            f"Verify the task file contains the expected test function."
+        )
+
+    return test_file, test_func_name
+
+
+def _run_benchmark(args: argparse.Namespace) -> int:
+    """Implement ``run-benchmark`` (issue #1123).
+
+    Resolves a named benchmark task to its pytest path and invokes it with
+    the correct ``-m benchmark`` marker and workspace isolation.
+    Accepts ``--fixture <name>`` to seed the benchmark workspace from
+    ``benchmarks/fixtures/<name>/``. Exits with the underlying pytest
+    exit code.
+
+    Task name resolution is forgiving: both ``sort_a_list`` and
+    ``test_sort_a_list`` are accepted and normalised internally.
+    """
+    try:
+        test_file, test_func_name = _resolve_benchmark_task(args.task_name)
+    except FileNotFoundError as exc:
+        sys.stderr.write(f"run-benchmark: {exc}\n")
+        return 1
+    except ValueError as exc:
+        sys.stderr.write(f"run-benchmark: {exc}\n")
+        return 1
+
+    cmd: list[str] = [
+        sys.executable,
+        "-m",
+        "pytest",
+        str(test_file) + "::" + test_func_name,
+        "-m",
+        "benchmark",
+    ]
+
+    env: dict[str, str] = dict(__import__("os").environ)
+    if getattr(args, "fixture", None) is not None:
+        env["PYTEST_BENCHMARK_FIXTURE"] = args.fixture
+
+    import subprocess
+
+    result = subprocess.run(
+        cmd,
+        env=env,
+        check=False,
+    )
+    return result.returncode
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="foundry-trace",
@@ -1346,6 +1429,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write the timeline to this path instead of stdout.",
     )
     timeline_parser.set_defaults(func=_timeline)
+
+    # Issue #1123: single-task benchmark execution. Resolves a named benchmark
+    # task to its pytest path and invokes it with correct isolation and the
+    # benchmark marker. ``--fixture`` seeds the workspace from the named
+    # fixture directory. Exit code mirrors pytest's exit code.
+    run_benchmark_parser = sub.add_parser(
+        "run-benchmark",
+        help="Run a single benchmark task in isolation (issue #1123).",
+    )
+    run_benchmark_parser.add_argument(
+        "task_name",
+        help=(
+            "Benchmark task name (e.g. sort_a_list or test_sort_a_list). "
+            "The 'test_' prefix is optional and stripped automatically."
+        ),
+    )
+    run_benchmark_parser.add_argument(
+        "--fixture",
+        metavar="NAME",
+        default=None,
+        help=(
+            "Seed the benchmark workspace from benchmarks/fixtures/NAME/ "
+            "before running the task. If omitted the workspace starts empty."
+        ),
+    )
+    run_benchmark_parser.set_defaults(func=_run_benchmark)
 
     return parser
 
