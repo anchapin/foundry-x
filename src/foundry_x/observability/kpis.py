@@ -2267,7 +2267,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Break improvement_rate and regression_rate down by this dimension"
             " (issue #898): 'skill' (per harness skill, from"
             " BenchmarkTask.requires_skills), 'task_family' (per"
-            " BenchmarkTask tag), or 'difficulty_tier' (smoke/easy/medium)."
+            " BenchmarkTask tag), or 'difficulty_tier' (smoke/easy/medium/hard)."
             " Requires task metadata to attribute verdict checks to groups;"
             " see --task-metadata. Works in both single-summary and"
             " baseline-vs-candidate comparison modes."
