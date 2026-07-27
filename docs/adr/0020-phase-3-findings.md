@@ -134,19 +134,28 @@ that stays within 2 pp of the Q8_0 baseline at that context window.
 
 ### Context Window Intelligence Floor Table
 
-> **Status: PENDING** — requires GPU hardware with sufficient VRAM for
-> larger KV caches. Tracked in follow-up issue.
+> **Status: IN PROGRESS (issue #1079)** — execution script ready at
+> `logs/run-ctx-sweep.sh`; requires GPU hardware with sufficient VRAM
+> for larger KV caches.
 
 | Context Window | Q8_0 Pass Rate | Q5_K_M Pass Rate | IQ4_XS Pass Rate | Notes |
 |----------------|----------------|------------------|------------------|-------|
 | **8192** (current) | — | — | — | Baseline from table above |
-| **16384** | — | — | — | Pending |
-| **32768** | — | — | — | Pending |
+| **16384** | — | — | — | Pending (issue #1079) |
+| **32768** | — | — | — | Pending (issue #1079) |
 | **131072** | — | — | — | Pending; may require >8 GB VRAM |
 
 The goal is to determine whether `FOUNDRY_CONTEXT_TOKENS=8192` remains
 the correct default, or whether larger context windows are viable at
 the recommended quantization floor without exceeding 8 GB VRAM.
+
+To execute the sweep:
+
+```bash
+FOUNDRY_MODEL_PATH=/srv/models ./logs/run-ctx-sweep.sh
+```
+
+Or manually with `foundry-sweep` (per the methodology above).
 
 ## Token Efficiency Analysis
 
