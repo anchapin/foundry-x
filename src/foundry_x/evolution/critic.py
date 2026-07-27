@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -502,7 +503,59 @@ class Critic:
 
         results: list[QuantizationResult] = []
 
-        try:
+        if os.environ.get("FOUNDRY_PARALLEL_SWEEP") == "1":
+            max_workers = max(1, (os.cpu_count() or 2) - 1)
+
+            quant_work: list[tuple[str, str]] = []
+            for quant in quantizations:
+                pattern = model_glob_patterns.get(quant, f"*.{quant}.gguf")
+                full_pattern = str(model_base / pattern)
+                matched = glob.glob(full_pattern)
+
+                if not matched:
+                    raise FileNotFoundError(
+                        f"No model file found for quantization {quant!r} "
+                        f"using pattern {pattern!r} in {model_path_env}"
+                    )
+                if len(matched) > 1:
+                    raise ValueError(
+                        f"Multiple model files matched for quantization {quant!r}: {matched}"
+                    )
+
+                model_file = matched[0]
+                model_id = f"{quant}"
+                quant_work.append((model_file, model_id))
+
+            def _run_for_quant_in_env(
+                model_file: str,
+                model_id: str,
+                base_env: dict[str, str],
+            ) -> QuantizationResult:
+                env = os.environ.copy()
+                env.update(base_env)
+                env["FOUNDRY_MODEL_PATH"] = str(model_base)
+                env["FOUNDRY_MODEL_ID"] = model_id
+                return self._run_sweep_for_quant(
+                    model_file,
+                    model_id,
+                    cost_per_token=effective_cost,
+                    env=env,
+                )
+
+            base_env: dict[str, str] = {}
+            if context_tokens is not None:
+                base_env["FOUNDRY_CONTEXT_TOKENS"] = str(context_tokens)
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        _run_for_quant_in_env, mf, mid, base_env
+                    ): (mf, mid)
+                    for mf, mid in quant_work
+                }
+                for future in as_completed(futures):
+                    results.append(future.result())
+        else:
             for quant in quantizations:
                 pattern = model_glob_patterns.get(quant, f"*.{quant}.gguf")
                 full_pattern = str(model_base / pattern)
@@ -541,12 +594,12 @@ class Critic:
                         os.environ["FOUNDRY_MODEL_ID"] = original_model_id
                     else:
                         os.environ.pop("FOUNDRY_MODEL_ID", None)
-        finally:
-            if context_tokens is not None:
-                if original_context_tokens is not None:
-                    os.environ["FOUNDRY_CONTEXT_TOKENS"] = original_context_tokens
-                else:
-                    os.environ.pop("FOUNDRY_CONTEXT_TOKENS", None)
+
+        if context_tokens is not None:
+            if original_context_tokens is not None:
+                os.environ["FOUNDRY_CONTEXT_TOKENS"] = original_context_tokens
+            else:
+                os.environ.pop("FOUNDRY_CONTEXT_TOKENS", None)
 
         baseline = baseline_quantization if baseline_quantization else quantizations[0]
         baseline_result = next(r for r in results if r.quantization == baseline)
@@ -673,6 +726,7 @@ class Critic:
         model_file: str,
         model_id: str,
         cost_per_token: float | None = None,
+        env: dict[str, str] | None = None,
     ) -> QuantizationResult:
         """Run the benchmark suite for a single quantization.
 
@@ -680,6 +734,12 @@ class Critic:
         If *cost_per_token* is provided, ``cost_per_task`` is computed.
         ``token_efficiency`` is computed when ``total_tokens`` and
         ``avg_cycle_time_s`` are both available (requires trace integration).
+
+        When *env* is provided it is passed to the subprocess as its environment
+        (derived from a copy of ``os.environ`` plus any overrides). This keeps
+        per-quantization env vars (FOUNDRY_MODEL_PATH, FOUNDRY_MODEL_ID,
+        FOUNDRY_CONTEXT_TOKENS) isolated in the parallel path so concurrent
+        workers do not interfere with each other.
         """
         quant_label = Path(model_file).stem
         try:
@@ -689,6 +749,7 @@ class Critic:
                 text=True,
                 timeout=self.gate_timeout_s,
                 check=False,
+                env=env,
             )
         except subprocess.TimeoutExpired as exc:
             # gate_timeout_s killed the sweep subprocess — return a
