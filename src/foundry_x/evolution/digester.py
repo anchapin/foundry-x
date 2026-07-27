@@ -21,6 +21,8 @@ even when a downstream ``tool_error`` event also occurs.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -34,6 +36,13 @@ class FailureReport(BaseModel):
 
     ``failed_steps`` carries loosely-typed per-step dicts whose shape varies
     by failure mode; ``dict[str, Any]`` is intentional and noted per ADR-0006.
+
+    ``seen_across_n_sessions`` (ADR-0030) is populated by the evolution loop
+    after querying :class:`FailurePatternStore`. It carries the number of
+    distinct sessions in which this ``(proposed_class, context_hash)`` pattern
+    has been observed. ``0`` means the pattern store was not consulted (the
+    default for a freshly-built report). The Evolver uses this field to prefer
+    structural (hook-based) fixes for recurring failures.
     """
 
     session_id: str
@@ -41,6 +50,7 @@ class FailureReport(BaseModel):
     failed_steps: list[dict[str, Any]] = Field(default_factory=list)
     suspected_causes: list[str] = Field(default_factory=list)
     proposed_class: str = "unknown"
+    seen_across_n_sessions: int = 0
 
 
 # --- Failure-signalling vocabulary -----------------------------------------
@@ -454,6 +464,37 @@ def _aggregate_context_overflow(
                     proposed_class=CONTEXT_OVERFLOW_CLASS,
                 )
     return None
+
+
+def context_hash_bucket(failure: FailureReport) -> str:
+    """Compute a deterministic SHA-256 bucket for a failure's structural shape.
+
+    The bucket clusters similar failures across sessions by their structural
+    fingerprint — not their free-text summary. Two sessions that both fail
+    with ``proposed_class='wrong-tool'``, ``kind='tool_error'``, and
+    ``name='bash'`` produce the same bucket regardless of what the task
+    prompt said (ADR-0030 §2).
+
+    Intentionally excludes ``session_id``, ``timestamp``, ``event_id``, and
+    any free-text field (``summary``, ``suspected_causes``) to avoid hashing
+    session-specific noise.
+
+    Returns the hex digest (64 chars). When ``failed_steps`` is empty the
+    bucket still encodes ``proposed_class`` alone so clean/unknown reports
+    have a stable (but distinct) bucket.
+    """
+    step: dict[str, Any] = failure.failed_steps[0] if failure.failed_steps else {}
+    payload = step.get("payload") if isinstance(step.get("payload"), dict) else {}
+    kind = str(step.get("kind", ""))
+    tool_name = str(payload.get("name", ""))
+    error_type = str(payload.get("error_type", ""))
+    signal = str(step.get("signal", ""))
+
+    bucket_input = f"{failure.proposed_class}|{kind}|{tool_name}|{error_type}|{signal}"
+    normalized = re.sub(r"\s+", " ", bucket_input).strip().lower()
+    normalized = re.sub(r"\|+", "|", normalized).strip("|")
+    normalized = "|".join(part.strip() for part in normalized.split("|"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 class Digester:

@@ -21,8 +21,9 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from foundry_x.evolution.critic import Critic, CriticVerdict
-from foundry_x.evolution.digester import Digester, FailureReport
+from foundry_x.evolution.digester import Digester, FailureReport, context_hash_bucket
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
+from foundry_x.evolution.store import FailurePatternStore
 from foundry_x.execution.runner import resolve_harness_version
 from foundry_x.observability.regression_report import record_verdict
 from foundry_x.trace.logger import TraceEvent, TraceLogger
@@ -75,6 +76,39 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _record_and_annotate_pattern(
+    failure_report: FailureReport,
+    store: FailurePatternStore,
+) -> None:
+    """Record a failure into the pattern store and annotate the report.
+
+    Mutates ``failure_report.seen_across_n_sessions`` in place so the
+    Evolver can read the recurrence count from the report it already
+    receives (ADR-0030, issue #1038).
+
+    The timestamp used for the pattern row is taken from the first
+    failed step (if available) or the current time as fallback.
+    """
+    bucket = context_hash_bucket(failure_report)
+    timestamp = _now_iso()
+    if failure_report.failed_steps:
+        ts = failure_report.failed_steps[0].get("timestamp")
+        if isinstance(ts, str) and ts:
+            timestamp = ts
+    store.record(
+        proposed_class=failure_report.proposed_class,
+        session_id=failure_report.session_id,
+        timestamp=timestamp,
+        context_hash=bucket,
+    )
+    pattern = store.find_pattern(
+        proposed_class=failure_report.proposed_class,
+        context_hash=bucket,
+    )
+    if pattern is not None:
+        failure_report.seen_across_n_sessions = pattern.session_count
+
+
 def run_evolution_step(
     session_id: str,
     events: list[TraceEvent],
@@ -85,6 +119,7 @@ def run_evolution_step(
     no_verify: bool = False,
     trace_logger: TraceLogger | None = None,
     critic_tier: Literal["smoke", "full"] = "full",
+    failure_pattern_store: FailurePatternStore | None = None,
 ) -> EvolutionResult:
     """Run one iteration of the evolution loop over a session's trace events.
 
@@ -96,6 +131,12 @@ def run_evolution_step(
     *and* the Evolver returns at least one ProposedEdit. A clean report
     (no failure detected) short-circuits the loop and returns immediately
     with an empty ``proposed_edits`` list and ``verdict=None``.
+
+    When a :class:`FailurePatternStore` is provided, non-clean failure
+    reports are recorded into it and queried for cross-session recurrence
+    before the Evolver runs (ADR-0030, issue #1038). The
+    ``seen_across_n_sessions`` field on the annotated report lets the
+    Evolver prefer structural (hook-based) fixes for recurring patterns.
 
     Parameters
     ----------
@@ -131,6 +172,10 @@ def run_evolution_step(
         suite — unchanged historical behaviour. ``"smoke"`` runs only the
         smoke-tagged subset so an obvious rejection fast-fails without the
         full-suite cost, lowering ``kpi-cycle-time``.
+    failure_pattern_store:
+        Optional :class:`FailurePatternStore` for cross-session pattern
+        accumulation (ADR-0030). When provided, non-clean reports are
+        recorded and queried for recurrence before the Evolver runs.
 
     Returns
     -------
@@ -154,6 +199,9 @@ def run_evolution_step(
             started_at=started_at,
             completed_at=_now_iso(),
         )
+
+    if failure_pattern_store is not None:
+        _record_and_annotate_pattern(failure_report, failure_pattern_store)
 
     if evolver is None:
         evolver = Evolver(trace_logger=trace_logger, session_id=session_id)
@@ -232,6 +280,7 @@ async def run_evolution_step_async(
     no_verify: bool = False,
     trace_logger: TraceLogger | None = None,
     critic_tier: Literal["smoke", "full"] = "full",
+    failure_pattern_store: FailurePatternStore | None = None,
 ) -> EvolutionResult:
     """Async variant of :func:`run_evolution_step`.
 
@@ -245,6 +294,9 @@ async def run_evolution_step_async(
 
     ``trace_logger`` is passed to the default :class:`Evolver` so
     template-fallback failures emit trace events (issue #974).
+
+    ``failure_pattern_store`` enables cross-session pattern accumulation
+    (ADR-0030, issue #1038).
     """
     harness_version = resolve_harness_version(harness_dir).version
     started_at = _now_iso()
@@ -262,6 +314,9 @@ async def run_evolution_step_async(
             started_at=started_at,
             completed_at=_now_iso(),
         )
+
+    if failure_pattern_store is not None:
+        _record_and_annotate_pattern(failure_report, failure_pattern_store)
 
     if evolver is None:
         evolver = Evolver(trace_logger=trace_logger, session_id=session_id)

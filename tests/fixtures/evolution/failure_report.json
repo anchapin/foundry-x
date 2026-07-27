@@ -16,6 +16,7 @@
     }
   ],
   "proposed_class": "tool-error",
+  "seen_across_n_sessions": 0,
   "session_id": "sess-fixture-001",
   "summary": "tool-error failure (kind=tool_error, signal=kind:tool_error): no tool named foo",
   "suspected_causes": [
