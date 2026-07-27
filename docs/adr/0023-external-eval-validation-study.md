@@ -128,6 +128,51 @@ correlations, scaled to a 0–1 positive-only range). They are
 *overrideable*: a follow-up ADR can move them with evidence, but any
 such move must re-run the full study.
 
+### Slice size decision (issue #1055, 2026-07-26)
+
+The original §"Follow-ups" item 3 listed replacing the 20-task slice
+with the full EvalPlus set as optional, pending runner speed. Issue
+#1055 formalised the statistical dimension of that decision.
+
+**Method.** The per-configuration external pass rate is a binomial
+proportion *p̂ = passed / total*. Its standard error is
+`SE = sqrt(p̂(1 − p̂) / n)`, implemented in
+`foundry_x.evaluation.humaneval_plus.binomial_standard_error`. The
+worst case (maximising SE over *p̂*) is *p̂ = 0.5*, giving
+`SE_max = sqrt(0.25 / n)`.
+
+**Threshold.** `SLICE_MAX_STANDARD_ERROR = 0.05` (5 percentage points).
+An SE above this adds enough noise to the Pearson correlation to
+obscure a real effect; below it, the correlation study has acceptable
+statistical power.
+
+**Findings.**
+
+| Slice | Tasks (*n*) | Worst-case SE | Adequate? |
+| ----- | ---------- | ------------- | --------- |
+| Current sample | 20 | `sqrt(0.25/20) ≈ 0.112` | **No** — 2.2× over threshold |
+| Full EvalPlus | 164 | `sqrt(0.25/164) ≈ 0.039` | **Yes** — below threshold |
+| Minimum for SE ≤ 0.05 | 100 | `sqrt(0.25/100) = 0.050` | Borderline |
+
+**Decision.** The 20-task slice is retained for offline plumbing
+validation (canonical-solution integrity, loader contract) where
+statistical power is irrelevant. The full 164-task EvalPlus set is the
+target for the correlation study (§"Follow-ups" item 2), gated on
+per-task latency < 15 s measured via `foundry-trace` tool-latency
+percentiles. At ~30 s/task the full set adds ~37 h per study run —
+acceptable for a one-time study, too expensive for routine CI.
+
+**Cost estimate.** 164 tasks × 30 configs ≈ 4920 external evaluations
+vs. the current 600 (20 × 30): an ~8× increase, justified by the
+2.9× reduction in worst-case SE.
+
+**Loader readiness.** `load_humaneval_slice` is schema-agnostic: it
+reads any file in the `HumanEvalTask` shape, so an operator drops the
+official `humaneval-plus.jsonl` in place of
+`humaneval_plus_sample.jsonl` without touching the loader. This is
+confirmed by `test_load_humaneval_slice_handles_large_slice` (164-task
+synthetic slice) in `tests/test_humaneval_plus_loader.py`.
+
 ## Consequences
 
 - **What this PR proves**: the plumbing is sound. The slice loads, the
@@ -150,9 +195,16 @@ such move must re-run the full study.
      the result. If the result is `weak_proxy` or `invalid_proxy`,
      criterion 4 of issue #900 requires a follow-up issue describing
      how the internal suite will be broadened.
-  3. (Optional) Replace the 20-task slice with the full 500-task
-     EvalPlus set once the runner is fast enough to make the
-     per-configuration cost acceptable.
+  3. ~~(Optional) Replace the 20-task slice with the full 500-task
+     EvalPlus set once the runner is fast enough~~ **(Decided, issue
+     #1055, 2026-07-26)**: the 20-task slice is statistically
+     inadequate — its worst-case binomial SE ≈ 0.112 far exceeds the
+     0.05 threshold (see §"Slice size decision" below). The full
+     164-task EvalPlus set (worst-case SE ≈ 0.039) meets the threshold
+     and is the target for the correlation study. `load_humaneval_slice`
+     loads the full file unchanged (confirmed by test). The expansion is
+     gated on per-task latency < 15 s (runner-speed gate); see
+     §"Slice size decision" for the full analysis.
 - **No `pyproject.toml` change** is required: pydantic ≥ 2.6 is
   already a dependency ([ADR-0002](0002-uv-for-dependency-management.md),
   [ADR-0006](0006-pydantic-for-module-boundaries.md)), the slice is

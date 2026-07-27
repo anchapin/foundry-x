@@ -139,7 +139,8 @@ def find_cross_session_pattern(
     bucket = context_hash_bucket(failure)
     age_cutoff = age_cutoff or (datetime.now(UTC) - timedelta(days=PATTERN_AGE_CUTOFF))
 
-    rows = store.query("""
+    rows = store.query(
+        """
         SELECT proposed_class, context_hash,
                COUNT(DISTINCT session_id)          AS session_count,
                MAX(timestamp)                      AS latest_timestamp,
@@ -150,17 +151,19 @@ def find_cross_session_pattern(
           AND  timestamp      >= ?
         GROUP BY proposed_class, context_hash
         HAVING COUNT(DISTINCT session_id) >= ?
-    """, [failure.proposed_class, bucket, age_cutoff.isoformat(), min_sessions])
+    """,
+        [failure.proposed_class, bucket, age_cutoff.isoformat(), min_sessions],
+    )
 
     if not rows:
         return None
     row = rows[0]
     return CrossSessionPattern(
-        proposed_class=row['proposed_class'],
-        context_hash=row['context_hash'],
-        session_count=row['session_count'],
-        latest_timestamp=row['latest_timestamp'],
-        session_ids=row['session_ids'].split(','),
+        proposed_class=row["proposed_class"],
+        context_hash=row["context_hash"],
+        session_count=row["session_count"],
+        latest_timestamp=row["latest_timestamp"],
+        session_ids=row["session_ids"].split(","),
     )
 ```
 
@@ -183,8 +186,7 @@ the `Evolver` can include a evidence snippet in the `ProposedEdit.rationale`
 class FailurePatternStore:
     """SQLite-backed store for cross-session failure pattern accumulation."""
 
-    def __init__(self, path: str | Path) -> None:
-        ...
+    def __init__(self, path: str | Path) -> None: ...
 
     def record(self, failure: FailureReport, resolution: str = "pending") -> None:
         """Insert a failure event into the pattern store.
