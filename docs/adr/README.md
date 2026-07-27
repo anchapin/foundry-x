@@ -35,6 +35,7 @@ format and process.
 | [0021](./0021-context-pruning-at-scale.md) | Context pruning at scale — Phase 3 findings | Accepted |
 | [0022](./0022-store-implementation-selection-criteria.md) | Store implementation selection criteria | Accepted |
 | [0023](./0023-external-eval-validation-study.md) | External-eval validation study (issue #900) | Accepted |
+| [0032](./0032-external-eval-pearson-study-protocol.md) | External-eval Pearson correlation study protocol (issue #1028) | Proposed |
 
 When adding a new ADR, append it to this table in the same PR.
 Mark the status `Accepted` in the same PR that ships the implementation;

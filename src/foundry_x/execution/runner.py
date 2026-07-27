@@ -2062,6 +2062,14 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         help="Harness variant label (e.g. q4km, q5km). Stored in session "
         "metadata for external-eval correlation grouping (issue #955).",
     )
+    parser.add_argument(
+        "--study-run-type",
+        default=None,
+        choices=["internal_suite", "external_slice"],
+        help="Tag this session as part of an external-eval correlation study "
+        "(issue #1028). Stored in session metadata to allow the study "
+        "aggregator to separate internal-suite runs from external-slice runs.",
+    )
     args = parser.parse_args()
 
     harness_dir = Path(args.harness_dir).resolve()
@@ -2096,6 +2104,7 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         if harness_variant_override is not None
         else os.environ.get(_HARNESS_VARIANT_ENV, "").strip() or None
     )
+    study_run_type = args.study_run_type if args.study_run_type is not None else None
     limits = run_limits_from_env()
 
     model_adapter: ModelAdapter | None = None
@@ -2121,6 +2130,8 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
     if harness_variant is not None:
         session_metadata["harness_variant"] = harness_variant
     session_metadata["harness_version_source"] = harness_version_source
+    if study_run_type is not None:
+        session_metadata["study_run_type"] = study_run_type
     with logger.session(
         harness_version=harness_version,
         model_id=model_id,

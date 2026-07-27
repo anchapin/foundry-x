@@ -145,6 +145,39 @@ def pearson_binary(
     return num / (denom_x * denom_y) ** 0.5
 
 
+def pearson_binary_ci_95(
+    internal_rates: Sequence[float],
+    external_rates: Sequence[float],
+) -> tuple[float, float]:
+    """Compute the 95% confidence interval for Pearson r via Fisher's z.
+
+    Calls :func:`pearson_binary` internally and raises the same errors
+    on under-powered or zero-variance inputs.
+
+    Args:
+        internal_rates: Per-configuration internal pass rates in ``[0.0, 1.0]``.
+        external_rates: Per-configuration external pass rates in ``[0.0, 1.0]``.
+
+    Returns:
+        ``(r_lower, r_upper)`` — the lower and upper bounds of the 95%
+        confidence interval, both clamped to ``[-1.0, 1.0]``.
+    """
+    import math
+
+    r = pearson_binary(internal_rates, external_rates)
+    n = len(internal_rates)
+    if n <= 3:
+        raise ValueError(f"Fisher's z CI requires n > 3; got n = {n}")
+
+    z = math.atanh(r)
+    se_z = 1.0 / math.sqrt(n - 3)
+    z_lower = z - 1.96 * se_z
+    z_upper = z + 1.96 * se_z
+    r_lower = math.tanh(z_lower)
+    r_upper = math.tanh(z_upper)
+    return r_lower, r_upper
+
+
 def interpret_correlation(coefficient: float) -> str:
     """Return a one-line plain-English reading of a correlation coefficient.
 
@@ -174,4 +207,5 @@ __all__ = [
     "ZeroVarianceError",
     "interpret_correlation",
     "pearson_binary",
+    "pearson_binary_ci_95",
 ]
