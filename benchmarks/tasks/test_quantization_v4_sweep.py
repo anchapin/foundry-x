@@ -52,7 +52,7 @@ TASK = BenchmarkTask(
         "Issue #1078, ADR-0020 §GGUF v4 Quantization Extension."
     ),
     tags=["agent-loop", "quantization", "sweep", "v4", "5600G", "6600-XT", "IQ4_XS"],
-    difficulty_tier="medium",
+    difficulty_tier="smoke",
 )
 
 _V4_QUANTIZATIONS = list(KNOWN_V4_QUANTIZATIONS)
