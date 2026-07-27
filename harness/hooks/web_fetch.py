@@ -113,7 +113,7 @@ class WebFetchHook:
     ``post_tool`` is a pass-through; the hook does not modify fetch results.
     """
 
-    _phase: int = 3
+    _phase: int = 5
 
     __slots__ = ("_tracer",)
 

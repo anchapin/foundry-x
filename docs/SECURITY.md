@@ -35,7 +35,7 @@ We design against these threats:
    open an SSRF channel (the agent fetching internal metadata
    endpoints like `169.254.169.254`) or a data-exfiltration channel
    (the agent sending collected data to an attacker-controlled
-   domain). The `WebFetchHook` (`harness/hooks/web_fetch.py`)
+   domain). The `WebFetchHook`
    mitigates this threat by validating every `web_fetch` tool call's
    URL host against the operator-configured `FETCH_ALLOWED_DOMAINS`
    allowlist before the HTTP request is issued. When the allowlist is
@@ -99,7 +99,7 @@ We design against these threats:
   be migrated to the container for any non-trivial evolution run.
 - **Controlled fetch allowlist (issue #1054).** The `web_fetch` skill
   lets the agent retrieve documentation from allowlisted domains. The
-  `WebFetchHook` (`harness/hooks/web_fetch.py`) validates every
+  `WebFetchHook` validates every
   `web_fetch` tool call's URL host against the `FETCH_ALLOWED_DOMAINS`
   environment variable (comma-separated domain list). A URL whose host
   is not in the allowlist is blocked — the hook records a

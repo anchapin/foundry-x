@@ -70,6 +70,8 @@ KNOWN_KINDS: frozenset[str] = frozenset(
     {
         "context_pruned",
         "critic_verdict",
+        "fetch_blocked",
+        "fetch_success",
         "firewall_exception",
         "hook_registry_error",
         "injection_blocked",
