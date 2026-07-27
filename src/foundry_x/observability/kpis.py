@@ -116,10 +116,25 @@ GENERATION_EXHAUSTED_KIND = "generation_exhausted"
 
 
 #: Dimension accepted by :func:`compute_kpis`'s ``group_by`` parameter
-#: (issue #898). Each value selects which :class:`TaskKpiMetadata` field
-#: drives the per-slice breakdown of ``improvement_rate`` and
-#: ``regression_rate``.
-GroupByDim = Literal["skill", "task_family", "difficulty_tier"]
+#: (issue #898, #1039). Each value selects which field drives the
+#: per-slice breakdown of ``improvement_rate`` and ``regression_rate``.
+#:
+#: *Task-level* dimensions (``skill`` / ``task_family`` /
+#: ``difficulty_tier``) slice by :class:`TaskKpiMetadata` attributes.
+#:
+#: *Session-level* dimensions (``model_id`` / ``quantization`` /
+#: ``harness_version``) slice by
+#: :class:`~foundry_x.trace.logger.TraceSession` attributes — verdicts
+#: are bucketed by the session's model/quantization/harness fields
+#: rather than task metadata.
+GroupByDim = Literal[
+    "skill",
+    "task_family",
+    "difficulty_tier",
+    "model_id",
+    "quantization",
+    "harness_version",
+]
 
 
 class TaskKpiMetadata(BaseModel):
@@ -332,6 +347,14 @@ class KpiSummary(BaseModel):
     per_skill: dict[str, SkillKpiSlice] = {}
     per_task_family: dict[str, SkillKpiSlice] = {}
     per_difficulty_tier: dict[str, SkillKpiSlice] = {}
+    # Issue #1039: session-level KPI slices.  Unlike the task-level slices
+    # above (keyed by task metadata), these are keyed by session attributes
+    # (model_id, quantization, harness_version) and bucket verdicts by the
+    # session that produced them.  Only the dimension selected via
+    # ``group_by`` is populated; the others stay empty.
+    per_model_id: dict[str, SkillKpiSlice] = {}
+    per_quantization: dict[str, SkillKpiSlice] = {}
+    per_harness_version: dict[str, SkillKpiSlice] = {}
 
 
 class StreamingQualityData(BaseModel):
@@ -444,6 +467,36 @@ def _failure_class_distribution(
     return distribution
 
 
+def _session_slice_or_task_slice(
+    logger: TraceLogger,
+    *,
+    harness_version: str | None,
+    group_by: GroupByDim | None,
+    task_metadata: dict[str, TaskKpiMetadata] | None,
+) -> dict[str, SkillKpiSlice]:
+    """Dispatch to session-level or task-level slicing based on *group_by* (issue #1039).
+
+    Session-level dimensions (``model_id``, ``quantization``,
+    ``harness_version``) use :func:`_slice_session_verdict_rates` which
+    groups verdicts by session attributes.  Task-level dimensions use the
+    existing :func:`_slice_verdict_rates` which groups by task metadata.
+    """
+    if group_by is None:
+        return {}
+    if group_by in _SESSION_LEVEL_DIMS:
+        return _slice_session_verdict_rates(
+            logger,
+            harness_version=harness_version,
+            group_by=group_by,
+        )
+    return _slice_verdict_rates(
+        logger,
+        harness_version=harness_version,
+        group_by=group_by,
+        task_metadata=task_metadata,
+    )
+
+
 def compute_kpis(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -532,7 +585,7 @@ def compute_kpis(
         evolver_llm_failure_count=evolver_llm_failure_count,
         evolver_llm_failure_rate=evolver_llm_failure_rate,
         **_slice_field(
-            _slice_verdict_rates(
+            _session_slice_or_task_slice(
                 logger,
                 harness_version=harness_version,
                 group_by=group_by,
@@ -560,6 +613,9 @@ def _slice_field(
         "skill": "per_skill",
         "task_family": "per_task_family",
         "difficulty_tier": "per_difficulty_tier",
+        "model_id": "per_model_id",
+        "quantization": "per_quantization",
+        "harness_version": "per_harness_version",
     }[group_by]
     return {field_name: slices}
 
@@ -621,6 +677,12 @@ def _slices_for(summary: KpiSummary, group_by: GroupByDim | None) -> dict[str, S
         return summary.per_task_family
     if group_by == "difficulty_tier":
         return summary.per_difficulty_tier
+    if group_by == "model_id":
+        return summary.per_model_id
+    if group_by == "quantization":
+        return summary.per_quantization
+    if group_by == "harness_version":
+        return summary.per_harness_version
     return {}
 
 
@@ -915,6 +977,109 @@ def _slice_verdict_rates(
             session_count=len(bucket.sessions),
         )
     return slices
+
+
+# Issue #1039 — session-level dimensions --------------------------------
+
+#: Mapping from session-level :class:`GroupByDim` values to the
+#: :class:`~foundry_x.trace.logger.TraceSession` attribute name.
+_SESSION_DIM_ATTRS: dict[str, str] = {
+    "model_id": "model_id",
+    "quantization": "quantization",
+    "harness_version": "harness_version",
+}
+
+
+def _build_session_group_map(
+    logger: TraceLogger,
+    *,
+    group_by: GroupByDim,
+    harness_version: str | None,
+) -> dict[str, str]:
+    """Map ``session_id -> group key`` for a session-level dimension.
+
+    When the session attribute is ``None`` the session is omitted from the
+    map so it does not appear in the slice breakdown (graceful degradation
+    per the issue's acceptance criteria).  ``harness_version`` is always
+    applied to ``list_sessions`` so sessions outside the filter window
+    are excluded.
+    """
+    attr = _SESSION_DIM_ATTRS[group_by]
+    mapping: dict[str, str] = {}
+    for session in logger.list_sessions(harness_version=harness_version):
+        key = getattr(session, attr, None)
+        if key is not None:
+            mapping[session.session_id] = str(key)
+    return mapping
+
+
+def _slice_session_verdict_rates(
+    logger: TraceLogger,
+    *,
+    harness_version: str | None,
+    group_by: GroupByDim,
+) -> dict[str, SkillKpiSlice]:
+    """Session-level per-group ``improvement_rate`` / ``regression_rate`` (issue #1039).
+
+    Works like :func:`_slice_verdict_rates` but buckets verdicts by a
+    session attribute (``model_id``, ``quantization``, or
+    ``harness_version``) instead of task metadata.  A session whose
+    attribute is ``None`` is excluded — the slice shows only sessions
+    that declared a value for the chosen dimension.
+
+    The ``prior_passed`` set is shared across groups (not scoped per
+    group) because a regression in session-level slicing means "the same
+    task regressed in the same session group" — the session group
+    determines the bucket, not the task's metadata.
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) and
+    one :meth:`TraceLogger.list_sessions` call.
+    """
+    if group_by not in _SESSION_DIM_ATTRS:
+        return {}
+
+    session_groups = _build_session_group_map(
+        logger, group_by=group_by, harness_version=harness_version
+    )
+    if not session_groups:
+        return {}
+
+    acc: dict[str, _SliceAcc] = {}
+    for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
+        group = session_groups.get(event.session_id)
+        if group is None:
+            continue
+        record = VerdictRecord(**event.payload)
+        bucket = acc.setdefault(group, _SliceAcc())
+        bucket.total += 1
+        bucket.sessions.add(event.session_id)
+        if record.verdict:
+            bucket.approved += 1
+        for task in record.failed_checks:
+            if task in bucket.prior_passed:
+                bucket.regression_sessions.add(event.session_id)
+        for task in record.passed_checks:
+            bucket.prior_passed.add(task)
+
+    slices: dict[str, SkillKpiSlice] = {}
+    for group, bucket in acc.items():
+        slices[group] = SkillKpiSlice(
+            improvement_rate=bucket.approved / bucket.total if bucket.total else 0.0,
+            regression_rate=(
+                len(bucket.regression_sessions) / len(bucket.sessions) if bucket.sessions else 0.0
+            ),
+            verdict_count=bucket.total,
+            session_count=len(bucket.sessions),
+        )
+    return slices
+
+
+# Issue #1039 — helpers for the session-level slice field wiring -------
+
+# Task-level dimensions (sliced by TaskKpiMetadata).
+_TASK_LEVEL_DIMS: frozenset[str] = frozenset({"skill", "task_family", "difficulty_tier"})
+# Session-level dimensions (sliced by TraceSession attributes).
+_SESSION_LEVEL_DIMS: frozenset[str] = frozenset({"model_id", "quantization", "harness_version"})
 
 
 def build_task_metadata() -> dict[str, TaskKpiMetadata]:
@@ -1602,14 +1767,17 @@ def _render_markdown(summary: KpiSummary) -> str:
         lines.append("| --- | --- |")
         for cls, count in sorted(summary.failure_class_distribution.items()):
             lines.append(f"| {cls} | {count} |")
-    # Issue #898: render the populated per-slice breakdown (only the
+    # Issue #898, #1039: render the populated per-slice breakdown (only the
     # dimension selected via ``--group-by`` is non-empty, so at most one
     # of these sections appears). Compact and omitted entirely when no
-    # task metadata was supplied.
+    # task/session metadata was supplied.
     for label, slices in (
         ("Skill", summary.per_skill),
         ("Task Family", summary.per_task_family),
         ("Difficulty Tier", summary.per_difficulty_tier),
+        ("Model ID", summary.per_model_id),
+        ("Quantization", summary.per_quantization),
+        ("Harness Version", summary.per_harness_version),
     ):
         if slices:
             lines.extend(_render_slice_section(label, slices))
@@ -1806,6 +1974,9 @@ def _render_comparison_slice_deltas(comparison: KpiComparison) -> str:
         "skill": "Skill",
         "task_family": "Task Family",
         "difficulty_tier": "Difficulty Tier",
+        "model_id": "Model ID",
+        "quantization": "Quantization",
+        "harness_version": "Harness Version",
     }
     blocks: list[str] = []
     for dim, slices in comparison.slice_deltas.items():
@@ -1883,13 +2054,16 @@ def append_kpi_history(
             # (like the per-slice fields below), not a trend metric — keep
             # the JSONL history line compact and its key set stable.
             "excluded_from_cycle_time",
-            # Issue #898: per-slice breakdowns are an on-demand diagnostic
-            # view (populated only with --group-by), not a trend metric —
-            # exclude them so the JSONL history line stays compact. They
-            # are recomputed from the trace store on demand.
+            # Issue #898, #1039: per-slice breakdowns are an on-demand
+            # diagnostic view (populated only with --group-by), not a
+            # trend metric — exclude them so the JSONL history line stays
+            # compact. They are recomputed from the trace store on demand.
             "per_skill",
             "per_task_family",
             "per_difficulty_tier",
+            "per_model_id",
+            "per_quantization",
+            "per_harness_version",
         },
     )
     payload["timestamp"] = _now_iso()
@@ -2261,20 +2435,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--group-by",
         dest="group_by",
-        choices=("skill", "task_family", "difficulty_tier"),
+        choices=(
+            "skill",
+            "task_family",
+            "difficulty_tier",
+            "model_id",
+            "quantization",
+            "harness_version",
+        ),
         default=None,
         help=(
             "Break improvement_rate and regression_rate down by this dimension"
-            " (issue #898): 'skill' (per harness skill, from"
-            " BenchmarkTask.requires_skills), 'task_family' (per"
-            " BenchmarkTask tag), or 'difficulty_tier' (smoke/easy/medium/hard)."
-            " Requires task metadata to attribute verdict checks to groups;"
-            " see --task-metadata. Works in both single-summary and"
-            " baseline-vs-candidate comparison modes."
+            " (issues #898, #1039). Task-level: 'skill' (per harness skill,"
+            " from BenchmarkTask.requires_skills), 'task_family' (per"
+            " BenchmarkTask tag), or 'difficulty_tier'"
+            " (smoke/easy/medium/hard). Session-level: 'model_id',"
+            " 'quantization', or 'harness_version' (per-session"
+            " TraceSession attributes). Task-level dimensions require"
+            " task metadata (--task-metadata); session-level dimensions"
+            " use session attributes directly."
+            " Works in both single-summary and baseline-vs-candidate"
+            " comparison modes."
             " NOTE: Tasks with missing metadata (empty requires_skills, empty"
             " tags, or difficulty_tier='easy' by default) are silently"
-            " excluded from slice views. Use --validate-metadata to audit"
-            " tasks with incomplete annotations."
+            " excluded from task-level slice views. Sessions with None"
+            " for the chosen session attribute are excluded from"
+            " session-level slice views."
         ),
     )
     parser.add_argument(
@@ -2428,10 +2614,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     fmt = _resolve_format(args.format, args.out)
     logger = TraceLogger(args.db)
 
-    # Issue #898: build the task-name -> metadata map once (when --group-by
-    # is set) so both the single-summary and comparison paths share it.
+    # Issue #898, #1039: build the task-name -> metadata map only for
+    # task-level dimensions; session-level dimensions (model_id,
+    # quantization, harness_version) do not need task metadata.
     task_metadata = None
-    if args.group_by is not None:
+    if args.group_by is not None and args.group_by in _TASK_LEVEL_DIMS:
         task_metadata = (
             _load_task_metadata(Path(args.task_metadata))
             if args.task_metadata is not None
