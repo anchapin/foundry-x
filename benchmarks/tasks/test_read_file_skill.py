@@ -1,5 +1,11 @@
 """Benchmark task: gate the read_file skill contract (issue #577).
 
+INFRASTRUCTURE CHECK (issue #1120)
+==================================
+This task uses run_solution to plant a complete golden solution. It tests
+whether the execution infrastructure works correctly -- NOT whether the
+agent can independently use the read_file skill.
+
 The ``read_file`` skill (``harness/skills/read_file.json``) is the agent's
 primary information-gathering tool, yet the benchmark suite had zero tasks
 pinning its contract. A regression in ``read_file`` (wrong path resolution,
@@ -54,7 +60,7 @@ TASK = BenchmarkTask(
         "from data.txt."
     ),
     requires_skills=["read_file"],
-    tags=["read_file", "config", "encoding", "offset", "paging"],
+    tags=["read_file", "config", "encoding", "offset", "paging", "infrastructure"],
 )
 
 CASES = ["config_parser", "line_range", "latin1_encoding"]

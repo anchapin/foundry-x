@@ -1,4 +1,14 @@
-"""Benchmark task: return the nth Fibonacci number."""
+"""Benchmark task: return the nth Fibonacci number.
+
+INFRASTRUCTURE CHECK (issue #1120)
+==================================
+This task uses run_solution to plant a complete golden solution. It tests
+whether the execution infrastructure works correctly -- NOT whether the
+agent can independently synthesize a Fibonacci algorithm.
+
+The golden-solution approach provides a deterministic pass/fail baseline
+that locks the infrastructure green before the agent loop is wired.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +23,8 @@ TASK = BenchmarkTask(
     name="nth_fibonacci",
     description="Return the nth Fibonacci number (F(0)=0, F(1)=1).",
     prompt=("Read integer n from input.txt and write F(n) to output.txt, where F(0)=0 and F(1)=1."),
-    tags=["math", "recurrence"],
+    difficulty_tier="easy",
+    tags=["math", "recurrence", "infrastructure"],
 )
 
 GOLDEN_SOLUTION = """\

@@ -1,5 +1,11 @@
 """Benchmark task: binary search (implementation, easy).
 
+INFRASTRUCTURE CHECK (issue #1120)
+==================================
+This task uses run_solution to plant a complete golden solution. It tests
+whether the execution infrastructure works correctly -- NOT whether the
+agent can independently synthesize a binary search algorithm.
+
 Exercises a single non-trivial algorithmic shape: the O(log n) halving
 loop with index arithmetic and a termination condition. The complement
 ``lo <= hi`` boundary and the empty-list / not-found edges probe
@@ -40,7 +46,7 @@ TASK = BenchmarkTask(
         "output.txt contains the 0-based index of target in the list, or "
         "'-1' when the target is absent or the list is empty."
     ),
-    tags=["implementation"],
+    tags=["implementation", "infrastructure"],
 )
 
 GOLDEN_SOLUTION = """\

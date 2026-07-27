@@ -1092,6 +1092,20 @@ def _verdict_rates(
     * *regression_rate* = sessions with >=1 regressed task / sessions with a
       verdict, where a task regresses when it appears in ``failed_checks`` after
       having appeared in ``passed_checks`` in an earlier verdict.
+
+    Infrastructure / golden-solution tasks (issue #1120)
+    ---------------------------------------------------
+    Benchmark tasks tagged ``infrastructure`` (e.g. ``implementation_fizzbuzz``,
+    ``sort_a_list``, ``nth_fibonacci``) use ``run_solution`` to plant a
+    complete golden solution and assert the infrastructure works -- they do NOT
+    test whether the agent can independently solve the problem. These tasks are
+    INCLUDED in the improvement-rate denominator as of this writing. Operators
+    who wish to exclude them should filter by the ``infrastructure`` tag when
+    grouping by ``task_family``: the ``infrastructure`` group captures only
+    these planted-solution tasks, and the rate computed over that slice reflects
+    infrastructure reliability only. The aggregate improvement-rate denominator
+    includes all verdicts regardless of tag; future work may add an optional
+    ``exclude_infrastructure`` parameter to filter them from the denominator.
     """
 
     total_verdicts = 0

@@ -1,5 +1,11 @@
 """Benchmark task: gate the read_multiple_files skill contract (issue #873).
 
+INFRASTRUCTURE CHECK (issue #1120)
+==================================
+This task uses run_solution to plant a complete golden solution. It tests
+whether the execution infrastructure works correctly -- NOT whether the
+agent can independently use the read_multiple_files skill.
+
 The ``read_multiple_files`` skill (``harness/skills/read_multiple_files.json``)
 lets the agent read N files in a single batched call. The benchmark suite had
 no task pinning its contract; issue #617 / PR #688 explicitly scoped the
@@ -67,7 +73,7 @@ TASK = BenchmarkTask(
         "is truncated for case 3."
     ),
     requires_skills=["read_multiple_files"],
-    tags=["read_multiple_files", "batch", "errors", "truncation"],
+    tags=["read_multiple_files", "batch", "errors", "truncation", "infrastructure"],
 )
 
 CASES = ["multi_file_basic", "missing_file_in_batch", "truncation_aggregate"]
