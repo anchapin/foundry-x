@@ -1176,3 +1176,313 @@ class TestContextTokensEnvPropagation:
         ):
             critic.quantization_sweep(quantizations=["Q5_K_M"])
             assert os.environ.get("FOUNDRY_CONTEXT_TOKENS") == "4096"
+
+
+class TestParallelQuantizationSweep:
+    """Tests for FOUNDRY_PARALLEL_SWEEP=1 parallel execution path (issue #1126)."""
+
+    def test_parallel_sweep_runs_all_quantizations(self, tmp_path):
+        """Parallel path calls _run_sweep_for_quant once per quantization."""
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        (model_dir / "test.Q4_K_S.gguf").touch()
+        (model_dir / "test.Q5_K_M.gguf").touch()
+
+        q4_result = QuantizationResult(
+            quantization="Q4_K_S",
+            model_path=str(model_dir / "test.Q4_K_S.gguf"),
+            model_id="Q4_K_S",
+            pass_rate=0.8,
+        )
+        q5_result = QuantizationResult(
+            quantization="Q5_K_M",
+            model_path=str(model_dir / "test.Q5_K_M.gguf"),
+            model_id="Q5_K_M",
+            pass_rate=0.9,
+        )
+        results = {"Q4_K_S": q4_result, "Q5_K_M": q5_result}
+
+        def fake_run(self, model_file, model_id, cost_per_token=None, env=None):
+            return results[model_id]
+
+        critic = Critic(harness_dir=harness)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "FOUNDRY_MODEL_PATH": str(model_dir),
+                    "FOUNDRY_PARALLEL_SWEEP": "1",
+                },
+                clear=False,
+            ),
+            patch.object(Critic, "_run_sweep_for_quant", fake_run),
+        ):
+            verdict = critic.quantization_sweep(quantizations=["Q4_K_S", "Q5_K_M"])
+
+        assert verdict.recommended == "Q5_K_M"
+        assert verdict.regression is False
+        assert len(verdict.quantizations) == 2
+
+    def test_parallel_sweep_produces_same_verdict_as_sequential(self, tmp_path):
+        """Parallel and sequential paths produce identical verdicts for same inputs."""
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        (model_dir / "test.Q4_K_M.gguf").touch()
+        (model_dir / "test.Q5_K_M.gguf").touch()
+        (model_dir / "test.Q8_0.gguf").touch()
+
+        q4_result = QuantizationResult(
+            quantization="Q4_K_M",
+            model_path=str(model_dir / "test.Q4_K_M.gguf"),
+            model_id="Q4_K_M",
+            total_tasks=10,
+            passed_tasks=6,
+            failed_tasks=4,
+            pass_rate=0.6,
+        )
+        q5_result = QuantizationResult(
+            quantization="Q5_K_M",
+            model_path=str(model_dir / "test.Q5_K_M.gguf"),
+            model_id="Q5_K_M",
+            total_tasks=10,
+            passed_tasks=8,
+            failed_tasks=2,
+            pass_rate=0.8,
+        )
+        q8_result = QuantizationResult(
+            quantization="Q8_0",
+            model_path=str(model_dir / "test.Q8_0.gguf"),
+            model_id="Q8_0",
+            total_tasks=10,
+            passed_tasks=9,
+            failed_tasks=1,
+            pass_rate=0.9,
+        )
+        results_map = {
+            "Q4_K_M": q4_result,
+            "Q5_K_M": q5_result,
+            "Q8_0": q8_result,
+        }
+
+        def fake_run(self, model_file, model_id, cost_per_token=None, env=None):
+            return results_map[model_id]
+
+        critic = Critic(harness_dir=harness)
+
+        with (
+            patch.dict(
+                os.environ,
+                {"FOUNDRY_MODEL_PATH": str(model_dir)},
+                clear=False,
+            ),
+            patch.object(Critic, "_run_sweep_for_quant", fake_run),
+        ):
+            seq_verdict = critic.quantization_sweep(quantizations=["Q4_K_M", "Q5_K_M", "Q8_0"])
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "FOUNDRY_MODEL_PATH": str(model_dir),
+                    "FOUNDRY_PARALLEL_SWEEP": "1",
+                },
+                clear=False,
+            ),
+            patch.object(Critic, "_run_sweep_for_quant", fake_run),
+        ):
+            par_verdict = critic.quantization_sweep(quantizations=["Q4_K_M", "Q5_K_M", "Q8_0"])
+
+        assert seq_verdict.recommended == par_verdict.recommended
+        assert seq_verdict.regression == par_verdict.regression
+        assert len(seq_verdict.quantizations) == len(par_verdict.quantizations)
+        seq_by_q = {r.quantization: r for r in seq_verdict.quantizations}
+        par_by_q = {r.quantization: r for r in par_verdict.quantizations}
+        for q, seq_r in seq_by_q.items():
+            assert seq_r.pass_rate == par_by_q[q].pass_rate
+
+    def test_parallel_sweep_regression_detected(self, tmp_path):
+        """Regression flag is set when a quantization drops below threshold."""
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        (model_dir / "test.Q4_K_S.gguf").touch()
+        (model_dir / "test.Q5_K_M.gguf").touch()
+
+        baseline_result = QuantizationResult(
+            quantization="Q4_K_S",
+            model_path=str(model_dir / "test.Q4_K_S.gguf"),
+            model_id="Q4_K_S",
+            total_tasks=10,
+            passed_tasks=5,
+            failed_tasks=5,
+            pass_rate=0.5,
+        )
+        worse_result = QuantizationResult(
+            quantization="Q5_K_M",
+            model_path=str(model_dir / "test.Q5_K_M.gguf"),
+            model_id="Q5_K_M",
+            total_tasks=10,
+            passed_tasks=1,
+            failed_tasks=9,
+            pass_rate=0.1,
+        )
+        results_map = {"Q4_K_S": baseline_result, "Q5_K_M": worse_result}
+
+        def fake_run(self, model_file, model_id, cost_per_token=None, env=None):
+            return results_map[model_id]
+
+        critic = Critic(harness_dir=harness)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "FOUNDRY_MODEL_PATH": str(model_dir),
+                    "FOUNDRY_PARALLEL_SWEEP": "1",
+                },
+                clear=False,
+            ),
+            patch.object(Critic, "_run_sweep_for_quant", fake_run),
+        ):
+            verdict = critic.quantization_sweep(
+                quantizations=["Q4_K_S", "Q5_K_M"],
+                baseline_quantization="Q4_K_S",
+            )
+
+        assert verdict.regression is True
+        assert verdict.recommended == "Q4_K_S"
+
+    def test_parallel_sweep_restores_context_tokens(self, tmp_path):
+        """FOUNDRY_CONTEXT_TOKENS is restored after parallel sweep."""
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        (model_dir / "test.Q5_K_M.gguf").touch()
+
+        original_result = QuantizationResult(
+            quantization="Q5_K_M",
+            model_path=str(model_dir / "test.Q5_K_M.gguf"),
+            model_id="Q5_K_M",
+            pass_rate=0.95,
+        )
+
+        def fake_run(self, model_file, model_id, cost_per_token=None, env=None):
+            return original_result
+
+        critic = Critic(harness_dir=harness)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "FOUNDRY_MODEL_PATH": str(model_dir),
+                    "FOUNDRY_CONTEXT_TOKENS": "8192",
+                    "FOUNDRY_PARALLEL_SWEEP": "1",
+                },
+                clear=False,
+            ),
+            patch.object(Critic, "_run_sweep_for_quant", fake_run),
+        ):
+            critic.quantization_sweep(
+                quantizations=["Q5_K_M"],
+                context_tokens=16384,
+            )
+            assert os.environ.get("FOUNDRY_CONTEXT_TOKENS") == "8192"
+
+    def test_parallel_sweep_context_tokens_in_worker_env(self, tmp_path):
+        """Parallel workers receive FOUNDRY_CONTEXT_TOKENS via their env dict."""
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        (model_dir / "test.Q5_K_M.gguf").touch()
+
+        captured_env: dict[str, str | None] = {}
+
+        def fake_run(self, model_file, model_id, cost_per_token=None, env=None):
+            captured_env["FOUNDRY_CONTEXT_TOKENS"] = (
+                env.get("FOUNDRY_CONTEXT_TOKENS") if env else None
+            )
+            captured_env["FOUNDRY_MODEL_ID"] = env.get("FOUNDRY_MODEL_ID") if env else None
+            return QuantizationResult(
+                quantization="Q5_K_M",
+                model_path=str(model_dir / "test.Q5_K_M.gguf"),
+                model_id="Q5_K_M",
+                pass_rate=0.95,
+            )
+
+        critic = Critic(harness_dir=harness)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "FOUNDRY_MODEL_PATH": str(model_dir),
+                    "FOUNDRY_PARALLEL_SWEEP": "1",
+                },
+                clear=False,
+            ),
+            patch.object(Critic, "_run_sweep_for_quant", fake_run),
+        ):
+            critic.quantization_sweep(
+                quantizations=["Q5_K_M"],
+                context_tokens=32768,
+            )
+
+        assert captured_env["FOUNDRY_CONTEXT_TOKENS"] == "32768"
+        assert captured_env["FOUNDRY_MODEL_ID"] == "Q5_K_M"
+
+    def test_parallel_sweep_multiple_quant_files(self, tmp_path):
+        """Parallel sweep processes multiple quantizations concurrently."""
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        (model_dir / "test.Q4_K_S.gguf").touch()
+        (model_dir / "test.Q5_K_M.gguf").touch()
+        (model_dir / "test.Q8_0.gguf").touch()
+        (model_dir / "test.Q6_K.gguf").touch()
+
+        call_times: list[str] = []
+
+        def fake_run(self, model_file, model_id, cost_per_token=None, env=None):
+            call_times.append(model_id)
+            return QuantizationResult(
+                quantization=model_id,
+                model_path=model_file,
+                model_id=model_id,
+                total_tasks=10,
+                passed_tasks=8,
+                failed_tasks=2,
+                pass_rate=0.8,
+            )
+
+        critic = Critic(harness_dir=harness)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "FOUNDRY_MODEL_PATH": str(model_dir),
+                    "FOUNDRY_PARALLEL_SWEEP": "1",
+                },
+                clear=False,
+            ),
+            patch.object(Critic, "_run_sweep_for_quant", fake_run),
+        ):
+            verdict = critic.quantization_sweep(quantizations=["Q4_K_S", "Q5_K_M", "Q8_0", "Q6_K"])
+
+        assert len(verdict.quantizations) == 4
+        assert {r.quantization for r in verdict.quantizations} == {
+            "Q4_K_S",
+            "Q5_K_M",
+            "Q8_0",
+            "Q6_K",
+        }
