@@ -7,5 +7,6 @@
     "git apply",
     "pytest"
   ],
+  "target_file": null,
   "verdict": true
 }

@@ -214,6 +214,101 @@ class TestRunEvolutionStep:
         assert result.verdict is not None
         assert result.verdict.failure_class == result.failure_report.proposed_class
 
+    def test_verdict_target_file_from_proposed_edit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Issue #1115: verdict.target_file is wired from ProposedEdit.target_file."""
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit = ProposedEdit(
+            target_file="harness/hooks/my_hook.py",
+            rationale="Fix the failure",
+            unified_diff="--- a/harness/hooks/my_hook.py\n+++ b/harness/hooks/my_hook.py\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+
+        result = run_evolution_step("sess-target-file", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert result.verdict is not None
+        assert result.verdict.target_file == "harness/hooks/my_hook.py"
+
+    def test_verdict_target_file_none_when_no_verify(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Issue #1115: verdict.target_file is set even when --no-verify skips the gate."""
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit = ProposedEdit(
+            target_file="harness/skills/my_skill/SKILL.md",
+            rationale="Fix the failure",
+            unified_diff="--- a/harness/skills/my_skill/SKILL.md\n+++ b/harness/skills/my_skill/SKILL.md\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+
+        result = run_evolution_step(
+            "sess-no-verify-target-file", events, harness_dir, no_verify=True
+        )
+
+        assert result.failure_report.proposed_class != "clean"
+        assert result.verdict is not None
+        assert result.verdict.verdict is None
+        assert result.verdict.notes == "--no-verify: skipped"
+        assert result.verdict.target_file == "harness/skills/my_skill/SKILL.md"
+
+    def test_multiple_edits_verdict_has_target_file_of_last_edit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Issue #1115: with multiple edits, verdict.target_file is the last edit's target."""
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit1 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 1",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new1\n",
+        )
+        proposed_edit2 = ProposedEdit(
+            target_file="harness/hooks/another_hook.py",
+            rationale="Fix 2",
+            unified_diff="--- a/harness/hooks/another_hook.py\n+++ b/harness/hooks/another_hook.py\n@@ -1 +1 @@\n-old\n+new2\n",
+        )
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit1, proposed_edit2]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+
+        result = run_evolution_step("sess-multi-target-file", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert len(result.proposed_edits) == 2
+        assert result.verdict is not None
+        assert result.verdict.edit_index == 1
+        assert result.verdict.target_file == "harness/hooks/another_hook.py"
+
 
 class TestEvolutionResultModel:
     def test_result_model_fields(self):
@@ -1254,3 +1349,34 @@ class TestRunEvolutionBatch:
         result = run_evolution_batch("sess-batch-ts", events, harness_dir)
         assert result.started_at is not None
         assert result.completed_at is not None
+
+    def test_batch_verdict_has_target_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue #1115: batch verdicts carry target_file from ProposedEdit."""
+        from foundry_x.evolution.evolver import ProposedEdit
+        from foundry_x.evolution.loop import run_evolution_batch
+
+        harness_dir = _write_harness(tmp_path)
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit = ProposedEdit(
+            target_file="harness/hooks/batch_hook.py",
+            rationale="Fix the failure",
+            unified_diff="--- a/harness/hooks/batch_hook.py\n+++ b/harness/hooks/batch_hook.py\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+        result = run_evolution_batch("sess-batch-target-file", events, harness_dir)
+
+        assert result.total_failures >= 1
+        assert len(result.results) >= 1
+        last_result = result.results[-1]
+        assert last_result.verdict is not None
+        assert last_result.verdict.target_file == "harness/hooks/batch_hook.py"

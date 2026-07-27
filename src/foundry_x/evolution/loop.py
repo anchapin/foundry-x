@@ -271,6 +271,7 @@ def run_evolution_step(
                 notes="--no-verify: skipped",
                 edit_index=idx,
                 failure_class=failure_report.proposed_class,
+                target_file=edit.target_file,
             )
     else:
         for idx, edit in enumerate(proposed_edits):
@@ -280,6 +281,7 @@ def run_evolution_step(
                 failure_class=failure_report.proposed_class,
                 tier=critic_tier,
             )
+            verdict.target_file = edit.target_file
 
     return EvolutionResult(
         session_id=session_id,
@@ -384,6 +386,7 @@ async def run_evolution_step_async(
                 notes="--no-verify: skipped",
                 edit_index=idx,
                 failure_class=failure_report.proposed_class,
+                target_file=edit.target_file,
             )
     else:
         for idx, edit in enumerate(proposed_edits):
@@ -393,6 +396,7 @@ async def run_evolution_step_async(
                 failure_class=failure_report.proposed_class,
                 tier=critic_tier,
             )
+            verdict.target_file = edit.target_file
 
     return EvolutionResult(
         session_id=session_id,
@@ -515,6 +519,7 @@ def run_evolution_batch(
                     notes="--no-verify: skipped",
                     edit_index=idx,
                     failure_class=failure_report.proposed_class,
+                    target_file=edit.target_file,
                 )
         else:
             if critic is None:
@@ -526,6 +531,7 @@ def run_evolution_batch(
                     failure_class=failure_report.proposed_class,
                     tier=critic_tier,
                 )
+                verdict.target_file = edit.target_file
 
         results.append(
             EvolutionResult(
@@ -629,6 +635,7 @@ async def run_evolution_batch_async(
                     notes="--no-verify: skipped",
                     edit_index=idx,
                     failure_class=failure_report.proposed_class,
+                    target_file=edit.target_file,
                 )
         else:
             if critic is None:
@@ -640,6 +647,7 @@ async def run_evolution_batch_async(
                     failure_class=failure_report.proposed_class,
                     tier=critic_tier,
                 )
+                verdict.target_file = edit.target_file
 
         results.append(
             EvolutionResult(

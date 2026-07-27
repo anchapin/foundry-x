@@ -355,16 +355,19 @@ def _run_loop(
             notes="--no-verify: skipped",
             edit_index=0,
             failure_class=report.proposed_class,
+            target_file=edit.target_file,
         )
     else:
         critic = Critic(harness_dir=harness_dir)
         verdict = critic.evaluate(edit.unified_diff, failure_class=report.proposed_class)
+        verdict.target_file = edit.target_file
     verdict_with_class = CriticVerdict(
         verdict=verdict.verdict,
         passed_checks=list(verdict.passed_checks),
         failed_checks=list(verdict.failed_checks),
         notes=verdict.notes,
         failure_class=verdict.failure_class,
+        target_file=verdict.target_file,
     )
     record_verdict(logger, session_id, verdict_with_class)
     print(_render_critic_verdict(verdict))
