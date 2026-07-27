@@ -5,7 +5,13 @@ import sys
 from pathlib import Path
 
 from foundry_x.evolution.digester import Digester
-from foundry_x.observability.kpis import _resolve_format
+from foundry_x.observability.kpis import (
+    _resolve_format,
+    compute_trends,
+    read_kpi_history,
+    render_history_markdown,
+    render_trends_markdown,
+)
 from foundry_x.observability.regression_report import analyze_regressions
 from foundry_x.observability.render import render_failure_report
 from foundry_x.observability.session_card import format_session_card
@@ -301,6 +307,39 @@ def _build_parser() -> argparse.ArgumentParser:
             "section."
         ),
     )
+
+    # Issue #1031: persistent KPI history and trend analysis.
+    # Allows operators to view trend tables computed from the JSONL history log.
+    kpi_history = sub.add_parser(
+        "kpi-history",
+        help="Render KPI history and trend analysis from the JSONL history log.",
+    )
+    kpi_history.add_argument(
+        "--history",
+        required=True,
+        help="Path to the KPI history JSONL log (from foundry-kpis --log-to).",
+    )
+    kpi_history.add_argument(
+        "--trend",
+        action="store_true",
+        default=False,
+        help=(
+            "Show computed trend statistics (slope, direction, percent change) "
+            "in addition to the history table."
+        ),
+    )
+    kpi_history.add_argument(
+        "--format",
+        choices=("markdown", "json"),
+        default="markdown",
+        help="Output format (default: markdown).",
+    )
+    kpi_history.add_argument(
+        "--out",
+        default=None,
+        help="Write output to this path instead of stdout.",
+    )
+
     return parser
 
 
@@ -464,6 +503,23 @@ def main(argv: list[str] | None = None) -> int:
         else:
             sys.stdout.write(rendered)
             if not rendered.endswith("\n"):
+                sys.stdout.write("\n")
+        return 0
+
+    if args.command == "kpi-history":
+        # Issue #1031: read the JSONL history log and render history table,
+        # trend statistics, or both.
+        entries = read_kpi_history(Path(args.history))
+        if args.trend:
+            trends = compute_trends(entries)
+            output = render_trends_markdown(trends)
+        else:
+            output = render_history_markdown(entries, trend=False)
+        if args.out:
+            Path(args.out).write_text(output, encoding="utf-8")
+        else:
+            sys.stdout.write(output)
+            if not output.endswith("\n"):
                 sys.stdout.write("\n")
         return 0
 

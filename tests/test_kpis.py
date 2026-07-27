@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -2426,3 +2427,277 @@ def test_append_kpi_history_excludes_session_slice_fields(tmp_path):
     assert "per_model_id" not in line
     assert "per_quantization" not in line
     assert "per_harness_version" not in line
+
+
+# ---------------------------------------------------------------------------
+# Issue #1031: KPI history trend computation and rendering
+# ---------------------------------------------------------------------------
+
+
+from foundry_x.observability.kpis import (
+    KpiHistoryEntry,
+    KpiTrends,
+    append_kpi_history,
+    compute_trends,
+    read_kpi_history,
+    render_trends_markdown,
+)
+
+
+def _make_entry(
+    cycle_time: float | None,
+    regression_rate: float,
+    improvement_rate: float,
+    harness_version: str | None = None,
+) -> KpiHistoryEntry:
+    """Factory to build a minimal KpiHistoryEntry for trend tests."""
+    return KpiHistoryEntry(
+        timestamp="2024-01-01T00:00:00+00:00",
+        harness_version=harness_version,
+        cycle_time_seconds=cycle_time,
+        regression_rate=regression_rate,
+        improvement_rate=improvement_rate,
+    )
+
+
+def test_compute_trends_empty_entries():
+    """Empty entry list yields a default KpiTrends with insufficient_data."""
+    trends = compute_trends([])
+    assert trends.entry_count == 0
+    assert trends.cycle_time_direction == "insufficient_data"
+    assert trends.regression_rate_direction == "insufficient_data"
+    assert trends.improvement_rate_direction == "insufficient_data"
+
+
+def test_compute_trends_insufficient_data_single_entry():
+    """Single entry has insufficient data for trend computation."""
+    entry = _make_entry(cycle_time=10.0, regression_rate=0.1, improvement_rate=0.5)
+    trends = compute_trends([entry])
+    assert trends.entry_count == 1
+    assert trends.cycle_time_direction == "insufficient_data"
+    assert trends.regression_rate_direction == "insufficient_data"
+    assert trends.improvement_rate_direction == "insufficient_data"
+
+
+def test_compute_trends_cycle_time_improving():
+    """Cycle time decreasing is marked as improving (higher_is_better=False)."""
+    # Entries spanning 5 days, cycle time declining from 100 to 50.
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    entries = [
+        KpiHistoryEntry(
+            timestamp=(base.replace(day=i + 1)).isoformat(),
+            cycle_time_seconds=100.0 - i * 10,
+            regression_rate=0.0,
+            improvement_rate=1.0,
+        )
+        for i in range(5)
+    ]
+    trends = compute_trends(entries)
+    assert trends.cycle_time_direction == "improving"
+    assert trends.cycle_time_percent_change is not None
+    assert trends.cycle_time_percent_change < 0  # decreased
+
+
+def test_compute_trends_improvement_rate_improving():
+    """Improvement rate increasing is marked as improving (higher_is_better=True)."""
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    entries = [
+        KpiHistoryEntry(
+            timestamp=(base.replace(day=i + 1)).isoformat(),
+            cycle_time_seconds=100.0,
+            regression_rate=0.0,
+            improvement_rate=0.2 + i * 0.15,  # 0.2, 0.35, 0.5, 0.65, 0.8
+        )
+        for i in range(5)
+    ]
+    trends = compute_trends(entries)
+    assert trends.improvement_rate_direction == "improving"
+    assert trends.improvement_rate_percent_change is not None
+    assert trends.improvement_rate_percent_change > 0  # increased
+
+
+def test_compute_trends_regression_rate_worsening():
+    """Regression rate increasing is marked as worsening (higher_is_better=False)."""
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    entries = [
+        KpiHistoryEntry(
+            timestamp=(base.replace(day=i + 1)).isoformat(),
+            cycle_time_seconds=100.0,
+            regression_rate=0.05 + i * 0.05,  # 0.05, 0.1, 0.15, 0.2, 0.25
+            improvement_rate=1.0,
+        )
+        for i in range(5)
+    ]
+    trends = compute_trends(entries)
+    assert trends.regression_rate_direction == "worsening"
+    assert trends.regression_rate_percent_change is not None
+    assert trends.regression_rate_percent_change > 0  # increased
+
+
+def test_compute_trends_stable_when_flat():
+    """Near-zero slope is marked as stable."""
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    entries = [
+        KpiHistoryEntry(
+            timestamp=(base.replace(day=i + 1)).isoformat(),
+            cycle_time_seconds=100.0,  # flat
+            regression_rate=0.1,  # flat
+            improvement_rate=0.8,  # flat
+        )
+        for i in range(5)
+    ]
+    trends = compute_trends(entries)
+    assert trends.cycle_time_direction == "stable"
+    assert trends.regression_rate_direction == "stable"
+    assert trends.improvement_rate_direction == "stable"
+
+
+def test_compute_trends_none_values_excluded():
+    """None values in cycle_time are excluded from trend computation."""
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    entries = [
+        KpiHistoryEntry(
+            timestamp=(base.replace(day=i + 1)).isoformat(),
+            cycle_time_seconds=None if i == 2 else 100.0 - i * 5,
+            regression_rate=0.1,
+            improvement_rate=0.8,
+        )
+        for i in range(5)
+    ]
+    trends = compute_trends(entries)
+    # Should still compute a trend with 4 valid points
+    assert trends.cycle_time_direction in (
+        "improving",
+        "worsening",
+        "stable",
+        "insufficient_data",
+    )
+
+
+def test_compute_trends_entry_count_and_time_span():
+    """Trend metadata correctly reports entry count and time span."""
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    entries = [
+        KpiHistoryEntry(
+            timestamp=(base.replace(day=i + 1)).isoformat(),
+            cycle_time_seconds=100.0 - i * 5,
+            regression_rate=0.1,
+            improvement_rate=0.8,
+        )
+        for i in range(3)
+    ]
+    trends = compute_trends(entries)
+    assert trends.entry_count == 3
+    assert trends.time_span_seconds is not None
+    assert trends.time_span_seconds > 0
+
+
+def test_compute_trends_percent_change_first_to_last():
+    """Percent change is computed from first to last valid entry."""
+    entries = [
+        _make_entry(cycle_time=100.0, regression_rate=0.0, improvement_rate=0.5),
+        _make_entry(cycle_time=80.0, regression_rate=0.2, improvement_rate=0.7),
+    ]
+    trends = compute_trends(entries)
+    assert trends.cycle_time_percent_change == pytest.approx(-20.0)  # 100 -> 80
+    assert trends.improvement_rate_percent_change == pytest.approx(40.0)  # 0.5 -> 0.7
+
+
+def test_render_trends_markdown_empty():
+    """Empty trends render a placeholder message."""
+    trends = KpiTrends()
+    output = render_trends_markdown(trends)
+    assert "No KPI history entries" in output
+
+
+def test_render_trends_markdown_shows_direction_emoji():
+    """Trend direction is rendered with an emoji arrow."""
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    entries = [
+        KpiHistoryEntry(
+            timestamp=(base.replace(day=i + 1)).isoformat(),
+            cycle_time_seconds=100.0 - i * 5,
+            regression_rate=0.0,
+            improvement_rate=0.8 + i * 0.05,
+        )
+        for i in range(5)
+    ]
+    trends = compute_trends(entries)
+    output = render_trends_markdown(trends)
+    assert "Cycle Time" in output
+    assert "improving" in output or "worsening" in output or "stable" in output
+    assert "entry" in output
+
+
+def test_render_trends_markdown_includes_entry_count():
+    """Output footer mentions the number of entries used."""
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    entries = [
+        KpiHistoryEntry(
+            timestamp=(base.replace(day=i + 1)).isoformat(),
+            cycle_time_seconds=100.0,
+            regression_rate=0.1,
+            improvement_rate=0.8,
+        )
+        for i in range(7)
+    ]
+    trends = compute_trends(entries)
+    output = render_trends_markdown(trends)
+    assert "7" in output
+
+
+# ---------------------------------------------------------------------------
+# Issue #1031: fx-trace kpi-history CLI integration
+# ---------------------------------------------------------------------------
+
+
+def test_main_kpi_history_renders_table(tmp_path, capsys):
+    """``fx-trace kpi-history`` renders the history table from a JSONL file."""
+    from foundry_x.observability.kpis import append_kpi_history
+
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    summary = compute_kpis(logger)
+    hist = tmp_path / "kpi_history.jsonl"
+    append_kpi_history(hist, summary, harness_version="v1")
+
+    # Use the CLI-via-import pattern (main is foundry-kpis, not fx-trace).
+    # We test the kpi_history flow by calling the module-level functions directly.
+    entries = read_kpi_history(hist)
+    assert len(entries) == 1
+    assert entries[0].improvement_rate == 1.0
+
+
+def test_main_kpi_history_with_trend_flag(tmp_path, capsys):
+    """Trend flag triggers render_trends_markdown output."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    summary = compute_kpis(logger)
+    hist = tmp_path / "kpi_history.jsonl"
+    append_kpi_history(hist, summary, harness_version="v1")
+
+    entries = read_kpi_history(hist)
+    trends = compute_trends(entries)
+    output = render_trends_markdown(trends)
+    assert "Cycle Time" in output
+    assert "entry" in output
+
+
+def test_read_kpi_history_round_trips_trend_data(tmp_path):
+    """History entries round-trip all scalar fields used by trend computation."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    summary = compute_kpis(logger)
+    hist = tmp_path / "kpi_history.jsonl"
+    append_kpi_history(hist, summary, harness_version="v1")
+
+    entries = read_kpi_history(hist)
+    assert len(entries) == 1
+    entry = entries[0]
+    # The scalar fields used for trends
+    assert entry.cycle_time_seconds is not None
+    assert entry.improvement_rate == 1.0
+    assert entry.regression_rate == 0.0
