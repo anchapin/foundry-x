@@ -128,6 +128,70 @@ correlations, scaled to a 0–1 positive-only range). They are
 *overrideable*: a follow-up ADR can move them with evidence, but any
 such move must re-run the full study.
 
+### Proxy-broadening contingency (issue #1045, 2026-07-27)
+
+The Thresholds table above states that `weak_proxy` and `invalid_proxy`
+each require a follow-up describing how the internal task distribution
+will be broadened. That follow-up is pre-authorized in
+[ADR-0027](0027-proxy-broadening-contingency.md) so that the response is
+immediate rather than reactive — the broadening ladder does not require
+a new ADR when the study result arrives.
+
+**Gap.** ADR-0027 §"Gap analysis" audits every tag in
+`benchmarks/tasks/*.py` and finds abundant coverage for `debugging`,
+`refactoring`, `multi-file`, and `security` task families, but **minimal
+coverage for pure single-function `implementation` tasks**. HumanEval+ is
+an *implementation* benchmark (synthesise a correct function body from a
+docstring + signature), so this structural mismatch is the leading
+hypothesis for a `weak_proxy` or `invalid_proxy` result.
+
+**Level 1 — `weak_proxy` remediation** (`0.3 ≤ r < 0.7`).
+
+Add **8 single-function `implementation` tasks** to `benchmarks/tasks/`,
+each a standalone `BenchmarkTask` with `tags=["implementation"]`,
+requiring only `read_file`/`write_file` (no bash, no multi-file
+navigation), deterministic and offline:
+
+| # | Task name pattern                      | HumanEval+ category     | Tier   |
+|---|----------------------------------------|-------------------------|--------|
+| 1 | `test_implement_two_sum`               | Array/hashing           | easy   |
+| 2 | `test_implement_reverse_string`        | String                  | easy   |
+| 3 | `test_implement_nth_fibonacci`         | Recurrence/math         | easy   |
+| 4 | `test_implement_is_palindrome`         | String                  | easy   |
+| 5 | `test_implement_merge_sorted_lists`    | Linked list / merging   | medium |
+| 6 | `test_implement_binary_search`         | Search                  | medium |
+| 7 | `test_implement_valid_parentheses`     | Stack                   | medium |
+| 8 | `test_implement_max_subarray`          | Dynamic programming     | medium |
+
+*Exit criterion*: re-run the correlation study against the same HumanEval+
+slice. If `r ≥ 0.7`, the suite is `valid_proxy`; if still `r < 0.7`,
+escalate to Level 2.
+
+**Level 2 — `invalid_proxy` remediation** (`r < 0.3`).
+
+Replace the 20-task `humaneval_plus_sample.jsonl` slice with the full
+**164-task EvalPlus `humaneval_plus.jsonl`** dataset. The loader
+`load_humaneval_slice()` is already schema-agnostic (confirmed by
+`test_load_humaneval_slice_handles_large_slice`), so the transition is a
+data swap plus a `benchmarks/external/README.md` update — no code changes
+to `correlation.py`, `humaneval_plus.py`, or the `BenchmarkTask` schema.
+Level 1 must be present and passing at the same correlation run (Level 1
+is a prerequisite for Level 2).
+
+*Exit criterion*: re-run the study on the full set. If `r ≥ 0.7`, the
+suite is `valid_proxy`; if `r ≥ 0.3` but `< 0.7`, Level 1 was
+insufficient and ADR-0027 should be extended with further implementation
+tasks; if `r < 0.3` persists, the assumption that the internal suite can
+replicate HumanEval+ rankings is itself false and a separate ADR is
+required.
+
+**The ladder is monotonic**: Level 1 tasks remain in the suite regardless
+of whether Level 2 is reached. It is a *contingency* plan, not a
+commitment to broaden on a schedule — the study result drives the
+decision. No `harness/` changes are involved; the plan operates on the
+benchmark suite only. See [ADR-0027](0027-proxy-broadening-contingency.md)
+for the full gap analysis, file lists, and exit-criterion rationale.
+
 ### Slice size decision (issue #1055, 2026-07-26)
 
 The original §"Follow-ups" item 3 listed replacing the 20-task slice
