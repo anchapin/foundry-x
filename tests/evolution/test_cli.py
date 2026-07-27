@@ -104,9 +104,7 @@ class TestFoundryEvolveCLI:
         harness.mkdir()
         _write_minimal_harness(harness)
 
-        main(
-            ["evolve", "--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)]
-        )
+        main(["evolve", "--session-id", sid, "--trace-db", str(db), "--harness-dir", str(harness)])
 
         out = capsys.readouterr().out
         assert "Failure Report" in out
