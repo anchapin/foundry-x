@@ -1758,3 +1758,141 @@ def test_doctor_no_corrupt_lines(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "no corrupt lines" in out
+
+
+# --- Issue #1123: run-benchmark tests ------------------------------------------
+
+
+from unittest.mock import patch
+
+from foundry_x.trace.cli import _resolve_benchmark_task
+
+
+class TestResolveBenchmarkTask:
+    def test_bare_name_resolves_to_test_file(self):
+        test_file, test_func = _resolve_benchmark_task("sort_a_list")
+        assert test_file == Path("benchmarks/tasks/test_sort_a_list.py")
+        assert test_func == "test_sort_a_list"
+
+    def test_test_prefix_is_stripped(self):
+        test_file, test_func = _resolve_benchmark_task("test_sort_a_list")
+        assert test_file == Path("benchmarks/tasks/test_sort_a_list.py")
+        assert test_func == "test_sort_a_list"
+
+    def test_two_sum_resolves_correctly(self):
+        test_file, test_func = _resolve_benchmark_task("two_sum")
+        assert test_file == Path("benchmarks/tasks/test_two_sum.py")
+        assert test_func == "test_two_sum"
+
+    def test_two_sum_with_test_prefix(self):
+        test_file, test_func = _resolve_benchmark_task("test_two_sum")
+        assert test_file == Path("benchmarks/tasks/test_two_sum.py")
+        assert test_func == "test_two_sum"
+
+    def test_missing_task_raises_file_not_found(self):
+        with pytest.raises(FileNotFoundError) as exc_info:
+            _resolve_benchmark_task("does_not_exist")
+        assert "does_not_exist" in str(exc_info.value)
+        assert "Benchmark task not found" in str(exc_info.value)
+
+    def test_task_file_without_test_function_raises_value_error(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        with patch("foundry_x.trace.cli.Path") as mock_path_cls:
+            dummy_file = tmp_path / "test_no_func.py"
+            dummy_file.write_text("def wrong_name():\n    pass\n", encoding="utf-8")
+            mock_instance = MagicMock()
+            mock_instance.exists.return_value = True
+            mock_instance.read_text.return_value = dummy_file.read_text()
+            mock_path_cls.return_value = mock_instance
+
+            with pytest.raises(ValueError) as exc_info:
+                _resolve_benchmark_task("no_func")
+            assert "test_no_func" in str(exc_info.value)
+            assert "is not defined" in str(exc_info.value)
+
+
+class TestRunBenchmarkExitCodeParity:
+    def test_exit_code_matches_pytest_for_sort_a_list(self):
+        import subprocess
+
+        cli_result = subprocess.run(
+            ["uv", "run", "foundry-trace", "run-benchmark", "sort_a_list"],
+            cwd=Path(__file__).parent.parent,
+            capture_output=True,
+            check=False,
+        )
+        pytest_result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "pytest",
+                "benchmarks/tasks/test_sort_a_list.py::test_sort_a_list",
+                "-m",
+                "benchmark",
+            ],
+            cwd=Path(__file__).parent.parent,
+            capture_output=True,
+            check=False,
+        )
+        assert cli_result.returncode == pytest_result.returncode
+
+    def test_exit_code_matches_pytest_with_fixture(self):
+        import subprocess
+
+        cli_result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "foundry-trace",
+                "run-benchmark",
+                "sort_a_list",
+                "--fixture",
+                "sort_a_list",
+            ],
+            cwd=Path(__file__).parent.parent,
+            capture_output=True,
+            check=False,
+        )
+        env = dict(__import__("os").environ)
+        env["PYTEST_BENCHMARK_FIXTURE"] = "sort_a_list"
+        pytest_result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "pytest",
+                "benchmarks/tasks/test_sort_a_list.py::test_sort_a_list",
+                "-m",
+                "benchmark",
+            ],
+            cwd=Path(__file__).parent.parent,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        assert cli_result.returncode == pytest_result.returncode
+
+
+class TestRunBenchmarkTaskNameResolution:
+    def test_error_message_on_missing_task(self, capsys):
+        rc = main(["run-benchmark", "nonexistent_task_xyz"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "Benchmark task not found" in err
+        assert "nonexistent_task_xyz" in err
+
+    def test_error_message_on_task_file_missing_function(self, tmp_path, capsys):
+        from unittest.mock import MagicMock
+
+        with patch("foundry_x.trace.cli.Path") as mock_path_cls:
+            dummy_file = tmp_path / "test_exists.py"
+            dummy_file.write_text("def other():\n    pass\n", encoding="utf-8")
+            mock_instance = MagicMock()
+            mock_instance.exists.return_value = True
+            mock_instance.read_text.return_value = dummy_file.read_text()
+            mock_path_cls.return_value = mock_instance
+
+            rc = main(["run-benchmark", "exists"])
+            assert rc == 1
+            err = capsys.readouterr().err
+            assert "is not defined" in err
