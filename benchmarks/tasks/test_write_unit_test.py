@@ -13,6 +13,14 @@ import pytest
 from benchmarks.models import BenchmarkTask, DifficultyTier
 from benchmarks.support import run_module
 
+TASK = BenchmarkTask(
+    name="write_unit_test",
+    description="Author a passing pytest suite for functions of varying complexity.",
+    prompt="Write a pytest test file for a given target function. Read the function signature and behavior, write comprehensive test cases that exercise all branches, then leave the test file in the workspace.",
+    difficulty_tier="medium",
+    tags=["testing", "pytest", "unit-test"],
+)
+
 # --- Tier definitions -------------------------------------------------------
 
 TIERS: dict[DifficultyTier, dict[str, str]] = {
