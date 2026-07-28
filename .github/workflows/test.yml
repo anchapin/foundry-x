@@ -21,7 +21,16 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Pytest (non-benchmark)
-        run: uv run pytest -m "not benchmark"
+        run: |
+          mkdir -p test-results
+          uv run pytest -m "not benchmark" --junit-xml=test-results/junit.xml
+
+      - name: Upload JUnit XML
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-xml-test
+          path: test-results/junit.xml
 
   benchmark:
     name: pytest (benchmark only)
@@ -41,7 +50,16 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Pytest (benchmark only)
-        run: uv run pytest -m benchmark
+        run: |
+          mkdir -p test-results
+          uv run pytest -m benchmark --junit-xml=test-results/junit.xml
+
+      - name: Upload JUnit XML
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-xml-benchmark
+          path: test-results/junit.xml
 
   test-real-model:
     name: pytest (real model integration)
@@ -65,4 +83,13 @@ jobs:
           TEST_MODEL_MODE: real
           OPENCODE_SERVER_URL: ${{ secrets.OPENCODE_SERVER_URL }}
           FOUNDRY_MODEL_API_KEY: ${{ secrets.FOUNDRY_MODEL_API_KEY }}
-        run: uv run pytest -m "not benchmark"
+        run: |
+          mkdir -p test-results
+          uv run pytest -m "not benchmark" --junit-xml=test-results/junit.xml
+
+      - name: Upload JUnit XML
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-xml-test-real-model
+          path: test-results/junit.xml

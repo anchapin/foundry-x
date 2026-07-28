@@ -24,4 +24,13 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Critic benchmark suite
-        run: uv run pytest -m benchmark
+        run: |
+          mkdir -p test-results
+          uv run pytest -m benchmark --junit-xml=test-results/junit.xml
+
+      - name: Upload JUnit XML
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-xml-critic
+          path: test-results/junit.xml
