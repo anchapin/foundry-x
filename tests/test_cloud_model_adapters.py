@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import AsyncIterator
 
 import httpx
@@ -634,6 +635,57 @@ def test_unknown_model_pricing_returns_zero():
     )
     try:
         assert adapter.token_pricing() == (0.0, 0.0)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_pricing_env_var_override_anthropic(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_PRICING_CLAUDE_3_5_SONNET_20241022", "5.0,25.0")
+    adapter = AnthropicAdapter(
+        model="claude-3-5-sonnet-20241022",
+        base_url="https://api.anthropic.com",
+        api_key="sk-test",
+    )
+    try:
+        assert adapter.token_pricing() == (5.0, 25.0)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_pricing_env_var_override_openai(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_PRICING_GPT_4O", "10.0,40.0")
+    adapter = OpenAINativeAdapter(
+        model="gpt-4o",
+        base_url="https://api.openai.com",
+        api_key="sk-test",
+    )
+    try:
+        assert adapter.token_pricing() == (10.0, 40.0)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_pricing_env_var_invalid_format_falls_back_to_hardcoded(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_PRICING_CLAUDE_3_5_SONNET_20241022", "not-a-number")
+    adapter = AnthropicAdapter(
+        model="claude-3-5-sonnet-20241022",
+        base_url="https://api.anthropic.com",
+        api_key="sk-test",
+    )
+    try:
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            pricing = adapter.token_pricing()
+            assert pricing == (3.0, 15.0)
+            assert len(w) == 1
+            assert "Invalid pricing" in str(w[0].message)
+            assert "RuntimeWarning" in str(w[0].category)
     finally:
         import asyncio
 

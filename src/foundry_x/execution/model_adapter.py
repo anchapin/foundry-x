@@ -1418,7 +1418,40 @@ class AnthropicAdapter(CloudModelAdapter):
         )
 
     def token_pricing(self) -> tuple[float, float]:
-        return _ANTHROPIC_PRICING_PER_1M.get(self.model, (0.0, 0.0))
+        return _resolve_token_pricing(self.model, _ANTHROPIC_PRICING_PER_1M)
+
+
+def _resolve_token_pricing(
+    model: str, hardcoded: dict[str, tuple[float, float]]
+) -> tuple[float, float]:
+    """Return ``(input_per_1m_usd, output_per_1m_usd)`` for *model*.
+
+    Checks ``FOUNDRY_MODEL_PRICING_<MODEL>`` env var first (format:
+    ``input,output``, e.g. ``3.0,15.0``). Falls back to *hardcoded*
+    table. Returns ``(0.0, 0.0)`` when pricing is unknown.
+    """
+    env_key = f"FOUNDRY_MODEL_PRICING_{model.upper().replace('-', '_')}"
+    raw = os.environ.get(env_key)
+    if raw is not None:
+        parts = raw.split(",")
+        if len(parts) == 2:
+            try:
+                return (float(parts[0]), float(parts[1]))
+            except ValueError:
+                warnings.warn(
+                    f"Invalid pricing in {env_key}={raw!r}; expected 'input,output' float pair; "
+                    f"falling back to hardcoded table.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        else:
+            warnings.warn(
+                f"Invalid pricing in {env_key}={raw!r}; expected 'input,output' float pair; "
+                f"falling back to hardcoded table.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    return hardcoded.get(model, (0.0, 0.0))
 
 
 _ANTHROPIC_PRICING_PER_1M: dict[str, tuple[float, float]] = {
@@ -1521,7 +1554,7 @@ class OpenAINativeAdapter(CloudModelAdapter):
         )
 
     def token_pricing(self) -> tuple[float, float]:
-        return _OPENAI_PRICING_PER_1M.get(self.model, (0.0, 0.0))
+        return _resolve_token_pricing(self.model, _OPENAI_PRICING_PER_1M)
 
 
 _OPENAI_PRICING_PER_1M: dict[str, tuple[float, float]] = {
