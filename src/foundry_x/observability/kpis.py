@@ -832,7 +832,9 @@ def compute_kpis(
     excluded_from_cycle_time = (
         excluded_wall_clock + excluded_token_budget + excluded_event_limit + excluded_other
     )
-    regression_rate, improvement_rate = _verdict_rates(logger, harness_version=harness_version)
+    regression_rate, improvement_rate = _verdict_rates(
+        logger, harness_version=harness_version, task_metadata=task_metadata
+    )
     injection_blocks = _injection_blocks(logger, harness_version=harness_version)
     token_totals = _token_totals(logger, harness_version=harness_version)
     hooks_disabled_count, hooks_disabled_rate = _hook_registry_errors(
@@ -1182,6 +1184,7 @@ def _cycle_time(
 def _verdict_rates(
     logger: TraceLogger,
     harness_version: str | None = None,
+    task_metadata: dict[str, TaskKpiMetadata] | None = None,
 ) -> tuple[float, float]:
     """Derive regression and improvement rates from persisted Critic verdicts.
 
@@ -1195,24 +1198,21 @@ def _verdict_rates(
     timestamp order, so the ``prior_passed`` tracker sees verdicts in
     the same order the previous per-session nested loop produced.
 
-    * *improvement_rate* = approved verdicts / total verdicts.
+    * *improvement_rate* = approved non-smoke verdicts / total non-smoke verdicts.
     * *regression_rate* = sessions with >=1 regressed task / sessions with a
       verdict, where a task regresses when it appears in ``failed_checks`` after
       having appeared in ``passed_checks`` in an earlier verdict.
 
-    Infrastructure / golden-solution tasks (issue #1120)
-    ---------------------------------------------------
-    Benchmark tasks tagged ``infrastructure`` (e.g. ``implementation_fizzbuzz``,
-    ``sort_a_list``, ``nth_fibonacci``) use ``run_solution`` to plant a
-    complete golden solution and assert the infrastructure works -- they do NOT
-    test whether the agent can independently solve the problem. These tasks are
-    INCLUDED in the improvement-rate denominator as of this writing. Operators
-    who wish to exclude them should filter by the ``infrastructure`` tag when
-    grouping by ``task_family``: the ``infrastructure`` group captures only
-    these planted-solution tasks, and the rate computed over that slice reflects
-    infrastructure reliability only. The aggregate improvement-rate denominator
-    includes all verdicts regardless of tag; future work may add an optional
-    ``exclude_infrastructure`` parameter to filter them from the denominator.
+    ADR-0034 §2 — smoke-tier exclusion
+    ----------------------------------
+    Smoke-tier tasks do not exercise agent capability, so a harness that
+    passes all smoke tasks but fails all easy/medium/hard tasks has NOT
+    improved. When *task_metadata* is supplied, verdicts whose every task
+    belongs to the ``smoke`` difficulty tier are EXCLUDED from the
+    improvement-rate denominator (but still counted in regression-rate, since
+    a smoke-task failure indicates a broken pipeline, not an agent regression).
+    Verdicts that mix smoke and non-smoke tasks are attributed to the
+    non-smoke portion and count normally.
     """
 
     total_verdicts = 0
@@ -1222,11 +1222,30 @@ def _verdict_rates(
     regression_sessions: set[str] = set()
 
     for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
-        total_verdicts += 1
         sessions_with_verdicts.add(event.session_id)
         record = VerdictRecord(**event.payload)
-        if record.verdict:
-            approved += 1
+
+        has_non_smoke = False
+        has_smoke_failed = False
+        if task_metadata is not None:
+            all_tasks = set(record.passed_checks) | set(record.failed_checks)
+            has_non_smoke = any(
+                task_metadata.get(t) is not None
+                and task_metadata[t].difficulty_tier != "smoke"
+                for t in all_tasks
+            )
+            has_smoke_failed = any(
+                task_metadata.get(t) is not None
+                and task_metadata[t].difficulty_tier == "smoke"
+                and t in set(record.failed_checks)
+                for t in all_tasks
+            )
+
+        if task_metadata is None or (has_non_smoke and not has_smoke_failed):
+            total_verdicts += 1
+            if record.verdict:
+                approved += 1
+
         for task in record.failed_checks:
             if task in prior_passed:
                 regression_sessions.add(event.session_id)
@@ -1238,6 +1257,7 @@ def _verdict_rates(
         len(regression_sessions) / len(sessions_with_verdicts) if sessions_with_verdicts else 0.0
     )
     return regression_rate, improvement_rate
+
 
 
 def _groups_for_task(meta: TaskKpiMetadata, group_by: GroupByDim) -> set[str]:
@@ -1306,6 +1326,14 @@ def _slice_verdict_rates(
     acc: dict[str, _SliceAcc] = {}
     for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
         record = VerdictRecord(**event.payload)
+
+        all_tasks = set(record.passed_checks) | set(record.failed_checks)
+        has_non_smoke = any(
+            task_metadata.get(t) is not None
+            and task_metadata[t].difficulty_tier != "smoke"
+            for t in all_tasks
+        )
+
         # Resolve every group this verdict touches up front so the per-
         # group loop below does not re-walk the metadata per check.
         touched: set[str] = set()
@@ -1319,10 +1347,31 @@ def _slice_verdict_rates(
         # loop below, so the guard was dead code with no behavioural effect.
         for group in touched:
             bucket = acc.setdefault(group, _SliceAcc())
-            bucket.total += 1
             bucket.sessions.add(event.session_id)
-            if record.verdict:
-                bucket.approved += 1
+            if has_non_smoke:
+                bucket.total += 1
+                if group == "smoke":
+                    if record.verdict:
+                        bucket.approved += 1
+                else:
+                    tier_passed = any(
+                        task_metadata.get(t) is not None
+                        and group in _groups_for_task(task_metadata[t], group_by)
+                        and t in set(record.passed_checks)
+                        for t in all_tasks
+                    )
+                    if tier_passed:
+                        bucket.approved += 1
+            elif group == "smoke":
+                bucket.total += 1
+                tier_passed = any(
+                    task_metadata.get(t) is not None
+                    and task_metadata[t].difficulty_tier == "smoke"
+                    and t in set(record.passed_checks)
+                    for t in all_tasks
+                )
+                if tier_passed:
+                    bucket.approved += 1
             for task in record.failed_checks:
                 if task in bucket.prior_passed:
                     bucket.regression_sessions.add(event.session_id)
