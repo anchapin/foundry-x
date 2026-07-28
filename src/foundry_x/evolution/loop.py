@@ -715,8 +715,9 @@ def run_evolution_daemon(
     """Run the evolution daemon continuously (issue #1047).
 
     Polls the trace store for sessions that have not yet been evolved,
-    processes each through :func:`run_evolution_step`, records the
-    ``critic_verdict`` event, and marks the session as evolved. Runs
+    processes each through :func:`run_evolution_batch`, records the
+    ``critic_verdict`` event for each failure class, and marks the session
+    as evolved. Runs
     indefinitely until:
 
     * **SIGTERM** is received — the daemon finishes the current session
@@ -819,7 +820,7 @@ def run_evolution_daemon(
                     print(f"[daemon] evolving session {session_id} ({len(events)} events)")
 
                 try:
-                    result = run_evolution_step(
+                    result = run_evolution_batch(
                         session_id,
                         events,
                         harness_dir,
@@ -834,22 +835,26 @@ def run_evolution_daemon(
                     sessions_skipped += 1
                     continue
 
-                if result.verdict is not None:
-                    record_verdict(trace_logger, session_id, result.verdict)
+                for step_result in result.results:
+                    if step_result.verdict is not None:
+                        record_verdict(trace_logger, session_id, step_result.verdict)
 
                 trace_logger.mark_session_evolved(session_id)
                 sessions_processed += 1
 
                 if verbose:
-                    if result.verdict is None:
-                        status = "clean"
-                    elif result.verdict.verdict:
-                        status = "approved"
-                    else:
-                        status = "rejected"
+                    n_approved = sum(
+                        1 for r in result.results if r.verdict is not None and r.verdict.verdict
+                    )
+                    n_rejected = sum(
+                        1 for r in result.results if r.verdict is not None and not r.verdict.verdict
+                    )
+                    n_clean = sum(1 for r in result.results if r.verdict is None)
+                    n_classes = result.batch_report.total_failures
                     print(
                         f"[daemon] session {session_id} done "
-                        f"(class={result.failure_class}, verdict={status})"
+                        f"({n_classes} failure class(es): "
+                        f"{n_approved} approved, {n_rejected} rejected, {n_clean} clean)"
                     )
 
             if max_iterations is not None and iterations >= max_iterations:
