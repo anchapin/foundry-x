@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import difflib
 import json
 import re
@@ -87,17 +88,97 @@ def _serialize_event(event: TraceEvent) -> dict[str, object]:
     }
 
 
+def _flatten_payload(payload: dict[str, Any], prefix: str = "payload") -> dict[str, Any]:
+    """Flatten a nested payload dict into dot-notation columns for CSV export."""
+    result: dict[str, Any] = {}
+    for key, value in payload.items():
+        column_name = f"{prefix}.{key}"
+        if isinstance(value, dict):
+            result.update(_flatten_payload(value, column_name))
+        elif isinstance(value, list):
+            result[column_name] = json.dumps(value)
+        else:
+            result[column_name] = value
+    return result
+
+
 def _export(args: argparse.Namespace) -> int:
-    logger = TraceLogger(_get_trace_db(args))
-    events = logger.load_session(args.session_id)
-    lines = [json.dumps(_serialize_event(event)) for event in events]
-    output = "\n".join(lines)
-    if lines:
-        output += "\n"
-    if args.out:
-        Path(args.out).write_text(output, encoding="utf-8")
+    """Export trace events in JSONL or CSV format.
+
+    Supports:
+    - Single session (``--session-id``) or all sessions (``--all``)
+    - JSONL or CSV output format (``--format jsonl|csv``)
+    - Filtering by event kind (``--kind``)
+    - Filtering by harness version (``--harness-version``)
+    """
+    logger = _logger_for(_get_trace_db(args))
+
+    if getattr(args, "all", False):
+        events = list(
+            logger.query_events(
+                kind=getattr(args, "kind", None),
+                harness_version=getattr(args, "harness_version", None),
+            )
+        )
     else:
-        sys.stdout.write(output)
+        session_id = getattr(args, "session_id", None)
+        if session_id is None:
+            sys.stderr.write("export: must specify --session-id or --all.\n")
+            return 1
+        events = list(logger.load_session(session_id))
+        kind_filter = getattr(args, "kind", None)
+        if kind_filter is not None:
+            events = [e for e in events if e.kind == kind_filter]
+
+    if not events:
+        sys.stderr.write("export: no events to export.\n")
+        return 0
+
+    fmt = getattr(args, "format", "jsonl")
+
+    if fmt == "jsonl":
+        lines = [json.dumps(_serialize_event(event)) for event in events]
+        output = "\n".join(lines)
+        if lines:
+            output += "\n"
+        if args.out:
+            Path(args.out).write_text(output, encoding="utf-8")
+        else:
+            sys.stdout.write(output)
+    elif fmt == "csv":
+        import io
+
+        base_columns = ["event_id", "session_id", "timestamp", "kind"]
+        all_payload_keys: set[str] = set()
+        for event in events:
+            all_payload_keys.update(_flatten_payload(event.payload).keys())
+        fieldnames = base_columns + sorted(all_payload_keys)
+
+        rows: list[dict[str, Any]] = []
+        for event in events:
+            row: dict[str, Any] = {
+                "event_id": event.event_id,
+                "session_id": event.session_id,
+                "timestamp": event.timestamp,
+                "kind": event.kind,
+            }
+            row.update(_flatten_payload(event.payload))
+            rows.append(row)
+
+        output_buffer = io.StringIO()
+        writer = csv.DictWriter(output_buffer, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+        output = output_buffer.getvalue()
+
+        if args.out:
+            Path(args.out).write_text(output, encoding="utf-8")
+        else:
+            sys.stdout.write(output)
+    else:
+        sys.stderr.write(f"export: unknown format '{fmt}'. Use 'jsonl' or 'csv'.\n")
+        return 1
+
     return 0
 
 
@@ -1270,13 +1351,39 @@ def _build_parser() -> argparse.ArgumentParser:
 
     export_parser = sub.add_parser(
         "export",
-        help="Export a session as newline-delimited JSON (ADR-0003 JSONL).",
+        help="Export trace events in JSONL or CSV format (issue #1273).",
     )
-    export_parser.add_argument("session_id", help="Session to export.")
+    export_parser.add_argument(
+        "--session-id",
+        default=None,
+        help="Session to export (mutually exclusive with --all).",
+    )
+    export_parser.add_argument(
+        "--all",
+        action="store_true",
+        default=False,
+        help="Export all sessions.",
+    )
+    export_parser.add_argument(
+        "--format",
+        choices=["jsonl", "csv"],
+        default="jsonl",
+        help="Export format (default: jsonl).",
+    )
+    export_parser.add_argument(
+        "--kind",
+        default=None,
+        help="Filter to events of this kind (e.g. 'tool_call', 'model_response').",
+    )
+    export_parser.add_argument(
+        "--harness-version",
+        default=None,
+        help="Filter to sessions with this harness version (only with --all).",
+    )
     export_parser.add_argument(
         "--trace-db",
         default="logs/traces.db",
-        help="Path to the trace SQLite database (default: logs/traces.db).",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
     )
     export_parser.add_argument(
         "--db",
@@ -1286,7 +1393,7 @@ def _build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument(
         "--out",
         default=None,
-        help="Write JSONL to this path instead of stdout.",
+        help="Write output to this path instead of stdout.",
     )
     export_parser.set_defaults(func=_export)
 
