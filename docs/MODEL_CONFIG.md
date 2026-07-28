@@ -56,6 +56,24 @@ If your endpoint requires no token, leave both unset.
 | `FOUNDRY_REQUEST_TIMEOUT_S` | `30` | Per-request round-trip cap in seconds |
 | `FOUNDRY_ADAPTER_MAX_RETRIES` | `2` | Retry limit on transient errors (408/429/5xx, connect failures) |
 
+### Pricing override
+
+Cloud provider pricing tables (`AnthropicAdapter`, `OpenAINativeAdapter`) are
+hardcoded in [`model_adapter.py`][foundry_x.execution.model_adapter]. When a
+provider updates pricing, you can override per-model without a code change:
+
+```bash
+# Format: input_price_per_1m,output_price_per_1m (USD)
+FOUNDRY_MODEL_PRICING_CLAUDE_3_5_SONNET_20241022=3.5,17.5
+```
+
+The env var name is the model ID uppercased with `-` replaced by `_` (e.g.
+`claude-3-5-sonnet-20241022` → `FOUNDRY_MODEL_PRICING_CLAUDE_3_5_SONNET_20241022`).
+
+The override takes precedence over the hardcoded table. Unknown models (not in
+the hardcoded table and no env var) return `(0.0, 0.0)` and emit a
+`RuntimeWarning`.
+
 ### Server supervision (issue #899)
 
 When `fx-runner` is launched against a local `llama-server` (or any
