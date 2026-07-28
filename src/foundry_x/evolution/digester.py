@@ -108,6 +108,12 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         # ``InjectionFirewallHook`` silently disabled; the Digester must
         # surface this so the Evolver and operators flag the degradation.
         "hook_registry_error",
+        # Issue #1180: ``server_unavailable`` is emitted by the Runner when the
+        # model server becomes unreachable (runner.py:1918). Without it in
+        # FAILURE_KINDS the Digester silently classifies infra failures as
+        # ``clean``, so the Evolver never proposes remediation and the
+        # Regression Rate KPI is biased downward.
+        "server_unavailable",
     }
 )
 
