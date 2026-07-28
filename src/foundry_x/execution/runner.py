@@ -1773,6 +1773,16 @@ async def run_task(
     context_tokens_threshold = os.environ.get("FOUNDRY_CONTEXT_TOKENS", "").strip()
     if context_tokens_threshold:
         _token_threshold = int(context_tokens_threshold)
+        _token_budget_raw = os.environ.get("FOUNDRY_TOKEN_BUDGET", "").strip()
+        if _token_budget_raw:
+            _token_budget = int(_token_budget_raw)
+            if _token_threshold > _token_budget:
+                raise ValueError(
+                    f"FOUNDRY_CONTEXT_TOKENS ({_token_threshold}) must be <= "
+                    f"FOUNDRY_TOKEN_BUDGET ({_token_budget}): "
+                    "pruning threshold exceeds abort threshold, pruning will never fire "
+                    "(ADR-0021 §6)."
+                )
         from harness.hooks.context_pruning import (
             DEFAULT_THRESHOLD,
             register_token_aware_into,
