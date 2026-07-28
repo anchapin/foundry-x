@@ -35,6 +35,27 @@ jobs:
           fi
           echo "No conflict markers found."
 
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install uv (hash-verified)
+        uses: ./.github/actions/install-uv
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run pre-commit
+        run: uv run pre-commit run --all-files
+
   ci:
     name: lint + test
     runs-on: ubuntu-latest
