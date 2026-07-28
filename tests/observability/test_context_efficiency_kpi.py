@@ -16,6 +16,7 @@ import pytest
 
 from foundry_x.observability.kpis import (
     compute_kpis,
+    main,
 )
 from foundry_x.trace.logger import TraceLogger
 
@@ -191,3 +192,68 @@ def test_context_efficiency_respects_harness_version_filter(tmp_path):
     assert summary_v1.context_efficiency is not None
     assert summary_v2.context_efficiency is not None
     assert summary_v1.context_efficiency == summary_v2.context_efficiency
+
+
+# Issue #1286: FOUNDRY_CONTEXT_EFFICIENCY_MIN triggers exit 2 when efficiency
+# falls below the floor. Absent env var → backward-compatible zero exit.
+# ---------------------------------------------------------------------------
+
+
+def test_context_efficiency_min_exits_2_when_below_threshold(tmp_path, capsys, monkeypatch):
+    """Alert fires and main returns 2 when context_efficiency is below the env floor."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=1)
+
+    monkeypatch.setenv("FOUNDRY_CONTEXT_EFFICIENCY_MIN", "0.999")
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "context_efficiency" in captured.err
+    assert "FOUNDRY_CONTEXT_EFFICIENCY_MIN" in captured.err
+
+
+def test_context_efficiency_min_exits_0_when_at_or_above_threshold(tmp_path, capsys, monkeypatch):
+    """No alert when context_efficiency is at or above the env floor."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=1)
+
+    monkeypatch.setenv("FOUNDRY_CONTEXT_EFFICIENCY_MIN", "0.10")
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ALERT" not in captured.err
+
+
+def test_context_efficiency_min_exits_0_when_env_var_absent(tmp_path, capsys, monkeypatch):
+    """Backward-compatible: no alert when FOUNDRY_CONTEXT_EFFICIENCY_MIN is unset."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=1)
+
+    monkeypatch.delenv("FOUNDRY_CONTEXT_EFFICIENCY_MIN", raising=False)
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ALERT" not in captured.err
+
+
+def test_context_efficiency_min_exits_0_when_no_context_efficiency_data(
+    tmp_path, capsys, monkeypatch
+):
+    """No alert is possible when context_efficiency is None (no sessions)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+
+    monkeypatch.setenv("FOUNDRY_CONTEXT_EFFICIENCY_MIN", "0.80")
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ALERT" not in captured.err
