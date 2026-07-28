@@ -449,6 +449,13 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write(f"session {session_id} not found or empty\n")
             return 2
         fmt = _resolve_format(args.format, args.out)
+        if args.format is not None and args.out is not None:
+            expected_ext = "." + args.format
+            if not Path(args.out).suffix.lower().endswith(expected_ext):
+                sys.stderr.write(
+                    f"warning: --format {args.format} conflicts with --out extension "
+                    f"'{Path(args.out).suffix}'; writing {args.format} anyway\n"
+                )
         if fmt == "json":
             rendered = render_timeline_json(events)
         elif fmt == "svg":
