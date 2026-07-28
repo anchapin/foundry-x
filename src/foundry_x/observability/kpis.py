@@ -129,6 +129,19 @@ SERVER_UNAVAILABLE_KIND = "server_unavailable"
 # ``evolver_llm_failure_rate`` is the fraction of sessions with at least one.
 GENERATION_EXHAUSTED_KIND = "generation_exhausted"
 
+# Issue #1281: the runner emits ``model_cost`` when the CloudModelAdapter
+# receives a cost event from the provider. The ``model_cost_count`` KPI is
+# the total number of such events; ``total_model_cost_usd`` is the cumulative
+# estimated cost in USD.
+MODEL_COST_KIND = "model_cost"
+# Issue #1281: the runner emits ``model_rate_limit`` when the CloudModelAdapter
+# receives a rate-limit update from the provider. The ``model_rate_limit_count``
+# KPI is the total number of such events.
+MODEL_RATE_LIMIT_KIND = "model_rate_limit"
+# Issue #1281: the runner emits ``fetch_blocked`` when the WebFetchHook
+# detects a URL whose host is not in FETCH_ALLOWED_DOMAINS. The
+# ``fetch_blocked_count`` KPI is the total number of such events.
+FETCH_BLOCKED_KIND = "fetch_blocked"
 
 #: Dimension accepted by :func:`compute_kpis`'s ``group_by`` parameter
 #: (issue #898, #1039). Each value selects which field drives the
@@ -350,6 +363,15 @@ class KpiSummary(BaseModel):
     across aborted sessions. Returns ``None`` when no session hit the token
     budget, so operators can distinguish a clean store (None) from one where
     all sessions exceeded their budgets (a real percentage).
+
+    Issue #1281 adds ``model_cost_count`` and ``total_model_cost_usd``: the
+    total number of ``model_cost`` events and the cumulative estimated cost in
+    USD, sourced from the ``estimated_cost_usd`` field on each event. Also adds
+    ``model_rate_limit_count``: the total number of ``model_rate_limit`` events.
+    And ``fetch_blocked_count``: the total number of ``fetch_blocked`` events
+    emitted when the WebFetchHook blocks a URL not in FETCH_ALLOWED_DOMAINS.
+    All three are auxiliary operator signals surfaced alongside
+    ``model_retry_count`` and ``server_restart_count``.
     """
 
     cycle_time_seconds: float | None = None
@@ -379,6 +401,10 @@ class KpiSummary(BaseModel):
     evolver_llm_failure_count: int = 0
     evolver_llm_failure_rate: float = 0.0
     token_budget_overrun_pct: float | None = None
+    model_cost_count: int = 0
+    total_model_cost_usd: float = 0.0
+    model_rate_limit_count: int = 0
+    fetch_blocked_count: int = 0
     per_skill: dict[str, SkillKpiSlice] = {}
     per_task_family: dict[str, SkillKpiSlice] = {}
     per_difficulty_tier: dict[str, SkillKpiSlice] = {}
@@ -466,6 +492,9 @@ class KpiHistoryEntry(BaseModel):
     Issue #1112 adds ``token_budget_overrun_pct``: the mean percentage by which
     sessions that hit ``task_aborted(reason="token_budget")`` exceeded their
     token budget. ``None`` when no session hit the token budget.
+
+    Issue #1281 adds ``model_cost_count``, ``total_model_cost_usd``,
+    ``model_rate_limit_count``, and ``fetch_blocked_count``.
     """
 
     timestamp: str
@@ -485,6 +514,10 @@ class KpiHistoryEntry(BaseModel):
     failure_class_distribution: dict[str, int] = {}
     evolver_llm_failure_count: int = 0
     evolver_llm_failure_rate: float = 0.0
+    model_cost_count: int = 0
+    total_model_cost_usd: float = 0.0
+    model_rate_limit_count: int = 0
+    fetch_blocked_count: int = 0
 
 
 class KpiTrends(BaseModel):
@@ -858,6 +891,11 @@ def compute_kpis(
     evolver_llm_failure_count, evolver_llm_failure_rate = _evolver_llm_failure(
         logger, harness_version=harness_version
     )
+    model_cost_count, total_model_cost_usd = _model_cost_count(
+        logger, harness_version=harness_version
+    )
+    model_rate_limit_count = _model_rate_limit_count(logger, harness_version=harness_version)
+    fetch_blocked_count = _fetch_blocked_count(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -886,6 +924,10 @@ def compute_kpis(
         excluded_other=excluded_other,
         evolver_llm_failure_count=evolver_llm_failure_count,
         evolver_llm_failure_rate=evolver_llm_failure_rate,
+        model_cost_count=model_cost_count,
+        total_model_cost_usd=total_model_cost_usd,
+        model_rate_limit_count=model_rate_limit_count,
+        fetch_blocked_count=fetch_blocked_count,
         **_slice_field(
             _session_slice_or_task_slice(
                 logger,
@@ -1073,6 +1115,15 @@ def _compute_deltas(
         "evolver_llm_failure_rate": _delta(
             baseline.evolver_llm_failure_rate, candidate.evolver_llm_failure_rate
         ),
+        # Issue #1281: model cost, rate limit, and fetch blocked deltas.
+        "model_cost_count": candidate.model_cost_count - baseline.model_cost_count,
+        "total_model_cost_usd": _delta(
+            baseline.total_model_cost_usd, candidate.total_model_cost_usd
+        ),
+        "model_rate_limit_count": (
+            candidate.model_rate_limit_count - baseline.model_rate_limit_count
+        ),
+        "fetch_blocked_count": candidate.fetch_blocked_count - baseline.fetch_blocked_count,
     }
 
 
@@ -1987,6 +2038,88 @@ def _evolver_llm_failure(
     return total_count, rate
 
 
+def _model_cost_count(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> tuple[int, float]:
+    """Count ``model_cost`` events and sum estimated_cost_usd (issue #1281).
+
+    Returns ``(cost_count, total_cost_usd)`` where ``cost_count`` is the
+    total number of ``model_cost`` events and ``total_cost_usd`` is the
+    cumulative estimated cost in USD, summed from the ``estimated_cost_usd``
+    field on each event payload.
+
+    Surfaced as an auxiliary operator signal alongside
+    :func:`_model_retry_count` and :func:`_server_restart_count`.
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    total_cost = 0.0
+    count = 0
+    for event in logger.query_events(
+        kind=MODEL_COST_KIND,
+        harness_version=harness_version,
+    ):
+        count += 1
+        cost = event.payload.get("estimated_cost_usd")
+        if cost is not None:
+            total_cost += cost
+    return count, total_cost
+
+
+def _model_rate_limit_count(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> int:
+    """Count ``model_rate_limit`` events emitted by the runner (issue #1281).
+
+    The runner records one ``model_rate_limit`` event each time the
+    CloudModelAdapter receives a rate-limit update from the provider. The
+    count is aggregated across matching sessions so operators can monitor
+    provider headroom.
+
+    Surfaced as an auxiliary operator signal alongside
+    :func:`_model_cost_count` and :func:`_fetch_blocked_count`.
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    count = 0
+    for event in logger.query_events(
+        kind=MODEL_RATE_LIMIT_KIND,
+        harness_version=harness_version,
+    ):
+        count += 1
+    return count
+
+
+def _fetch_blocked_count(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> int:
+    """Count ``fetch_blocked`` events emitted by the WebFetchHook (issue #1281).
+
+    The hook records one ``fetch_blocked`` event each time a ``web_fetch``
+    tool call is blocked because the URL's host is not in FETCH_ALLOWED_DOMAINS.
+    The count is aggregated across matching sessions so operators can audit
+    which URLs are being blocked.
+
+    Surfaced as an auxiliary operator signal alongside
+    :func:`_model_rate_limit_count` and :func:`_model_cost_count`.
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    count = 0
+    for event in logger.query_events(
+        kind=FETCH_BLOCKED_KIND,
+        harness_version=harness_version,
+    ):
+        count += 1
+    return count
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -2152,6 +2285,27 @@ def _render_markdown(summary: KpiSummary) -> str:
             f"Evolver LLM Failures: {summary.evolver_llm_failure_count} "
             f"generation_exhausted event(s) "
             f"(rate: {_format_value(summary.evolver_llm_failure_rate)})."
+        )
+    # Issue #1281: surface model cost events when at least one was recorded.
+    if summary.model_cost_count > 0:
+        lines.append("")
+        lines.append(
+            f"Model Cost: {summary.model_cost_count} cost event(s) recorded "
+            f"(total: ${summary.total_model_cost_usd:.4f} USD)."
+        )
+    # Issue #1281: surface model rate-limit events when at least one was recorded.
+    if summary.model_rate_limit_count > 0:
+        lines.append("")
+        lines.append(
+            f"Model Rate Limits: {summary.model_rate_limit_count} "
+            "rate-limit event(s) recorded by the runner."
+        )
+    # Issue #1281: surface fetch_blocked events when at least one was recorded.
+    if summary.fetch_blocked_count > 0:
+        lines.append("")
+        lines.append(
+            f"Fetch Blocked: {summary.fetch_blocked_count} "
+            "fetch_blocked event(s) — URL(s) blocked by WebFetchHook."
         )
     # Issue #895, #1113: surface the cycle-time exclusion count and its
     # per-abort-reason breakdown when > 0 so the survivorship bias in
@@ -2406,6 +2560,31 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
             f"{_format_value(candidate.evolver_llm_failure_rate)} | "
             f"{_format_delta(baseline.evolver_llm_failure_rate, candidate.evolver_llm_failure_rate, higher_is_better=False)} |"
         ),
+        # Issue #1281: model cost, rate limit, and fetch blocked counts.
+        (
+            "| Model Cost Count | "
+            f"{baseline.model_cost_count} | "
+            f"{candidate.model_cost_count} | "
+            f"{_format_delta(float(baseline.model_cost_count), float(candidate.model_cost_count), higher_is_better=False)} |"
+        ),
+        (
+            "| Total Model Cost (USD) | "
+            f"{baseline.total_model_cost_usd:.4f} | "
+            f"{candidate.total_model_cost_usd:.4f} | "
+            f"{_format_delta(baseline.total_model_cost_usd, candidate.total_model_cost_usd, higher_is_better=False)} |"
+        ),
+        (
+            "| Model Rate Limit Count | "
+            f"{baseline.model_rate_limit_count} | "
+            f"{candidate.model_rate_limit_count} | "
+            f"{_format_delta(float(baseline.model_rate_limit_count), float(candidate.model_rate_limit_count), higher_is_better=False)} |"
+        ),
+        (
+            "| Fetch Blocked Count | "
+            f"{baseline.fetch_blocked_count} | "
+            f"{candidate.fetch_blocked_count} | "
+            f"{_format_delta(float(baseline.fetch_blocked_count), float(candidate.fetch_blocked_count), higher_is_better=False)} |"
+        ),
     ]
     return "\n".join(lines)
 
@@ -2480,7 +2659,9 @@ def append_kpi_history(
     ``token_budget_overrun_pct``, ``model_retry_count``,
     ``tool_argument_parse_error_count``,
     ``event_limit_abort_count``, ``server_restart_count``,
-    ``evolver_llm_failure_count``, and ``evolver_llm_failure_rate`` are scalar
+    ``evolver_llm_failure_count``, ``evolver_llm_failure_rate``,
+    ``model_cost_count``, ``total_model_cost_usd``,
+    ``model_rate_limit_count``, and ``fetch_blocked_count`` are scalar
     fields and are included so the trend table can show their drift
     across harness edits. Then ``timestamp`` and the optional
     ``harness_version`` are added. Parent directories are created on
@@ -2604,6 +2785,10 @@ _RELIABILITY_SIGNALS: list[tuple[str, str]] = [
     ("hooks_disabled_rate", "Hooks Disabled Rate"),
     ("evolver_llm_failure_count", "Evol LLM Failures"),
     ("evolver_llm_failure_rate", "Evol LLM Failure Rate"),
+    ("model_cost_count", "Model Costs"),
+    ("total_model_cost_usd", "Total Model Cost (USD)"),
+    ("model_rate_limit_count", "Model Rate Limits"),
+    ("fetch_blocked_count", "Fetch Blocked"),
 ]
 
 
