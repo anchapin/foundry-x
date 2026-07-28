@@ -82,6 +82,16 @@ _DEFAULT_RESTART_BACKOFF_CAP_S = 8.0
 # ``server_restart_count``.
 SERVER_UNAVAILABLE_KIND = "server_unavailable"
 
+# Trace-event vocabulary (issue #1166). ``ServerPool.acquire`` emits this
+# when it falls back to the first registered slot because no slot was
+# healthy and no autostart slot became healthy within its timeout.
+SERVER_POOL_FALLBACK_KIND = "server_pool_fallback"
+
+# ``Tracer(slot, kind, payload) -> None``: records a trace event.
+# The pool calls it when returning an unhealthy fallback slot so the
+# caller can observe the degradation.
+PoolTracer = Callable[[str, str, dict[str, object]], None]
+
 
 class ServerLaunchError(RuntimeError):
     """Raised when ``start()`` fails to spawn the underlying ``llama-server``."""
@@ -458,9 +468,11 @@ class ServerPool:
         self,
         *,
         manager_factory: Callable[[ServerConfig], FoundryServerManager] | None = None,
+        tracer: PoolTracer | None = None,
     ) -> None:
         self._managers: dict[str, FoundryServerManager] = {}
         self._manager_factory = manager_factory or FoundryServerManager
+        self._tracer: PoolTracer | None = tracer
 
     # ---- registration --------------------------------------------------
 
@@ -549,8 +561,9 @@ class ServerPool:
         the window, it is returned.
 
         If no slot becomes healthy (or no slot has autostart), the first
-        registered slot is returned as a fallback — the caller decides
-        whether to proceed.
+        registered slot is returned as a fallback and a
+        ``server_pool_fallback`` trace event is emitted so the caller
+        can observe the degradation.
         """
         if not self._managers:
             raise KeyError("cannot acquire from an empty pool")
@@ -574,6 +587,18 @@ class ServerPool:
                         return slot, mgr
                 break
 
-        # Fallback: first registered slot.
+        # Fallback: first registered slot — emit a trace event so the caller
+        # knows the slot was returned without a clean health check (issue #1166).
         first_slot = next(iter(self._managers))
-        return first_slot, self._managers[first_slot]
+        first_mgr = self._managers[first_slot]
+        if self._tracer is not None:
+            self._tracer(
+                first_slot,
+                SERVER_POOL_FALLBACK_KIND,
+                {
+                    "host": first_mgr.host,
+                    "health_url": first_mgr.health_url,
+                    "autostart": first_mgr.config.autostart,
+                },
+            )
+        return first_slot, first_mgr
