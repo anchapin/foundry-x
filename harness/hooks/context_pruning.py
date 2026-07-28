@@ -167,6 +167,10 @@ class _SqlitePruner:
             raise
 
     def close(self) -> None:
+        try:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.ProgrammingError:
+            pass
         self._conn.close()
 
     def __enter__(self) -> Self:
