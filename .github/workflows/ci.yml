@@ -75,5 +75,5 @@ jobs:
       - name: Ruff lint
         run: uv run ruff check .
 
-      - name: Pytest
+      - name: Pytest (non-benchmark)
         run: uv run pytest -m "not benchmark"
