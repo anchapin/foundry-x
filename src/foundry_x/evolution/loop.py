@@ -33,6 +33,8 @@ from foundry_x.execution.runner import resolve_harness_version
 from foundry_x.observability.regression_report import record_verdict
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
+EVOLVER_DURATION_KIND = "evolver_duration"
+
 
 class EvolutionResult(BaseModel):
     """Structured result of a single evolution-step pipeline run (ADR-0006).
@@ -98,6 +100,33 @@ def _now_iso() -> str:
     suffix without modification.
     """
     return datetime.now(UTC).isoformat()
+
+
+def _emit_evolver_duration(
+    trace_logger: TraceLogger | None,
+    evolver: Evolver,
+    session_id: str,
+    failure_class: str,
+    evolver_duration_ms: float,
+    proposed_edits: list[ProposedEdit],
+) -> None:
+    """Emit an evolver_duration trace event if a logger is available.
+
+    Uses the ``trace_logger`` argument when provided; otherwise falls back
+    to ``evolver._trace_logger`` if the evolver has one attached.
+    """
+    logger = trace_logger if trace_logger is not None else evolver._trace_logger
+    if logger is None:
+        return
+    logger.record(
+        session_id,
+        EVOLVER_DURATION_KIND,
+        {
+            "evolver_duration_ms": evolver_duration_ms,
+            "failure_class": failure_class,
+            "proposed_edits_count": len(proposed_edits),
+        },
+    )
 
 
 def _record_and_annotate_pattern(
@@ -242,6 +271,16 @@ def run_evolution_step(
     except NotImplementedError:
         proposed_edits = []
 
+    if evolver_duration_ms is not None:
+        _emit_evolver_duration(
+            trace_logger=trace_logger,
+            evolver=evolver,
+            session_id=session_id,
+            failure_class=failure_report.proposed_class,
+            evolver_duration_ms=evolver_duration_ms,
+            proposed_edits=proposed_edits,
+        )
+
     if not proposed_edits:
         return EvolutionResult(
             session_id=session_id,
@@ -358,6 +397,16 @@ async def run_evolution_step_async(
         evolver_duration_ms = (time.time() - t0) * 1000
     except NotImplementedError:
         proposed_edits = []
+
+    if evolver_duration_ms is not None:
+        _emit_evolver_duration(
+            trace_logger=trace_logger,
+            evolver=evolver,
+            session_id=session_id,
+            failure_class=failure_report.proposed_class,
+            evolver_duration_ms=evolver_duration_ms,
+            proposed_edits=proposed_edits,
+        )
 
     if not proposed_edits:
         return EvolutionResult(
@@ -493,6 +542,16 @@ def run_evolution_batch(
         except NotImplementedError:
             proposed_edits = []
 
+        if evolver_duration_ms is not None:
+            _emit_evolver_duration(
+                trace_logger=trace_logger,
+                evolver=evolver,
+                session_id=session_id,
+                failure_class=failure_report.proposed_class,
+                evolver_duration_ms=evolver_duration_ms,
+                proposed_edits=proposed_edits,
+            )
+
         if not proposed_edits:
             results.append(
                 EvolutionResult(
@@ -608,6 +667,16 @@ async def run_evolution_batch_async(
             evolver_duration_ms = (time.time() - t0) * 1000
         except NotImplementedError:
             proposed_edits = []
+
+        if evolver_duration_ms is not None:
+            _emit_evolver_duration(
+                trace_logger=trace_logger,
+                evolver=evolver,
+                session_id=session_id,
+                failure_class=failure_report.proposed_class,
+                evolver_duration_ms=evolver_duration_ms,
+                proposed_edits=proposed_edits,
+            )
 
         if not proposed_edits:
             results.append(
