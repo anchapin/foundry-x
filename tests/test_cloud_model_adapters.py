@@ -24,6 +24,7 @@ from foundry_x.execution.model_adapter import (
     ModelAdapter,
     ModelCostEvent,
     ModelRateLimitInfo,
+    ModelRetryEvent,
     OpenAINativeAdapter,
     resolve_model_adapter,
 )
@@ -109,6 +110,57 @@ async def test_anthropic_complete_posts_messages_endpoint():
     assert response.usage.prompt_tokens == 10
     assert response.usage.completion_tokens == 5
     assert response.usage.total_tokens == 15
+
+
+async def _no_sleep(_seconds: float) -> None:
+    """No-op replacement for ``asyncio.sleep`` in retry tests."""
+
+
+@pytest.mark.asyncio
+async def test_anthropic_complete_retries_503_then_succeeds(monkeypatch):
+    """503 → 503 → 200 yields a ModelResponse with two model_retry events (issue #1168)."""
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    retries: list[ModelRetryEvent] = []
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        idx = calls["count"]
+        calls["count"] += 1
+        if idx < 2:
+            return httpx.Response(503, text="transient")
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "done"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        response = await adapter.complete(
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+    assert response.message.content == "done"
+    assert len(retries) == 2
+    assert retries[0].attempt == 1
+    assert retries[0].error_type == "HTTPStatusError"
+    assert retries[1].attempt == 2
+    assert retries[1].error_type == "HTTPStatusError"
+    assert all(r.backoff_ms >= 0 for r in retries)
 
 
 @pytest.mark.asyncio
