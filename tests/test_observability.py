@@ -452,6 +452,54 @@ def test_cli_timeline_harness_version_json_format(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# Issue #1149: fx-trace timeline --format svg stdout and conflict detection.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_timeline_format_svg_writes_svg_to_stdout(tmp_path, capsys):
+    """--format svg without --out writes SVG to stdout (issue #1149)."""
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+
+    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid, "--format", "svg"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.startswith("<svg")
+    assert "</svg>" in out
+
+
+def test_cli_timeline_format_out_conflict_warns(tmp_path, capsys):
+    """--format svg --out with mismatching extension prints a warning (issue #1149)."""
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+    out_path = tmp_path / "timeline.md"
+
+    rc = cli_main(
+        [
+            "timeline",
+            "--db",
+            str(db),
+            "--session-id",
+            sid,
+            "--format",
+            "svg",
+            "--out",
+            str(out_path),
+        ]
+    )
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "warning" in err.lower()
+    assert "svg" in err
+    assert ".md" in err
+    # The file should still be written with SVG content.
+    content = out_path.read_text(encoding="utf-8")
+    assert content.startswith("<svg")
+
+
+# ---------------------------------------------------------------------------
 # Issue #268: fx-trace failure-report subcommand.
 # ---------------------------------------------------------------------------
 
