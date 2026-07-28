@@ -57,8 +57,7 @@ def test_benchmark_job_has_if_condition(config: dict) -> None:
     """The ``benchmark`` job must have an ``if`` condition to gate when it runs."""
     cond = _benchmark_job_if_condition(config)
     assert cond is not None, (
-        "benchmark job must have an 'if' condition gating when it runs "
-        "(issue #1280)."
+        "benchmark job must have an 'if' condition gating when it runs (issue #1280)."
     )
 
 
