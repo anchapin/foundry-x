@@ -707,7 +707,7 @@ def main(argv: list[str] | None = None) -> int:
 def _build_evolve_subparser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--session-id",
-        required=True,
+        required=False,
         help="Trace session UUID to analyse.",
     )
     parser.add_argument(
@@ -725,6 +725,14 @@ def _build_evolve_subparser(parser: argparse.ArgumentParser) -> None:
         "--verbose",
         action="store_true",
         help="Print the full unified_diff of each ProposedEdit.",
+    )
+    parser.add_argument(
+        "--latest",
+        action="store_true",
+        help=(
+            "Automatically select the most recent session by started_at desc. "
+            "Mutually exclusive with --session-id (issue #1147)."
+        ),
     )
     parser.add_argument(
         "--background",
@@ -904,8 +912,24 @@ def _main_evolve(args: argparse.Namespace) -> int:
     if getattr(args, "background", False):
         return _spawn_background_evolve(args)
     no_verify = getattr(args, "no_verify", False)
+
+    # Issue #1147: resolve session_id from --latest or validate --session-id
+    session_id = getattr(args, "session_id", None)
+    use_latest = getattr(args, "latest", False)
+    if use_latest and session_id is not None:
+        sys.stderr.write("--latest and --session-id are mutually exclusive\n")
+        return 2
+    if use_latest:
+        backend = _infer_backend(args.trace_db)
+        logger = TraceLogger(args.trace_db, backend=backend)
+        sessions = logger.list_sessions()
+        if not sessions:
+            sys.stderr.write("no sessions found in trace store\n")
+            return 2
+        session_id = sessions[-1].session_id
+
     _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
-        session_id=args.session_id,
+        session_id=session_id,
         trace_db=args.trace_db,
         harness_dir=args.harness_dir,
         verbose=args.verbose,
@@ -927,13 +951,23 @@ def _spawn_background_evolve(args: argparse.Namespace) -> int:
     so operators can monitor it; the child writes progress to the trace
     store and the ProposedEditStore.
     """
+    # Issue #1147: resolve --latest before spawning so the child doesn't need TraceLogger access
+    session_id = getattr(args, "session_id", None)
+    if getattr(args, "latest", False):
+        backend = _infer_backend(args.trace_db)
+        logger = TraceLogger(args.trace_db, backend=backend)
+        sessions = logger.list_sessions()
+        if not sessions:
+            sys.stderr.write("no sessions found in trace store\n")
+            return 2
+        session_id = sessions[-1].session_id
     cmd: list[str] = [
         sys.executable,
         "-m",
         "foundry_x.evolution.cli",
         "evolve",
         "--session-id",
-        str(args.session_id),
+        str(session_id),
         "--trace-db",
         str(args.trace_db),
         "--harness-dir",

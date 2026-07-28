@@ -340,6 +340,76 @@ class TestNoVerifyFlag:
         assert "No failure detected" in captured.out
 
 
+class TestEvolveLatest:
+    """Tests for --latest auto-select of most recent session (issue #1147)."""
+
+    def test_latest_resolves_to_most_recent_session(self, tmp_path, capsys):
+        """--latest selects the newest session by started_at desc."""
+        db = tmp_path / "traces.db"
+        sid = _populate_clean_session(db)  # creates one session
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        rc = main(
+            [
+                "evolve",
+                "--latest",
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+            ]
+        )
+        assert rc == 0
+
+    def test_latest_and_session_id_mutually_exclusive(self, tmp_path, capsys):
+        """--latest and --session-id together exit 2 with error."""
+        db = tmp_path / "traces.db"
+        sid = _populate_clean_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        rc = main(
+            [
+                "evolve",
+                "--latest",
+                "--session-id",
+                sid,
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+            ]
+        )
+        assert rc == 2
+        captured = capsys.readouterr()
+        assert "mutually exclusive" in captured.err
+
+    def test_latest_with_no_sessions_exits_2(self, tmp_path, capsys):
+        """--latest with empty trace store exits 2 with friendly error."""
+        db = tmp_path / "traces.db"
+        TraceLogger(db)  # empty DB
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        rc = main(
+            [
+                "evolve",
+                "--latest",
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+            ]
+        )
+        assert rc == 2
+        captured = capsys.readouterr()
+        assert "no sessions found" in captured.err
+
+
 # --------------------------------------------------------------------------- #
 # CriticVerdict.verdict Optional                                               #
 # --------------------------------------------------------------------------- #
