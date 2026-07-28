@@ -206,8 +206,13 @@ mirrors the way our product works:
     to run non-blocking. Pass `--latest` to auto-select the most recent
     session without needing the UUID. All flags are documented in
     `foundry-evolve evolve --help`.
+  - `uv run foundry-evolve daemon` — poll the trace store for unevolved
+    sessions and run the evolution loop on each automatically;
+    graceful SIGTERM shutdown (issue #1047).
   - `uv run foundry-sweep` — parametric sweep of harness variants
-    (e.g. quantization sweep; Phase 3).
+    (e.g. quantization sweep; Phase 3). Each model file is matched via
+    glob (default `*.<quant>.gguf`); `FOUNDRY_MODEL_PATH` must point to
+    the directory containing model files.
   - `uv run fx-trace` (from `observability/cli.py`) — KPI reports,
     regression reports, session summaries, tool-latency percentiles.
   - `uv run foundry-x-trace` / `foundry-trace` (from `trace/cli.py`) —
