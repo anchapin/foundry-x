@@ -48,6 +48,7 @@ import logging
 import os
 import sqlite3
 from collections.abc import Callable
+from typing import Self
 
 from .base import HookRegistry, ToolCall, ToolResult
 
@@ -167,6 +168,12 @@ class _SqlitePruner:
 
     def close(self) -> None:
         self._conn.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:  # type: ignore[override]
+        self.close()
 
 
 def _sqlite_pruner(db_path: str | os.PathLike) -> Pruner:
