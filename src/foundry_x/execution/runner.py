@@ -2233,6 +2233,7 @@ async def run_task(
 
             step += 1
     finally:
+        _pruner.close()
         if created_adapter and isinstance(adapter, OpenAICompatibleAdapter):
             await adapter.aclose()
         ttft_p50: int | None = int(statistics.median(turn_ttfts)) if turn_ttfts else None
