@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import warnings
 from collections.abc import Sequence
@@ -3149,6 +3150,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             f" exceeds threshold {args.alert_threshold:.4f}\n"
         )
         return 1
+
+    # Issue #1286: FOUNDRY_CONTEXT_EFFICIENCY_MIN triggers exit 2 when efficiency
+    # falls below the configured floor. Backward-compatible: absent env var is ignored.
+    min_efficiency = os.environ.get("FOUNDRY_CONTEXT_EFFICIENCY_MIN")
+    if (
+        min_efficiency is not None
+        and summary.context_efficiency is not None
+        and summary.context_efficiency < float(min_efficiency)
+    ):
+        sys.stderr.write(
+            f"[ALERT] context_efficiency {summary.context_efficiency:.4f}"
+            f" is below FOUNDRY_CONTEXT_EFFICIENCY_MIN={min_efficiency}\n"
+        )
+        return 2
+
     return 0
 
 
