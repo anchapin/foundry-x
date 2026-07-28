@@ -1774,12 +1774,29 @@ async def run_task(
     context_tokens_threshold = os.environ.get("FOUNDRY_CONTEXT_TOKENS", "").strip()
     if context_tokens_threshold:
         _token_threshold = int(context_tokens_threshold)
-        from harness.hooks.context_pruning import register_token_aware_into
+        from harness.hooks.context_pruning import (
+            DEFAULT_THRESHOLD,
+            register_token_aware_into,
+        )
 
+        _event_threshold = DEFAULT_THRESHOLD
+        manifest_path = harness_dir / "manifest.json"
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                _event_threshold = manifest.get("context_pruning", {}).get(
+                    "event_threshold", DEFAULT_THRESHOLD
+                )
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        def _tracer(sid: str, kind: str, payload: dict[str, object]) -> None:
+            log.record(sid, kind=kind, payload=payload)
         register_token_aware_into(
             registry,
             session_id=session_id,
             token_threshold=_token_threshold,
+            event_threshold=_event_threshold,
             pruner=_pruner.prune,
             tracer=_tracer,
             get_tokens=_pruner.count_tokens,
