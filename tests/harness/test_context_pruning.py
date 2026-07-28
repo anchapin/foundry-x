@@ -1193,9 +1193,7 @@ def test_count_tokens_does_not_block_concurrent_prune(self, tmp_path) -> None:
 
     executed = [str(call_args[0][0]) for call_args in mock_conn.execute.call_args_list]
     tx_statements = [
-        s.strip()
-        for s in executed
-        if s.strip().upper().startswith(("BEGIN", "COMMIT", "ROLLBACK"))
+        s.strip() for s in executed if s.strip().upper().startswith(("BEGIN", "COMMIT", "ROLLBACK"))
     ]
     assert tx_statements == [], (
         f"count_tokens issued transaction statements: {tx_statements} — "
