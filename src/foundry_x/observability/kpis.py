@@ -68,6 +68,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -79,6 +80,19 @@ from pydantic import BaseModel, Field, ValidationError
 from foundry_x.evolution.digester import INJECTION_BLOCKED_KIND
 from foundry_x.observability.regression_report import VerdictRecord
 from foundry_x.trace.logger import TraceEvent, TraceLogger
+
+
+def _get_trace_db(args: argparse.Namespace) -> str:
+    """Return the trace-db path, emitting a deprecation warning if --db was used."""
+    if getattr(args, "db", None) is not None:
+        warnings.warn(
+            "--db is deprecated; use --trace-db instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return args.db
+    return args.trace_db
+
 
 TASK_ABORTED_KIND = "task_aborted"
 TOKEN_BUDGET_REASON = "token_budget"
@@ -2855,9 +2869,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Compute and display the three PRD success-metric KPIs.",
     )
     parser.add_argument(
-        "--db",
+        "--trace-db",
         default="./logs/traces.db",
         help="Path to the trace SQLite database (default: ./logs/traces.db).",
+    )
+    parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     parser.add_argument(
         "--harness-version",
@@ -3050,7 +3069,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.validate_metadata:
-        logger = TraceLogger(args.db)
+        logger = TraceLogger(_get_trace_db(args))
         results = validate_task_metadata(logger, harness_version=args.harness_version)
         output = _render_validation_markdown(results)
         if args.out:
@@ -3060,7 +3079,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     fmt = _resolve_format(args.format, args.out)
-    logger = TraceLogger(args.db)
+    logger = TraceLogger(_get_trace_db(args))
 
     # Issue #898, #1039: build the task-name -> metadata map only for
     # task-level dimensions; session-level dimensions (model_id,
