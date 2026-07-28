@@ -494,3 +494,18 @@ def test_cli_failure_report_missing_session_returns_nonzero(tmp_path, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "ghost-session" in captured.err
+
+
+def test_cli_failure_report_json_format(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_failing_session(db)
+
+    rc = cli_main(["failure-report", "--db", str(db), "--session-id", sid, "--format", "json"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    data = json.loads(captured.out)
+    assert data["session_id"] == sid
+    assert "summary" in data
+    assert "proposed_class" in data

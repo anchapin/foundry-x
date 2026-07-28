@@ -18,7 +18,7 @@ from foundry_x.observability.regression_report import (
     TaskKpiMetadata,
     analyze_regressions,
 )
-from foundry_x.observability.render import render_failure_report
+from foundry_x.observability.render import render_failure_report, render_failure_report_json
 from foundry_x.observability.session_card import format_session_card
 from foundry_x.observability.session_summary import (
     SessionSummaryReport,
@@ -226,6 +226,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--session-id",
         required=True,
         help="Session UUID whose events should be digested and rendered.",
+    )
+    failure_report.add_argument(
+        "--format",
+        default=None,
+        choices=("markdown", "json"),
+        help="Output format. Default: 'markdown'. When --out ends in '.json', JSON is auto-selected.",
+    )
+    failure_report.add_argument(
+        "--out",
+        default=None,
+        help="Write output to this path instead of stdout.",
     )
 
     # Issue #184: cross-session outcome roll-up. Lets an Operator read
@@ -471,10 +482,19 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write(f"session {args.session_id} not found or empty\n")
             return 2
         report = Digester().digest(args.session_id, events)
-        rendered = render_failure_report(report)
-        sys.stdout.write(rendered)
-        if not rendered.endswith("\n"):
-            sys.stdout.write("\n")
+        # Determine format: explicit --format wins; auto-detect from --out extension
+        fmt = args.format
+        if fmt is None and args.out is not None and args.out.endswith(".json"):
+            fmt = "json"
+        if fmt is None:
+            fmt = "markdown"
+        rendered = render_failure_report_json(report) if fmt == "json" else render_failure_report(report)
+        if args.out:
+            Path(args.out).write_text(rendered, encoding="utf-8")
+        else:
+            sys.stdout.write(rendered)
+            if not rendered.endswith("\n"):
+                sys.stdout.write("\n")
         return 0
 
     if args.command == "session-summary":
