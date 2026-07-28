@@ -346,7 +346,7 @@ class TestEvolveLatest:
     def test_latest_resolves_to_most_recent_session(self, tmp_path, capsys):
         """--latest selects the newest session by started_at desc."""
         db = tmp_path / "traces.db"
-        sid = _populate_clean_session(db)  # creates one session
+        _populate_clean_session(db)  # creates one session
         harness = tmp_path / "harness"
         harness.mkdir()
         _write_minimal_harness(harness)
