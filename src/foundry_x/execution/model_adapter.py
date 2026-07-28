@@ -1114,12 +1114,58 @@ class AnthropicAdapter(CloudModelAdapter):
 
     def parse_stream_chunk(self, data: JsonObject) -> ModelResponseChunk | None:
         event_type = str(data.get("__event_type", "") or data.get("type", ""))
+        if event_type == "content_block_start":
+            content_block = data.get("content_block")
+            if isinstance(content_block, dict) and content_block.get("type") == "tool_use":
+                block_index = data.get("index", 0)
+                tool_id = content_block.get("id")
+                tool_name = content_block.get("name")
+                tool_type = content_block.get("type")
+                if not hasattr(self, "_content_block_to_tool_call_index"):
+                    self._content_block_to_tool_call_index: dict[int, int] = {}
+                if block_index not in self._content_block_to_tool_call_index:
+                    self._content_block_to_tool_call_index[block_index] = len(
+                        self._content_block_to_tool_call_index
+                    )
+                tc_index = self._content_block_to_tool_call_index[block_index]
+                return ModelResponseChunk(
+                    tool_calls=[
+                        ModelToolCallChunk(
+                            index=tc_index,
+                            id=tool_id,
+                            type=tool_type,
+                            function=ToolCallFunctionChunk(name=tool_name),
+                        )
+                    ]
+                )
+            return None
         if event_type == "content_block_delta":
             delta = data.get("delta")
             if isinstance(delta, dict) and delta.get("type") == "text_delta":
                 text = delta.get("text")
                 if isinstance(text, str) and text:
                     return ModelResponseChunk(content=text)
+            if isinstance(delta, dict) and delta.get("type") == "tool_use":
+                block_index = data.get("index", 0)
+                input_json = delta.get("input_json", "")
+                if not hasattr(self, "_content_block_to_tool_call_index"):
+                    self._content_block_to_tool_call_index: dict[int, int] = {}
+                if block_index not in self._content_block_to_tool_call_index:
+                    self._content_block_to_tool_call_index[block_index] = len(
+                        self._content_block_to_tool_call_index
+                    )
+                tc_index = self._content_block_to_tool_call_index[block_index]
+                return ModelResponseChunk(
+                    tool_calls=[
+                        ModelToolCallChunk(
+                            index=tc_index,
+                            function=ToolCallFunctionChunk(
+                                name=None,
+                                arguments=input_json if isinstance(input_json, str) else "",
+                            ),
+                        )
+                    ]
+                )
             return None
         if event_type == "message_delta":
             delta = data.get("delta")
