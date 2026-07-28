@@ -374,6 +374,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "section."
         ),
     )
+    tool_latency.add_argument(
+        "--trend",
+        action="store_true",
+        default=False,
+        help=(
+            "Show trend analysis for the last 24 hours (issue #1227). "
+            "Adds trend_p95 and delta_p95_ms columns to the output. "
+            "Recommended mode for operational monitoring. "
+            "--trend implies --window last_24h when no --window flags "
+            "are provided; explicit --window flags are respected alongside "
+            "--trend."
+        ),
+    )
 
     # Issue #1031: persistent KPI history and trend analysis.
     # Allows operators to view trend tables computed from the JSONL history log.
@@ -583,9 +596,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "tool-latency":
         backend = _infer_backend(args.db)
         logger = TraceLogger(args.db, backend=backend)
-        windows = (
-            [LatencyWindow(value) for value in args.window] if args.window is not None else None
-        )
+        if args.window is not None:
+            windows = [LatencyWindow(value) for value in args.window]
+        elif args.trend:
+            windows = [LatencyWindow.LAST_24H]
+        else:
+            windows = None
         report = aggregate_tool_latency(
             logger,
             since=args.since,
