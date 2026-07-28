@@ -256,6 +256,8 @@ class TestNoVerifyFlag:
         assert "WARNING" in captured.err
         assert "--no-verify" in captured.err
         assert "ADR-0004" in captured.err
+        # Warning MUST NOT appear in stdout (issue #1150).
+        assert "WARNING" not in captured.out
 
     def test_no_verify_persists_verdict_none_in_trace_store(self, tmp_path, capsys):
         db = tmp_path / "traces.db"

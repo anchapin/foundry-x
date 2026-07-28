@@ -61,9 +61,11 @@ from foundry_x.trace.logger import TraceLogger
 #: cannot ship to ``main``; the flag is a local-experimentation escape
 #: hatch only (issue #888).
 _NO_VERIFY_WARNING = (
-    "WARNING: --no-verify bypasses the Critic gate. Per ADR-0004, harness "
+    "\n"
+    "!!! WARNING: --no-verify bypasses the Critic gate. Per ADR-0004, harness "
     "edits not evaluated by Critic cannot ship to main. "
-    "Use only for local experimentation.\n"
+    "Use only for local experimentation. !!!\n"
+    "\n"
 )
 
 #: Env var pointing to the pool manifest JSON path (issue #1046, ADR-0026).
@@ -302,6 +304,7 @@ def _run_loop(
     """
     if no_verify:
         sys.stderr.write(_NO_VERIFY_WARNING)
+        sys.stderr.flush()
     harness_version = resolve_harness_version(harness_dir).version
     started_at = _now_iso()
     backend = _infer_backend(trace_db)
