@@ -18,7 +18,8 @@ Before you write code in this repo, read in this order:
 
 1. `README.md` — what this is.
 2. `docs/PRD.md` — product requirements and KPIs.
-3. `docs/ROADMAP.md` — current phase and milestones.
+3. `docs/ROADMAP.md` — all three phases shipped (929b327, 2026-07-11).
+   Detailed delivery status is in that file.
 4. `docs/PHILOSOPHY.md` — the principles you must not violate.
 5. `docs/SECURITY.md` — guardrails, especially for `harness/` edits.
    `harness/manifest.json` controls which hooks are active; adding or
@@ -45,7 +46,7 @@ Before you write code in this repo, read in this order:
     - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
     - Module-boundary models → ADR-0006 | `src/foundry_x/execution/` → ADR-0010
     - `src/foundry_x/evolution/` → ADR-0010 | `evolution/loop.py` → ADR-0010
-      - Run `ls docs/adr/` for the full current set (0001–0034); key decisions:
+      - Run `ls docs/adr/` for the full current set (0001–0035); key decisions:
         - Conventional Commits → ADR-0008
         - Security-eval benchmarks → ADR-0009
         - Manifest as evolver target → ADR-0012
@@ -56,6 +57,7 @@ Before you write code in this repo, read in this order:
         - Cross-session failure accumulator → ADR-0030
         - Security benchmark vectors → ADR-0031
         - Smoke DifficultyTier definition → ADR-0034
+        - Parallel issue-generation prompt → ADR-0035
         - Cloud model adapters → ADR-0029
 11. The relevant module under `src/foundry_x/`.
 
@@ -135,14 +137,15 @@ mirrors the way our product works:
   hygiene checks. See `.pre-commit-config.yaml`.
 - **Lint:** `uv run ruff check .` must pass before commit (also enforced
   by pre-commit). Always run before pytest. The `lint.yml` CI workflow
-  additionally runs `uv run ruff format --check` as a separate job; the
+  runs `ruff check .` *and* `ruff format --check` as separate jobs; the
   `ci.yml` lint+test job only runs `ruff check .`. Fix format locally
   with `uv run ruff format .` (run `--check` first, then `format .` if
   it fails — never let unformatted code reach PR review). Note `ruff`
   line-length is **100** here, not the default 88 (see `[tool.ruff]`
   in `pyproject.toml`); pre-commit's `ruff` hook auto-fixes with
   `--fix --exit-non-zero-on-fix`, so staged files get modified and must
-  be re-added.
+  be re-added. The lint job also runs `tests/docs/test_doc_links.py`
+  to catch broken cross-doc references.
 - **Test:** `uv run pytest` — must pass before commit. Run after lint.
   Pytest discovers both `tests/` and `benchmarks/` (see `testpaths` in
   `pyproject.toml`); benchmark tasks under `benchmarks/tasks/` are gated
@@ -211,7 +214,9 @@ mirrors the way our product works:
 - **Operational notes:**
   - `logs/` is gitignored but grows without bound. Manage retention
     with `uv run foundry-x-trace prune --keep-last N` or
-    `--older-than DAYS`; both support `--dry-run`.
+    `--older-than DAYS`; both support `--dry-run`. Add `--vacuum`
+    on a sqlite retention pass to reclaim the `traces.db-wal` sidecar
+    that heavy pruning otherwise grows unboundedly (issue #896).
   - End-to-end real-model benchmarks (launch llama-server, run the
     sandboxed agent, assert the trace store grew, tear down):
     `infra/scripts/run_benchmark.sh --task "..." [--model <gguf>]
@@ -220,6 +225,10 @@ mirrors the way our product works:
   - Trace backend: SQLite is default (`./logs/traces.db`, WAL mode);
     switch with `FOUNDRY_TRACE_BACKEND=jsonl` and a `.jsonl` path.
     Same schema either way (ADR-0003).
+  - Dependency audit: `pip-audit` runs weekly in CI (audit.yml) and on
+    every PR touching `pyproject.toml`, `uv.lock`, or any
+    `requirements*.txt`. Use `uvx --from "pip-audit==2.10.1" pip-audit`
+    locally (ADR-0002).
 - **Type discipline:** Python 3.11+ syntax. `pydantic` for all
   structured data at module boundaries (ADR-0006). No `Any` without
   a comment explaining why.
