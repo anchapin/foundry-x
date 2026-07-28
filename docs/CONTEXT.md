@@ -142,11 +142,19 @@ states), cross-module scope (four or more files across at least two
 distinct Python packages or module namespaces), non-trivial state management
 (state that spans multiple tool-call rounds and is not directly observable
 in a single file), and a deterministic pre/post-condition oracle.
-See ADR-0028 §2 for the full definition (status: Proposed).
+See ADR-0028 §2 for the full definition (status: Accepted).
 
-No tasks currently declare ``difficulty_tier="hard"``.  The tier exists
-in the schema to allow future hard-tier benchmarks to be added once
-ADR-0028 is Accepted and the implementation plan is complete.
+Two tasks currently declare ``difficulty_tier="hard"``:
+``test_debug_import_cycle`` (Archetype H1 — complex debugging across
+modules) and ``test_refactor_api_with_constraints`` (Archetype H2 —
+multi-file coordinated refactor with constraint), both with fixtures under
+``benchmarks/fixtures/hard/``.
+
+Because only two tasks populate the hard tier, operators should treat
+``--group-by difficulty_tier`` hard-slice metrics as having limited
+statistical power: ADR-0028 §Risk notes that N=2 is too small for
+reliable mean estimates, so hard-tier pass/fail rates are noisy until the
+tier is further populated.
 
 ## Event kinds
 
