@@ -71,6 +71,8 @@ DIGESTER_PY = REPO_ROOT / "src" / "foundry_x" / "evolution" / "digester.py"
 #   - Runner: ``server_unavailable`` (issue #899: ``FoundryServerManager``
 #     reported an unhealthy ``/health`` mid-session and triggered the
 #     supervisor's restart loop)
+#   - Runner via CloudModelAdapter: ``model_cost``, ``model_rate_limit``
+#     (issue #1179 / ADR-0029: cost + rate-limit trace events)
 KNOWN_KINDS: frozenset[str] = frozenset(
     {
         "context_pruned",
@@ -80,7 +82,9 @@ KNOWN_KINDS: frozenset[str] = frozenset(
         "firewall_exception",
         "hook_registry_error",
         "injection_blocked",
+        "model_cost",
         "model_error",
+        "model_rate_limit",
         "model_request",
         "model_response",
         "model_response_chunk",
@@ -217,6 +221,8 @@ def test_table_kind_names_are_snake_case():
 # kind without updating CONTEXT.md (or vice-versa), this test fails.
 #   kind -> relative path from repo root
 KIND_EMITTERS: dict[str, str] = {
+    "model_cost": "src/foundry_x/execution/runner.py",
+    "model_rate_limit": "src/foundry_x/execution/runner.py",
     "model_response_chunk": "src/foundry_x/execution/runner.py",
     "model_retry": "src/foundry_x/execution/runner.py",
     "token_usage_missing": "src/foundry_x/execution/runner.py",
