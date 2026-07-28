@@ -115,18 +115,12 @@ class _SqlitePruner:
         self._conn.execute("PRAGMA busy_timeout=30000")
 
     def count_tokens(self, session_id: str) -> int:
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            row = self._conn.execute(
-                "SELECT payload FROM events "
-                "WHERE session_id = ? AND kind = 'model_response' "
-                "ORDER BY timestamp DESC LIMIT 1",
-                (session_id,),
-            ).fetchone()
-            self._conn.execute("COMMIT")
-        except Exception:
-            self._conn.execute("ROLLBACK")
-            raise
+        row = self._conn.execute(
+            "SELECT payload FROM events "
+            "WHERE session_id = ? AND kind = 'model_response' "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
         if not row:
             return 0
         payload = json.loads(row[0])

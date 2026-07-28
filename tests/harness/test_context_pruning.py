@@ -1155,3 +1155,47 @@ def test_sqlite_pruner_concurrent_access_no_busy_errors(tmp_path) -> None:
         t.join()
 
     assert errors == [], f"Concurrent access raised errors: {errors}"
+
+
+def test_count_tokens_does_not_block_concurrent_prune(tmp_path) -> None:
+    """``count_tokens`` uses no explicit transaction (no BEGIN/COMMIT/ROLLBACK)
+    so it acquires only a DEFERRED (read-only) lock and does not block a
+    concurrent ``prune`` (which uses BEGIN IMMEDIATE = RESERVED lock).
+    Verified by patching sqlite3.connect to return a mock that records all
+    execute calls, then asserting no transaction statements are issued for
+    the read-only path (issue #1283)."""
+    import sqlite3
+    from unittest.mock import MagicMock, patch
+
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as sid:
+        _plant(logger, sid, 50)
+
+    executed: list[str] = []
+    mock_conn = MagicMock(spec=sqlite3.Connection)
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = None
+    mock_conn.execute.return_value = mock_cursor
+    mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+    mock_conn.__exit__ = MagicMock(return_value=False)
+
+    def make_mock_connect(path, **kwargs):
+        return mock_conn
+
+    with patch("sqlite3.connect", side_effect=make_mock_connect):
+        pruner = _SqlitePruner(db)
+        try:
+            pruner.count_tokens(sid)
+            pruner.count_tokens("unknown-session")
+        finally:
+            pruner.close()
+
+    executed = [str(call_args[0][0]) for call_args in mock_conn.execute.call_args_list]
+    tx_statements = [
+        s.strip() for s in executed if s.strip().upper().startswith(("BEGIN", "COMMIT", "ROLLBACK"))
+    ]
+    assert tx_statements == [], (
+        f"count_tokens issued transaction statements: {tx_statements} — "
+        "it should use a deferred read with no explicit transaction (issue #1283)"
+    )
