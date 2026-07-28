@@ -32,6 +32,15 @@ DEFAULT_SMOKE_BENCHMARK_TAGS: list[str] = ["smoke"]
 #: (issue #1042). Comma-separated tag values, e.g. ``"smoke,core"``.
 _SMOKE_BENCHMARK_TAGS_ENV = "FOUNDRY_SMOKE_BENCHMARK_TAGS"
 
+#: Env var name for runtime configuration of the gate timeout (issue #1172).
+#: When ``Critic.__init__`` receives ``gate_timeout_s=None`` (the default),
+#: the value is resolved from this env var so operators can set an escape-hatch
+#: timeout without a code change.  A positive float bounds every subprocess
+#: spawned inside ``evaluate()`` so a hanging child cannot inflate
+#: ``kpi-cycle-time`` to infinity.  ``None`` preserves the historical
+#: unbounded behaviour.
+_GATE_TIMEOUT_S_ENV = "FOUNDRY_GATE_TIMEOUT_S"
+
 _NOTES_TAIL_CHARS = 4000
 
 #: GGUF v3 quantization types studied in ADR-0020 (K-quants and legacy
@@ -156,6 +165,31 @@ def _resolve_smoke_tags(explicit: list[str] | None) -> list[str]:
         if tags:
             return list(dict.fromkeys(tags))
     return list(DEFAULT_SMOKE_BENCHMARK_TAGS)
+
+
+def _resolve_gate_timeout(explicit: float | None) -> float | None:
+    """Resolve the gate timeout (issue #1172).
+
+    Resolution order: an explicit constructor argument wins; otherwise the
+    ``FOUNDRY_GATE_TIMEOUT_S`` env var is parsed as a float; otherwise
+    ``None`` (unbounded) is returned, preserving the historical behaviour.
+
+    ``None`` is returned when the env var is absent, empty, or not a valid
+    positive float, so that an operator can unset the env var to restore the
+    default unbounded behaviour without editing code.
+    """
+    if explicit is not None:
+        return explicit
+    raw = os.environ.get(_GATE_TIMEOUT_S_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return value
 
 
 def _scan_diff_for_injection(diff: str) -> list[str]:
@@ -361,9 +395,12 @@ class Critic:
         # historical unbounded behaviour; a positive float bounds git apply,
         # load_check, and pytest so a hanging child cannot inflate
         # ``kpi-cycle-time`` to infinity.
-        if gate_timeout_s is not None and gate_timeout_s <= 0:
+        # Resolution order: explicit constructor argument →
+        # ``FOUNDRY_GATE_TIMEOUT_S`` env var → ``None`` (issue #1172).
+        resolved_gate_timeout = _resolve_gate_timeout(gate_timeout_s)
+        if resolved_gate_timeout is not None and resolved_gate_timeout <= 0:
             raise ValueError("gate_timeout_s must be > 0 or None")
-        self.gate_timeout_s = gate_timeout_s
+        self.gate_timeout_s = resolved_gate_timeout
         # Two-tier gate (issue #1042): the fast-reject ("smoke") tier runs a
         # configurable subset of benchmark tasks before the full suite. The
         # subset is selected by intersecting each task's ``tags`` with
