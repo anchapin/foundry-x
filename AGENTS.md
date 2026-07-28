@@ -18,7 +18,8 @@ Before you write code in this repo, read in this order:
 
 1. `README.md` — what this is.
 2. `docs/PRD.md` — product requirements and KPIs.
-3. `docs/ROADMAP.md` — current phase and milestones.
+3. `docs/ROADMAP.md` — all three phases shipped (929b327, 2026-07-11).
+   Detailed delivery status is in that file.
 4. `docs/PHILOSOPHY.md` — the principles you must not violate.
 5. `docs/SECURITY.md` — guardrails, especially for `harness/` edits.
    `harness/manifest.json` controls which hooks are active; adding or
@@ -33,30 +34,37 @@ Before you write code in this repo, read in this order:
    TraceLogger, Digester, Evolver, Critic and how they connect).
 8. `docs/OPERATOR.md` — human-side workflow that mirrors the agent
    loop in §3 below.
-9. `docs/MODEL_CONFIG.md` — the full set of model-side env vars
+ 9. `docs/MODEL_CONFIG.md` — the full set of model-side env vars
    (`OPENCODE_SERVER_URL`, `FOUNDRY_TOKEN_BUDGET`, `FOUNDRY_TASK_TIMEOUT`,
    `FOUNDRY_MAX_EVENTS_PER_SESSION`, `FOUNDRY_REQUEST_TIMEOUT_S`, …) and the
    resolution order. Three resource caps guard against runaway loops:
    `FOUNDRY_TASK_TIMEOUT` (wall-clock, default 600 s),
    `FOUNDRY_TOKEN_BUDGET` (total tokens, unset), and
    `FOUNDRY_MAX_EVENTS_PER_SESSION` (event count, unset).
+   Key derived caps: `FOUNDRY_CONTEXT_TOKENS` (set to a positive int to
+   switch from event-count pruning to token-aware pruning — see ADR-0021).
+   `FOUNDRY_SMOKE_BENCHMARK_TAGS` (comma-separated, default `smoke`) selects
+   the fast-reject benchmark subset for rapid iteration.
+   `FOUNDRY_GATE_TIMEOUT_S` (float, default unbounded) bounds every Critic
+   subprocess so a hanging child cannot inflate cycle-time KPIs.
 10. `docs/adr/` — read the relevant ADR before changing that area:
     - `harness/` → ADR-0004 | `pyproject.toml` / deps → ADR-0002
     - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
     - Module-boundary models → ADR-0006 | `src/foundry_x/execution/` → ADR-0010
     - `src/foundry_x/evolution/` → ADR-0010 | `evolution/loop.py` → ADR-0010
-      - Run `ls docs/adr/` for the full current set (0001–0034); key decisions:
-        - Conventional Commits → ADR-0008
-        - Security-eval benchmarks → ADR-0009
-        - Manifest as evolver target → ADR-0012
-        - Model abstraction → ADR-0014 (ADR-0015 merged into it)
-        - Review state machine → ADR-0017
-        - Context pruning at scale → ADR-0021
-        - External eval validation study → ADR-0023
-        - Cross-session failure accumulator → ADR-0030
-        - Security benchmark vectors → ADR-0031
-        - Smoke DifficultyTier definition → ADR-0034
-        - Cloud model adapters → ADR-0029
+      - Run `ls docs/adr/` for the full current set (0001–0035); key decisions recently added:
+         - ADR-0035 (parallel issue-generation prompt)
+         - ADR-0034 (Smoke DifficultyTier definition)
+         - ADR-0031 (security benchmark vectors)
+         - ADR-0030 (cross-session failure accumulator)
+         - ADR-0029 (cloud model adapters)
+         - Conventional Commits → ADR-0008
+         - Security-eval benchmarks → ADR-0009
+         - Manifest as evolver target → ADR-0012
+         - Model abstraction → ADR-0014 (ADR-0015 merged into it)
+         - Review state machine → ADR-0017
+         - Context pruning at scale → ADR-0021
+         - External eval validation study → ADR-0023
 11. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
@@ -82,6 +90,9 @@ and ask the human.
   `foundry-evolve evolve --no-verify` skips the gate locally and records
   a synthetic "skipped" `CriticVerdict` (documented in SECURITY.md) — it
   cannot ship a harness edit to `main`.
+  **Early-exit:** diffs touching only `docs/`, `.pre-commit-config.yaml`,
+  or `pyproject.toml` skip the benchmark suite (they are not critical to
+  benchmark outcomes); all other changes run the full gate.
 - **Never run destructive commands** (`rm -rf`, `git reset --hard`,
   force-push to a branch other than your own throwaway, dropping a
   database) without an explicit rollback path stated in the response.
@@ -135,14 +146,15 @@ mirrors the way our product works:
   hygiene checks. See `.pre-commit-config.yaml`.
 - **Lint:** `uv run ruff check .` must pass before commit (also enforced
   by pre-commit). Always run before pytest. The `lint.yml` CI workflow
-  additionally runs `uv run ruff format --check` as a separate job; the
+  runs `ruff check .` *and* `ruff format --check` as separate jobs; the
   `ci.yml` lint+test job only runs `ruff check .`. Fix format locally
   with `uv run ruff format .` (run `--check` first, then `format .` if
   it fails — never let unformatted code reach PR review). Note `ruff`
   line-length is **100** here, not the default 88 (see `[tool.ruff]`
   in `pyproject.toml`); pre-commit's `ruff` hook auto-fixes with
   `--fix --exit-non-zero-on-fix`, so staged files get modified and must
-  be re-added.
+  be re-added. The lint job also runs `tests/docs/test_doc_links.py`
+  to catch broken cross-doc references.
 - **Test:** `uv run pytest` — must pass before commit. Run after lint.
   Pytest discovers both `tests/` and `benchmarks/` (see `testpaths` in
   `pyproject.toml`); benchmark tasks under `benchmarks/tasks/` are gated
@@ -211,7 +223,9 @@ mirrors the way our product works:
 - **Operational notes:**
   - `logs/` is gitignored but grows without bound. Manage retention
     with `uv run foundry-x-trace prune --keep-last N` or
-    `--older-than DAYS`; both support `--dry-run`.
+    `--older-than DAYS`; both support `--dry-run`. Add `--vacuum`
+    on a sqlite retention pass to reclaim the `traces.db-wal` sidecar
+    that heavy pruning otherwise grows unboundedly (issue #896).
   - End-to-end real-model benchmarks (launch llama-server, run the
     sandboxed agent, assert the trace store grew, tear down):
     `infra/scripts/run_benchmark.sh --task "..." [--model <gguf>]
@@ -220,6 +234,10 @@ mirrors the way our product works:
   - Trace backend: SQLite is default (`./logs/traces.db`, WAL mode);
     switch with `FOUNDRY_TRACE_BACKEND=jsonl` and a `.jsonl` path.
     Same schema either way (ADR-0003).
+  - Dependency audit: `pip-audit` runs weekly in CI (audit.yml) and on
+    every PR touching `pyproject.toml`, `uv.lock`, or any
+    `requirements*.txt`. Use `uvx --from "pip-audit==2.10.1" pip-audit`
+    locally (ADR-0002).
 - **Type discipline:** Python 3.11+ syntax. `pydantic` for all
   structured data at module boundaries (ADR-0006). No `Any` without
   a comment explaining why.
