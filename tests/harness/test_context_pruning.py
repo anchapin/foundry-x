@@ -426,11 +426,13 @@ def test_token_aware_prunes_when_over_token_threshold(tmp_path) -> None:
         "dropped": expected_dropped,
         "threshold_tokens": 1000,
         "session_tokens": 3000,
+        "event_threshold": DEFAULT_THRESHOLD,
     }
     assert captured[0]["payload"] == {
         "dropped": expected_dropped,
         "threshold_tokens": 1000,
         "session_tokens": 3000,
+        "event_threshold": DEFAULT_THRESHOLD,
     }
 
 

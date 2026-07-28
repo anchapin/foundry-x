@@ -452,6 +452,7 @@ class TokenAwarePruningHook:
                     "dropped": dropped,
                     "threshold_tokens": self._token_threshold,
                     "session_tokens": session_tokens,
+                    "event_threshold": self._event_threshold,
                 },
             )
             _log.info(
