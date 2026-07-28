@@ -488,7 +488,9 @@ def main(argv: list[str] | None = None) -> int:
             fmt = "json"
         if fmt is None:
             fmt = "markdown"
-        rendered = render_failure_report_json(report) if fmt == "json" else render_failure_report(report)
+        rendered = (
+            render_failure_report_json(report) if fmt == "json" else render_failure_report(report)
+        )
         if args.out:
             Path(args.out).write_text(rendered, encoding="utf-8")
         else:
