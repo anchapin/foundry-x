@@ -345,7 +345,10 @@ def resolve_context_tokens_threshold(env: dict[str, str] | None = None) -> int |
     raw = source.get(_CONTEXT_TOKENS_ENV, "").strip()
     if not raw:
         return None
-    return int(raw)
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 class TokenAwarePruningHook:

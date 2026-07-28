@@ -982,11 +982,10 @@ def test_resolve_context_tokens_threshold_parses_int_correctly(monkeypatch) -> N
     assert resolve_context_tokens_threshold() == 16384
 
 
-def test_resolve_context_tokens_threshold_rejects_non_digit(monkeypatch) -> None:
-    """Non-numeric FOUNDRY_CONTEXT_TOKENS must raise ValueError."""
+def test_resolve_context_tokens_threshold_returns_none_on_misconfigured_value(monkeypatch) -> None:
+    """Misconfigured FOUNDRY_CONTEXT_TOKENS (non-digit) must return None."""
     monkeypatch.setenv("FOUNDRY_CONTEXT_TOKENS", "not_a_number")
-    with pytest.raises(ValueError, match="invalid literal"):
-        resolve_context_tokens_threshold()
+    assert resolve_context_tokens_threshold() is None
 
 
 def test_token_aware_pruning_at_5600g_6600xt_context_window(tmp_path) -> None:
