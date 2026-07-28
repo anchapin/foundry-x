@@ -1230,8 +1230,7 @@ def _verdict_rates(
         if task_metadata is not None:
             all_tasks = set(record.passed_checks) | set(record.failed_checks)
             has_non_smoke = any(
-                task_metadata.get(t) is not None
-                and task_metadata[t].difficulty_tier != "smoke"
+                task_metadata.get(t) is not None and task_metadata[t].difficulty_tier != "smoke"
                 for t in all_tasks
             )
             has_smoke_failed = any(
@@ -1257,7 +1256,6 @@ def _verdict_rates(
         len(regression_sessions) / len(sessions_with_verdicts) if sessions_with_verdicts else 0.0
     )
     return regression_rate, improvement_rate
-
 
 
 def _groups_for_task(meta: TaskKpiMetadata, group_by: GroupByDim) -> set[str]:
@@ -1329,8 +1327,7 @@ def _slice_verdict_rates(
 
         all_tasks = set(record.passed_checks) | set(record.failed_checks)
         has_non_smoke = any(
-            task_metadata.get(t) is not None
-            and task_metadata[t].difficulty_tier != "smoke"
+            task_metadata.get(t) is not None and task_metadata[t].difficulty_tier != "smoke"
             for t in all_tasks
         )
 
