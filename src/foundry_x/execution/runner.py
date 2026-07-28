@@ -1760,23 +1760,22 @@ async def run_task(
             if isinstance(hook, WebFetchHook) and hook._tracer is None:
                 hook._tracer = _fetch_tracer
 
-    # Token-aware pruning (issue #465): when FOUNDRY_CONTEXT_TOKENS is set,
-    # register TokenAwarePruningHook so the runner's accumulated tokens_used
-    # drives pruning decisions instead of raw event count. The get_tokens
-    # closure captures tokens_used by reference so the hook reads the current
-    # value on every pre_tool call.
+    # Context pruning: when FOUNDRY_CONTEXT_TOKENS is set, register
+    # TokenAwarePruningHook so the runner's accumulated tokens_used drives
+    # pruning decisions (issue #465). When it is absent/empty, fall back to
+    # event-count ContextPruningHook so event-count pruning is never dead code
+    # in production (issue #1160). Both paths share a tracer and pruner.
+    def _tracer(sid: str, kind: str, payload: dict[str, object]) -> None:
+        log.record(sid, kind=kind, payload=payload)
+
+    from harness.hooks.context_pruning import _SqlitePruner
+
+    _pruner = _SqlitePruner(log.path)
     context_tokens_threshold = os.environ.get("FOUNDRY_CONTEXT_TOKENS", "").strip()
     if context_tokens_threshold:
         _token_threshold = int(context_tokens_threshold)
-        from harness.hooks.context_pruning import (
-            _SqlitePruner,
-            register_token_aware_into,
-        )
+        from harness.hooks.context_pruning import register_token_aware_into
 
-        def _tracer(sid: str, kind: str, payload: dict[str, object]) -> None:
-            log.record(sid, kind=kind, payload=payload)
-
-        _pruner = _SqlitePruner(log.path)
         register_token_aware_into(
             registry,
             session_id=session_id,
@@ -1785,6 +1784,36 @@ async def run_task(
             tracer=_tracer,
             get_tokens=_pruner.count_tokens,
         )
+    else:
+        from harness.hooks.context_pruning import (
+            DEFAULT_THRESHOLD,
+            DEFAULT_TOKEN_THRESHOLD,
+            register_into,
+        )
+
+        _event_threshold = DEFAULT_THRESHOLD
+        _token_thresh = DEFAULT_TOKEN_THRESHOLD
+        try:
+            _manifest_path = harness_dir / "manifest.json"
+            if _manifest_path.is_file():
+                _manifest = json.loads(_manifest_path.read_text(encoding="utf-8"))
+                _cp = _manifest.get("context_pruning", {})
+                if "event_threshold" in _cp:
+                    _event_threshold = int(_cp["event_threshold"])
+                if "token_threshold" in _cp:
+                    _token_thresh = int(_cp["token_threshold"])
+        except (json.JSONDecodeError, OSError):
+            pass
+
+        if registry is not None and hasattr(registry, "register"):
+            register_into(
+                registry,
+                session_id=session_id,
+                threshold=_event_threshold,
+                token_threshold=_token_thresh,
+                pruner=_pruner.prune,
+                tracer=_tracer,
+            )
 
     resolved_workspace_root = (
         workspace_root if workspace_root is not None else _resolve_workspace_root()
