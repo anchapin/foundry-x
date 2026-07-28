@@ -1012,39 +1012,6 @@ class Critic:
         The verdict's ``approved`` flag is ``True`` only when every check that
         runs succeeds. All filesystem mutations are confined to the temp copy.
         """
-        """Apply ``proposed_diff`` to a sandbox copy of the harness and gate it.
-
-        Steps (ADR-0004):
-
-        1. Copy ``harness_dir`` into a fresh ``TemporaryDirectory``.
-        2. Enforce the diff-size cap (``max_diff_lines``). An oversized diff
-           is rejected immediately (``failed_checks=["diff_size_cap"]``).
-        3. Scan the diff for prompt-injection markers (SECURITY.md Threat #2).
-           A diff carrying ``ignore previous instructions``-style phrases or
-           role-tag sequences is rejected immediately
-           (``failed_checks=["injection_detected"]``).
-        4. Apply ``proposed_diff`` via ``git apply``. A patch that does not
-           apply cleanly is rejected immediately (``failed_checks=["git apply"]``).
-        5. Run ``harness/scripts/load_check.py`` against the sandbox copy
-           (issue #187). A harness that fails to load -- broken
-           ``skills/*.json``, an unimportable hook, an empty system prompt
-           -- is rejected *before* pytest is spawned, so the verdict names
-           the precondition (``failed_checks=["load_check"]``) rather than
-           a confusing downstream pytest error.
-        6. Run pytest with ``self.pytest_args`` in the sandbox.
-
-        Every subprocess inside this method is bounded by
-        ``self.gate_timeout_s`` (issue #188). On
-        :class:`subprocess.TimeoutExpired` the verdict is
-        ``approved=False`` with ``failed_checks`` carrying the offending check
-        name suffixed ``":timeout"`` (e.g. ``"pytest:timeout"``), and
-        ``notes`` holds the trailing window of any partial output the
-        process managed to write before being killed — or a wall-clock-cap
-        message when no partial output was captured.
-
-        The verdict's ``approved`` flag is ``True`` only when every check that
-        runs succeeds. All filesystem mutations are confined to the temp copy.
-        """
         with tempfile.TemporaryDirectory(prefix="critic-sandbox-") as sandbox:
             sandbox_root = Path(sandbox) / "harness"
             shutil.copytree(self.harness_dir, sandbox_root)
