@@ -93,6 +93,7 @@ def _get_trace_db(args: argparse.Namespace) -> str:
         return args.db
     return args.trace_db
 
+
 TASK_ABORTED_KIND = "task_aborted"
 TOKEN_BUDGET_REASON = "token_budget"
 # Issue #869: the runner emits ``task_aborted(reason="event_limit")`` when the
