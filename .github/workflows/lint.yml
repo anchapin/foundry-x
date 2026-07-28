@@ -29,6 +29,27 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check
 
+  ci-gate-claims:
+    name: ci-gate-claims
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install uv (hash-verified)
+        uses: ./.github/actions/install-uv
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      - name: CI gate claims
+        run: uv run pytest tests/docs/test_ci_gate_claims.py -v
+
   docs-link:
     name: docs-link-integrity
     runs-on: ubuntu-latest
