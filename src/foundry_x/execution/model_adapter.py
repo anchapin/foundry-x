@@ -819,6 +819,9 @@ class CloudModelAdapter(ABC):
                 await asyncio.sleep(backoff_ms / 1000)
                 continue
 
+            # Phase 2 — stream the body.  Mid-stream failures are NOT retried;
+            # issue #200 / #1164 explicitly exclude partially-received SSE from the
+            # retry boundary so that CloudModelAdapter matches OpenAICompatibleAdapter.
             try:
                 last_headers = response.headers
                 async for chunk_data in self._iter_provider_stream(response):

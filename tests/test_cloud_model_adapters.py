@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 
 import httpx
 import pytest
@@ -460,6 +461,118 @@ def test_cloud_model_adapter_is_abstract():
             base_url="https://example.com",
             api_key="x",
         )
+
+
+async def _no_sleep(_seconds: float) -> None:
+    """No-op replacement for ``asyncio.sleep`` in retry tests."""
+
+
+class _FailingLinesResponse(httpx.Response):
+    """Response whose ``aiter_lines()`` yields partial SSE then raises."""
+
+    def __init__(self, *args: object, fail_after: int = 1, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._fail_after = fail_after
+
+    async def aiter_lines(self) -> AsyncIterator[str]:  # type: ignore[override]
+        n = 0
+        async for line in super().aiter_lines():  # type: ignore[misc]
+            yield line
+            n += 1
+            if n >= self._fail_after:
+                raise OSError("simulated mid-stream connection drop")
+
+
+# ---------------------------------------------------------------------------
+# Mid-stream retry boundary — issue #200 / #1164
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_does_not_retry_mid_stream_failure(monkeypatch):
+    """Connection errors are retried; mid-stream errors are NOT retried.
+
+    This mirrors the OpenAICompatibleAdapter contract from issue #200.
+    Verifies that after a successful connection + 200 response, an error
+    during SSE iteration propagates immediately without triggering a retry.
+    """
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+    retries: list[object] = []
+
+    def handler(request: httpx.Request) -> _FailingLinesResponse:
+        calls["count"] += 1
+        return _FailingLinesResponse(
+            200,
+            content=(
+                "event: content_block_delta\n"
+                'data: {"type":"content_block_delta",'
+                '"delta":{"type":"text_delta","text":"Hi"}}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+            fail_after=1,  # fail on the second line
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        with pytest.raises(OSError, match="simulated mid-stream"):
+            async for _chunk in adapter.stream(messages=[{"role": "user", "content": "hi"}]):
+                pass
+
+    assert calls["count"] == 1, "handler should only be called once (no mid-stream retry)"
+    assert retries == [], "no retry events for mid-stream failure"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_retries_connection_failure(monkeypatch):
+    """Connection-establishment errors ARE retried (issue #200 / #1164)."""
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+    retries: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            return httpx.Response(503, text="unavailable")
+        return httpx.Response(
+            200,
+            content=(
+                "event: message_start\n"
+                'data: {"type":"message_start","message":{"usage":{"input_tokens":5}}}\n\n'
+                "event: content_block_delta\n"
+                'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}\n\n'
+                "event: message_stop\n"
+                'data: {"type":"message_stop"}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        chunks = []
+        async for chunk in adapter.stream(messages=[{"role": "user", "content": "hi"}]):
+            chunks.append(chunk)
+
+    assert calls["count"] == 3, "503 should be retried twice then succeed"
+    assert len(retries) == 2
+    contents = [c.content for c in chunks if c.content]
+    assert contents == ["Hi"]
 
 
 def test_unknown_model_pricing_returns_zero():
