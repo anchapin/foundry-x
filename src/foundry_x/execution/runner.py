@@ -1791,6 +1791,7 @@ async def run_task(
 
         def _tracer(sid: str, kind: str, payload: dict[str, object]) -> None:
             log.record(sid, kind=kind, payload=payload)
+
         register_token_aware_into(
             registry,
             session_id=session_id,
