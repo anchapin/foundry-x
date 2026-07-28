@@ -26,6 +26,7 @@ from foundry_x.execution.model_adapter import (
     ModelCostEvent,
     ModelRateLimitInfo,
     ModelRetryEvent,
+    OpenAICompatibleAdapter,
     OpenAINativeAdapter,
     resolve_model_adapter,
 )
@@ -499,6 +500,65 @@ async def test_build_model_adapter_with_overrides_routes_openai():
         assert adapter.base_url == "https://api.openai.com"
     finally:
         await adapter.aclose()
+
+
+def test_resolve_model_adapter_env_override_compatible(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_ADAPTER", "OpenAICompatibleAdapter")
+    adapter = resolve_model_adapter(
+        "anthropic/claude-3-5-sonnet-20241022",
+        api_key="test",
+        base_url="http://localhost:8080",
+    )
+    try:
+        assert isinstance(adapter, OpenAICompatibleAdapter)
+        assert adapter.model == "anthropic/claude-3-5-sonnet-20241022"
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_resolve_model_adapter_env_override_unknown(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_ADAPTER", "NonExistentAdapter")
+    with pytest.raises(ValueError, match="Unknown FOUNDRY_MODEL_ADAPTER"):
+        resolve_model_adapter("test-model", api_key="test")
+
+
+def test_resolve_model_adapter_env_override_compatible_requires_base_url(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_ADAPTER", "OpenAICompatibleAdapter")
+    with pytest.raises(ValueError, match="base_url"):
+        resolve_model_adapter("anthropic/claude-3-5-sonnet-20241022", api_key="test")
+
+
+def test_resolve_model_adapter_env_override_anthropic(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_ADAPTER", "AnthropicAdapter")
+    adapter = resolve_model_adapter(
+        "anthropic/claude-3-5-sonnet-20241022",
+        api_key="sk-ant-test",
+        base_url="https://api.anthropic.com",
+    )
+    try:
+        assert isinstance(adapter, AnthropicAdapter)
+        assert adapter.model == "claude-3-5-sonnet-20241022"
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_resolve_model_adapter_env_override_openai(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_ADAPTER", "OpenAINativeAdapter")
+    adapter = resolve_model_adapter(
+        "openai/gpt-4o-mini",
+        api_key="sk-openai-test",
+    )
+    try:
+        assert isinstance(adapter, OpenAINativeAdapter)
+        assert adapter.model == "gpt-4o-mini"
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
 
 
 # ---------------------------------------------------------------------------
