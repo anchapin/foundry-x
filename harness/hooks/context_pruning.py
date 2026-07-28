@@ -111,44 +111,59 @@ class _SqlitePruner:
     def __init__(self, db_path: str | os.PathLike) -> None:
         self._conn = sqlite3.connect(db_path)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=30000")
 
     def count_tokens(self, session_id: str) -> int:
-        row = self._conn.execute(
-            "SELECT payload FROM events "
-            "WHERE session_id = ? AND kind = 'model_response' "
-            "ORDER BY timestamp DESC LIMIT 1",
-            (session_id,),
-        ).fetchone()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._conn.execute(
+                "SELECT payload FROM events "
+                "WHERE session_id = ? AND kind = 'model_response' "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
         if not row:
             return 0
         payload = json.loads(row[0])
         return payload.get("tokens_used", 0)
 
     def prune(self, session_id: str, keep_kinds: frozenset[str], target_count: int) -> int:
-        not_in_clause = ", ".join("?" for _ in keep_kinds)
-        total = self._conn.execute(
-            "SELECT COUNT(*) FROM events WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()[0]
-        if total <= target_count:
-            return 0
-        to_drop = total - target_count
-        params: list[object] = [session_id, *keep_kinds, to_drop]
-        cursor = self._conn.execute(
-            "SELECT event_id FROM events "
-            "WHERE session_id = ? AND kind NOT IN (" + not_in_clause + ") "
-            "ORDER BY timestamp LIMIT ?",
-            params,
-        )
-        ids = [row[0] for row in cursor.fetchall()]
-        if not ids:
-            return 0
-        placeholders = ", ".join("?" for _ in ids)
-        self._conn.execute(
-            "DELETE FROM events WHERE event_id IN (" + placeholders + ")",
-            ids,
-        )
-        return len(ids)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            not_in_clause = ", ".join("?" for _ in keep_kinds)
+            total = self._conn.execute(
+                "SELECT COUNT(*) FROM events WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()[0]
+            if total <= target_count:
+                self._conn.execute("ROLLBACK")
+                return 0
+            to_drop = total - target_count
+            params: list[object] = [session_id, *keep_kinds, to_drop]
+            cursor = self._conn.execute(
+                "SELECT event_id FROM events "
+                "WHERE session_id = ? AND kind NOT IN (" + not_in_clause + ") "
+                "ORDER BY timestamp LIMIT ?",
+                params,
+            )
+            ids = [row[0] for row in cursor.fetchall()]
+            if not ids:
+                self._conn.execute("COMMIT")
+                return 0
+            placeholders = ", ".join("?" for _ in ids)
+            self._conn.execute(
+                "DELETE FROM events WHERE event_id IN (" + placeholders + ")",
+                ids,
+            )
+            self._conn.execute("COMMIT")
+            return len(ids)
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
 
     def close(self) -> None:
         self._conn.close()
