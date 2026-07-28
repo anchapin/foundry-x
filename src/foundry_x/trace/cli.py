@@ -5,6 +5,7 @@ import difflib
 import json
 import re
 import sys
+import warnings
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,18 @@ from foundry_x.evolution.digester import Digester
 from foundry_x.observability.render import render_failure_report
 from foundry_x.observability.timeline import format_timeline
 from foundry_x.trace.logger import TraceEvent, TraceLogger, TraceSession
+
+
+def _get_trace_db(args: argparse.Namespace) -> str:
+    """Return the trace-db path, emitting a deprecation warning if --db was used."""
+    if getattr(args, "db", None) is not None:
+        warnings.warn(
+            "--db is deprecated; use --trace-db instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return args.db
+    return args.trace_db
 
 
 def _render_failure(args: argparse.Namespace) -> int:
@@ -41,7 +54,7 @@ def _format_session_row(session: TraceSession) -> str:
 
 
 def _sessions(args: argparse.Namespace) -> int:
-    logger = TraceLogger(args.db)
+    logger = TraceLogger(_get_trace_db(args))
     sessions = logger.list_sessions()
     if not sessions:
         sys.stdout.write("No sessions found.\n")
@@ -53,7 +66,7 @@ def _sessions(args: argparse.Namespace) -> int:
 
 
 def _show(args: argparse.Namespace) -> int:
-    logger = TraceLogger(args.db)
+    logger = TraceLogger(_get_trace_db(args))
     events = logger.load_session(args.session_id)
     if not events:
         sys.stderr.write(f"No events found for session {args.session_id}.\n")
@@ -75,7 +88,7 @@ def _serialize_event(event: TraceEvent) -> dict[str, object]:
 
 
 def _export(args: argparse.Namespace) -> int:
-    logger = TraceLogger(args.db)
+    logger = TraceLogger(_get_trace_db(args))
     events = logger.load_session(args.session_id)
     lines = [json.dumps(_serialize_event(event)) for event in events]
     output = "\n".join(lines)
@@ -115,7 +128,7 @@ def _session_list(args: argparse.Namespace) -> int:
     harness build; ``--limit`` truncates after N rows. The command exits 0
     even when the database is empty so it composes cleanly in shell pipes.
     """
-    logger = TraceLogger(args.db)
+    logger = TraceLogger(_get_trace_db(args))
     sessions = logger.list_sessions()
     if args.harness_version is not None:
         sessions = [s for s in sessions if s.harness_version == args.harness_version]
@@ -135,7 +148,7 @@ def _session_show(args: argparse.Namespace) -> int:
     unknown session returns exit code 1 with a message on stderr,
     mirroring ``_show`` and the grep convention.
     """
-    logger = TraceLogger(args.db)
+    logger = TraceLogger(_get_trace_db(args))
     events = logger.load_session(args.session_id)
     if not events:
         sys.stderr.write(f"No events found for session {args.session_id}.\n")
@@ -158,7 +171,7 @@ def _events_grep(args: argparse.Namespace) -> int:
     logging the parse error to stderr per the 'never silently swallow
     exceptions' rule in AGENTS.md.
     """
-    logger = TraceLogger(args.db)
+    logger = TraceLogger(_get_trace_db(args))
     events = logger.load_session(args.session_id)
     if not events:
         sys.stderr.write(f"No events found for session {args.session_id}.\n")
@@ -220,7 +233,7 @@ def _redact_session(args: argparse.Namespace) -> int:
     ``--dry-run`` (issue #1122) prints what would be removed without
     calling ``delete_session``.
     """
-    logger = _logger_for(args.db)
+    logger = _logger_for(_get_trace_db(args))
     count = len(logger.load_session(args.session_id))
     if getattr(args, "dry_run", False):
         sessions = logger.list_sessions()
@@ -257,7 +270,7 @@ def _redact_key(args: argparse.Namespace) -> int:
     out-of-range index returns exit code 1 immediately so a stale index
     never silently rewrites the wrong row.
     """
-    logger = _logger_for(args.db)
+    logger = _logger_for(_get_trace_db(args))
     ok = logger.redact_event(args.session_id, args.event_index, args.key)
     if not ok:
         sys.stderr.write(
@@ -298,7 +311,7 @@ def _delete_session(args: argparse.Namespace) -> int:
     ``--dry-run`` (issue #1122) prints what would be removed without
     calling ``delete_session``.
     """
-    logger = _logger_for(args.db)
+    logger = _logger_for(_get_trace_db(args))
     count = len(logger.load_session(args.session_id))
     if getattr(args, "dry_run", False):
         sessions = logger.list_sessions()
@@ -338,7 +351,7 @@ def _prune(args: argparse.Namespace) -> int:
     ``-wal`` sidecar grows unboundedly across pruning cycles. The flag
     is a no-op on the jsonl backend.
     """
-    logger = _logger_for(args.db)
+    logger = _logger_for(_get_trace_db(args))
     sessions = list(logger.list_sessions())
 
     if args.keep_last is not None and args.older_than is not None:
@@ -395,7 +408,7 @@ def _compact(args: argparse.Namespace) -> int:
     ``--dry-run`` reports what would be removed without touching the file.
     Only works on the JSONL backend; exits 0 on sqlite with a no-op message.
     """
-    logger = _logger_for(args.db)
+    logger = _logger_for(_get_trace_db(args))
 
     if logger.backend != "jsonl":
         sys.stdout.write("compact: jsonl backend required; sqlite VACUUM is automatic.\n")
@@ -497,7 +510,7 @@ def _seed_sample_trace(args: argparse.Namespace) -> int:
     tokens, keys, or PEM blocks — per the redaction contract in
     ``docs/SECURITY.md`` §Secrets.
     """
-    db_path = Path(args.db)
+    db_path = Path(_get_trace_db(args))
     db_path.parent.mkdir(parents=True, exist_ok=True)
     backend = "jsonl" if db_path.suffix.lower() != _SQLITE_SUFFIX else "sqlite"
     logger = TraceLogger(db_path, backend=backend)
@@ -587,11 +600,11 @@ def _info(args: argparse.Namespace) -> int:
     Prints WAL size, DB size, and session count for operators to detect
     WAL bloat before it becomes problematic.
     """
-    logger = _logger_for(args.db)
+    logger = _logger_for(_get_trace_db(args))
     sessions = list(logger.list_sessions())
 
     if logger.backend == "sqlite":
-        db_path = Path(args.db)
+        db_path = Path(_get_trace_db(args))
         wal_path = db_path.with_suffix(db_path.suffix + "-wal")
         wal_size = wal_path.stat().st_size if wal_path.exists() else 0
         db_size = db_path.stat().st_size if db_path.exists() else 0
@@ -608,7 +621,7 @@ def _info(args: argparse.Namespace) -> int:
                 f"Run `foundry-trace prune --vacuum` to reclaim WAL space.\n"
             )
     else:
-        db_path = Path(args.db)
+        db_path = Path(_get_trace_db(args))
         db_size = db_path.stat().st_size if db_path.exists() else 0
         session_count = len(sessions)
 
@@ -775,7 +788,7 @@ def _diagnose(args: argparse.Namespace) -> int:
     error message (acceptance criterion). Works on both sqlite and
     jsonl backends via :func:`_logger_for`.
     """
-    logger = _logger_for(args.db)
+    logger = _logger_for(_get_trace_db(args))
     events = logger.load_session(args.session_id)
     if not events:
         sys.stderr.write(f"session {args.session_id} not found or empty.\n")
@@ -980,10 +993,10 @@ def _doctor(args: argparse.Namespace) -> int:
     """
     from foundry_x.trace.logger import TraceLogger
 
-    if not args.db.endswith(".jsonl"):
+    if not _get_trace_db(args).endswith(".jsonl"):
         sys.stderr.write("doctor: jsonl backend required; sqlite is not supported.\n")
         return 1
-    logger = TraceLogger(args.db, backend="jsonl")
+    logger = TraceLogger(_get_trace_db(args), backend="jsonl")
     result = logger.doctor(apply=args.apply)
     if not result["applied"]:
         if result["skipped_lines"]:
@@ -1019,7 +1032,7 @@ def _timeline(args: argparse.Namespace) -> int:
     ``--no-color`` to disable TTY detection (colors are not used in
     the current implementation but the flag is reserved).
     """
-    logger = _logger_for(args.db)
+    logger = _logger_for(_get_trace_db(args))
     events = logger.load_session(args.session_id)
     if not events:
         sys.stderr.write(f"No events found for session {args.session_id}.\n")
@@ -1150,7 +1163,7 @@ def _session_diff(args: argparse.Namespace) -> int:
     diffing. ``--out`` writes the diff to a file instead of stdout.
     Both sqlite and jsonl backends are supported via :func:`_logger_for`.
     """
-    logger = _logger_for(args.db)
+    logger = _logger_for(_get_trace_db(args))
 
     events_a = logger.load_session(args.session_id_a)
     if not events_a:
@@ -1227,9 +1240,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="List recorded trace sessions.",
     )
     sessions_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database (default: logs/traces.db).",
+    )
+    sessions_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     sessions_parser.set_defaults(func=_sessions)
 
@@ -1239,9 +1257,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     show_parser.add_argument("session_id", help="Session to display.")
     show_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database (default: logs/traces.db).",
+    )
+    show_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     show_parser.set_defaults(func=_show)
 
@@ -1251,9 +1274,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     export_parser.add_argument("session_id", help="Session to export.")
     export_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database (default: logs/traces.db).",
+    )
+    export_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     export_parser.add_argument(
         "--out",
@@ -1268,9 +1296,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="List trace sessions (session_id, started_at, ended_at, harness_version).",
     )
     session_list_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database (default: logs/traces.db).",
+    )
+    session_list_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     session_list_parser.add_argument(
         "--harness-version",
@@ -1291,9 +1324,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     session_show_parser.add_argument("session_id", help="Session to display.")
     session_show_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database (default: logs/traces.db).",
+    )
+    session_show_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     session_show_parser.set_defaults(func=_session_show)
 
@@ -1308,9 +1346,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Python regex applied to each event's serialized payload.",
     )
     events_grep_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database (default: logs/traces.db).",
+    )
+    events_grep_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     events_grep_parser.set_defaults(func=_events_grep)
 
@@ -1321,9 +1364,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     redact_session_parser.add_argument("session_id", help="Session to delete.")
     redact_session_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    redact_session_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     redact_session_parser.add_argument(
         "--out",
@@ -1349,9 +1397,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     redact_key_parser.add_argument("key", help="Payload key to overwrite.")
     redact_key_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    redact_key_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     redact_key_parser.add_argument(
         "--out",
@@ -1367,9 +1420,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     delete_session_parser.add_argument("session_id", help="Session to delete.")
     delete_session_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    delete_session_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     delete_session_parser.add_argument(
         "--dry-run",
@@ -1388,9 +1446,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Plant a deterministic sample session for offline smoke testing.",
     )
     seed_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database (default: logs/traces.db).",
+    )
+    seed_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     seed_parser.add_argument(
         "--harness-version",
@@ -1408,9 +1471,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Remove old sessions per retention policy (--keep-last or --older-than).",
     )
     prune_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    prune_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     prune_parser.add_argument(
         "--keep-last",
@@ -1448,9 +1516,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Show WAL size, DB size, and session count for the trace store (issue #959).",
     )
     info_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    info_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     info_parser.set_defaults(func=_info)
 
@@ -1459,9 +1532,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Remove orphaned session_end markers from a JSONL trace file (issue #632).",
     )
     compact_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.jsonl",
         help="Path to the JSONL trace file (default: logs/traces.jsonl).",
+    )
+    compact_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     compact_parser.add_argument(
         "--dry-run",
@@ -1477,9 +1555,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Drop irrecoverably corrupted JSONL lines (json_decode_error) from a trace file.",
     )
     doctor_parser.add_argument(
-        "--db",
-        required=True,
+        "--trace-db",
+        default=None,
         help="Path to the JSONL trace file.",
+    )
+    doctor_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     doctor_parser.add_argument(
         "--apply",
@@ -1501,9 +1584,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     diagnose_parser.add_argument("session_id", help="Session to diagnose.")
     diagnose_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    diagnose_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     diagnose_parser.add_argument(
         "--out",
@@ -1533,9 +1621,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable TTY color detection (reserved for future use).",
     )
     timeline_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    timeline_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     timeline_parser.add_argument(
         "--out",
@@ -1589,9 +1682,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Filter both sessions to this event kind before diffing.",
     )
     session_diff_parser.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    session_diff_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     session_diff_parser.add_argument(
         "--out",
