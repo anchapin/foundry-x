@@ -105,7 +105,11 @@ def test_web_fetch_allowlist_contract() -> None:
     # block path (host not in allowlist) and the pass-through path (host in
     # allowlist) under an explicit, populated allowlist.
     events: list[dict[str, object]] = []
-    hook = WebFetchHook(tracer=events.append)
+
+    def _tracer(event_name: str, payload: dict[str, object]) -> None:
+        events.append({"kind": event_name, **payload})
+
+    hook = WebFetchHook(tracer=_tracer)
     with mock.patch.dict(os.environ, {"FETCH_ALLOWED_DOMAINS": "docs.python.org,man7.org"}):
         blocked_call = ToolCall(name="web_fetch", arguments={"url": "https://evil.com/exfil"})
         result = asyncio.run(hook.pre_tool(blocked_call))
