@@ -245,6 +245,8 @@ class HookManifestValidator:
         "injection_firewall": None,  # filled in lazily
         "context_pruning": None,
         "rate_limit": None,
+        "token_aware_pruning": None,
+        "web_fetch": None,
     }
 
     def __init__(self, harness_dir: Path) -> None:
