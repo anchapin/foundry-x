@@ -1,6 +1,6 @@
 """Benchmark task: keyword-only API refactor with a test constraint (ADR-0028 H2).
 
-This is a ``difficulty_tier='medium'`` task in the suite.  It
+This is a ``difficulty_tier='hard'`` task in the suite.  It
 implements Archetype H2 ("multi-file coordinated refactor with
 constraint") from ADR-0028 §3:
 
@@ -91,20 +91,20 @@ TASK = BenchmarkTask(
         "\n"
         "After your changes, 'python -m pytest' must exit 0."
     ),
-    difficulty_tier="medium",
+    difficulty_tier="hard",
     expected_outcome=(
         "After updating all positional callers to keyword-only, "
         "'python -m pytest' exits 0 with 2 passed, and "
         "tests/test_stats.py still defines test_clamp_mean (it was "
         "corrected, not deleted)."
     ),
-    timeout_seconds=60,
+    timeout_seconds=300,
     requires_skills=["bash", "grep_search", "edit_file"],
     tags=["refactoring", "api-migration", "keyword-only", "multi-file", "cross-module"],
 )
 
 #: Root of the static fixture data for this task.
-_FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / TASK.name
+_FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "hard" / TASK.name
 
 #: Golden callers -- every positional call migrated to keyword-only.
 GOLDEN_CALC = '''\
