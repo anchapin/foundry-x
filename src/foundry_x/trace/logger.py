@@ -464,7 +464,7 @@ class TraceLogger:
         # supersedes in ADR-0003.
         self._conn: sqlite3.Connection | None = None
         if backend == "sqlite":
-            self._conn = sqlite3.connect(self.path)
+            self._conn = sqlite3.connect(self.path, timeout=30)
             # WAL is a persistent database property (stored in the file
             # header), so this also benefits raw ``sqlite3.connect`` readers
             # opened against the same file later.
