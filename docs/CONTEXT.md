@@ -230,34 +230,39 @@ set the Digester considers structural failure markers; treat it as a
 subset of the broader kind vocabulary above.
 
 - **`FAILURE_KINDS`** (constant in
-  `src/foundry_x/evolution/digester.py:85-112`): `tool_error`,
+  `src/foundry_x/evolution/digester.py:85-118`): `tool_error`,
   `task_failed`, `task_aborted`, `run_failed`, `agent_error`, `error`,
-  `model_error`, `hook_registry_error`.
+  `model_error`, `hook_registry_error`, `server_unavailable`.
   `task_failed` and `task_aborted` are emitted by the production Runner:
   `task_failed` when the agent loop raises an exception, and
   `task_aborted` when the wall-clock cap fires (reason=`wall_clock`)
   or the token budget is exceeded (reason=`token_budget`). The remaining
   four are reserved vocabulary recognized by the Digester for
-   compatibility with legacy producers and tests. `model_error` (issue
-   #867) is emitted by the Runner when `adapter.complete` raises, paired
-   with `outcome.reason="model_error"`; issue #931 added a second trigger
-   on the empty-response degenerate path (no content, no tool calls,
-   `finish_reason=None`) — the Runner emits `model_error` with
-   `error_type="EmptyResponse"` and classifies the outcome as
-   `status="failed"`/`reason="model_error"` so the first-failure walk sees
-   sessions that previously silently landed in `"success"`;
-   `hook_registry_error` (issue
+  compatibility with legacy producers and tests. `model_error` (issue
+  #867) is emitted by the Runner when `adapter.complete` raises, paired
+  with `outcome.reason="model_error"`; issue #931 added a second trigger
+  on the empty-response degenerate path (no content, no tool calls,
+  `finish_reason=None`) — the Runner emits `model_error` with
+  `error_type="EmptyResponse"` and classifies the outcome as
+  `status="failed"`/`reason="model_error"` so the first-failure walk sees
+  sessions that previously silently landed in `"success"`;
+  `hook_registry_error` (issue
   #867) is emitted by `Runner._resolve_hook_registry` when
   `harness.hooks.get_registry()` raises after a successful lazy import,
   leaving the session with every hook (including the
   `InjectionFirewallHook`) silently disabled. Without these two kinds
   in the set, the Digester's first-failure walk reports the later
   downstream failure as the root cause and the Evolver can miss the
-  real signal (model fault or security-degraded session). Adding a new
+  real signal (model fault or security-degraded session);
+  `server_unavailable` (issue #1180) is emitted by the Runner when
+  the model server becomes unreachable (reason=`server_unavailable`).
+  Without it in FAILURE_KINDS the Digester silently classifies infra
+  failures as `clean`, so the Evolver never proposes remediation and
+  the Regression Rate KPI is biased downward. Adding a new
   value here is a vocabulary change and must ship with both a producer
   and a regression test (ADR-0004).
 - **`FAILURE_PAYLOAD_KEYS`** (constant in
-  `src/foundry_x/evolution/digester.py:114-120`): `error`, `traceback`,
+  `src/foundry_x/evolution/digester.py:120-126`): `error`, `traceback`,
   `exception`. A `tool_result` whose payload has any of these keys is
   classified as a failure even though its `kind` is benign — the
   signal is on the payload, not on the kind. The same payload-key
