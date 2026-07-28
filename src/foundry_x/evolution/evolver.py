@@ -60,10 +60,24 @@ _HARNESS_SUBDIRS = frozenset({"hooks", "skills"})
 # configured. Absent or false means template path is used.
 _FOUNDRY_EVOLVER_LLM_ENABLED_ENV = "FOUNDRY_EVOLVER_LLM_ENABLED"
 
+# Env var that sets the timeout in seconds for the LLM call in generate_edits.
+# Defaults to 60s. A timeout triggers the fallback to the template path.
+_FOUNDRY_EVOLVER_LLM_TIMEOUT_ENV = "FOUNDRY_EVOLVER_LLM_TIMEOUT_S"
+_DEFAULT_EVOLVER_LLM_TIMEOUT_S = 60.0
+
 
 def _is_llm_edit_gen_enabled() -> bool:
     """Return True when FOUNDRY_EVOLVER_LLM_ENABLED is set to a truthy value."""
     return os.environ.get(_FOUNDRY_EVOLVER_LLM_ENABLED_ENV, "").lower() in ("1", "true")
+
+
+def _get_llm_timeout() -> float:
+    """Return the LLM timeout in seconds from the env var, or the default."""
+    val = os.environ.get(_FOUNDRY_EVOLVER_LLM_TIMEOUT_ENV, "")
+    try:
+        return float(val)
+    except ValueError:
+        return _DEFAULT_EVOLVER_LLM_TIMEOUT_S
 
 
 class EvolverGenerationError(Exception):
@@ -1447,7 +1461,15 @@ class Evolver:
 
             self.record_llm_call()
             try:
-                response = await adapter.complete(messages)
+                async with asyncio.timeout(_get_llm_timeout()):
+                    response = await adapter.complete(messages)
+            except TimeoutError:
+                self._record_generation_attempt(attempt=attempt, error="llm_timeout")
+                if attempt == max_retries:
+                    self._record_generation_exhausted(max_retries, "llm_timeout")
+                    raise EvolverLLMError("LLM call timed out") from None
+                await asyncio.sleep(_jittered_backoff(attempt))
+                continue
             except Exception as exc:
                 self._record_generation_attempt(
                     attempt=attempt,
