@@ -322,7 +322,6 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "server_restart_count",
         "evolver_llm_failure_count",
         "evolver_llm_failure_rate",
-        "token_budget_overrun_pct",
     }
     assert "injection_blocks" not in payload
     assert "token_totals" not in payload
