@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -128,42 +127,6 @@ def _stub_harness(harness_dir: Path) -> Path:
     (harness_dir / "hooks").mkdir(exist_ok=True)
     (harness_dir / "skills").mkdir(exist_ok=True)
     return harness_dir
-
-
-def _sqlite_pruner(db_path: Path):
-    """Build a ``Pruner`` callable backed by direct SQLite.
-
-    Mirrors the implementation in ``tests/harness/test_context_pruning.py``.
-    """
-
-    def _drop(session_id: str, keep_kinds: frozenset[str], target_count: int) -> int:
-        not_in_clause = ", ".join("?" for _ in keep_kinds)
-        with sqlite3.connect(db_path, timeout=30) as conn:
-            total = conn.execute(
-                "SELECT COUNT(*) FROM events WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()[0]
-            if total <= target_count:
-                return 0
-            to_drop = total - target_count
-            params: list[object] = [session_id, *keep_kinds, to_drop]
-            cursor = conn.execute(
-                "SELECT event_id FROM events "
-                "WHERE session_id = ? AND kind NOT IN (" + not_in_clause + ") "
-                "ORDER BY timestamp LIMIT ?",
-                params,
-            )
-            ids = [row[0] for row in cursor.fetchall()]
-            if not ids:
-                return 0
-            placeholders = ", ".join("?" for _ in ids)
-            conn.execute(
-                "DELETE FROM events WHERE event_id IN (" + placeholders + ")",
-                ids,
-            )
-            return len(ids)
-
-    return _drop
 
 
 def _plant(logger: TraceLogger, session_id: str, n: int) -> None:

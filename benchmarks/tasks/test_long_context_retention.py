@@ -33,7 +33,6 @@ Acceptance criteria (issue #811):
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -41,7 +40,7 @@ import pytest
 from benchmarks.models import BenchmarkTask
 from foundry_x.trace.logger import TraceLogger
 from harness.hooks.base import HookRegistry, ToolCall
-from harness.hooks.context_pruning import ContextPruningHook
+from harness.hooks.context_pruning import ContextPruningHook, _SqlitePruner
 
 TASK = BenchmarkTask(
     name="long_context_retention",
@@ -84,45 +83,6 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 """
-
-
-def _sqlite_pruner(db_path: Path):
-    """Build a ``Pruner`` callable backed by direct SQLite.
-
-    Mirrors the pattern in ``tests/harness/test_context_pruning.py``:
-    the hook is decoupled from :class:`TraceLogger` (AGENTS.md §7
-    self-reference loop), so the test wires a minimal SQLite closure
-    rather than importing TraceLogger into the harness layer.
-    """
-
-    def _drop(session_id: str, keep_kinds: frozenset[str], target_count: int) -> int:
-        not_in_clause = ", ".join("?" for _ in keep_kinds)
-        with sqlite3.connect(db_path) as conn:
-            total = conn.execute(
-                "SELECT COUNT(*) FROM events WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()[0]
-            if total <= target_count:
-                return 0
-            to_drop = total - target_count
-            params: list[object] = [session_id, *keep_kinds, to_drop]
-            cursor = conn.execute(
-                "SELECT event_id FROM events "
-                "WHERE session_id = ? AND kind NOT IN (" + not_in_clause + ") "
-                "ORDER BY timestamp LIMIT ?",
-                params,
-            )
-            ids = [row[0] for row in cursor.fetchall()]
-            if not ids:
-                return 0
-            placeholders = ", ".join("?" for _ in ids)
-            conn.execute(
-                "DELETE FROM events WHERE event_id IN (" + placeholders + ")",
-                ids,
-            )
-            return len(ids)
-
-    return _drop
 
 
 def _plant(logger: TraceLogger, session_id: str, n: int) -> None:
@@ -195,7 +155,7 @@ def test_long_context_retention(
     with trace_store.session(harness_version="test-long-context-retention") as sid:
         _plant(trace_store, sid, _PLANT_COUNT)
 
-        pruner = _sqlite_pruner(trace_store.path)
+        _pruner = _SqlitePruner(trace_store.path)
         captured: list[dict] = []
 
         def tracer(_sid: str, kind: str, payload: dict) -> None:
@@ -206,7 +166,7 @@ def test_long_context_retention(
         hook = ContextPruningHook(
             session_id=sid,
             threshold=_PRUNE_THRESHOLD,
-            pruner=pruner,
+            pruner=_pruner.prune,
             tracer=tracer,
         )
         registry.register(hook)

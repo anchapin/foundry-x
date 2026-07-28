@@ -103,7 +103,16 @@ def test_add_missing_docstring__agent_output(benchmark_workspace: Path) -> None:
     It requires the Runner to produce a documented calculator.py in the
     workspace before the Critic evaluates it. If the file already contains
     correct docstrings (agent-produced), the test passes without planting.
+
+    Skip in mock mode: MockModelAdapter cannot produce meaningful docstrings,
+    so the agent loop would leave the file undocumented and this test would
+    falsely fail.
     """
+    import os
+
+    if os.environ.get("TEST_MODEL_MODE", "mock") == "mock":
+        pytest.skip("test_add_missing_docstring__agent_output requires TEST_MODEL_MODE=real")
+
     fixture_dir = Path(__file__).parent.parent / "fixtures" / TASK.name
     src = fixture_dir / "calculator.py"
     dest = benchmark_workspace / "calculator.py"
