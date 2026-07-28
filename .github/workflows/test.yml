@@ -35,7 +35,7 @@ jobs:
   benchmark:
     name: pytest (benchmark only)
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.changed_files, 'benchmarks/') || contains(github.event.pull_request.changed_files, 'benchmarks/**/*'))
+    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.changed_files, 'benchmarks/') || contains(github.event.pull_request.changed_files, 'benchmarks/**/*') || contains(github.event.pull_request.changed_files, 'src/foundry_x/execution/') || contains(github.event.pull_request.changed_files, 'src/foundry_x/trace/'))
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
