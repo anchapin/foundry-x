@@ -1291,6 +1291,9 @@ class AnthropicAdapter(CloudModelAdapter):
                     self._content_block_to_tool_call_index[block_index] = len(
                         self._content_block_to_tool_call_index
                     )
+                if not hasattr(self, "_tool_call_name_by_block_index"):
+                    self._tool_call_name_by_block_index: dict[int, str] = {}
+                self._tool_call_name_by_block_index[block_index] = tool_name
                 tc_index = self._content_block_to_tool_call_index[block_index]
                 return ModelResponseChunk(
                     tool_calls=[
@@ -1319,12 +1322,13 @@ class AnthropicAdapter(CloudModelAdapter):
                         self._content_block_to_tool_call_index
                     )
                 tc_index = self._content_block_to_tool_call_index[block_index]
+                tool_name = getattr(self, "_tool_call_name_by_block_index", {}).get(block_index)
                 return ModelResponseChunk(
                     tool_calls=[
                         ModelToolCallChunk(
                             index=tc_index,
                             function=ToolCallFunctionChunk(
-                                name=None,
+                                name=tool_name,
                                 arguments=input_json if isinstance(input_json, str) else "",
                             ),
                         )

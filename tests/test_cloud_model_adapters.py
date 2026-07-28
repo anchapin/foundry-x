@@ -244,6 +244,50 @@ async def test_anthropic_stream_parses_event_framing():
 
 
 @pytest.mark.asyncio
+async def test_anthropic_stream_preserves_tool_call_name():
+    """content_block_start carries tool name; content_block_delta must preserve it (issue #1275)."""
+    body = (
+        "event: content_block_start\n"
+        'data: {"type":"content_block_start","index":0,'
+        '"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file"}}\n\n'
+        "event: content_block_delta\n"
+        'data: {"type":"content_block_delta","index":0,'
+        '"delta":{"type":"tool_use","input_json":"{\\"path\\": \\"README.md\\"}"}}\n\n'
+        "event: message_delta\n"
+        'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},'
+        '"usage":{"output_tokens":3}}\n\n'
+        "event: message_stop\n"
+        'data: {"type":"message_stop"}\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+        )
+        chunks = []
+        async for chunk in adapter.stream(messages=[{"role": "user", "content": "read"}]):
+            chunks.append(chunk)
+
+    tool_chunks = [c for c in chunks if c.tool_calls]
+    assert len(tool_chunks) == 2
+    start_chunk = tool_chunks[0]
+    assert start_chunk.tool_calls[0].function.name == "read_file"
+    delta_chunk = tool_chunks[1]
+    assert delta_chunk.tool_calls[0].function.name == "read_file"
+    assert delta_chunk.tool_calls[0].function.arguments == '{"path": "README.md"}'
+
+
+@pytest.mark.asyncio
 async def test_anthropic_complete_emits_cost_and_rate_limit_callbacks():
     cost_events: list[ModelCostEvent] = []
     rate_events: list[ModelRateLimitInfo] = []
