@@ -581,6 +581,65 @@ def test_timeout_notes_uses_wall_clock_message_when_no_output() -> None:
     assert "killed" in notes
 
 
+class TestResolveGateTimeoutEnvVar:
+    """Tests for FOUNDRY_GATE_TIMEOUT_S env var resolution (issue #1172)."""
+
+    def test_env_var_sets_gate_timeout_s_when_not_explicit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When ``gate_timeout_s`` is not passed, ``FOUNDRY_GATE_TIMEOUT_S``
+        is used (issue #1172 acceptance criterion 1)."""
+        monkeypatch.setenv("FOUNDRY_GATE_TIMEOUT_S", "7.5")
+        critic = Critic(Path("/tmp/nonexistent"))
+        assert critic.gate_timeout_s == 7.5
+
+    def test_explicit_argument_takes_precedence_over_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit ``gate_timeout_s`` argument wins over the env var
+        (issue #1172 acceptance criterion 1 — resolution order)."""
+        monkeypatch.setenv("FOUNDRY_GATE_TIMEOUT_S", "3.0")
+        critic = Critic(Path("/tmp/nonexistent"), gate_timeout_s=12.0)
+        assert critic.gate_timeout_s == 12.0
+
+    def test_missing_env_var_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When the env var is absent, ``gate_timeout_s`` is ``None``,
+        preserving backward compatibility (issue #1172 acceptance criterion 3)."""
+        monkeypatch.delenv("FOUNDRY_GATE_TIMEOUT_S", raising=False)
+        critic = Critic(Path("/tmp/nonexistent"))
+        assert critic.gate_timeout_s is None
+
+    def test_empty_env_var_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When ``FOUNDRY_GATE_TIMEOUT_S`` is set to the empty string,
+        ``gate_timeout_s`` is ``None`` so operators can restore unbounded
+        behaviour by unsetting (or nulling) the env var."""
+        monkeypatch.setenv("FOUNDRY_GATE_TIMEOUT_S", "")
+        critic = Critic(Path("/tmp/nonexistent"))
+        assert critic.gate_timeout_s is None
+
+    def test_non_positive_env_var_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A non-positive env var value is treated as unset so the default
+        ``None`` (unbounded) behaviour is restored (issue #1172)."""
+        monkeypatch.setenv("FOUNDRY_GATE_TIMEOUT_S", "0")
+        critic = Critic(Path("/tmp/nonexistent"))
+        assert critic.gate_timeout_s is None
+        monkeypatch.setenv("FOUNDRY_GATE_TIMEOUT_S", "-5.0")
+        critic2 = Critic(Path("/tmp/nonexistent"))
+        assert critic2.gate_timeout_s is None
+
+    def test_non_numeric_env_var_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A non-numeric env var value is treated as unset."""
+        monkeypatch.setenv("FOUNDRY_GATE_TIMEOUT_S", "not-a-number")
+        critic = Critic(Path("/tmp/nonexistent"))
+        assert critic.gate_timeout_s is None
+
+    def test_env_var_integer_is_parsed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An integer env var value is parsed as a float."""
+        monkeypatch.setenv("FOUNDRY_GATE_TIMEOUT_S", "30")
+        critic = Critic(Path("/tmp/nonexistent"))
+        assert critic.gate_timeout_s == 30.0
+
+
 class TestParseModelRegistry:
     """Tests for FOUNDRY_MODEL_REGISTRY parsing (ADR-0025)."""
 
