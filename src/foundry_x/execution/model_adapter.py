@@ -585,6 +585,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
 
     def _parse_rate_limit(self, headers_lower: Mapping[str, str]) -> ModelRateLimitInfo:
         """Parse rate-limit headers into ModelRateLimitInfo."""
+
         def _to_int(value: str | None) -> int | None:
             if value is None or value == "":
                 return None
