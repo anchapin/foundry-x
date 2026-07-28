@@ -1992,15 +1992,12 @@ async def run_task(
                     "tokens_used": tokens_used,
                 },
             )
-            if _check_event_limit(session_id):
-                outcome_status = "failed"
-                outcome_reason = "event_limit"
-                hit_event_limit = True
-                break
-
             # Issue #789: check token_budget BEFORE appending the response so the
             # offending message is not injected into conversation history. The
             # outcome.payload must reflect the last safe response.
+            # Issue #1181: check token_budget BEFORE event_limit so that when both
+            # fire in the same iteration, token_budget's reason is preserved (not
+            # overwritten by event_limit's reason).
             if token_budget is not None and tokens_used > token_budget:
                 outcome_status = "failed"
                 outcome_reason = "token_budget"
@@ -2013,6 +2010,12 @@ async def run_task(
                         "token_budget": token_budget,
                     },
                 )
+                break
+
+            if _check_event_limit(session_id):
+                outcome_status = "failed"
+                outcome_reason = "event_limit"
+                hit_event_limit = True
                 break
 
             messages.append(response.message)
