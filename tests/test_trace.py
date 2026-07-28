@@ -916,3 +916,27 @@ def test_batch_mode_close_flushes_all_pending(tmp_path):
     logger = TraceLogger(path, backend="sqlite")
     events = logger.load_session(sid)
     assert len(events) == 75
+
+
+def test_iter_events_returns_correct_results_in_under_50ms(tmp_path):
+    """Regression test: iter_events with kind filter returns correct results
+    in <50ms for a session with >1000 events (issue #1151).
+
+    The composite index idx_events_session_kind makes this an O(log n)
+    indexed lookup rather than an O(n) full table scan.
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    with logger.session(harness_version="0.1.0") as sid:
+        for i in range(1200):
+            kind = "critic_verdict" if i % 100 == 0 else "tool_call"
+            logger.record(sid, kind=kind, payload={"i": i})
+
+    start = time.perf_counter()
+    verdicts = list(logger.iter_events(sid, kind="critic_verdict"))
+    elapsed_ms = (time.perf_counter() - start) * 1000
+
+    assert len(verdicts) == 12
+    assert all(e.kind == "critic_verdict" for e in verdicts)
+    assert elapsed_ms < 50, f"iter_events took {elapsed_ms:.1f}ms, expected <50ms"
