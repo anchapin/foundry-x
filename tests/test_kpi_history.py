@@ -305,6 +305,9 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     # scalar field introduced for issue #1112. model_cost_count,
     # total_model_cost_usd, model_rate_limit_count, and fetch_blocked_count
     # are scalar fields introduced for issue #1281.
+    # streaming_quality_mean_ttft_ms, streaming_quality_p50_ttft_ms,
+    # streaming_quality_p95_ttft_ms, mean_prompt_tokens_per_step, and
+    # mean_completion_tokens_per_step are the issue #1271 aggregate metrics.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
@@ -328,6 +331,11 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "total_model_cost_usd",
         "model_rate_limit_count",
         "fetch_blocked_count",
+        "streaming_quality_mean_ttft_ms",
+        "streaming_quality_p50_ttft_ms",
+        "streaming_quality_p95_ttft_ms",
+        "mean_prompt_tokens_per_step",
+        "mean_completion_tokens_per_step",
     }
     assert "injection_blocks" not in payload
     assert "token_totals" not in payload

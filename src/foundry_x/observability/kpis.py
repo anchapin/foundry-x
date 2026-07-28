@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import warnings
@@ -372,6 +373,12 @@ class KpiSummary(BaseModel):
     emitted when the WebFetchHook blocks a URL not in FETCH_ALLOWED_DOMAINS.
     All three are auxiliary operator signals surfaced alongside
     ``model_retry_count`` and ``server_restart_count``.
+
+    Issue #1271 adds ``streaming_quality_mean_ttft_ms``,
+    ``streaming_quality_p50_ttft_ms``, and ``streaming_quality_p95_ttft_ms``:
+    aggregate TTFT statistics across all sessions, plus
+    ``mean_prompt_tokens_per_step`` and ``mean_completion_tokens_per_step``
+    for token efficiency analysis per model response step.
     """
 
     cycle_time_seconds: float | None = None
@@ -405,6 +412,18 @@ class KpiSummary(BaseModel):
     total_model_cost_usd: float = 0.0
     model_rate_limit_count: int = 0
     fetch_blocked_count: int = 0
+    # Issue #1271: aggregate streaming quality across all sessions for the
+    # given harness version.  ``streaming_quality_mean_ttft_ms`` is the mean
+    # of per-session average TTFT values; ``streaming_quality_p50_ttft_ms``
+    # and ``streaming_quality_p95_ttft_ms`` are the 50th and 95th percentiles
+    # of those per-session averages.  ``mean_prompt_tokens_per_step`` and
+    # ``mean_completion_tokens_per_step`` are the mean prompt and completion
+    # token counts per ``model_response`` step, aggregated across all sessions.
+    streaming_quality_mean_ttft_ms: float | None = None
+    streaming_quality_p50_ttft_ms: float | None = None
+    streaming_quality_p95_ttft_ms: float | None = None
+    mean_prompt_tokens_per_step: float | None = None
+    mean_completion_tokens_per_step: float | None = None
     per_skill: dict[str, SkillKpiSlice] = {}
     per_task_family: dict[str, SkillKpiSlice] = {}
     per_difficulty_tier: dict[str, SkillKpiSlice] = {}
@@ -495,6 +514,10 @@ class KpiHistoryEntry(BaseModel):
 
     Issue #1281 adds ``model_cost_count``, ``total_model_cost_usd``,
     ``model_rate_limit_count``, and ``fetch_blocked_count``.
+
+    Issue #1271 adds ``streaming_quality_mean_ttft_ms``,
+    ``streaming_quality_p50_ttft_ms``, and ``streaming_quality_p95_ttft_ms``,
+    plus ``mean_prompt_tokens_per_step`` and ``mean_completion_tokens_per_step``.
     """
 
     timestamp: str
@@ -518,6 +541,11 @@ class KpiHistoryEntry(BaseModel):
     total_model_cost_usd: float = 0.0
     model_rate_limit_count: int = 0
     fetch_blocked_count: int = 0
+    streaming_quality_mean_ttft_ms: float | None = None
+    streaming_quality_p50_ttft_ms: float | None = None
+    streaming_quality_p95_ttft_ms: float | None = None
+    mean_prompt_tokens_per_step: float | None = None
+    mean_completion_tokens_per_step: float | None = None
 
 
 class KpiTrends(BaseModel):
@@ -689,6 +717,24 @@ def _trend_direction(
     if (delta > 0) is higher_is_better:
         return "improving"
     return "worsening"
+
+
+def percentile(sorted_values: list[float], q: float) -> float:
+    """Return the *q*-th percentile of *sorted_values* using nearest-rank.
+
+    *sorted_values* must be in ascending order; the function does not
+    re-sort. Nearest-rank (a.k.a. ``ceil(q/100 * n)``) is deliberately
+    chosen over linear interpolation: it is deterministic, has no
+    floating-point interpolation edge cases, and matches the operator
+    intuition "p95 means the worst of the top 5%".
+
+    Returns ``0.0`` for an empty input.
+    """
+    n = len(sorted_values)
+    if n == 0:
+        return 0.0
+    rank = max(1, math.ceil(q / 100.0 * n))
+    return float(sorted_values[min(rank, n) - 1])
 
 
 def _percent_change(first: float | None, last: float | None) -> float | None:
@@ -898,6 +944,14 @@ def compute_kpis(
     )
     model_rate_limit_count = _model_rate_limit_count(logger, harness_version=harness_version)
     fetch_blocked_count = _fetch_blocked_count(logger, harness_version=harness_version)
+    (
+        streaming_quality_mean_ttft_ms,
+        streaming_quality_p50_ttft_ms,
+        streaming_quality_p95_ttft_ms,
+    ) = _streaming_quality_aggregate(logger, harness_version=harness_version)
+    mean_prompt_tokens_per_step, mean_completion_tokens_per_step = _token_per_step(
+        logger, harness_version=harness_version
+    )
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -930,6 +984,11 @@ def compute_kpis(
         total_model_cost_usd=total_model_cost_usd,
         model_rate_limit_count=model_rate_limit_count,
         fetch_blocked_count=fetch_blocked_count,
+        streaming_quality_mean_ttft_ms=streaming_quality_mean_ttft_ms,
+        streaming_quality_p50_ttft_ms=streaming_quality_p50_ttft_ms,
+        streaming_quality_p95_ttft_ms=streaming_quality_p95_ttft_ms,
+        mean_prompt_tokens_per_step=mean_prompt_tokens_per_step,
+        mean_completion_tokens_per_step=mean_completion_tokens_per_step,
         **_slice_field(
             _session_slice_or_task_slice(
                 logger,
@@ -1126,6 +1185,25 @@ def _compute_deltas(
             candidate.model_rate_limit_count - baseline.model_rate_limit_count
         ),
         "fetch_blocked_count": candidate.fetch_blocked_count - baseline.fetch_blocked_count,
+        # Issue #1271: aggregate streaming quality TTFT deltas (lower is better —
+        # faster first token is improvement; slower is regression).
+        "streaming_quality_mean_ttft_ms": _delta(
+            baseline.streaming_quality_mean_ttft_ms, candidate.streaming_quality_mean_ttft_ms
+        ),
+        "streaming_quality_p50_ttft_ms": _delta(
+            baseline.streaming_quality_p50_ttft_ms, candidate.streaming_quality_p50_ttft_ms
+        ),
+        "streaming_quality_p95_ttft_ms": _delta(
+            baseline.streaming_quality_p95_ttft_ms, candidate.streaming_quality_p95_ttft_ms
+        ),
+        # Issue #1271: token per-step deltas (higher is better — more tokens
+        # per step means more efficient model usage).
+        "mean_prompt_tokens_per_step": _delta(
+            baseline.mean_prompt_tokens_per_step, candidate.mean_prompt_tokens_per_step
+        ),
+        "mean_completion_tokens_per_step": _delta(
+            baseline.mean_completion_tokens_per_step, candidate.mean_completion_tokens_per_step
+        ),
     }
 
 
@@ -1825,6 +1903,70 @@ def _streaming_quality(
             avg_chunk_interval_ms=avg_interval,
         )
     return result
+
+
+def _streaming_quality_aggregate(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> tuple[float | None, float | None, float | None]:
+    """Aggregate TTFT statistics across all sessions (issue #1271).
+
+    Returns ``(mean_ttft_ms, p50_ttft_ms, p95_ttft_ms)`` where each value is
+    computed over the per-session average TTFT values.  Sessions with no
+    ``model_response`` events carrying ``time_to_first_token_ms`` are omitted.
+    Returns ``(None, None, None)`` when no session has TTFT data.
+
+    Uses the ``percentile`` function from :mod:`foundry_x.observability`
+    (nearest-rank method, deterministic, matches operator intuition).
+    """
+    all_ttfts: list[int] = []
+    for event in logger.query_events(
+        kind="model_response",
+        harness_version=harness_version,
+    ):
+        ttft = event.payload.get("time_to_first_token_ms")
+        if isinstance(ttft, int):
+            all_ttfts.append(ttft)
+
+    if not all_ttfts:
+        return None, None, None
+
+    mean_ttft = sum(all_ttfts) / len(all_ttfts)
+    sorted_ttfts = sorted(all_ttfts)
+    p50_ttft = percentile(sorted_ttfts, 50.0)
+    p95_ttft = percentile(sorted_ttfts, 95.0)
+    return mean_ttft, p50_ttft, p95_ttft
+
+
+def _token_per_step(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> tuple[float | None, float | None]:
+    """Mean prompt and completion tokens per ``model_response`` step (issue #1271).
+
+    Walks every ``model_response`` event and extracts ``token_usage.prompt_tokens``
+    and ``token_usage.completion_tokens``.  Returns the mean across all steps.
+    Returns ``(None, None)`` when no event carries token usage data.
+    """
+    prompt_tokens: list[int] = []
+    completion_tokens: list[int] = []
+    for event in logger.query_events(
+        kind="model_response",
+        harness_version=harness_version,
+    ):
+        usage = event.payload.get("token_usage")
+        if not isinstance(usage, dict):
+            continue
+        pt = usage.get("prompt_tokens")
+        ct = usage.get("completion_tokens")
+        if isinstance(pt, int):
+            prompt_tokens.append(pt)
+        if isinstance(ct, int):
+            completion_tokens.append(ct)
+
+    mean_prompt = sum(prompt_tokens) / len(prompt_tokens) if prompt_tokens else None
+    mean_completion = sum(completion_tokens) / len(completion_tokens) if completion_tokens else None
+    return mean_prompt, mean_completion
 
 
 def _context_pruned(
@@ -2630,6 +2772,40 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
             f"{baseline.fetch_blocked_count} | "
             f"{candidate.fetch_blocked_count} | "
             f"{_format_delta(float(baseline.fetch_blocked_count), float(candidate.fetch_blocked_count), higher_is_better=False)} |"
+        ),
+        # Issue #1271: aggregate streaming quality TTFT rows (lower is better —
+        # faster first token is improvement; slower is regression).
+        (
+            "| Mean TTFT (ms) | "
+            f"{_format_value(baseline.streaming_quality_mean_ttft_ms)} | "
+            f"{_format_value(candidate.streaming_quality_mean_ttft_ms)} | "
+            f"{_format_delta(baseline.streaming_quality_mean_ttft_ms, candidate.streaming_quality_mean_ttft_ms, higher_is_better=False)} |"
+        ),
+        (
+            "| p50 TTFT (ms) | "
+            f"{_format_value(baseline.streaming_quality_p50_ttft_ms)} | "
+            f"{_format_value(candidate.streaming_quality_p50_ttft_ms)} | "
+            f"{_format_delta(baseline.streaming_quality_p50_ttft_ms, candidate.streaming_quality_p50_ttft_ms, higher_is_better=False)} |"
+        ),
+        (
+            "| p95 TTFT (ms) | "
+            f"{_format_value(baseline.streaming_quality_p95_ttft_ms)} | "
+            f"{_format_value(candidate.streaming_quality_p95_ttft_ms)} | "
+            f"{_format_delta(baseline.streaming_quality_p95_ttft_ms, candidate.streaming_quality_p95_ttft_ms, higher_is_better=False)} |"
+        ),
+        # Issue #1271: token per-step rows (higher is better — more tokens
+        # per step means more efficient model usage).
+        (
+            "| Mean Prompt Tokens/Step | "
+            f"{_format_value(baseline.mean_prompt_tokens_per_step)} | "
+            f"{_format_value(candidate.mean_prompt_tokens_per_step)} | "
+            f"{_format_delta(baseline.mean_prompt_tokens_per_step, candidate.mean_prompt_tokens_per_step, higher_is_better=True)} |"
+        ),
+        (
+            "| Mean Completion Tokens/Step | "
+            f"{_format_value(baseline.mean_completion_tokens_per_step)} | "
+            f"{_format_value(candidate.mean_completion_tokens_per_step)} | "
+            f"{_format_delta(baseline.mean_completion_tokens_per_step, candidate.mean_completion_tokens_per_step, higher_is_better=True)} |"
         ),
     ]
     return "\n".join(lines)
