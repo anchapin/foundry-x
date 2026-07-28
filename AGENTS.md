@@ -203,7 +203,9 @@ mirrors the way our product works:
     session. Use `approve <uuid>` to mark a ProposedEdit as reviewed
     and `apply <uuid>` to apply it to the harness. Pass `--no-verify`
     to skip the Critic gate (local-only, audit-logged). Pass `--background`
-    to run non-blocking. Both flags are documented in SECURITY.md.
+    to run non-blocking. Pass `--latest` to auto-select the most recent
+    session without needing the UUID. All flags are documented in
+    `foundry-evolve evolve --help`.
   - `uv run foundry-sweep` — parametric sweep of harness variants
     (e.g. quantization sweep; Phase 3).
   - `uv run fx-trace` (from `observability/cli.py`) — KPI reports,
