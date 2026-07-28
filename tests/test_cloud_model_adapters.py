@@ -536,8 +536,134 @@ class _FailingLinesResponse(httpx.Response):
 
 
 # ---------------------------------------------------------------------------
-# Mid-stream retry boundary — issue #200 / #1164
+# Mid-stream retry boundary — issue #200 / #1164 / #1278
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_anthropic_adapter_stream_retries_transport_error(monkeypatch):
+    """Transport errors (ConnectError) are retried during streaming."""
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+    retries: list[ModelRetryEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            raise httpx.ConnectError("connection refused", request=request)
+        body = (
+            "event: message_start\n"
+            'data: {"type":"message_start","message":{"usage":{"input_tokens":5}}}\n\n'
+            "event: content_block_delta\n"
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}\n\n'
+            "event: message_stop\n"
+            'data: {"type":"message_stop"}\n\n'
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        chunks = []
+        async for chunk in adapter.stream(messages=[{"role": "user", "content": "hi"}]):
+            chunks.append(chunk)
+
+    assert calls["count"] == 3, "ConnectError should be retried twice then succeed"
+    assert len(retries) == 2
+    assert retries[0].error_type == "ConnectError"
+    assert retries[1].error_type == "ConnectError"
+    contents = [c.content for c in chunks if c.content]
+    assert contents == ["Hi"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_adapter_stream_retries_429(monkeypatch):
+    """HTTP 429 (rate-limit) is retried during streaming."""
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+    retries: list[ModelRetryEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            return httpx.Response(429, text="rate limited")
+        body = (
+            "event: message_start\n"
+            'data: {"type":"message_start","message":{"usage":{"input_tokens":5}}}\n\n'
+            "event: content_block_delta\n"
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}\n\n'
+            "event: message_stop\n"
+            'data: {"type":"message_stop"}\n\n'
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        chunks = []
+        async for chunk in adapter.stream(messages=[{"role": "user", "content": "hi"}]):
+            chunks.append(chunk)
+
+    assert calls["count"] == 3, "429 should be retried twice then succeed"
+    assert len(retries) == 2
+    assert retries[0].error_type == "HTTPStatusError"
+    assert retries[1].error_type == "HTTPStatusError"
+    contents = [c.content for c in chunks if c.content]
+    assert contents == ["Hi"]
+
+
+@pytest.mark.asyncio
+async def test_openai_native_adapter_stream_retries_503(monkeypatch):
+    """HTTP 503 is retried during streaming for OpenAINativeAdapter."""
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+    retries: list[ModelRetryEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            return httpx.Response(503, text="down")
+        body = (
+            "data: "
+            + json.dumps({"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]})
+            + "\n\ndata: [DONE]\n\n"
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAINativeAdapter(
+            model="gpt-4o",
+            base_url="https://api.openai.com",
+            api_key="sk-openai-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        chunks = []
+        async for chunk in adapter.stream(messages=[{"role": "user", "content": "hi"}]):
+            chunks.append(chunk)
+
+    assert calls["count"] == 3, "503 should be retried twice then succeed"
+    assert len(retries) == 2
+    assert retries[0].error_type == "HTTPStatusError"
+    assert retries[1].error_type == "HTTPStatusError"
+    contents = [c.content for c in chunks if c.content]
+    assert contents == ["hi"]
 
 
 @pytest.mark.asyncio
