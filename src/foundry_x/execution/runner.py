@@ -790,6 +790,7 @@ async def _handle_server_unavailable(
     log: TraceLogger,
     session_id: str,
     step: int,
+    record_and_count: Callable[[str, str, dict[str, Any]], None] | None = None,
 ) -> bool:
     """Record a ``server_unavailable`` trace event and call :meth:`restart`.
 
@@ -803,6 +804,15 @@ async def _handle_server_unavailable(
     counter on the manager is the authoritative source of truth for
     "how many restart cycles actually succeeded".
 
+    *record_and_count* is the runner's closure that increments the
+    per-session event counter before delegating to ``log.record()``.
+    When provided (the normal case inside ``run_task``), the
+    ``server_unavailable`` event counts toward
+    ``FOUNDRY_MAX_EVENTS_PER_SESSION`` so a misbehaving server that
+    repeatedly triggers health-check failures cannot bypass the runaway-
+    loop guard. When ``None`` (the standalone / test case), the event
+    is recorded directly without counting.
+
     Returns ``True`` when the runner should abort the session — i.e.
     when ``autostart`` is on and the supervisor's bounded restart loop
     failed to re-establish ``/health`` within the configured retry
@@ -815,13 +825,14 @@ async def _handle_server_unavailable(
     silenced — the runner is the outermost supervisor and must surface
     a launch failure rather than swallow it (AGENTS.md §2).
     """
+    _record = record_and_count if record_and_count is not None else log.record
     payload: dict[str, object] = {
         "step": step,
         "host": server_manager.host,
         "health_url": server_manager.health_url,
         "restart_attempted": bool(server_manager.config.autostart),
     }
-    log.record(session_id, kind=SERVER_UNAVAILABLE_KIND, payload=payload)
+    _record(session_id, kind=SERVER_UNAVAILABLE_KIND, payload=payload)
     if not server_manager.config.autostart:
         # Passive health-check only — no spawn / kill is attempted; the
         # model adapter's own retry policy (FOUNDRY_ADAPTER_MAX_RETRIES)
@@ -832,7 +843,7 @@ async def _handle_server_unavailable(
     try:
         healthy_after = await server_manager.restart()
     except (ServerLaunchError, ServerNotManagedError) as exc:
-        log.record(
+        _record(
             session_id,
             kind="model_error",
             payload={
@@ -1967,7 +1978,7 @@ async def run_task(
                 healthy = await server_manager.is_healthy()
                 if not healthy:
                     should_abort = await _handle_server_unavailable(
-                        server_manager, log, session_id, step
+                        server_manager, log, session_id, step, _record_and_count
                     )
                     if should_abort:
                         outcome_status = "failed"
