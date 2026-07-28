@@ -1157,7 +1157,7 @@ def test_sqlite_pruner_concurrent_access_no_busy_errors(tmp_path) -> None:
     assert errors == [], f"Concurrent access raised errors: {errors}"
 
 
-def test_count_tokens_does_not_block_concurrent_prune(self, tmp_path) -> None:
+def test_count_tokens_does_not_block_concurrent_prune(tmp_path) -> None:
     """``count_tokens`` uses no explicit transaction (no BEGIN/COMMIT/ROLLBACK)
     so it acquires only a DEFERRED (read-only) lock and does not block a
     concurrent ``prune`` (which uses BEGIN IMMEDIATE = RESERVED lock).
