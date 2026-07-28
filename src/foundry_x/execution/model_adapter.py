@@ -268,6 +268,13 @@ class ModelAdapter(Protocol):
 class OpenAICompatibleAdapter(ModelAdapter):
     """ModelAdapter backed by an OpenAI-compatible chat-completions API."""
 
+    _RATE_LIMIT_HEADERS = (
+        "x-ratelimit-remaining-requests",
+        "x-ratelimit-remaining-tokens",
+        "x-ratelimit-reset-requests",
+        "x-ratelimit-reset-tokens",
+    )
+
     def __init__(
         self,
         base_url: str,
@@ -279,6 +286,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
         chat_completions_path: str | None = None,
         max_retries: int = _DEFAULT_ADAPTER_MAX_RETRIES,
         on_retry: RetryCallback | None = None,
+        on_cost: CostCallback | None = None,
+        on_rate_limit: RateLimitCallback | None = None,
     ) -> None:
         base = base_url.strip().rstrip("/")
         if not base:
@@ -295,6 +304,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
         self._headers = _auth_headers(api_key)
         self.max_retries = max_retries
         self.on_retry = on_retry
+        self.on_cost = on_cost
+        self.on_rate_limit = on_rate_limit
 
     async def __aenter__(self) -> Self:
         return self
@@ -422,6 +433,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
                         status_code=status,
                         response_body=exc.response.text,
                     ) from exc
+                if status == 429:
+                    self._emit_rate_limit(exc.response.headers)
                 backoff_ms = _compute_backoff_ms(attempt)
                 self._emit_retry(attempt + 1, exc, backoff_ms)
                 await asyncio.sleep(backoff_ms / 1000)
@@ -444,9 +457,63 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 data = response.json()
             except json.JSONDecodeError as exc:
                 raise ModelAdapterResponseError("model endpoint returned invalid JSON") from exc
+            self._emit_cost(data)
             return _JSON_OBJECT_ADAPTER.validate_python(data)
 
         raise ModelAdapterError("model endpoint request failed: retries exhausted")
+
+    def _emit_cost(self, data: JsonObject) -> None:
+        """Emit ``on_cost`` if usage data is present in the response (issue #1165)."""
+        if self.on_cost is None:
+            return
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            return
+        prompt_tokens = usage.get("prompt_tokens", 0) or 0
+        completion_tokens = usage.get("completion_tokens", 0) or 0
+        self.on_cost(
+            ModelCostEvent(
+                provider="openai-compatible",
+                model=self.model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                estimated_cost_usd=0.0,
+            )
+        )
+
+    def _emit_rate_limit(self, headers: httpx.Headers) -> None:
+        """Emit ``on_rate_limit`` if rate-limit headers are present (issue #1165)."""
+        if self.on_rate_limit is None:
+            return
+        lowered = {key.lower(): value for key, value in headers.items()}
+        names_lower = {name.lower() for name in self._RATE_LIMIT_HEADERS}
+        if not names_lower.intersection(lowered):
+            return
+
+        def _to_int(value: str | None) -> int | None:
+            if value is None or value == "":
+                return None
+            try:
+                return int(value)
+            except ValueError:
+                return None
+
+        def _parse_duration(value: str | None) -> float | None:
+            if value is None or value == "":
+                return None
+            try:
+                return float(value.rstrip("s").rstrip("ms"))
+            except ValueError:
+                return None
+
+        self.on_rate_limit(
+            ModelRateLimitInfo(
+                requests_remaining=_to_int(lowered.get("x-ratelimit-remaining-requests")),
+                tokens_remaining=_to_int(lowered.get("x-ratelimit-remaining-tokens")),
+                requests_reset_seconds=_parse_duration(lowered.get("x-ratelimit-reset-requests")),
+                tokens_reset_seconds=_parse_duration(lowered.get("x-ratelimit-reset-tokens")),
+            )
+        )
 
     @property
     def _chat_completions_url(self) -> str:
@@ -1465,4 +1532,6 @@ def resolve_model_adapter(
         timeout=timeout,
         max_retries=max_retries,
         on_retry=on_retry,
+        on_cost=on_cost,
+        on_rate_limit=on_rate_limit,
     )

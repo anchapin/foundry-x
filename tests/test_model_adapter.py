@@ -11,6 +11,7 @@ from foundry_x.execution.model_adapter import (
     ModelAdapterError,
     ModelAdapterHTTPError,
     ModelAdapterResponseError,
+    ModelCostEvent,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -710,6 +711,84 @@ async def test_retry_429_is_retryable(monkeypatch):
     assert response.message.content == "done"
     assert len(retries) == 1
     assert retries[0].error_type == "HTTPStatusError"
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_on_cost_callback_invoked():
+    """OpenAICompatibleAdapter calls on_cost when usage data is present (issue #1165)."""
+
+    cost_events: list[ModelCostEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="llama-3.2",
+            client=client,
+            on_cost=cost_events.append,
+        )
+        response = await adapter.complete(
+            messages=[ModelMessage(role="user", content="hello")],
+        )
+
+    assert response.message.content == "done"
+    assert len(cost_events) == 1
+    assert cost_events[0].provider == "openai-compatible"
+    assert cost_events[0].model == "llama-3.2"
+    assert cost_events[0].prompt_tokens == 100
+    assert cost_events[0].completion_tokens == 50
+    assert cost_events[0].estimated_cost_usd == 0.0
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_on_cost_callback_not_invoked_when_no_usage():
+    """OpenAICompatibleAdapter does not call on_cost when usage data is absent."""
+
+    cost_events: list[ModelCostEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="llama-3.2",
+            client=client,
+            on_cost=cost_events.append,
+        )
+        response = await adapter.complete(
+            messages=[ModelMessage(role="user", content="hello")],
+        )
+
+    assert response.message.content == "done"
+    assert cost_events == []
 
 
 @pytest.mark.asyncio
