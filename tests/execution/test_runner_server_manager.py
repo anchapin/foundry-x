@@ -19,6 +19,8 @@ import pytest
 
 from foundry_x.execution.model_adapter import (
     ModelResponseChunk,
+    ModelToolCallChunk,
+    ToolCallFunctionChunk,
 )
 from foundry_x.execution.runner import RunLimits
 from foundry_x.execution.runner import run_task as real_run_task
@@ -41,6 +43,44 @@ class _FinalAnswerAdapter:
     """Adapter that yields a final-answer turn (no tool calls)."""
 
     async def stream(self, messages, tools=None, **kwargs):
+        yield ModelResponseChunk(content="done")
+        yield ModelResponseChunk(finish_reason="stop")
+
+    async def complete(self, messages, tools=None, **kwargs):
+        raise AssertionError("run_task must call stream()")
+
+    async def chat(self, messages, tools=None, **kwargs):
+        raise AssertionError("run_task must call stream()")
+
+
+class _ScriptedAdapter:
+    """Adapter that yields two turns: first emits a tool call, second yields final answer.
+
+    Used to force the runner through multiple loop iterations so multiple
+    ``server_unavailable`` events can be recorded before the event cap fires.
+    """
+
+    def __init__(self) -> None:
+        self._turn = 0
+
+    async def stream(self, messages, tools=None, **kwargs):
+        self._turn += 1
+        if self._turn == 1:
+            yield ModelResponseChunk(
+                tool_calls=[
+                    ModelToolCallChunk(
+                        index=0,
+                        id="call_1",
+                        type="function",
+                        function=ToolCallFunctionChunk(
+                            name="bash",
+                            arguments='{"command": "true"}',
+                        ),
+                    )
+                ]
+            )
+            yield ModelResponseChunk(finish_reason="tool_calls")
+            return
         yield ModelResponseChunk(content="done")
         yield ModelResponseChunk(finish_reason="stop")
 
@@ -352,3 +392,66 @@ async def test_runner_passes_real_foundry_server_manager(
     outcome = next(e for e in events if e.kind == "outcome")
     assert outcome.payload["status"] == "failed"
     assert outcome.payload["reason"] == "server_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_server_unavailable_events_count_toward_max_events_per_session(
+    tmp_path: Path,
+) -> None:
+    """Issue #1236: ``server_unavailable`` events must count toward
+    ``FOUNDRY_MAX_EVENTS_PER_SESSION`` so a misbehaving server that
+    repeatedly triggers health-check failures cannot bypass the runaway-
+    loop guard.
+
+    With ``max_events_per_session=10`` the sequence across two iterations is:
+      user_prompt (1)
+      → server_unavailable + model_request + model_response (2,3,4)
+      → tool_call + tool_result (5,6)
+      → server_unavailable + model_request + model_response (7,8,9)
+      → tool_call (10) → event_limit fires after tool_result would be 11.
+    The session aborts with ``event_limit``, not an unbounded loop.
+    """
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    # Always unhealthy; restart succeeds → loop continues, generating multiple
+    # server_unavailable events until the per-session event cap fires.
+    manager = _FakeServerManager(healthy=False, autostart=True, restart_outcome=True)
+
+    # _ScriptedAdapter yields tool_calls in turn 1, final_answer in turn 2.
+    # This forces the runner to loop through two iterations, generating two
+    # server_unavailable events before the cap (set to 10 events) is hit.
+    with logger.session(harness_version="0.1.0") as session_id:
+        await real_run_task(
+            "server-unavailable-event-limit-test",
+            harness_dir,
+            logger,
+            session_id,
+            model_adapter=_ScriptedAdapter(),
+            skill_executor=None,
+            limits=RunLimits(max_events_per_session=10),
+            workspace_root=None,
+            server_manager=manager,  # type: ignore[arg-type]
+        )
+
+    events = logger.load_session(session_id)
+    unavailable = [e for e in events if e.kind == "server_unavailable"]
+    # Two server_unavailable events (one per loop iteration before cap hit)
+    assert len(unavailable) == 2, f"expected 2 server_unavailable events, got {unavailable}"
+
+    # The session aborts due to event_limit, not due to server_unavailable
+    outcome = next(e for e in events if e.kind == "outcome")
+    assert outcome.payload["status"] == "failed", (
+        f"expected outcome.status='failed', got {outcome.payload['status']}"
+    )
+    assert outcome.payload["reason"] == "event_limit", (
+        f"expected outcome.reason='event_limit' (cap hit), got {outcome.payload['reason']}. "
+        "server_unavailable events are bypassing FOUNDRY_MAX_EVENTS_PER_SESSION."
+    )
+
+    # Verify task_aborted was emitted with event_limit reason
+    aborted = [e for e in events if e.kind == "task_aborted"]
+    assert len(aborted) == 1, f"expected 1 task_aborted, got {aborted}"
+    assert aborted[0].payload["reason"] == "event_limit"
