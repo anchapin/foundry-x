@@ -34,6 +34,7 @@ from harness.hooks.context_pruning import (
     DEFAULT_THRESHOLD,
     DEFAULT_TOKEN_THRESHOLD,
     ContextPruningHook,
+    Pruner,
     TokenAwarePruningHook,
     TokenCounter,
     Tracer,
@@ -1113,3 +1114,44 @@ class TestSqlitePrunerConnectionReuse:
         pruner = _SqlitePruner(db)
         pruner.close()
         pruner.close()
+
+
+# ---------------------------------------------------------------------------
+# Issue #1284: WAL pragma and busy_timeout on _sqlite_pruner factory
+# ---------------------------------------------------------------------------
+
+
+def test_sqlite_pruner_concurrent_access_no_busy_errors(tmp_path) -> None:
+    """Concurrent _sqlite_pruner calls must not raise SQLITE_BUSY errors
+    when multiple threads prune the same session simultaneously (issue #1284).
+
+    With ``PRAGMA journal_mode=WAL`` and ``PRAGMA busy_timeout=30000`` set
+    on each factory-created connection, concurrent prune operations from
+    multiple threads must not fail with SQLITE_BUSY."""
+    import sqlite3
+    import threading
+
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    errors: list[sqlite3.Error] = []
+
+    with logger.session(harness_version="test-0.0") as sid:
+        _plant(logger, sid, 500)
+
+    def make_pruner() -> Pruner:
+        return _sqlite_pruner(db)
+
+    def prune_loop(pruner: Pruner) -> None:
+        try:
+            for _ in range(20):
+                pruner(sid, frozenset({"tool_result", "user_prompt"}), 200)
+        except sqlite3.Error as e:  # pragma: no cover — SQLITE_BUSY would surface here
+            errors.append(e)
+
+    threads = [threading.Thread(target=prune_loop, args=(make_pruner(),)) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"Concurrent access raised errors: {errors}"

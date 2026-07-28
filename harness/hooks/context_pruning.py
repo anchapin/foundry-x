@@ -191,6 +191,8 @@ def _sqlite_pruner(db_path: str | os.PathLike) -> Pruner:
     def _drop(session_id: str, keep_kinds: frozenset[str], target_count: int) -> int:
         not_in_clause = ", ".join("?" for _ in keep_kinds)
         with sqlite3.connect(db_path) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             total = conn.execute(
                 "SELECT COUNT(*) FROM events WHERE session_id = ?",
                 (session_id,),
