@@ -1,7 +1,7 @@
 # ADR-0035: Parallel Sub-Agent Issue Generation
 
-**Status:** Proposed  
-**Date:** 2026-07-27  
+**Status:** Proposed
+**Date:** 2026-07-27
 **Deciders:** FoundryX team
 
 ## Context
