@@ -119,7 +119,7 @@ class WebFetchHook:
 
     def __init__(
         self,
-        tracer: Callable[[dict[str, object]], None] | None = None,
+        tracer: Callable[[str, dict[str, object]], None] | None = None,
     ) -> None:
         self._tracer = tracer
 
@@ -138,12 +138,12 @@ class WebFetchHook:
         # then mutate the call so the executor short-circuits.
         if self._tracer is not None:
             self._tracer(
+                "fetch_blocked",
                 {
-                    "kind": "fetch_blocked",
                     "url": url,
                     "reason": "domain_not_in_allowlist",
                     "allowed_domains": sorted(allowed),
-                }
+                },
             )
 
         new_args: dict[str, Any] = dict(call.arguments)

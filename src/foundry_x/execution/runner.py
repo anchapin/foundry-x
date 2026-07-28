@@ -1747,13 +1747,12 @@ async def run_task(
     # WebFetchHook was registered with tracer=None. Walk the hook list
     # and wire the first such instance so that blocked fetches emit
     # ``fetch_blocked`` events to the TraceLogger. The tracer signature
-    # is Callable[[dict], None] (one argument: the payload dict carrying
-    # ``kind``, ``url``, ``reason``, and ``allowed_domains``).
+    # is Callable[[str, dict], None] (kind string and payload dict),
+    # matching the Tracer protocol used by InjectionFirewallHook.
     if registry is not None:
         from harness.hooks.web_fetch import WebFetchHook
 
-        def _fetch_tracer(payload: dict[str, object]) -> None:
-            kind = payload.pop("kind", "fetch_blocked")
+        def _fetch_tracer(kind: str, payload: dict[str, object]) -> None:
             log.record(session_id, kind=kind, payload=payload)
 
         for hook in registry._hooks:
