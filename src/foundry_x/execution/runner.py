@@ -1860,6 +1860,21 @@ async def run_task(
             # sentinel key when the domain is not in FETCH_ALLOWED_DOMAINS.
             # Short-circuit to an error without issuing the HTTP request.
             if arguments.get("__fetch_blocked"):
+                # Emit a ``fetch_blocked`` trace event so operators can query
+                # what the allowlist is blocking (issue #1240). The URL has been
+                # cleared by WebFetchHook.pre_tool; emit what we have.
+                _fetch_tracer(
+                    "fetch_blocked",
+                    {
+                        "url": "",
+                        "reason": "domain_not_in_allowlist",
+                        "allowed_domains": sorted(
+                            d.strip()
+                            for d in os.environ.get("FETCH_ALLOWED_DOMAINS", "").split(",")
+                            if d.strip()
+                        ),
+                    },
+                )
                 return {
                     "content": "",
                     "status_code": 0,
