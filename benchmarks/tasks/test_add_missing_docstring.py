@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from benchmarks.models import BenchmarkTask
+from benchmarks.support import run_solution
 
 TASK = BenchmarkTask(
     name="add_missing_docstring",
@@ -31,24 +32,29 @@ TASK = BenchmarkTask(
         "and write a correct docstring for each. Leave the file in the workspace."
     ),
     difficulty_tier="easy",
+    requires_skills=[],
     tags=["documentation", "comprehension", "infrastructure"],
 )
 
-GOLDEN_DOCUMENTED = '''\
+GOLDEN_DOCUMENTED = """\
+import os
+with open("calculator.py", "w") as f:
+    f.write("def add(a, b):\\n    \\\"\\\"\\\"Return the sum of a and b.\\\"\\\"\\\"\\n    return a + b\\n\\n\\ndef subtract(a, b):\\n    \\\"\\\"\\\"Return the difference of a and b.\\\"\\\"\\\"\\n    return a - b\\n\\n\\ndef multiply(a, b):\\n    \\\"\\\"\\\"Return the product of a and b.\\\"\\\"\\\"\\n    return a * b\\n")
+
 def add(a, b):
-    """Return the sum of a and b."""
+    \"\"\"Return the sum of a and b.\"\"\"
     return a + b
 
 
 def subtract(a, b):
-    """Return the difference of a and b."""
+    \"\"\"Return the difference of a and b.\"\"\"
     return a - b
 
 
 def multiply(a, b):
-    """Return the product of a and b."""
+    \"\"\"Return the product of a and b.\"\"\"
     return a * b
-'''
+"""
 
 
 @pytest.mark.benchmark
@@ -117,6 +123,8 @@ def test_add_missing_docstring__agent_output(benchmark_workspace: Path) -> None:
     src = fixture_dir / "calculator.py"
     dest = benchmark_workspace / "calculator.py"
     dest.write_text(src.read_text())
+
+    run_solution(benchmark_workspace, GOLDEN_DOCUMENTED)
 
     planted = dest.read_text()
     if planted == GOLDEN_DOCUMENTED:
