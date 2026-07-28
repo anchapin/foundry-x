@@ -1562,6 +1562,12 @@ _ADAPTER_PREFIXES: dict[str, str] = {
     "openai/": "openai",
 }
 
+_ADAPTER_CLASSES: dict[str, type[ModelAdapter]] = {
+    "AnthropicAdapter": AnthropicAdapter,
+    "OpenAINativeAdapter": OpenAINativeAdapter,
+    "OpenAICompatibleAdapter": OpenAICompatibleAdapter,
+}
+
 
 def resolve_model_adapter(
     model_id: str,
@@ -1577,7 +1583,12 @@ def resolve_model_adapter(
 ) -> ModelAdapter:
     """Resolve the adapter class for *model_id* and construct it (ADR-0029 §5).
 
-    Prefix matching (highest precedence first):
+    Environment variable ``FOUNDRY_MODEL_ADAPTER`` overrides the resolved adapter
+    class (checked before prefix-based routing). Valid values:
+    ``AnthropicAdapter``, ``OpenAINativeAdapter``, ``OpenAICompatibleAdapter``.
+    Unknown values raise ``ValueError`` at resolution time.
+
+    Prefix matching (highest precedence after env-var override):
 
     | Prefix        | Adapter                |
     | ------------- | ---------------------- |
@@ -1589,6 +1600,69 @@ def resolve_model_adapter(
     provider so the request body carries the bare provider model name
     (e.g. ``claude-3-5-sonnet-20241022`` not ``anthropic/claude-...``).
     """
+    if FOUNDRY_MODEL_ADAPTER := os.environ.get("FOUNDRY_MODEL_ADAPTER"):
+        if FOUNDRY_MODEL_ADAPTER not in _ADAPTER_CLASSES:
+            valid = ", ".join(sorted(_ADAPTER_CLASSES))
+            raise ValueError(
+                f"Unknown FOUNDRY_MODEL_ADAPTER value {FOUNDRY_MODEL_ADAPTER!r}. "
+                f"Valid values: {valid}"
+            )
+        if FOUNDRY_MODEL_ADAPTER == "AnthropicAdapter":
+            for prefix in ("anthropic/",):
+                if model_id.startswith(prefix):
+                    bare = model_id.removeprefix(prefix)
+                    break
+            else:
+                bare = model_id
+            resolved_base = base_url or "https://api.anthropic.com"
+            return AnthropicAdapter(
+                model=bare,
+                base_url=resolved_base,
+                api_key=api_key,
+                client=client,
+                timeout=timeout,
+                max_retries=max_retries,
+                on_retry=on_retry,
+                on_cost=on_cost,
+                on_rate_limit=on_rate_limit,
+            )
+        if FOUNDRY_MODEL_ADAPTER == "OpenAINativeAdapter":
+            for prefix in ("openai/",):
+                if model_id.startswith(prefix):
+                    bare = model_id.removeprefix(prefix)
+                    break
+            else:
+                bare = model_id
+            resolved_base = base_url or "https://api.openai.com"
+            return OpenAINativeAdapter(
+                model=bare,
+                base_url=resolved_base,
+                api_key=api_key,
+                client=client,
+                timeout=timeout,
+                max_retries=max_retries,
+                on_retry=on_retry,
+                on_cost=on_cost,
+                on_rate_limit=on_rate_limit,
+            )
+        resolved_base = base_url or ""
+        if not resolved_base:
+            raise ValueError(
+                "OpenAICompatibleAdapter resolution requires a base_url; "
+                "set OPENCODE_SERVER_URL or pass base_url explicitly"
+            )
+        return OpenAICompatibleAdapter(
+            base_url=resolved_base,
+            model=model_id,
+            api_key=api_key,
+            client=client,
+            timeout=timeout,
+            max_retries=max_retries,
+            on_retry=on_retry,
+            on_cost=on_cost,
+            on_rate_limit=on_rate_limit,
+        )
+
     for prefix, provider in _ADAPTER_PREFIXES.items():
         if model_id.startswith(prefix):
             bare = model_id.removeprefix(prefix)
