@@ -5,6 +5,7 @@ import json
 import os
 import random
 import re
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Literal, Protocol, Self, TypeAlias, runtime_checkable
@@ -325,8 +326,10 @@ class OpenAICompatibleAdapter(ModelAdapter):
         **kwargs: JsonValue,
     ) -> ModelResponse:
         request = _build_request(self.model, messages, tools, stream=False, extra_params=kwargs)
-        response = await self._post_json(request.to_openai_payload())
-        return _parse_completion_response(response)
+        response_data, headers = await self._post_json(request.to_openai_payload())
+        response = _parse_completion_response(response_data)
+        self._emit_cost_and_rate_limit(response, headers)
+        return response
 
     async def chat(
         self,
@@ -387,14 +390,29 @@ class OpenAICompatibleAdapter(ModelAdapter):
             # Phase 2 — stream the body.  Mid-stream failures are NOT
             # retried; issue #200 explicitly excludes partially-received
             # SSE from the retry boundary.
+            final_usage: ModelUsage | None = None
+            last_headers: httpx.Headers | None = response.headers
             try:
                 async for line in response.aiter_lines():
                     chunk = _parse_sse_line(line)
                     if chunk is None:
                         continue
+                    if chunk.usage is not None:
+                        final_usage = chunk.usage
                     yield chunk
             finally:
                 await cm.__aexit__(None, None, None)
+
+            if final_usage is not None and last_headers is not None:
+                self._emit_cost_and_rate_limit(
+                    ModelResponse(
+                        message=ModelMessage(role="assistant"),
+                        usage=final_usage,
+                    ),
+                    last_headers,
+                )
+            if last_headers is not None:
+                self._emit_rate_limit(last_headers)
             return
 
     def _emit_retry(self, attempt: int, exc: Exception, backoff_ms: int) -> None:
@@ -409,7 +427,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
             )
         )
 
-    async def _post_json(self, payload: JsonObject) -> JsonObject:
+    async def _post_json(self, payload: JsonObject) -> tuple[JsonObject, httpx.Headers]:
         """POST *payload* with bounded retry on transient failures (issue #200).
 
         Retries fire only on ``httpx.ConnectError``, ``httpx.ReadTimeout``,
@@ -457,8 +475,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 data = response.json()
             except json.JSONDecodeError as exc:
                 raise ModelAdapterResponseError("model endpoint returned invalid JSON") from exc
-            self._emit_cost(data)
-            return _JSON_OBJECT_ADAPTER.validate_python(data)
+            validated = _JSON_OBJECT_ADAPTER.validate_python(data)
+            return validated, response.headers
 
         raise ModelAdapterError("model endpoint request failed: retries exhausted")
 
@@ -471,13 +489,15 @@ class OpenAICompatibleAdapter(ModelAdapter):
             return
         prompt_tokens = usage.get("prompt_tokens", 0) or 0
         completion_tokens = usage.get("completion_tokens", 0) or 0
+        in_price, out_price = self.token_pricing()
+        cost = (prompt_tokens * in_price + completion_tokens * out_price) / 1_000_000.0
         self.on_cost(
             ModelCostEvent(
                 provider="openai-compatible",
                 model=self.model,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                estimated_cost_usd=0.0,
+                estimated_cost_usd=round(cost, 8),
             )
         )
 
@@ -513,6 +533,79 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 requests_reset_seconds=_parse_duration(lowered.get("x-ratelimit-reset-requests")),
                 tokens_reset_seconds=_parse_duration(lowered.get("x-ratelimit-reset-tokens")),
             )
+        )
+
+    def token_pricing(self) -> tuple[float, float]:
+        """Return ``(input_per_1m_usd, output_per_1m_usd)``; emits RuntimeWarning for unknown models."""
+        # OpenAICompatibleAdapter has no pricing table; emit warning and return (0.0, 0.0)
+        # so operators are alerted to the missing pricing data rather than silently reporting $0.00.
+        warnings.warn(
+            f"OpenAICompatibleAdapter: no pricing entry for model '{self.model}'; "
+            "cost attribution will report $0.00. "
+            "Consider using a CloudModelAdapter subclass with a known pricing table.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return (0.0, 0.0)
+
+    def _emit_cost_and_rate_limit(
+        self,
+        response: ModelResponse,
+        headers: httpx.Headers | Mapping[str, str],
+    ) -> None:
+        """Fire ``on_cost`` / ``on_rate_limit`` callbacks when wired (issue #1235)."""
+        if self.on_cost is not None and response.usage is not None:
+            prompt_tokens = response.usage.prompt_tokens
+            completion_tokens = response.usage.completion_tokens
+            in_price, out_price = self.token_pricing()
+            cost = (prompt_tokens * in_price + completion_tokens * out_price) / 1_000_000.0
+            self.on_cost(
+                ModelCostEvent(
+                    provider="openai-compatible",
+                    model=self.model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    estimated_cost_usd=round(cost, 8),
+                )
+            )
+        if self.on_rate_limit is not None:
+            info = self._extract_rate_limit(headers)
+            if info is not None:
+                self.on_rate_limit(info)
+
+    def _extract_rate_limit(
+        self, headers: httpx.Headers | Mapping[str, str]
+    ) -> ModelRateLimitInfo | None:
+        """Extract rate-limit info from headers if present."""
+        lowered = {key.lower(): value for key, value in headers.items()}
+        names_lower = {name.lower() for name in self._RATE_LIMIT_HEADERS}
+        if not names_lower.intersection(lowered):
+            return None
+        return self._parse_rate_limit(lowered)
+
+    def _parse_rate_limit(self, headers_lower: Mapping[str, str]) -> ModelRateLimitInfo:
+        """Parse rate-limit headers into ModelRateLimitInfo."""
+        def _to_int(value: str | None) -> int | None:
+            if value is None or value == "":
+                return None
+            try:
+                return int(value)
+            except ValueError:
+                return None
+
+        def _parse_duration(value: str | None) -> float | None:
+            if value is None or value == "":
+                return None
+            try:
+                return float(value.rstrip("s").rstrip("ms"))
+            except ValueError:
+                return None
+
+        return ModelRateLimitInfo(
+            requests_remaining=_to_int(headers_lower.get("x-ratelimit-remaining-requests")),
+            tokens_remaining=_to_int(headers_lower.get("x-ratelimit-remaining-tokens")),
+            requests_reset_seconds=_parse_duration(headers_lower.get("x-ratelimit-reset-requests")),
+            tokens_reset_seconds=_parse_duration(headers_lower.get("x-ratelimit-reset-tokens")),
         )
 
     @property
