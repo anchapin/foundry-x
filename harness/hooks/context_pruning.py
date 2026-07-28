@@ -109,7 +109,7 @@ class _SqlitePruner:
     __slots__ = ("_conn",)
 
     def __init__(self, db_path: str | os.PathLike) -> None:
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, timeout=30)
         self._conn.execute("PRAGMA journal_mode=WAL")
 
     def count_tokens(self, session_id: str) -> int:

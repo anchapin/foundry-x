@@ -140,10 +140,10 @@ class TestWebFetchHookPreTool:
 
     @pytest.mark.asyncio
     async def test_blocked_fetch_fires_tracer(self) -> None:
-        tracer_calls: list[dict[str, object]] = []
+        tracer_calls: list[tuple[str, dict[str, object]]] = []
 
-        def tracer(payload: dict[str, object]) -> None:
-            tracer_calls.append(payload)
+        def tracer(kind: str, payload: dict[str, object]) -> None:
+            tracer_calls.append((kind, payload))
 
         with mock.patch.dict("os.environ", {"FETCH_ALLOWED_DOMAINS": "docs.python.org"}):
             hook = WebFetchHook(tracer=tracer)
@@ -151,18 +151,18 @@ class TestWebFetchHookPreTool:
             await hook.pre_tool(call)
 
         assert len(tracer_calls) == 1
-        payload = tracer_calls[0]
-        assert payload["kind"] == "fetch_blocked"
+        kind, payload = tracer_calls[0]
+        assert kind == "fetch_blocked"
         assert payload["url"] == "https://evil.example.com/"
         assert payload["reason"] == "domain_not_in_allowlist"
         assert payload["allowed_domains"] == ["docs.python.org"]
 
     @pytest.mark.asyncio
     async def test_allowed_fetch_does_not_fire_tracer(self) -> None:
-        tracer_calls: list[dict[str, object]] = []
+        tracer_calls: list[tuple[str, dict[str, object]]] = []
 
-        def tracer(payload: dict[str, object]) -> None:
-            tracer_calls.append(payload)
+        def tracer(kind: str, payload: dict[str, object]) -> None:
+            tracer_calls.append((kind, payload))
 
         with mock.patch.dict("os.environ", {"FETCH_ALLOWED_DOMAINS": "docs.python.org"}):
             hook = WebFetchHook(tracer=tracer)
