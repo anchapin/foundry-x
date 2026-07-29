@@ -188,11 +188,14 @@ mirrors the way our product works:
     `--model-id`, `--quantization`, `--path-or-endpoint`; same module
     as `python -m foundry_x.execution.runner`)
   - `uv run foundry-x-trace` (alias `foundry-trace`) — trace-driven
-    inspection. Subcommands worth knowing: `sessions`, `show <sid>`,
-    `events-grep`, `render-failure`, `seed-sample-trace` (plant a
-    deterministic offline session), and `prune` (drop old sessions
-    from `logs/traces.db` — see Operational notes below). `--help` for
-    the full list.
+     inspection. Key subcommands:
+     - `sessions` — list recorded sessions
+     - `show <sid>` — print the event timeline
+     - `events-grep` — grep events by pattern
+     - `render-failure` — render a failure report
+     - `seed-sample-trace` — plant a deterministic offline session
+     - `prune` — drop old sessions from `logs/traces.db`
+     Run `foundry-x-trace --help` for the full subcommand list.
   - `uv run foundry-kpis` — compute the three PRD success-metric
     KPIs (cycle time, regression rate, improvement rate) plus the
     tracked token-budget metric from traces.
