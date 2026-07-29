@@ -26,7 +26,7 @@ jobs:
       - name: Critic benchmark suite
         run: |
           mkdir -p test-results
-          uv run pytest -m benchmark --junit-xml=test-results/junit.xml
+          uv run pytest -n auto -m benchmark --junit-xml=test-results/junit.xml
 
       - name: Upload JUnit XML
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

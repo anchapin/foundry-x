@@ -48,7 +48,7 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: CI gate claims
-        run: uv run pytest tests/docs/test_ci_gate_claims.py -v
+        run: uv run pytest -n auto tests/docs/test_ci_gate_claims.py -v
 
   docs-link:
     name: docs-link-integrity
@@ -69,4 +69,4 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Doc link integrity
-        run: uv run pytest tests/docs/test_doc_links.py
+        run: uv run pytest -n auto tests/docs/test_doc_links.py
