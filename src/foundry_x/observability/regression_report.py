@@ -158,7 +158,9 @@ def _load_verdict_events(
     so time-bounded queries do not materialize events outside the window.
     """
     events: list[tuple[str, str, VerdictRecord]] = []
-    for event in logger.query_events(kind=VERDICT_KIND, harness_version=harness_version, since=since):
+    for event in logger.query_events(
+        kind=VERDICT_KIND, harness_version=harness_version, since=since
+    ):
         events.append(
             (
                 event.session_id,

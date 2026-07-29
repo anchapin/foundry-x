@@ -948,9 +948,13 @@ class TraceLogger:
             all matching events qualify.
         """
         if self.backend == "jsonl":
-            yield from self._query_events_jsonl(kind=kind, harness_version=harness_version, since=since)
+            yield from self._query_events_jsonl(
+                kind=kind, harness_version=harness_version, since=since
+            )
             return
-        yield from self._query_events_sqlite(kind=kind, harness_version=harness_version, since=since)
+        yield from self._query_events_sqlite(
+            kind=kind, harness_version=harness_version, since=since
+        )
 
     def _list_sessions_sqlite(self, harness_version: str | None = None) -> Sequence[TraceSession]:
         assert self._conn is not None  # backend == "sqlite"

@@ -1116,16 +1116,22 @@ def _cycle_time(
     time-bounded queries do not materialize events outside the window.
     """
     start_events: dict[str, TraceEvent] = {}
-    for event in logger.query_events(kind="task_received", harness_version=harness_version, since=since):
+    for event in logger.query_events(
+        kind="task_received", harness_version=harness_version, since=since
+    ):
         start_events.setdefault(event.session_id, event)
     end_events: dict[str, TraceEvent] = {}
-    for event in logger.query_events(kind="critic_verdict", harness_version=harness_version, since=since):
+    for event in logger.query_events(
+        kind="critic_verdict", harness_version=harness_version, since=since
+    ):
         end_events.setdefault(event.session_id, event)
 
     # Issue #1113: build a session_id -> reason map from task_aborted events
     # so we can attribute excluded sessions to their abort reason.
     abort_reasons: dict[str, str] = {}
-    for event in logger.query_events(kind="task_aborted", harness_version=harness_version, since=since):
+    for event in logger.query_events(
+        kind="task_aborted", harness_version=harness_version, since=since
+    ):
         if event.session_id not in abort_reasons:
             abort_reasons[event.session_id] = event.payload.get("reason", "other")
 
