@@ -435,6 +435,16 @@ class KpiSummary(BaseModel):
     per_model_id: dict[str, SkillKpiSlice] = {}
     per_quantization: dict[str, SkillKpiSlice] = {}
     per_harness_version: dict[str, SkillKpiSlice] = {}
+    # Issue #1269: hook overhead percentiles per tool, computed from
+    # ``hook_overhead_ms`` and ``hook_post_overhead_ms`` on tool_call events.
+    hook_overhead: dict[str, HookOverheadRow] = {}
+    # Issue #1269: aggregate hook overhead percentiles across all tools for
+    # ``foundry-kpis --format json`` output (the dict above is the per-tool
+    # breakdown; these scalars are the overall aggregates).
+    hook_overhead_ms_p50: float = 0.0
+    hook_overhead_ms_p95: float = 0.0
+    hook_post_overhead_ms_p50: float = 0.0
+    hook_post_overhead_ms_p95: float = 0.0
 
 
 class StreamingQualityData(BaseModel):
@@ -447,6 +457,21 @@ class StreamingQualityData(BaseModel):
     avg_ttft_ms: float | None = None
     total_chunks: int = 0
     avg_chunk_interval_ms: float | None = None
+
+
+class HookOverheadRow(BaseModel):
+    """Hook overhead percentiles for one tool (issue #1269).
+
+    Aggregated from the ``hook_overhead_ms`` and ``hook_post_overhead_ms``
+    fields on every ``tool_call`` event the Runner emits. Computed via one
+    ``query_events`` cursor with the kind filter pushed down.
+    """
+
+    count: int = 0
+    hook_overhead_ms_p50: float = 0.0
+    hook_overhead_ms_p95: float = 0.0
+    hook_post_overhead_ms_p50: float = 0.0
+    hook_post_overhead_ms_p95: float = 0.0
 
 
 class KpiComparison(BaseModel):
@@ -518,6 +543,13 @@ class KpiHistoryEntry(BaseModel):
     Issue #1271 adds ``streaming_quality_mean_ttft_ms``,
     ``streaming_quality_p50_ttft_ms``, and ``streaming_quality_p95_ttft_ms``,
     plus ``mean_prompt_tokens_per_step`` and ``mean_completion_tokens_per_step``.
+
+    Issue #1269 adds the four aggregate hook overhead percentiles:
+    ``hook_overhead_ms_p50``, ``hook_overhead_ms_p95``,
+    ``hook_post_overhead_ms_p50``, ``hook_post_overhead_ms_p95``. These are
+    the p50/p95 of all tool_call events' ``hook_overhead_ms`` and
+    ``hook_post_overhead_ms`` fields, respectively, across all tools in
+    the analysis window.
     """
 
     timestamp: str
@@ -546,6 +578,11 @@ class KpiHistoryEntry(BaseModel):
     streaming_quality_p95_ttft_ms: float | None = None
     mean_prompt_tokens_per_step: float | None = None
     mean_completion_tokens_per_step: float | None = None
+    # Issue #1269: aggregate hook overhead percentiles across all tools.
+    hook_overhead_ms_p50: float = 0.0
+    hook_overhead_ms_p95: float = 0.0
+    hook_post_overhead_ms_p50: float = 0.0
+    hook_post_overhead_ms_p95: float = 0.0
 
 
 class KpiTrends(BaseModel):
@@ -952,6 +989,13 @@ def compute_kpis(
     mean_prompt_tokens_per_step, mean_completion_tokens_per_step = _token_per_step(
         logger, harness_version=harness_version
     )
+    (
+        hook_overhead,
+        hook_overhead_ms_p50,
+        hook_overhead_ms_p95,
+        hook_post_overhead_ms_p50,
+        hook_post_overhead_ms_p95,
+    ) = _hook_overhead(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -989,6 +1033,11 @@ def compute_kpis(
         streaming_quality_p95_ttft_ms=streaming_quality_p95_ttft_ms,
         mean_prompt_tokens_per_step=mean_prompt_tokens_per_step,
         mean_completion_tokens_per_step=mean_completion_tokens_per_step,
+        hook_overhead=hook_overhead,
+        hook_overhead_ms_p50=hook_overhead_ms_p50,
+        hook_overhead_ms_p95=hook_overhead_ms_p95,
+        hook_post_overhead_ms_p50=hook_post_overhead_ms_p50,
+        hook_post_overhead_ms_p95=hook_post_overhead_ms_p95,
         **_slice_field(
             _session_slice_or_task_slice(
                 logger,
@@ -1203,6 +1252,19 @@ def _compute_deltas(
         ),
         "mean_completion_tokens_per_step": _delta(
             baseline.mean_completion_tokens_per_step, candidate.mean_completion_tokens_per_step
+        ),
+        # Issue #1269: hook overhead deltas (higher hook overhead is worse).
+        "hook_overhead_ms_p50": _delta(
+            baseline.hook_overhead_ms_p50, candidate.hook_overhead_ms_p50
+        ),
+        "hook_overhead_ms_p95": _delta(
+            baseline.hook_overhead_ms_p95, candidate.hook_overhead_ms_p95
+        ),
+        "hook_post_overhead_ms_p50": _delta(
+            baseline.hook_post_overhead_ms_p50, candidate.hook_post_overhead_ms_p50
+        ),
+        "hook_post_overhead_ms_p95": _delta(
+            baseline.hook_post_overhead_ms_p95, candidate.hook_post_overhead_ms_p95
         ),
     }
 
@@ -2323,6 +2385,81 @@ def _fetch_blocked_count(
     return count
 
 
+def _percentile(sorted_values: list[float], q: float) -> float:
+    """Return the *q*-th percentile of *sorted_values* using nearest-rank.
+
+    Mirrors the formula used in ``tool_latency.aggregate_tool_latency`` so
+    the hook overhead percentiles use the same deterministic method as tool
+    execution latency percentiles.
+    """
+    import math
+
+    n = len(sorted_values)
+    if n == 0:
+        return 0.0
+    rank = max(1, math.ceil(q / 100.0 * n))
+    return float(sorted_values[min(rank, n) - 1])
+
+
+def _hook_overhead(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> tuple[dict[str, HookOverheadRow], float, float, float, float]:
+    """Aggregate hook overhead percentiles per tool and overall (issue #1269).
+
+    Streams ``tool_call`` events via :meth:`TraceLogger.query_events` and
+    buckets ``hook_overhead_ms`` and ``hook_post_overhead_ms`` by tool name.
+    Computes p50/p95 per tool and the overall aggregate across all tools.
+
+    Returns
+    -------
+    ``(per_tool, overall_p50, overall_p95, post_p50, post_p95)`` where the
+    scalar values are the overall percentiles across all tools (for
+    :class:`KpiHistoryEntry`) and ``per_tool`` is the per-tool breakdown
+    for :attr:`KpiSummary.hook_overhead`.
+    """
+    per_tool_hook: dict[str, list[float]] = {}
+    per_tool_post: dict[str, list[float]] = {}
+    all_hook: list[float] = []
+    all_post: list[float] = []
+
+    for event in logger.query_events(kind="tool_call", harness_version=harness_version):
+        payload = event.payload or {}
+        hook_ms = payload.get("hook_overhead_ms")
+        post_ms = payload.get("hook_post_overhead_ms")
+        name = payload.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if isinstance(hook_ms, (int, float)) and not isinstance(hook_ms, bool) and hook_ms >= 0:
+            per_tool_hook.setdefault(name, []).append(float(hook_ms))
+            all_hook.append(float(hook_ms))
+        if isinstance(post_ms, (int, float)) and not isinstance(post_ms, bool) and post_ms >= 0:
+            per_tool_post.setdefault(name, []).append(float(post_ms))
+            all_post.append(float(post_ms))
+
+    all_hook.sort()
+    all_post.sort()
+    overall_hook_p50 = _percentile(all_hook, 50.0)
+    overall_hook_p95 = _percentile(all_hook, 95.0)
+    overall_post_p50 = _percentile(all_post, 50.0)
+    overall_post_p95 = _percentile(all_post, 95.0)
+
+    rows: dict[str, HookOverheadRow] = {}
+    all_tools = set(per_tool_hook.keys()) | set(per_tool_post.keys())
+    for tool in all_tools:
+        hook_vals = sorted(per_tool_hook.get(tool, []))
+        post_vals = sorted(per_tool_post.get(tool, []))
+        rows[tool] = HookOverheadRow(
+            count=len(hook_vals) + len(post_vals),
+            hook_overhead_ms_p50=_percentile(hook_vals, 50.0),
+            hook_overhead_ms_p95=_percentile(hook_vals, 95.0),
+            hook_post_overhead_ms_p50=_percentile(post_vals, 50.0),
+            hook_post_overhead_ms_p95=_percentile(post_vals, 95.0),
+        )
+
+    return rows, overall_hook_p50, overall_hook_p95, overall_post_p50, overall_post_p95
+
+
 def _format_value(value: float | None) -> str:
     if value is None:
         return "N/A"
@@ -2822,6 +2959,31 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
             f"{_format_value(candidate.mean_completion_tokens_per_step)} | "
             f"{_format_delta(baseline.mean_completion_tokens_per_step, candidate.mean_completion_tokens_per_step, higher_is_better=True)} |"
         ),
+        # Issue #1269: hook overhead deltas (higher is worse — adds latency to every tool call).
+        (
+            "| Hook Overhead ms p50 | "
+            f"{_format_value(baseline.hook_overhead_ms_p50)} | "
+            f"{_format_value(candidate.hook_overhead_ms_p50)} | "
+            f"{_format_delta(baseline.hook_overhead_ms_p50, candidate.hook_overhead_ms_p50, higher_is_better=False)} |"
+        ),
+        (
+            "| Hook Overhead ms p95 | "
+            f"{_format_value(baseline.hook_overhead_ms_p95)} | "
+            f"{_format_value(candidate.hook_overhead_ms_p95)} | "
+            f"{_format_delta(baseline.hook_overhead_ms_p95, candidate.hook_overhead_ms_p95, higher_is_better=False)} |"
+        ),
+        (
+            "| Hook Post Overhead ms p50 | "
+            f"{_format_value(baseline.hook_post_overhead_ms_p50)} | "
+            f"{_format_value(candidate.hook_post_overhead_ms_p50)} | "
+            f"{_format_delta(baseline.hook_post_overhead_ms_p50, candidate.hook_post_overhead_ms_p50, higher_is_better=False)} |"
+        ),
+        (
+            "| Hook Post Overhead ms p95 | "
+            f"{_format_value(baseline.hook_post_overhead_ms_p95)} | "
+            f"{_format_value(candidate.hook_post_overhead_ms_p95)} | "
+            f"{_format_delta(baseline.hook_post_overhead_ms_p95, candidate.hook_post_overhead_ms_p95, higher_is_better=False)} |"
+        ),
     ]
     return "\n".join(lines)
 
@@ -2945,6 +3107,10 @@ def append_kpi_history(
             "per_model_id",
             "per_quantization",
             "per_harness_version",
+            # Issue #1269: ``hook_overhead`` is a per-tool dict, not a scalar
+            # trend metric — exclude it so the JSONL history line stays compact.
+            # The four scalar hook overhead fields are included directly.
+            "hook_overhead",
         },
     )
     payload["timestamp"] = _now_iso()
