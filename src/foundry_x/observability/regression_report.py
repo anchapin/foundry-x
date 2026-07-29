@@ -72,6 +72,7 @@ class _Regression:
     was_passing_session: str
     now_failing_session: str
     now_failing_version: str
+    target_file: str | None = None
 
 
 @dataclass
@@ -80,6 +81,7 @@ class _NewPass:
     was_failing_session: str
     now_passing_session: str
     now_passing_version: str
+    target_file: str | None = None
 
 
 class RegressionRow(BaseModel):
@@ -89,6 +91,7 @@ class RegressionRow(BaseModel):
     was_passing_session: str
     now_failing_session: str
     now_failing_version: str
+    target_file: str | None = None
 
 
 class NewPassRow(BaseModel):
@@ -98,6 +101,7 @@ class NewPassRow(BaseModel):
     was_failing_session: str
     now_passing_session: str
     now_passing_version: str
+    target_file: str | None = None
 
 
 class RegressionAnalysis(BaseModel):
@@ -196,6 +200,7 @@ def _compute(
                         was_passing_session=prior_passed[task],
                         now_failing_session=session_id,
                         now_failing_version=session_version,
+                        target_file=verdict.target_file,
                     )
                 )
         for task in verdict.passed_checks:
@@ -206,6 +211,7 @@ def _compute(
                         was_failing_session=prior_failed[task],
                         now_passing_session=session_id,
                         now_passing_version=session_version,
+                        target_file=verdict.target_file,
                     )
                 )
         for task in verdict.passed_checks:
@@ -367,23 +373,29 @@ def _render(
         "",
     ]
     if regressions:
-        lines.append("| Task | Was passing (session) | Now failing (session) | Manifest version |")
-        lines.append("| --- | --- | --- | --- |")
+        lines.append(
+            "| Task | Was passing (session) | Now failing (session) | Manifest version | Target file |"
+        )
+        lines.append("| --- | --- | --- | --- | --- |")
         for reg in regressions:
+            target_file = reg.target_file if reg.target_file else ""
             lines.append(
                 f"| {reg.task} | {reg.was_passing_session} | "
-                f"{reg.now_failing_session} | {reg.now_failing_version} |"
+                f"{reg.now_failing_session} | {reg.now_failing_version} | {target_file} |"
             )
     else:
         lines.append("_None._")
     lines += ["", "## New Passes", ""]
     if new_passes:
-        lines.append("| Task | Was failing (session) | Now passing (session) | Manifest version |")
-        lines.append("| --- | --- | --- | --- |")
+        lines.append(
+            "| Task | Was failing (session) | Now passing (session) | Manifest version | Target file |"
+        )
+        lines.append("| --- | --- | --- | --- | --- |")
         for pas in new_passes:
+            target_file = pas.target_file if pas.target_file else ""
             lines.append(
                 f"| {pas.task} | {pas.was_failing_session} | "
-                f"{pas.now_passing_session} | {pas.now_passing_version} |"
+                f"{pas.now_passing_session} | {pas.now_passing_version} | {target_file} |"
             )
     else:
         lines.append("_None._")

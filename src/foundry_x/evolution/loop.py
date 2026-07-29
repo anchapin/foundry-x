@@ -297,6 +297,9 @@ def run_evolution_step(
     if critic is None and not no_verify:
         critic = Critic(harness_dir=harness_dir)
 
+    unique_target_files = {edit.target_file for edit in proposed_edits}
+    target_file = unique_target_files.pop() if len(unique_target_files) == 1 else None
+
     verdict = None
     if no_verify:
         # Skip the Critic gate but preserve the audit trail (issue #888).
@@ -310,7 +313,7 @@ def run_evolution_step(
                 notes="--no-verify: skipped",
                 edit_index=idx,
                 failure_class=failure_report.proposed_class,
-                target_file=edit.target_file,
+                target_file=target_file,
             )
     else:
         for idx, edit in enumerate(proposed_edits):
@@ -320,7 +323,7 @@ def run_evolution_step(
                 failure_class=failure_report.proposed_class,
                 tier=critic_tier,
             )
-            verdict.target_file = edit.target_file
+            verdict.target_file = target_file
 
     return EvolutionResult(
         session_id=session_id,
@@ -424,6 +427,9 @@ async def run_evolution_step_async(
     if critic is None and not no_verify:
         critic = Critic(harness_dir=harness_dir)
 
+    unique_target_files = {edit.target_file for edit in proposed_edits}
+    target_file = unique_target_files.pop() if len(unique_target_files) == 1 else None
+
     verdict = None
     if no_verify:
         # Skip the Critic gate but preserve the audit trail (issue #888).
@@ -435,7 +441,7 @@ async def run_evolution_step_async(
                 notes="--no-verify: skipped",
                 edit_index=idx,
                 failure_class=failure_report.proposed_class,
-                target_file=edit.target_file,
+                target_file=target_file,
             )
     else:
         for idx, edit in enumerate(proposed_edits):
@@ -445,7 +451,7 @@ async def run_evolution_step_async(
                 failure_class=failure_report.proposed_class,
                 tier=critic_tier,
             )
-            verdict.target_file = edit.target_file
+            verdict.target_file = target_file
 
     return EvolutionResult(
         session_id=session_id,
@@ -593,6 +599,9 @@ def run_evolution_batch(
             )
             continue
 
+        unique_target_files = {edit.target_file for edit in failure_edits}
+        target_file = unique_target_files.pop() if len(unique_target_files) == 1 else None
+
         verdict = None
         if no_verify:
             for idx, edit in enumerate(failure_edits):
@@ -603,7 +612,7 @@ def run_evolution_batch(
                     notes="--no-verify: skipped",
                     edit_index=idx,
                     failure_class=failure_report.proposed_class,
-                    target_file=edit.target_file,
+                    target_file=target_file,
                 )
         else:
             if critic is None:
@@ -615,7 +624,7 @@ def run_evolution_batch(
                     failure_class=failure_report.proposed_class,
                     tier=critic_tier,
                 )
-                verdict.target_file = edit.target_file
+                verdict.target_file = target_file
 
         results.append(
             EvolutionResult(
@@ -740,6 +749,9 @@ async def run_evolution_batch_async(
             )
             continue
 
+        unique_target_files = {edit.target_file for edit in failure_edits}
+        target_file = unique_target_files.pop() if len(unique_target_files) == 1 else None
+
         verdict = None
         if no_verify:
             for idx, edit in enumerate(failure_edits):
@@ -750,7 +762,7 @@ async def run_evolution_batch_async(
                     notes="--no-verify: skipped",
                     edit_index=idx,
                     failure_class=failure_report.proposed_class,
-                    target_file=edit.target_file,
+                    target_file=target_file,
                 )
         else:
             if critic is None:
@@ -762,7 +774,7 @@ async def run_evolution_batch_async(
                     failure_class=failure_report.proposed_class,
                     tier=critic_tier,
                 )
-                verdict.target_file = edit.target_file
+                verdict.target_file = target_file
 
         results.append(
             EvolutionResult(
