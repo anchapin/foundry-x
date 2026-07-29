@@ -207,7 +207,9 @@ def test_model_response_missing_usage(benchmark_workspace: Path) -> None:
 
     # --- model_response assertions -------------------------------------------
     model_responses = [event for event in events if event.kind == "model_response"]
-    assert len(model_responses) == 3, f"expected 3 model_response events; got {len(model_responses)}"
+    assert len(model_responses) == 3, (
+        f"expected 3 model_response events; got {len(model_responses)}"
+    )
 
     # Step 0: usage=None → token_usage is null, tokens_used is 0
     assert model_responses[0].payload["token_usage"] is None, (
