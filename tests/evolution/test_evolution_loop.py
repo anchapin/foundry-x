@@ -274,10 +274,10 @@ class TestRunEvolutionStep:
         assert result.verdict.notes == "--no-verify: skipped"
         assert result.verdict.target_file == "harness/skills/my_skill/SKILL.md"
 
-    def test_multiple_edits_verdict_has_target_file_of_last_edit(
+    def test_multiple_edits_different_files_sets_target_file_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """Issue #1115: with multiple edits, verdict.target_file is the last edit's target."""
+        """Issue #1348: with multiple edits targeting different files, target_file is None (ambiguous)."""
         harness_dir = _write_harness(tmp_path)
 
         events = [
@@ -307,7 +307,41 @@ class TestRunEvolutionStep:
         assert len(result.proposed_edits) == 2
         assert result.verdict is not None
         assert result.verdict.edit_index == 1
-        assert result.verdict.target_file == "harness/hooks/another_hook.py"
+        assert result.verdict.target_file is None
+
+    def test_multiple_edits_same_file_sets_target_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Issue #1348: with multiple edits targeting the same file, target_file is that file."""
+        harness_dir = _write_harness(tmp_path)
+
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        proposed_edit1 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 1",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new1\n",
+        )
+        proposed_edit2 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="Fix 2",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -2 +2 @@\n-old\n+new2\n",
+        )
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return [proposed_edit1, proposed_edit2]
+
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+
+        result = run_evolution_step("sess-multi-edit-same-file", events, harness_dir)
+
+        assert result.failure_report.proposed_class != "clean"
+        assert len(result.proposed_edits) == 2
+        assert result.verdict is not None
+        assert result.verdict.target_file == "harness/system_prompt.txt"
 
 
 class TestEvolutionResultModel:
