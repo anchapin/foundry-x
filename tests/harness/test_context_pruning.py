@@ -1199,3 +1199,24 @@ def test_count_tokens_does_not_block_concurrent_prune(tmp_path) -> None:
         f"count_tokens issued transaction statements: {tx_statements} — "
         "it should use a deferred read with no explicit transaction (issue #1283)"
     )
+
+    def test_count_tokens_warns_on_missing_tokens_used(self, tmp_path, caplog) -> None:
+        """When the most recent model_response lacks tokens_used, a warning
+        must be logged with session_id and timestamp (issue #1268)."""
+        import logging
+
+        db = tmp_path / "traces.db"
+        logger = TraceLogger(db)
+        with logger.session(harness_version="test-0.0") as sid:
+            logger.record(sid, kind="model_response", payload={"no_tokens": "here"})
+
+        pruner = _SqlitePruner(db)
+        try:
+            with caplog.at_level(logging.WARNING, logger="harness.hooks.context_pruning"):
+                result = pruner.count_tokens(sid)
+            assert result == 0
+            assert len(caplog.records) == 1
+            assert sid in caplog.records[0].message
+            assert "tokens_used" in caplog.records[0].message
+        finally:
+            pruner.close()
