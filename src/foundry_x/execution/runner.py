@@ -2357,6 +2357,12 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         "(issue #1028). Stored in session metadata to allow the study "
         "aggregator to separate internal-suite runs from external-slice runs.",
     )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Run harness, adapter, and environment pre-flight checks "
+        "without executing the agent loop. Exits 0 on success, 2 on failure.",
+    )
     args = parser.parse_args()
 
     harness_dir = Path(args.harness_dir).resolve()
@@ -2371,6 +2377,37 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         sys.exit(2)
     if str(harness_dir) not in sys.path:
         sys.path.insert(0, str(harness_dir))
+
+    if args.validate:
+        failed = False
+        try:
+            validate_harness_layout(harness_dir)
+        except HarnessValidationError as exc:
+            joined = ", ".join(exc.missing)
+            print(
+                f"error: harness validation failed: {exc.harness_dir} is missing required entries: {joined}",
+                file=sys.stderr,
+            )
+            failed = True
+
+        try:
+            build_model_adapter()
+        except ValueError as exc:
+            print(f"error: model adapter configuration error: {exc}", file=sys.stderr)
+            failed = True
+
+        trace_path = Path(args.trace_path)
+        try:
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            trace_path.open(mode="a", encoding="utf-8").close()
+        except OSError as exc:
+            print(f"error: trace store is not writable: {trace_path}: {exc}", file=sys.stderr)
+            failed = True
+
+        if failed:
+            sys.exit(2)
+        print("Validation: OK")
+        sys.exit(0)
 
     workspace_root = Path(args.workspace_root).resolve() if args.workspace_root else None
 
