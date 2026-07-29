@@ -1743,10 +1743,8 @@ async def run_task(
     registry = _resolve_hook_registry(log, session_id)
     hook_call_cls, hook_result_cls = _import_hook_types()
 
-    # Wire injection firewall tracer (issue #733): the default registry's
-    # InjectionFirewallHook was registered with tracer=None. Walk the hook
-    # list and wire the first such instance we find so that blocked tool
-    # results emit ``injection_blocked`` events to the TraceLogger.
+    # Wire injection firewall tracer (issue #733): register the tracer with
+    # the registry so that the InjectionFirewallHook auto-wires it (issue #1342).
     # The tracer signature for InjectionFirewallHook is Callable[[dict], None]
     # (one argument: the payload dict); the hook internally calls
     # tracer(payload) and the tracer forwards to log.record with the
@@ -1757,25 +1755,19 @@ async def run_task(
         def _inject_tracer(kind: str, payload: dict[str, object]) -> None:
             log.record(session_id, kind=kind, payload=payload)
 
-        for hook in registry._hooks:
-            if isinstance(hook, InjectionFirewallHook) and hook._tracer is None:
-                hook._tracer = _inject_tracer  # type: ignore[attr-defined]
+        registry.register_tracer(InjectionFirewallHook, _inject_tracer)
 
-    # Wire WebFetchHook tracer (issue #1054): the default registry's
-    # WebFetchHook was registered with tracer=None. Walk the hook list
-    # and wire the first such instance so that blocked fetches emit
-    # ``fetch_blocked`` events to the TraceLogger. The tracer signature
-    # is Callable[[str, dict], None] (kind string and payload dict),
-    # matching the Tracer protocol used by InjectionFirewallHook.
+    # Wire WebFetchHook tracer (issue #1054): register the tracer with the
+    # registry so that the WebFetchHook auto-wires it (issue #1342). The
+    # tracer signature is Callable[[str, dict], None] (kind string and payload
+    # dict), matching the Tracer protocol used by InjectionFirewallHook.
     if registry is not None:
         from harness.hooks.web_fetch import WebFetchHook
 
         def _fetch_tracer(kind: str, payload: dict[str, object]) -> None:
             log.record(session_id, kind=kind, payload=payload)
 
-        for hook in registry._hooks:
-            if isinstance(hook, WebFetchHook) and hook._tracer is None:
-                hook._tracer = _fetch_tracer
+        registry.register_tracer(WebFetchHook, _fetch_tracer)
 
     # Context pruning: when FOUNDRY_CONTEXT_TOKENS is set, register
     # TokenAwarePruningHook so the runner's accumulated tokens_used drives

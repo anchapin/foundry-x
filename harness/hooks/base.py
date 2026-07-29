@@ -27,6 +27,9 @@ class Hook(Protocol):
     async def post_tool(self, call: ToolCall, result: ToolResult) -> ToolResult: ...
 
 
+TracerTarget = Callable[[str, dict[str, Any]], None]
+
+
 # Optional sink invoked when a hook raises inside ``run_pre`` / ``run_post``.
 # The primary failure channel is the module logger (``harness.hooks.base``);
 # this callback exists so the runner (or tests) can record the failure into
@@ -39,6 +42,9 @@ HookErrorCallback = Callable[[str, int, str, BaseException], None]
 class HookRegistry:
     def __init__(self, on_error: HookErrorCallback | None = None) -> None:
         self._hooks: list[Hook] = []
+        # Tracers keyed by hook class: enables formal public-API wiring
+        # without runner needing to iterate _hooks or use isinstance.
+        self._tracers: dict[type, TracerTarget] = {}
         # ``on_error(slot, index, hook_name, exc)`` is invoked once per
         # isolated failure. Stored untyped on purpose so callers can route
         # the failure into any sink without widening the API.
@@ -46,6 +52,19 @@ class HookRegistry:
 
     def register(self, hook: Hook) -> None:
         self._hooks.append(hook)
+        self._auto_wire_tracer(hook)
+
+    def _auto_wire_tracer(self, hook: Hook) -> None:
+        if hasattr(hook, "_tracer") and hook._tracer is None:  # type: ignore[attr-defined]
+            tracer = self._tracers.get(type(hook))
+            if tracer is not None:
+                hook._tracer = tracer  # type: ignore[attr-defined]
+
+    def register_tracer(self, hook_cls: type, tracer: TracerTarget) -> None:
+        self._tracers[hook_cls] = tracer
+        for hook in self._hooks:
+            if type(hook) is hook_cls and hasattr(hook, "_tracer") and hook._tracer is None:  # type: ignore[attr-defined]
+                hook._tracer = tracer  # type: ignore[attr-defined]
 
     def reset(self, on_error: HookErrorCallback | None = None) -> None:
         """Drop every registered hook and replace ``on_error`` with ``on_error``.
@@ -58,6 +77,7 @@ class HookRegistry:
         is intentional — ``reset`` is the nuclear option.
         """
         self._hooks.clear()
+        self._tracers.clear()
         self._on_error = on_error
 
     async def run_pre(self, call: ToolCall) -> ToolCall:
