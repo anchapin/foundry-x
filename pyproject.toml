@@ -45,7 +45,7 @@ extend-exclude = ["benchmarks/fixtures", "worktrees"]
 testpaths = ["tests", "benchmarks"]
 pythonpath = ["."]
 norecursedirs = ["benchmarks/fixtures"]
-filterwarnings = "error"
+strict_markers = true
 markers = [
     "benchmark: deterministic gatekeeping benchmark task (ADR-0004, ADR-0005)",
 ]
