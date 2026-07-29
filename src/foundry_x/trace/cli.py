@@ -266,8 +266,11 @@ def _events_grep(args: argparse.Namespace) -> int:
     for event in events:
         payload_text = json.dumps(event.payload, sort_keys=True)
         if pattern.search(payload_text):
-            sys.stdout.write(f"{event.timestamp}  {event.kind}  {payload_text}\n")
+            if not getattr(args, "count", False):
+                sys.stdout.write(f"{event.timestamp}  {event.kind}  {payload_text}\n")
             matches += 1
+    if getattr(args, "count", False):
+        sys.stdout.write(f"{matches}\n")
     return 0 if matches else 1
 
 
@@ -1461,6 +1464,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--db",
         default=None,
         help="Deprecated: use --trace-db instead.",
+    )
+    events_grep_parser.add_argument(
+        "--count",
+        action="store_true",
+        help="Print only the integer count of matching events instead of event lines.",
     )
     events_grep_parser.set_defaults(func=_events_grep)
 
