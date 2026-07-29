@@ -448,6 +448,11 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     # issue #898 slice fields (empty unless ``--group-by`` is supplied).
     # ``per_model_id`` / ``per_quantization`` / ``per_harness_version``
     # are the issue #1039 session-level slice fields.
+    # model_cost_count, total_model_cost_usd, model_rate_limit_count,
+    # and fetch_blocked_count are the issue #1281 auxiliary metrics.
+    # streaming_quality_mean_ttft_ms, streaming_quality_p50_ttft_ms,
+    # streaming_quality_p95_ttft_ms, mean_prompt_tokens_per_step, and
+    # mean_completion_tokens_per_step are the issue #1271 aggregate metrics.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
@@ -486,6 +491,11 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "per_model_id",
         "per_quantization",
         "per_harness_version",
+        "streaming_quality_mean_ttft_ms",
+        "streaming_quality_p50_ttft_ms",
+        "streaming_quality_p95_ttft_ms",
+        "mean_prompt_tokens_per_step",
+        "mean_completion_tokens_per_step",
     }
 
 
