@@ -57,6 +57,8 @@ FOUNDRY_SERVER_N_GPU_LAYERS_ENV = "FOUNDRY_SERVER_NGpuLayers"
 FOUNDRY_SERVER_CTX_SIZE_ENV = "FOUNDRY_SERVER_CTXSize"
 FOUNDRY_SERVER_AUTOSTART_ENV = "FOUNDRY_SERVER_AUTOSTART"
 FOUNDRY_SERVER_BIN_ENV = "FOUNDRY_SERVER_BIN"
+FOUNDRY_SERVER_HEALTH_TIMEOUT_S_ENV = "FOUNDRY_SERVER_HEALTH_TIMEOUT_S"
+FOUNDRY_SERVER_HEALTH_READY_TIMEOUT_S_ENV = "FOUNDRY_SERVER_HEALTH_READY_TIMEOUT_S"
 
 # Default fallback for the manager when ``LLAMACPP_HOST`` is unset (matches
 # ``docs/MODEL_CONFIG.md`` §1 — the local-first fallback for llama.cpp).
@@ -161,6 +163,16 @@ class ServerConfig:
         autostart_raw = _resolved(FOUNDRY_SERVER_AUTOSTART_ENV, _DEFAULT_AUTOSTART).lower()
         autostart = autostart_raw in ("1", "true", "yes", "on")
         server_bin = src.get(FOUNDRY_SERVER_BIN_ENV, "").strip() or None
+        health_timeout_s = float(
+            src.get(FOUNDRY_SERVER_HEALTH_TIMEOUT_S_ENV, str(_DEFAULT_HEALTH_TIMEOUT_S)).strip()
+            or _DEFAULT_HEALTH_TIMEOUT_S
+        )
+        health_ready_timeout_s = float(
+            src.get(
+                FOUNDRY_SERVER_HEALTH_READY_TIMEOUT_S_ENV, str(_DEFAULT_HEALTH_READY_TIMEOUT_S)
+            ).strip()
+            or _DEFAULT_HEALTH_READY_TIMEOUT_S
+        )
         return cls(
             host=host,
             model_path=model_path,
@@ -168,6 +180,8 @@ class ServerConfig:
             ctx_size=ctx_size,
             autostart=autostart,
             server_bin=server_bin,
+            health_timeout_s=health_timeout_s,
+            health_ready_timeout_s=health_ready_timeout_s,
             slot=slot,
         )
 

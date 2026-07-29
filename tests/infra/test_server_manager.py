@@ -28,6 +28,8 @@ from foundry_x.infra.server_manager import (
     FOUNDRY_SERVER_AUTOSTART_ENV,
     FOUNDRY_SERVER_BIN_ENV,
     FOUNDRY_SERVER_CTX_SIZE_ENV,
+    FOUNDRY_SERVER_HEALTH_READY_TIMEOUT_S_ENV,
+    FOUNDRY_SERVER_HEALTH_TIMEOUT_S_ENV,
     FOUNDRY_SERVER_N_GPU_LAYERS_ENV,
     LLAMACPP_HOST_ENV,
     LLAMACPP_MODEL_PATH_ENV,
@@ -98,6 +100,8 @@ def test_server_config_from_env_uses_safe_defaults(monkeypatch: pytest.MonkeyPat
         FOUNDRY_SERVER_CTX_SIZE_ENV,
         FOUNDRY_SERVER_AUTOSTART_ENV,
         FOUNDRY_SERVER_BIN_ENV,
+        FOUNDRY_SERVER_HEALTH_TIMEOUT_S_ENV,
+        FOUNDRY_SERVER_HEALTH_READY_TIMEOUT_S_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -112,6 +116,8 @@ def test_server_config_from_env_uses_safe_defaults(monkeypatch: pytest.MonkeyPat
     # effects. CI / sweeps opt in via ``FOUNDRY_SERVER_AUTOSTART=1``.
     assert cfg.autostart is False
     assert cfg.server_bin is None
+    assert cfg.health_timeout_s == 2.0
+    assert cfg.health_ready_timeout_s == 60.0
 
 
 def test_server_config_from_env_recognises_truthy_autostart_values() -> None:
@@ -133,6 +139,18 @@ def test_server_config_from_env_treats_empty_strings_as_unset() -> None:
     assert cfg.host == "http://127.0.0.1:8080"
     assert cfg.model_path is None
     assert cfg.n_gpu_layers == "0"
+
+
+def test_server_config_from_env_reads_health_timeout() -> None:
+    """``FOUNDRY_SERVER_HEALTH_TIMEOUT_S`` and ``FOUNDRY_SERVER_HEALTH_READY_TIMEOUT_S``
+    are plumbed through ``ServerConfig.from_env``."""
+    env = {
+        FOUNDRY_SERVER_HEALTH_TIMEOUT_S_ENV: "5.0",
+        FOUNDRY_SERVER_HEALTH_READY_TIMEOUT_S_ENV: "120.0",
+    }
+    cfg = ServerConfig.from_env(env)
+    assert cfg.health_timeout_s == 5.0
+    assert cfg.health_ready_timeout_s == 120.0
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +570,8 @@ def test_import_does_not_read_environ() -> None:
             FOUNDRY_SERVER_CTX_SIZE_ENV,
             FOUNDRY_SERVER_AUTOSTART_ENV,
             FOUNDRY_SERVER_BIN_ENV,
+            FOUNDRY_SERVER_HEALTH_TIMEOUT_S_ENV,
+            FOUNDRY_SERVER_HEALTH_READY_TIMEOUT_S_ENV,
         ):
             importlib.delenv(name, raising=False)
         # ``FoundryServerManager()`` (no config) should resolve cleanly.
@@ -577,6 +597,8 @@ def test_default_env_does_not_include_real_model_path() -> None:
             FOUNDRY_SERVER_CTX_SIZE_ENV,
             FOUNDRY_SERVER_AUTOSTART_ENV,
             FOUNDRY_SERVER_BIN_ENV,
+            FOUNDRY_SERVER_HEALTH_TIMEOUT_S_ENV,
+            FOUNDRY_SERVER_HEALTH_READY_TIMEOUT_S_ENV,
         ):
             importlib.delenv(name, raising=False)
         cfg = ServerConfig.from_env()
@@ -586,7 +608,7 @@ def test_default_env_does_not_include_real_model_path() -> None:
         assert "/srv" not in cfg.host
     finally:
         importlib.undo()
-        # The monkeypatch fixture automatically restores os.environ on teardown;
+        # the monkeypatch fixture automatically restores os.environ on teardown;
         # the explicit ``undo`` here is defensive.
         for name in (
             LLAMACPP_HOST_ENV,
@@ -595,5 +617,7 @@ def test_default_env_does_not_include_real_model_path() -> None:
             FOUNDRY_SERVER_CTX_SIZE_ENV,
             FOUNDRY_SERVER_AUTOSTART_ENV,
             FOUNDRY_SERVER_BIN_ENV,
+            FOUNDRY_SERVER_HEALTH_TIMEOUT_S_ENV,
+            FOUNDRY_SERVER_HEALTH_READY_TIMEOUT_S_ENV,
         ):
             os.environ.pop(name, None)
