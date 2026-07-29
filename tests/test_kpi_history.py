@@ -336,6 +336,10 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "streaming_quality_p95_ttft_ms",
         "mean_prompt_tokens_per_step",
         "mean_completion_tokens_per_step",
+        "hook_overhead_ms_p50",
+        "hook_overhead_ms_p95",
+        "hook_post_overhead_ms_p50",
+        "hook_post_overhead_ms_p95",
     }
     assert "injection_blocks" not in payload
     assert "token_totals" not in payload

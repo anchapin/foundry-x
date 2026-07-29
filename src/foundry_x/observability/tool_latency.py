@@ -280,7 +280,14 @@ def _extract_post_overhead_ms(payload: dict) -> float | None:
 def _bucket_durations(
     events: Iterable[TraceEvent],
     since: str | None = None,
-) -> tuple[dict[str, list[float]], dict[str, list[float]], dict[str, list[float]], int, str | None, str | None]:
+) -> tuple[
+    dict[str, list[float]],
+    dict[str, list[float]],
+    dict[str, list[float]],
+    int,
+    str | None,
+    str | None,
+]:
     """Bucket ``tool_call`` event durations under their ``name`` field.
 
     Shared by the all-time aggregate (issue #181) and the windowed
@@ -327,7 +334,14 @@ def _bucket_durations(
         if post_overhead is not None:
             post_overhead_buckets.setdefault(name, []).append(post_overhead)
 
-    return duration_buckets, hook_overhead_buckets, post_overhead_buckets, total_calls, earliest, latest
+    return (
+        duration_buckets,
+        hook_overhead_buckets,
+        post_overhead_buckets,
+        total_calls,
+        earliest,
+        latest,
+    )
 
 
 def _rows_from_buckets(
