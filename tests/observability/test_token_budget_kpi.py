@@ -18,6 +18,7 @@ from foundry_x.evolution.critic import CriticVerdict
 from foundry_x.observability.kpis import (
     compare_kpis,
     compute_kpis,
+    main,
 )
 from foundry_x.observability.regression_report import record_verdict
 from foundry_x.trace.logger import TraceLogger
@@ -324,3 +325,66 @@ def test_token_totals_respects_harness_version_filter(tmp_path):
 
     assert list(summary_v1.token_totals.values()) == [2]
     assert list(summary_v2.token_totals.values()) == [6]
+
+
+# Issue #1354: FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX triggers exit 3 when overrun
+# exceeds the configured ceiling. Absent env var → backward-compatible zero exit.
+# ---------------------------------------------------------------------------
+
+
+def test_token_budget_overrun_max_exits_3_when_above_threshold(tmp_path, capsys, monkeypatch):
+    """Alert fires and main returns 3 when token_budget_overrun_pct exceeds the env ceiling."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, token_budget_abort=(5500, 5000))
+
+    monkeypatch.setenv("FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX", "5.0")
+    rc = main(["--trace-db", str(db)])
+    captured = capsys.readouterr()
+
+    assert rc == 3
+    assert "token_budget_overrun_pct" in captured.err
+    assert "FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX" in captured.err
+
+
+def test_token_budget_overrun_max_exits_0_when_at_or_below_threshold(tmp_path, capsys, monkeypatch):
+    """No alert when token_budget_overrun_pct is at or below the env ceiling."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, token_budget_abort=(5500, 5000))
+
+    monkeypatch.setenv("FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX", "50.0")
+    rc = main(["--trace-db", str(db)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ALERT" not in captured.err
+
+
+def test_token_budget_overrun_max_exits_0_when_env_var_absent(tmp_path, capsys, monkeypatch):
+    """Backward-compatible: no alert when FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX is unset."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, token_budget_abort=(5500, 5000))
+
+    monkeypatch.delenv("FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX", raising=False)
+    rc = main(["--trace-db", str(db)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ALERT" not in captured.err
+
+
+def test_token_budget_overrun_max_exits_0_when_no_token_budget_data(tmp_path, capsys, monkeypatch):
+    """No alert is possible when token_budget_overrun_pct is None (no sessions)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+
+    monkeypatch.setenv("FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX", "50.0")
+    rc = main(["--trace-db", str(db)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ALERT" not in captured.err
