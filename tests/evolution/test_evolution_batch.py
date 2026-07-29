@@ -277,3 +277,79 @@ class TestBatchDeduplication:
         target_files = {edit.target_file for edit in result.proposed_edits}
         assert "harness/system_prompt.txt" in target_files
         assert "harness/hooks/my_hook.py" in target_files
+
+
+class TestNoRedundantProposeCalls:
+    """Issue #1344: when propose_batch returns non-empty edits, propose() must NOT be called."""
+
+    def test_run_evolution_batch_no_redundant_propose_calls(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When batch_edits is non-empty, propose() is not called per failure."""
+        harness_dir = _write_harness(tmp_path)
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event(
+                "tool_error",
+                1.0,
+                {"error": "no such tool: frobnicate"},
+                event_id="e-wrong-tool",
+            ),
+            _event("tool_error", 2.0, {"error": "traceback occurred"}, event_id="e-tool-err"),
+        ]
+
+        proposed_edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="fix",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return [proposed_edit]
+
+        propose_call_count = 0
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            nonlocal propose_call_count
+            propose_call_count += 1
+            return [proposed_edit]
+
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+        result = run_evolution_batch("sess-no-redundant", events, harness_dir, no_verify=True)
+
+        assert propose_call_count == 0, (
+            f"propose() should NOT be called when propose_batch returns non-empty edits, "
+            f"but was called {propose_call_count} times"
+        )
+        assert len(result.results) >= 1, "should have results for each failure class"
+
+    def test_run_evolution_batch_fallback_propose_when_batch_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When batch_edits is empty, propose() is called per failure as fallback."""
+        harness_dir = _write_harness(tmp_path)
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event("error", 1.0, {"error": "oops"}, event_id="e2"),
+        ]
+
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return []
+
+        propose_call_count = 0
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            nonlocal propose_call_count
+            propose_call_count += 1
+            return []
+
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+        result = run_evolution_batch("sess-fallback", events, harness_dir)
+
+        assert propose_call_count == 1, (
+            f"propose() should be called once as fallback when batch_edits is empty, "
+            f"but was called {propose_call_count} times"
+        )
+        assert result.total_failures == 1
