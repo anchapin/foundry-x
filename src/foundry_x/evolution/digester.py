@@ -448,17 +448,19 @@ def _aggregate_context_overflow(
     session_id: str,
     ordered: Sequence[TraceEvent],
 ) -> FailureReport | None:
-    """Aggregate a context-overflow failure (issue #805).
+    """Aggregate a context-overflow failure (issue #805, issue #1345).
 
     Triggered when the runner agent loop terminates via
     ``outcome.status='truncated'`` / ``outcome.reason='max_steps'``
-    (ADR-0010 §Termination semantics). This is a terminal condition: the
-    session ended because the context budget was exhausted before the agent
-    produced a final answer. The Evolver should propose a pruning-hook
-    adjustment or prompt the model to avoid repetitive tool-call loops.
+    (ADR-0010 §Termination semantics) or via
+    ``task_aborted(reason='token_budget')`` (issue #1345). Both are terminal
+    conditions: the session ended because the context budget was exhausted
+    before the agent produced a final answer. The Evolver should propose a
+    pruning-hook adjustment or prompt the model to avoid repetitive tool-call
+    loops.
 
-    Returns ``None`` when no outcome event with the trigger payload is
-    present, so the caller can fall through to subsequent checks.
+    Returns ``None`` when no matching event is present, so the caller can
+    fall through to subsequent checks.
     """
     for i, event in enumerate(ordered):
         if event.kind == "outcome":
@@ -483,6 +485,35 @@ def _aggregate_context_overflow(
                         f"{CONTEXT_OVERFLOW_CLASS} failure: agent loop reached "
                         f"max_steps ({steps}) before producing a final answer"
                     ),
+                    failed_steps=failed_steps,
+                    suspected_causes=causes,
+                    proposed_class=CONTEXT_OVERFLOW_CLASS,
+                )
+        if event.kind == "task_aborted":
+            reason = event.payload.get("reason")
+            if reason == "token_budget":
+                token_budget = event.payload.get("token_budget")
+                failed_steps = [
+                    {
+                        "index": i,
+                        "event_id": event.event_id,
+                        "kind": event.kind,
+                        "timestamp": event.timestamp,
+                        "signal": "task_aborted:token_budget",
+                        "payload": event.payload,
+                    }
+                ]
+                causes = [
+                    _CLASS_CAUSE_TEMPLATES[CONTEXT_OVERFLOW_CLASS].format(match="token_budget")
+                ]
+                summary_parts = [
+                    f"{CONTEXT_OVERFLOW_CLASS} failure: task aborted due to token_budget exhaustion"
+                ]
+                if token_budget is not None:
+                    summary_parts.append(f"(budget={token_budget})")
+                return FailureReport(
+                    session_id=session_id,
+                    summary=" ".join(summary_parts),
                     failed_steps=failed_steps,
                     suspected_causes=causes,
                     proposed_class=CONTEXT_OVERFLOW_CLASS,
