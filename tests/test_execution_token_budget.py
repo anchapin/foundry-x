@@ -318,6 +318,7 @@ async def test_run_task_aborts_when_running_total_exceeds_token_budget(tmp_path)
     assert len(aborted) == 1
     assert aborted[0].payload == {
         "reason": "token_budget",
+        "step": 1,
         "tokens_used": 200,
         "token_budget": 150,
     }
@@ -531,6 +532,7 @@ async def test_run_task_token_budget_check_runs_before_message_append(tmp_path):
     assert len(aborted) == 1
     assert aborted[0].payload == {
         "reason": "token_budget",
+        "step": 1,
         "tokens_used": 300,
         "token_budget": 150,
     }

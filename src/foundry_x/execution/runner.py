@@ -570,28 +570,34 @@ async def run_with_limits(
     log: TraceLogger,
     session_id: str,
     limits: RunLimits,
+    *,
+    get_step: Callable[[], int | None] | None = None,
 ) -> Any:
     """Await ``awaitable`` under the wall-clock cap in ``limits``.
 
     On timeout, record a ``task_aborted`` trace event (reason ``wall_clock``)
-    carrying the exceeded cap, then re-raise :class:`asyncio.TimeoutError` so
-    the caller observes the abort. This is the SECURITY.md "Runaway
-    detection" guardrail: a degenerate harness edit that loops unbounded is
-    aborted before it can exhaust resources.
+    carrying the exceeded cap and current step (if ``get_step`` is provided),
+    then re-raise :class:`asyncio.TimeoutError` so the caller observes the
+    abort. This is the SECURITY.md "Runaway detection" guardrail: a degenerate
+    harness edit that loops unbounded is aborted before it can exhaust resources.
     """
     if limits.task_timeout_s is None:
         return await awaitable
     try:
         return await asyncio.wait_for(awaitable, timeout=limits.task_timeout_s)
     except TimeoutError:
+        step = get_step() if get_step is not None else None
+        payload: dict[str, Any] = {
+            "reason": "wall_clock",
+            "timeout_s": limits.task_timeout_s,
+            "token_budget": limits.token_budget,
+        }
+        if step is not None:
+            payload["step"] = step
         log.record(
             session_id,
             kind="task_aborted",
-            payload={
-                "reason": "wall_clock",
-                "timeout_s": limits.task_timeout_s,
-                "token_budget": limits.token_budget,
-            },
+            payload=payload,
         )
         raise
 
@@ -2087,6 +2093,7 @@ async def run_task(
                     kind="task_aborted",
                     payload={
                         "reason": "token_budget",
+                        "step": step,
                         "tokens_used": tokens_used,
                         "token_budget": token_budget,
                     },
