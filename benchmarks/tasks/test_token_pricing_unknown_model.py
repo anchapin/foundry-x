@@ -70,4 +70,5 @@ def test_token_pricing_unknown_model_emits_warning_and_returns_zero(
         f"token_pricing() returned {result!r}; expected (0.0, 0.0) for unknown model"
     )
     import asyncio
+
     asyncio.run(adapter.aclose())
