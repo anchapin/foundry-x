@@ -600,6 +600,9 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
         async def run_post(self, call, result):
             return result
 
+        def register_tracer(self, hook_cls, tracer):
+            pass
+
     def mock_resolve_one(log, session_id):
         return MockRegistryOneHook()
 
@@ -645,6 +648,9 @@ def test_run_task_records_hook_overhead_ms_with_delayed_hook(tmp_path, monkeypat
 
         async def run_post(self, call, result):
             return result
+
+        def register_tracer(self, hook_cls, tracer):
+            pass
 
     def mock_resolve_two(log, session_id):
         return MockRegistryTwoHooks()
@@ -798,6 +804,9 @@ def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monk
             await asyncio.sleep(post_hook_delay_ms / 1000.0)
             return result
 
+        def register_tracer(self, hook_cls, tracer):
+            pass
+
     def mock_resolve_slow_post(log, session_id):
         return MockRegistrySlowPost()
 
@@ -844,6 +853,9 @@ def test_run_task_records_hook_post_overhead_ms_with_delayed_hook(tmp_path, monk
             await asyncio.sleep(post_hook1_delay_ms / 1000.0)
             await asyncio.sleep(post_hook2_delay_ms / 1000.0)
             return result
+
+        def register_tracer(self, hook_cls, tracer):
+            pass
 
     def mock_resolve_two_post(log, session_id):
         return MockRegistryTwoSlowPost()
