@@ -571,3 +571,37 @@ async def test_empty_model_response_classified_as_failure(tmp_path):
     # The model_error event must precede the outcome event in trace order.
     kinds_in_order = [e.kind for e in events]
     assert kinds_in_order.index("model_error") < kinds_in_order.index("outcome")
+
+
+# --- issue #1339: message_count in outcome -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_outcome_includes_message_count(tmp_path):
+    """Issue #1339: the ``outcome`` event must include ``message_count`` —
+    the length of the conversation history at loop exit — so operators can
+    distinguish turns-heavy (high message_count) from token-heavy (high
+    tokens_total) sessions without replaying every model_request event."""
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+    db = tmp_path / "traces.db"
+
+    responses = [_final_response()]
+    adapter = _StreamingScriptedAdapter(responses)
+
+    logger = TraceLogger(db)
+    with logger.session(harness_version="0.1.0") as session_id:
+        await run_task(
+            "issue-1339-message-count",
+            harness_dir,
+            logger,
+            session_id,
+            model_adapter=adapter,
+            skill_executor=_noop_executor,
+        )
+
+    events = logger.load_session(session_id)
+    outcome = _outcome(events)
+    assert "message_count" in outcome, f"outcome missing message_count: {outcome}"
+    assert isinstance(outcome["message_count"], int)
+    assert outcome["message_count"] >= 2

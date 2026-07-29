@@ -2299,6 +2299,7 @@ async def run_task(
                 "server_restart_count": server_manager.restart_count
                 if server_manager is not None
                 else None,
+                "message_count": len(messages),
             },
         )
 
