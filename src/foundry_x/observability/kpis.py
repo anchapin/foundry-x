@@ -1233,9 +1233,7 @@ def _compute_deltas(
             baseline.evolver_llm_failure_rate, candidate.evolver_llm_failure_rate
         ),
         # Issue #1346: evolver duration delta (lower is better — faster evolver).
-        "evolver_duration_ms": _delta(
-            baseline.evolver_duration_ms, candidate.evolver_duration_ms
-        ),
+        "evolver_duration_ms": _delta(baseline.evolver_duration_ms, candidate.evolver_duration_ms),
         # Issue #1281: model cost, rate limit, and fetch blocked deltas.
         "model_cost_count": candidate.model_cost_count - baseline.model_cost_count,
         "total_model_cost_usd": _delta(
