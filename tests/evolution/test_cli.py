@@ -58,6 +58,126 @@ class TestInferBackend:
         assert _infer_backend("logs/traces.jsonl") == "jsonl"
 
 
+class TestExportPrometheus:
+    """Tests for --export-prometheus flag (issue #1364)."""
+
+    def test_export_prometheus_emits_kpi_metrics(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_failing_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        rc = main(
+            [
+                "evolve",
+                "--session-id",
+                sid,
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+                "--export-prometheus",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "foundryx_kpi_entry" in captured.out
+        assert 'kpi="cycle_time_seconds"' in captured.out
+        assert 'kpi="improvement_rate"' in captured.out
+        assert 'kpi="regression_rate"' in captured.out
+        assert rc == 1
+
+    def test_export_prometheus_exit_code_unaffected(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_failing_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        rc_with = main(
+            [
+                "evolve",
+                "--session-id",
+                sid,
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+                "--export-prometheus",
+            ]
+        )
+
+        db2 = tmp_path / "traces2.db"
+        sid2 = _populate_failing_session(db2)
+        harness2 = tmp_path / "harness2"
+        harness2.mkdir()
+        _write_minimal_harness(harness2)
+
+        rc_without = main(
+            [
+                "evolve",
+                "--session-id",
+                sid2,
+                "--trace-db",
+                str(db2),
+                "--harness-dir",
+                str(harness2),
+            ]
+        )
+
+        assert rc_with == rc_without == 1
+
+    def test_export_prometheus_clean_session(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_clean_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        rc = main(
+            [
+                "evolve",
+                "--session-id",
+                sid,
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+                "--export-prometheus",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "foundryx_kpi_entry" in captured.out
+        assert 'kpi="cycle_time_seconds"' in captured.out
+        assert 'kpi="improvement_rate"' in captured.out
+        assert 'kpi="regression_rate"' in captured.out
+        assert rc == 0
+
+    def test_export_prometheus_via_run_loop(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_failing_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
+            session_id=sid,
+            trace_db=str(db),
+            harness_dir=harness,
+            verbose=False,
+            export_prometheus=True,
+        )
+
+        captured = capsys.readouterr()
+        assert "foundryx_kpi_entry" in captured.out
+        assert 'kpi="cycle_time_seconds"' in captured.out
+        assert 'kpi="improvement_rate"' in captured.out
+        assert 'kpi="regression_rate"' in captured.out
+        assert exit_code == 1
+
+
 class TestFoundryEvolveCLI:
     def test_unknown_session_returns_exit_2(self, tmp_path, capsys):
         db = tmp_path / "traces.db"
