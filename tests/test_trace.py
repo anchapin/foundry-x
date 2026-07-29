@@ -940,3 +940,218 @@ def test_iter_events_returns_correct_results_in_under_50ms(tmp_path):
     assert len(verdicts) == 12
     assert all(e.kind == "critic_verdict" for e in verdicts)
     assert elapsed_ms < 50, f"iter_events took {elapsed_ms:.1f}ms, expected <50ms"
+
+
+# --- list_unevolved_sessions harness_version filter (issue #1272) --------------
+
+
+def _seed_unevolved_fixture(logger: TraceLogger) -> dict[str, str]:
+    """Plant sessions across two harness versions with mixed evolved states.
+
+    Returns a ``session_id -> harness_version`` map.
+    All sessions end when their context manager exits (session_end is always written).
+    """
+    ids: dict[str, str] = {}
+    # Session 1 / v1: ended, not evolved.
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "s1"})
+        ids[sid] = "v1"
+    # Session 2 / v1: ended, not evolved.
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "s2"})
+        ids[sid] = "v1"
+    # Session 3 / v2: ended, not evolved.
+    with logger.session(harness_version="v2") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "s3"})
+        ids[sid] = "v2"
+    # Session 4 / v1: ended, mark as evolved.
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "s4"})
+        ids[sid] = "v1"
+    logger.mark_session_evolved(sid)
+    # Session 5 / v2: ended (context manager always exits), not evolved.
+    with logger.session(harness_version="v2") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "s5"})
+        ids[sid] = "v2"
+    return ids
+
+
+@_BACKENDS
+def test_list_unevolved_sessions_returns_only_unevolved_ended_sessions(tmp_path, backend):
+    """list_unevolved_sessions excludes evolved sessions (issue #1272)."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    ids = _seed_unevolved_fixture(logger)
+
+    unevolved = logger.list_unevolved_sessions()
+    assert len(unevolved) == 4
+    assert set(unevolved).issubset(set(ids.keys()))
+    for sid in unevolved:
+        assert ids[sid] in ("v1", "v2")
+        assert logger.is_session_evolved(sid) is False
+
+
+@_BACKENDS
+def test_list_unevolved_sessions_harness_version_filter(tmp_path, backend):
+    """list_unevolved_sessions(harness_version=...) scopes to matching version (issue #1272)."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    ids = _seed_unevolved_fixture(logger)
+
+    v1_unevolved = logger.list_unevolved_sessions(harness_version="v1")
+    v2_unevolved = logger.list_unevolved_sessions(harness_version="v2")
+
+    assert len(v1_unevolved) == 2
+    assert len(v2_unevolved) == 2
+    v1_sids = set(v1_unevolved)
+    v2_sids = set(v2_unevolved)
+    for v1_sid in v1_unevolved:
+        assert ids[v1_sid] == "v1"
+    for v2_sid in v2_unevolved:
+        assert ids[v2_sid] == "v2"
+    assert v1_sids.isdisjoint(v2_sids)
+
+
+@_BACKENDS
+def test_list_unevolved_sessions_missing_harness_version_returns_empty(tmp_path, backend):
+    """harness_version that does not match returns empty list (issue #1272)."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    _seed_unevolved_fixture(logger)
+
+    assert logger.list_unevolved_sessions(harness_version="v99") == []
+
+
+# --- iter_unevolved_verdicts: O(1) store call for daemon verdict scan (issue #1272)
+
+
+def _seed_verdicts_fixture(logger: TraceLogger) -> dict[str, str]:
+    """Plant sessions with critic_verdict events and mixed evolved states.
+
+    Returns a ``session_id -> harness_version`` map.
+    """
+    ids: dict[str, str] = {}
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "s1"})
+        logger.record(sid, kind="critic_verdict", payload={"approved": True})
+        ids[sid] = "v1"
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "s2"})
+        logger.record(sid, kind="critic_verdict", payload={"approved": False})
+        ids[sid] = "v1"
+    with logger.session(harness_version="v2") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "s3"})
+        logger.record(sid, kind="critic_verdict", payload={"approved": True})
+        ids[sid] = "v2"
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "s4"})
+        logger.record(sid, kind="critic_verdict", payload={"approved": False})
+        ids[sid] = "v1"
+    logger.mark_session_evolved(sid)
+    with logger.session(harness_version="v2") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "s5"})
+        ids[sid] = "v2"
+    return ids
+
+
+@_BACKENDS
+def test_iter_unevolved_verdicts_yields_only_unevolved_sessions(tmp_path, backend):
+    """iter_unevolved_verdicts yields critic_verdict events only for unevolved sessions."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    _seed_verdicts_fixture(logger)
+
+    verdicts = list(logger.iter_unevolved_verdicts())
+    assert all(e.kind == "critic_verdict" for e in verdicts)
+    assert len(verdicts) == 3
+    verdict_sids = {e.session_id for e in verdicts}
+    for sid in verdict_sids:
+        assert logger.is_session_evolved(sid) is False
+
+
+@_BACKENDS
+def test_iter_unevolved_verdicts_excludes_evolved_sessions(tmp_path, backend):
+    """iter_unevolved_verdicts does not yield from sessions marked as evolved."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    ids = _seed_verdicts_fixture(logger)
+
+    verdicts = list(logger.iter_unevolved_verdicts())
+    verdict_sids = {e.session_id for e in verdicts}
+    for sid, version in ids.items():
+        if version == "v1" and sid != "s5":
+            is_evolved = logger.is_session_evolved(sid)
+            if is_evolved:
+                assert sid not in verdict_sids
+
+
+@_BACKENDS
+def test_iter_unevolved_verdicts_harness_version_filter(tmp_path, backend):
+    """iter_unevolved_verdicts(harness_version=...) scopes to matching version."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    _seed_verdicts_fixture(logger)
+
+    v1_verdicts = list(logger.iter_unevolved_verdicts(harness_version="v1"))
+    v2_verdicts = list(logger.iter_unevolved_verdicts(harness_version="v2"))
+
+    assert len(v1_verdicts) == 2
+    assert len(v2_verdicts) == 1
+    assert all(e.kind == "critic_verdict" for e in v1_verdicts)
+    assert all(e.kind == "critic_verdict" for e in v2_verdicts)
+
+
+@_BACKENDS
+def test_iter_unevolved_verdicts_empty_store_yields_nothing(tmp_path, backend):
+    """An empty trace store yields no events without raising."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+    assert list(logger.iter_unevolved_verdicts()) == []
+
+
+@_BACKENDS
+def test_iter_unevolved_verdicts_evolved_session_excluded(tmp_path, backend):
+    """iter_unevolved_verdicts excludes sessions that have been marked as evolved."""
+    path = tmp_path / f"traces{_suffix(backend)}"
+    logger = TraceLogger(path, backend=backend)
+
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "s1"})
+        logger.record(sid, kind="critic_verdict", payload={"approved": True})
+
+    verdicts = list(logger.iter_unevolved_verdicts())
+    assert len(verdicts) == 1
+
+    logger.mark_session_evolved(verdicts[0].session_id)
+
+    verdicts_after = list(logger.iter_unevolved_verdicts())
+    assert len(verdicts_after) == 0
+
+
+def test_iter_unevolved_verdicts_jsonl_vs_sqlite_count_equivalence(tmp_path):
+    """JSONL and SQLite backends return the same number of verdicts for the same fixture."""
+    sqlite_path = tmp_path / "traces.db"
+    jsonl_path = tmp_path / "traces.jsonl"
+
+    sqlite_logger = TraceLogger(sqlite_path, backend="sqlite")
+    jsonl_logger = TraceLogger(jsonl_path, backend="jsonl")
+
+    for logger in (sqlite_logger, jsonl_logger):
+        with logger.session(harness_version="v1") as sid:
+            logger.record(sid, kind="task_received", payload={"prompt": "s1"})
+            logger.record(sid, kind="critic_verdict", payload={"approved": True})
+        with logger.session(harness_version="v2") as sid:
+            logger.record(sid, kind="task_received", payload={"prompt": "s2"})
+            logger.record(sid, kind="critic_verdict", payload={"approved": False})
+        with logger.session(harness_version="v1") as sid:
+            logger.record(sid, kind="task_received", payload={"prompt": "s3"})
+            logger.record(sid, kind="critic_verdict", payload={"approved": True})
+        logger.mark_session_evolved(sid)
+
+    sqlite_verdicts = list(sqlite_logger.iter_unevolved_verdicts())
+    jsonl_verdicts = list(jsonl_logger.iter_unevolved_verdicts())
+
+    assert len(sqlite_verdicts) == 2
+    assert len(sqlite_verdicts) == len(jsonl_verdicts)
+    assert all(e.kind == "critic_verdict" for e in sqlite_verdicts)
+    assert all(e.kind == "critic_verdict" for e in jsonl_verdicts)
