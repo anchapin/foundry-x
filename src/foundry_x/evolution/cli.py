@@ -142,9 +142,7 @@ def _render_tracked_edit(edit: TrackedProposedEdit, verbose: bool = False) -> st
     return "\n".join(lines)
 
 
-def _render_critic_verdict(
-    verdict: CriticVerdict, cycle_time_seconds: float | None = None
-) -> str:
+def _render_critic_verdict(verdict: CriticVerdict, cycle_time_seconds: float | None = None) -> str:
     """Render a CriticVerdict as a compact plain-text summary.
 
     A ``None`` verdict represents a skipped Critic gate (``--no-verify``,
