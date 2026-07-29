@@ -3483,10 +3483,23 @@ def _render_validation_markdown(results: list[TaskValidationResult]) -> str:
     return "\n".join(lines)
 
 
+_TOKEN_BUDGET_OVERRUN_EPILOG = """
+Environment variables for alert thresholds:
+  FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX
+                        Exit 3 when token_budget_overrun_pct exceeds this value.
+                        Example: FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX=100.0
+                        (issue #1354).
+  FOUNDRY_CONTEXT_EFFICIENCY_MIN
+                        Exit 2 when context_efficiency falls below this value.
+                        (issue #1286).
+"""
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="foundry-kpis",
         description="Compute and display the three PRD success-metric KPIs.",
+        epilog=_TOKEN_BUDGET_OVERRUN_EPILOG,
     )
     parser.add_argument(
         "--trace-db",
@@ -3783,6 +3796,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             f" is below FOUNDRY_CONTEXT_EFFICIENCY_MIN={min_efficiency}\n"
         )
         return 2
+
+    # Issue #1354: FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX triggers exit 3 when overrun
+    # exceeds the configured ceiling. Backward-compatible: absent env var is ignored.
+    max_overrun = os.environ.get("FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX")
+    if (
+        max_overrun is not None
+        and summary.token_budget_overrun_pct is not None
+        and summary.token_budget_overrun_pct > float(max_overrun)
+    ):
+        sys.stderr.write(
+            f"[ALERT] token_budget_overrun_pct {summary.token_budget_overrun_pct:.4f}"
+            f" exceeds FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX={max_overrun}\n"
+        )
+        return 3
 
     return 0
 

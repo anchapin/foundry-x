@@ -54,13 +54,16 @@ def _docker_compose() -> str:
     docker = shutil.which("docker")
     if docker is None:
         pytest.skip("docker binary is not on PATH; skipping compose config validation")
-    probe = subprocess.run(
-        [docker, "compose", "version"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
+    try:
+        probe = subprocess.run(
+            [docker, "compose", "version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.skip("docker compose version timed out; skipping compose config validation")
     if probe.returncode != 0:
         pytest.skip("docker compose v2 plugin is unavailable; skipping compose config validation")
     return docker
