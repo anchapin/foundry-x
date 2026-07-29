@@ -2289,6 +2289,9 @@ async def run_task(
                 "steps": outcome_steps,
                 "ttft_ms": ttft_p50,
                 "tokens_total": tokens_used,
+                "server_restart_count": server_manager.restart_count
+                if server_manager is not None
+                else None,
             },
         )
 
