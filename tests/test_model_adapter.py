@@ -797,12 +797,18 @@ async def test_openai_compatible_stream_emits_cost_callback():
     cost_events: list[ModelCostEvent] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        body = "\n".join([
-            "data: " + json.dumps({"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]}),
-            "data: " + json.dumps({"usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}}),
-            "data: [DONE]",
-            "",
-        ])
+        body = "\n".join(
+            [
+                "data: "
+                + json.dumps({"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]}),
+                "data: "
+                + json.dumps(
+                    {"usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}}
+                ),
+                "data: [DONE]",
+                "",
+            ]
+        )
         return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
