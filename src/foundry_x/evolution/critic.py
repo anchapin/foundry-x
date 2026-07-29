@@ -43,6 +43,58 @@ _GATE_TIMEOUT_S_ENV = "FOUNDRY_GATE_TIMEOUT_S"
 
 _NOTES_TAIL_CHARS = 4000
 
+#: Patterns for files that are NOT critical to benchmark outcomes.
+#: A diff that touches ONLY these files (and no harness/, benchmarks/tasks/,
+#: or src/ files) can early-exit the Critic gate without running pytest.
+_NON_CRITICAL_PATTERNS: tuple[str, ...] = (
+    "docs/",
+    ".pre-commit-config.yaml",
+    "pyproject.toml",
+)
+
+#: Patterns for files that ARE critical to benchmark outcomes.
+#: A diff touching ANY of these must run the full Critic gate.
+_CRITICAL_PATTERNS: tuple[str, ...] = (
+    "harness/",
+    "benchmarks/tasks/",
+    "src/",
+)
+
+
+def _diff_touches_only_non_critical_files(diff: str) -> bool:
+    """Return True when every file path in *diff* is non-critical.
+
+    Parses ``--- a/<path>`` lines from the unified diff to extract the set of
+    files the diff touches, then checks each path against
+    :data:`_CRITICAL_PATTERNS`.  If none of the touched files match a critical
+    pattern, the diff is a no-op for benchmark purposes and the Critic gate can
+    exit early without running pytest.
+
+    Args:
+        diff: A unified-diff string (same format as
+            ``Critic.evaluate(proposed_diff=...)``).
+
+    Returns:
+        True when all touched files are non-critical (docs/, .pre-commit-config.yaml,
+        or pyproject.toml); False when any touched file is critical or when the
+        diff is empty.
+    """
+    if not diff.strip():
+        return False
+    touched_files: list[str] = []
+    for line in diff.splitlines():
+        if line.startswith("--- a/"):
+            path = line[5:].lstrip("/")
+            touched_files.append(path)
+    if not touched_files:
+        return False
+    for path in touched_files:
+        for critical in _CRITICAL_PATTERNS:
+            if path.startswith(critical):
+                return False
+    return True
+
+
 #: GGUF v3 quantization types studied in ADR-0020 (K-quants and legacy
 #: types). These are the quantizations for which the intelligence floor
 #: table in ADR-0020 has (projected) pass-rate data.
@@ -1041,6 +1093,19 @@ class Critic:
                         passed_checks=[],
                         failed_checks=["injection_detected"],
                         notes=f"injection pattern(s) in diff: {', '.join(injection_markers)}",
+                        edit_index=edit_index,
+                        failure_class=failure_class,
+                    )
+                # Gate 3: No-op diff check (issue #1347).
+                #    A diff that touches only non-critical files (docs/, CI configs,
+                #    .pre-commit-config.yaml, pyproject.toml) cannot affect benchmark
+                #    outcomes, so we approve it immediately without spawning pytest.
+                if _diff_touches_only_non_critical_files(proposed_diff):
+                    return CriticVerdict(
+                        verdict=True,
+                        passed_checks=["diff_noop"],
+                        failed_checks=[],
+                        notes="diff touches only non-critical files; gate skipped",
                         edit_index=edit_index,
                         failure_class=failure_class,
                     )
