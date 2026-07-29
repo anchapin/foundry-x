@@ -38,7 +38,6 @@ from harness.hooks.context_pruning import (
     TokenAwarePruningHook,
     TokenCounter,
     Tracer,
-    _sqlite_pruner,
     _SqlitePruner,
     register_into,
     register_token_aware_into,
@@ -104,7 +103,7 @@ def test_pre_tool_prunes_when_over_threshold(tmp_path) -> None:
     logger = TraceLogger(db)
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, _PLANTS)
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, captured = _tracer_for(logger, sid)
         hook = ContextPruningHook(
             session_id=sid,
@@ -149,7 +148,7 @@ def test_pre_tool_does_not_prune_when_under_threshold(tmp_path) -> None:
     logger = TraceLogger(db)
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, DEFAULT_THRESHOLD - 1)
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, captured = _tracer_for(logger, sid)
         hook = ContextPruningHook(
             session_id=sid,
@@ -183,7 +182,7 @@ def test_pre_tool_preserves_tool_result_and_user_prompt(tmp_path) -> None:
             logger.record(sid, kind="user_prompt", payload={"i": 0})
         for _ in range(100):
             logger.record(sid, kind="tool_call", payload={"i": 0})
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, captured = _tracer_for(logger, sid)
         hook = ContextPruningHook(
             session_id=sid,
@@ -224,7 +223,7 @@ def test_pre_tool_leaves_session_above_threshold_when_all_protected(tmp_path) ->
     with logger.session(harness_version="test-0.0") as sid:
         for _ in range(DEFAULT_THRESHOLD + 100):
             logger.record(sid, kind="tool_result", payload={"i": 0})
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, captured = _tracer_for(logger, sid)
         hook = ContextPruningHook(
             session_id=sid,
@@ -254,7 +253,7 @@ def test_constructor_rejects_invalid_threshold(tmp_path) -> None:
         ContextPruningHook(
             session_id=sid,
             threshold=0,
-            pruner=_sqlite_pruner(db),
+            pruner=_SqlitePruner(db),
             tracer=lambda *a, **k: None,
         )
 
@@ -279,7 +278,7 @@ def test_constructor_rejects_invalid_token_threshold(tmp_path) -> None:
             session_id=sid,
             threshold=DEFAULT_THRESHOLD,
             token_threshold=0,
-            pruner=_sqlite_pruner(db),
+            pruner=_SqlitePruner(db),
             tracer=lambda *a, **k: None,
         )
 
@@ -325,7 +324,7 @@ def test_register_into_installs_into_targeted_registry(tmp_path) -> None:
             session_id=sid,
             threshold=DEFAULT_THRESHOLD,
             token_threshold=DEFAULT_TOKEN_THRESHOLD,
-            pruner=_sqlite_pruner(db),
+            pruner=_SqlitePruner(db),
             tracer=lambda *a, **k: None,
         )
 
@@ -368,7 +367,7 @@ def test_payload_is_json_round_tripable(tmp_path) -> None:
     logger = TraceLogger(db)
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, _PLANTS)
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, _ = _tracer_for(logger, sid)
         hook = ContextPruningHook(
             session_id=sid,
@@ -405,7 +404,7 @@ def test_token_aware_prunes_when_over_token_threshold(tmp_path) -> None:
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, _PLANTS)
         token_map[sid] = 3000
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, captured = _tracer_for(logger, sid)
         get_tokens = _fake_token_counter(token_map)
         hook = TokenAwarePruningHook(
@@ -446,7 +445,7 @@ def test_token_aware_does_not_prune_when_under_token_threshold(tmp_path) -> None
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, _PLANTS)
         token_map[sid] = 500
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, captured = _tracer_for(logger, sid)
         hook = TokenAwarePruningHook(
             session_id=sid,
@@ -478,7 +477,7 @@ def test_token_aware_preserves_tool_result_and_user_prompt(tmp_path) -> None:
         for _ in range(100):
             logger.record(sid, kind="tool_call", payload={"i": 0})
         token_map[sid] = 3000
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, _captured = _tracer_for(logger, sid)
         hook = TokenAwarePruningHook(
             session_id=sid,
@@ -510,7 +509,7 @@ def test_token_aware_constructor_rejects_invalid_threshold(tmp_path) -> None:
         TokenAwarePruningHook(
             session_id=sid,
             token_threshold=0,
-            pruner=_sqlite_pruner(db),
+            pruner=_SqlitePruner(db),
             tracer=lambda *a, **k: None,
             get_tokens=lambda s: 0,
         )
@@ -526,7 +525,7 @@ def test_token_aware_constructor_rejects_empty_session_id(tmp_path) -> None:
         TokenAwarePruningHook(
             session_id="",
             token_threshold=1000,
-            pruner=_sqlite_pruner(db),
+            pruner=_SqlitePruner(db),
             tracer=lambda *a, **k: None,
             get_tokens=lambda s: 0,
         )
@@ -543,7 +542,7 @@ def test_token_aware_constructor_rejects_invalid_event_threshold(tmp_path) -> No
             session_id=sid,
             token_threshold=1000,
             event_threshold=0,
-            pruner=_sqlite_pruner(db),
+            pruner=_SqlitePruner(db),
             tracer=lambda *a, **k: None,
             get_tokens=lambda s: 0,
         )
@@ -604,7 +603,7 @@ def test_token_aware_register_token_aware_into_installs(tmp_path) -> None:
             fresh,
             session_id=sid,
             token_threshold=1000,
-            pruner=_sqlite_pruner(db),
+            pruner=_SqlitePruner(db),
             tracer=lambda *a, **k: None,
             get_tokens=lambda s: 0,
         )
@@ -634,7 +633,7 @@ def test_token_aware_payload_json_round_tripable(tmp_path) -> None:
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, _PLANTS)
         token_map[sid] = 3000
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, _ = _tracer_for(logger, sid)
         hook = TokenAwarePruningHook(
             session_id=sid,
@@ -669,7 +668,7 @@ def test_pre_tool_prunes_1000_plus_events(tmp_path) -> None:
     logger = TraceLogger(db)
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, 1000)
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, captured = _tracer_for(logger, sid)
         hook = ContextPruningHook(
             session_id=sid,
@@ -707,7 +706,7 @@ def test_pre_tool_prunes_2000_events_session(tmp_path) -> None:
     logger = TraceLogger(db)
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, 2000)
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, _captured = _tracer_for(logger, sid)
         hook = ContextPruningHook(
             session_id=sid,
@@ -740,7 +739,7 @@ def test_pre_tool_preserves_all_tool_results_regardless_of_age(tmp_path) -> None
             logger.record(sid, kind="tool_call", payload={"index": 0})
         for i in range(100, 200):
             logger.record(sid, kind="tool_result", payload={"index": i, "age": "new"})
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, _captured = _tracer_for(logger, sid)
         hook = ContextPruningHook(
             session_id=sid,
@@ -768,7 +767,7 @@ def test_dropped_events_recorded_correctly_in_trace(tmp_path) -> None:
     logger = TraceLogger(db)
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, 500)
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, captured = _tracer_for(logger, sid)
         hook = ContextPruningHook(
             session_id=sid,
@@ -798,7 +797,7 @@ def test_pruning_performance_reasonable_for_1000_events(tmp_path) -> None:
     logger = TraceLogger(db)
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, 1000)
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, _ = _tracer_for(logger, sid)
         hook = ContextPruningHook(
             session_id=sid,
@@ -824,7 +823,7 @@ def test_pruning_performance_reasonable_for_2000_events(tmp_path) -> None:
     logger = TraceLogger(db)
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, 2000)
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, _ = _tracer_for(logger, sid)
         hook = ContextPruningHook(
             session_id=sid,
@@ -848,7 +847,7 @@ def test_multiple_prune_calls_accumulate_correctly(tmp_path) -> None:
     logger = TraceLogger(db)
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, 600)
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, _captured = _tracer_for(logger, sid)
         hook = ContextPruningHook(
             session_id=sid,
@@ -885,7 +884,7 @@ def test_token_aware_prunes_multiple_times_when_over_threshold(tmp_path) -> None
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, _PLANTS)
         token_map[sid] = 5000
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, _captured = _tracer_for(logger, sid)
         hook = TokenAwarePruningHook(
             session_id=sid,
@@ -917,7 +916,7 @@ def test_token_aware_does_not_prune_at_exact_threshold(tmp_path) -> None:
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, _PLANTS)
         token_map[sid] = 1000
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, captured = _tracer_for(logger, sid)
         hook = TokenAwarePruningHook(
             session_id=sid,
@@ -945,7 +944,7 @@ def test_token_aware_prunes_with_large_token_counts(tmp_path) -> None:
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, 500)
         token_map[sid] = 50000
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, _captured = _tracer_for(logger, sid)
         hook = TokenAwarePruningHook(
             session_id=sid,
@@ -1007,7 +1006,7 @@ def test_token_aware_pruning_at_5600g_6600xt_context_window(tmp_path) -> None:
         for _ in range(200):
             logger.record(sid, kind="tool_call", payload={"i": 0})
         token_map[sid] = 9000
-        pruner = _sqlite_pruner(db)
+        pruner = _SqlitePruner(db)
         tracer, _captured = _tracer_for(logger, sid)
         hook = TokenAwarePruningHook(
             session_id=sid,

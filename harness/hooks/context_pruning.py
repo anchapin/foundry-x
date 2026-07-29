@@ -169,6 +169,9 @@ class _SqlitePruner:
             self._conn.execute("ROLLBACK")
             raise
 
+    def __call__(self, session_id: str, keep_kinds: frozenset[str], target_count: int) -> int:
+        return self.prune(session_id, keep_kinds, target_count)
+
     def close(self) -> None:
         try:
             self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -186,41 +189,11 @@ class _SqlitePruner:
 def _sqlite_pruner(db_path: str | os.PathLike) -> Pruner:
     """Build a :data:`Pruner` backed by direct SQLite.
 
-    Mirrors the pattern used in the test suite: drops the oldest events
-    whose ``kind`` is not in ``keep_kinds`` until the session's event
-    count is at most ``target_count``.
+    Delegates to :class:`_SqlitePruner` to reuse a single persistent
+    connection instead of opening a new one on every call (issue #1266).
     """
-
-    def _drop(session_id: str, keep_kinds: frozenset[str], target_count: int) -> int:
-        not_in_clause = ", ".join("?" for _ in keep_kinds)
-        with sqlite3.connect(db_path) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=30000")
-            total = conn.execute(
-                "SELECT COUNT(*) FROM events WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()[0]
-            if total <= target_count:
-                return 0
-            to_drop = total - target_count
-            params: list[object] = [session_id, *keep_kinds, to_drop]
-            cursor = conn.execute(
-                "SELECT event_id FROM events "
-                "WHERE session_id = ? AND kind NOT IN (" + not_in_clause + ") "
-                "ORDER BY timestamp LIMIT ?",
-                params,
-            )
-            ids = [row[0] for row in cursor.fetchall()]
-            if not ids:
-                return 0
-            placeholders = ", ".join("?" for _ in ids)
-            conn.execute(
-                "DELETE FROM events WHERE event_id IN (" + placeholders + ")",
-                ids,
-            )
-            return len(ids)
-
-    return _drop
+    impl = _SqlitePruner(db_path)
+    return impl.prune
 
 
 class ContextPruningHook:
