@@ -1074,9 +1074,7 @@ def test_exit_5_and_exit_1_distinction_is_visible_in_verdict(
     def fake_run_exit_1(*args: object, **kwargs: object) -> object:
         cmd = args[0] if args else kwargs.get("args")
         if cmd is not None and "pytest" in str(cmd):
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=1, stdout="", stderr=""
-            )
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
         return original_run(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(subprocess, "run", fake_run_exit_1)
