@@ -3026,3 +3026,102 @@ def test_read_kpi_history_round_trips_trend_data(tmp_path):
     assert entry.cycle_time_seconds is not None
     assert entry.improvement_rate == 1.0
     assert entry.regression_rate == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Issue #1346: ``evolver_duration_ms`` is the mean of ``evolver_duration``
+# events' ``evolver_duration_ms`` payload field, sourced from the trace
+# store by ``_evolver_duration_ms``.
+# ---------------------------------------------------------------------------
+
+
+def _seed_evolver_duration(
+    logger: TraceLogger,
+    harness_version: str,
+    durations_ms: list[float],
+) -> str:
+    """Plant ``evolver_duration`` events for one session (issue #1346)."""
+    from foundry_x.evolution.loop import EVOLVER_DURATION_KIND
+
+    with logger.session(harness_version=harness_version) as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+        for ms in durations_ms:
+            logger.record(
+                sid,
+                kind=EVOLVER_DURATION_KIND,
+                payload={
+                    "evolver_duration_ms": ms,
+                    "failure_class": "tool-error",
+                    "proposed_edits_count": 1,
+                },
+            )
+    return sid
+
+
+def test_kpis_aggregates_evolver_duration_ms(tmp_path):
+    """Mean evolver_duration_ms across events is surfaced in KPI summary (issue #1346).
+
+    Plants three sessions with evolver durations of 100.0, 200.0, and 300.0 ms.
+    The KPI summary should report 200.0 ms (the mean of the three values).
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_evolver_duration(logger, "v1", [100.0, 200.0, 300.0])
+
+    summary = compute_kpis(logger)
+
+    assert summary.evolver_duration_ms == 200.0
+    assert isinstance(summary.evolver_duration_ms, float)
+
+
+def test_evolver_duration_ms_none_when_no_events(tmp_path):
+    """When no evolver_duration events exist, evolver_duration_ms is None (issue #1346)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    summary = compute_kpis(logger)
+
+    assert summary.evolver_duration_ms is None
+
+
+def test_evolver_duration_ms_respects_harness_version_filter(tmp_path):
+    """The evolver_duration_ms aggregation honors ``harness_version`` filtering (issue #1346)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_evolver_duration(logger, "v1", [100.0])
+    _seed_evolver_duration(logger, "v2", [500.0])
+
+    v1_summary = compute_kpis(logger, harness_version="v1")
+    v2_summary = compute_kpis(logger, harness_version="v2")
+
+    assert v1_summary.evolver_duration_ms == 100.0
+    assert v2_summary.evolver_duration_ms == 500.0
+
+
+def test_evolver_duration_ms_in_json_output(tmp_path, capsys):
+    """``foundry-kpis --format json`` includes evolver_duration_ms (issue #1346)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_evolver_duration(logger, "v1", [150.0])
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert payload["evolver_duration_ms"] == 150.0
+
+
+def test_evolver_duration_ms_in_compare_kpis(tmp_path):
+    """``compare_kpis`` includes evolver_duration_ms delta (issue #1346)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_evolver_duration(logger, "v1", [100.0])
+    _seed_evolver_duration(logger, "v2", [300.0])
+
+    comparison = compare_kpis(logger, "v1", "v2")
+
+    assert comparison.baseline.evolver_duration_ms == 100.0
+    assert comparison.candidate.evolver_duration_ms == 300.0
+    assert comparison.deltas["evolver_duration_ms"] == 200.0
