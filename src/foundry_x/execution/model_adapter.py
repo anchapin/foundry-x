@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# trivial change to trigger fresh CI
 import asyncio
 import json
 import os
@@ -536,17 +537,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
         )
 
     def token_pricing(self) -> tuple[float, float]:
-        """Return ``(input_per_1m_usd, output_per_1m_usd)``; emits RuntimeWarning for unknown models."""
-        # OpenAICompatibleAdapter has no pricing table; emit warning and return (0.0, 0.0)
-        # so operators are alerted to the missing pricing data rather than silently reporting $0.00.
-        warnings.warn(
-            f"OpenAICompatibleAdapter: no pricing entry for model '{self.model}'; "
-            "cost attribution will report $0.00. "
-            "Consider using a CloudModelAdapter subclass with a known pricing table.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return (0.0, 0.0)
+        """Return ``(input_per_1m_usd, output_per_1m_usd)`` for the model."""
+        return _resolve_token_pricing(self.model, _OPENAI_PRICING_PER_1M)
 
     def _emit_cost_and_rate_limit(
         self,
