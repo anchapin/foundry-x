@@ -974,7 +974,9 @@ async def test_openai_compatible_on_cost_callback_with_nonzero_cost(monkeypatch)
     assert cost_events[0].model == "test-model"
     assert cost_events[0].prompt_tokens == 100
     assert cost_events[0].completion_tokens == 50
-    assert cost_events[0].estimated_cost_usd == pytest.approx(0.5 * 100 / 1_000_000 + 1.5 * 50 / 1_000_000)
+    assert cost_events[0].estimated_cost_usd == pytest.approx(
+        0.5 * 100 / 1_000_000 + 1.5 * 50 / 1_000_000
+    )
 
 
 @pytest.mark.asyncio
