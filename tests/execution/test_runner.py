@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from foundry_x.execution.runner import main
+from foundry_x.execution.runner import _DEFAULT_MAX_AGENT_STEPS, _resolve_max_steps, main
 
 
 def _stub_harness(harness_dir: Path) -> None:
@@ -87,3 +87,17 @@ class TestValidateMode:
         with pytest.raises(SystemExit) as exc_info:
             main(run_task_fn=noop_run_task)
         assert exc_info.value.code == 0
+
+
+class TestResolveMaxSteps:
+    def test_resolve_max_steps_non_positive_warns(self, monkeypatch):
+        monkeypatch.setenv("FOUNDRY_MAX_AGENT_STEPS", "-1")
+        with pytest.warns(UserWarning, match="FOUNDRY_MAX_AGENT_STEPS=-1.*non-positive"):
+            result = _resolve_max_steps()
+        assert result == _DEFAULT_MAX_AGENT_STEPS
+
+    def test_resolve_max_steps_zero_warns(self, monkeypatch):
+        monkeypatch.setenv("FOUNDRY_MAX_AGENT_STEPS", "0")
+        with pytest.warns(UserWarning, match="FOUNDRY_MAX_AGENT_STEPS=0.*non-positive"):
+            result = _resolve_max_steps()
+        assert result == _DEFAULT_MAX_AGENT_STEPS

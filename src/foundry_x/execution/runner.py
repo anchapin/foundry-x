@@ -13,6 +13,7 @@ import statistics
 import subprocess
 import sys
 import time
+import warnings
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -609,7 +610,13 @@ def _resolve_max_steps(env: Mapping[str, str] | None = None) -> int:
     if not raw:
         return _DEFAULT_MAX_AGENT_STEPS
     value = int(raw)
-    return value if value > 0 else _DEFAULT_MAX_AGENT_STEPS
+    if value <= 0:
+        warnings.warn(
+            f"FOUNDRY_MAX_AGENT_STEPS={value!r} is non-positive; "
+            f"falling back to {_DEFAULT_MAX_AGENT_STEPS}."
+        )
+        return _DEFAULT_MAX_AGENT_STEPS
+    return value
 
 
 def _is_max_steps_dynamic(env: Mapping[str, str] | None = None) -> bool:
