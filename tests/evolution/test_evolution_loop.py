@@ -1294,9 +1294,13 @@ class TestRunEvolutionBatch:
             unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
         )
 
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return [proposed_edit]
+
         def mock_propose(self, harness_dir, failure, current_diff=None):
             return [proposed_edit]
 
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
         monkeypatch.setattr(Evolver, "propose", mock_propose)
         result = run_evolution_batch("sess-batch-edits", events, harness_dir)
         assert proposed_edit in result.proposed_edits
@@ -1369,9 +1373,13 @@ class TestRunEvolutionBatch:
             unified_diff="--- a/harness/hooks/batch_hook.py\n+++ b/harness/hooks/batch_hook.py\n@@ -1 +1 @@\n-old\n+new\n",
         )
 
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return [proposed_edit]
+
         def mock_propose(self, harness_dir, failure, current_diff=None):
             return [proposed_edit]
 
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
         monkeypatch.setattr(Evolver, "propose", mock_propose)
         result = run_evolution_batch("sess-batch-target-file", events, harness_dir)
 
