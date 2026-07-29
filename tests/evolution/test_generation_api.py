@@ -9,6 +9,7 @@ import pytest
 from foundry_x.evolution.digester import FailureReport
 from foundry_x.evolution.evolver import (
     GENERATION_ATTEMPT_KIND,
+    GENERATION_EXHAUSTED_KIND,
     Evolver,
     EvolverGenerationError,
     EvolverLLMError,
@@ -175,6 +176,61 @@ class TestGenerateEdits:
         edits = await evolver.generate_edits(mock_adapter, tmp_path, failure_report, max_retries=2)
         assert len(edits) == 1
         assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_validation_failure_emits_per_attempt_generation_attempt(
+        self, mock_adapter: MagicMock, failure_report: FailureReport, tmp_path: Path
+    ) -> None:
+        """When N edits fail validation on M retry attempts, N×M generation_attempt events are recorded.
+
+        Each validation error on each retry attempt emits a generation_attempt event tagged with
+        the correct attempt number (issue #1261 acceptance criterion 1-3).
+        """
+        trace_logger = MagicMock()
+        evolver = Evolver(
+            trace_logger=trace_logger,
+            session_id="sess-validation-failure",
+            max_diff_lines=5,
+        )
+        large_diff = "\n".join([f"+extra line {i}" for i in range(10)])
+        response = json.dumps(
+            [
+                {
+                    "target_file": "harness/system_prompt.txt",
+                    "rationale": "test1",
+                    "unified_diff": f"--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\na\n{large_diff}\n",
+                },
+                {
+                    "target_file": "harness/system_prompt.txt",
+                    "rationale": "test2",
+                    "unified_diff": f"--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\na\n{large_diff}\n",
+                },
+            ]
+        )
+        mock_adapter.complete.return_value = MagicMock(message=MagicMock(content=response))
+        with pytest.raises(EvolverLLMError, match="no valid ProposedEdit"):
+            await evolver.generate_edits(mock_adapter, tmp_path, failure_report, max_retries=2)
+
+        attempt_calls = [
+            call
+            for call in trace_logger.record.call_args_list
+            if call.args[1] == GENERATION_ATTEMPT_KIND
+        ]
+        assert len(attempt_calls) == 4, (
+            f"Expected 4 generation_attempt events (2 edits × 2 attempts), got {len(attempt_calls)}"
+        )
+        attempts = [call.args[2]["attempt"] for call in attempt_calls]
+        assert attempts.count(1) == 2, f"Expected 2 events with attempt=1, got {attempts}"
+        assert attempts.count(2) == 2, f"Expected 2 events with attempt=2, got {attempts}"
+
+        exhausted_calls = [
+            call
+            for call in trace_logger.record.call_args_list
+            if call.args[1] == GENERATION_EXHAUSTED_KIND
+        ]
+        assert len(exhausted_calls) == 1, (
+            f"Expected 1 generation_exhausted event, got {len(exhausted_calls)}"
+        )
 
     @pytest.mark.asyncio
     async def test_raises_after_max_retries(
