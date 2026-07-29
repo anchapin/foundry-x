@@ -995,6 +995,7 @@ def test_smoke_tier_covered_tags_reflect_subset(
     assert "benchmark:heavy" not in passed
 
 
+
 # ---------------------------------------------------------------------------
 # Issue #1351: benchmark exit-code 5 regression test
 # ---------------------------------------------------------------------------
@@ -1185,3 +1186,4 @@ def test_smoke_tier_success_has_no_skipped_checks(
     verdict = critic.evaluate("", tier="smoke")
     assert verdict.verdict is True
     assert "beta" not in verdict.skipped_checks
+

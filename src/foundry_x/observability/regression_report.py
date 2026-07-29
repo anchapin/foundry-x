@@ -61,6 +61,7 @@ class VerdictRecord(BaseModel):
     verdict: bool | None = None
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
+    skipped_checks: list[str] = Field(default_factory=list)
     notes: str = ""
     failure_class: str | None = Field(default=None)
     target_file: str | None = Field(default=None)
@@ -135,6 +136,7 @@ def record_verdict(logger: TraceLogger, session_id: str, verdict: CriticVerdict)
         verdict=verdict.verdict,
         passed_checks=list(verdict.passed_checks),
         failed_checks=list(verdict.failed_checks),
+        skipped_checks=list(verdict.skipped_checks),
         notes=verdict.notes,
         failure_class=verdict.failure_class,
         target_file=verdict.target_file,
