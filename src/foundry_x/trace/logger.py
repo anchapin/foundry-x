@@ -904,6 +904,7 @@ class TraceLogger:
         self,
         kind: str | None = None,
         harness_version: str | None = None,
+        since: str | None = None,
     ) -> Iterator[TraceEvent]:
         """Yield :class:`TraceEvent` rows across **all** matching sessions.
 
@@ -938,11 +939,22 @@ class TraceLogger:
             JOIN against the ``sessions`` table (sqlite) or by tracking
             ``session_start`` marker lines inline (jsonl). ``None`` means
             no filter — events from every session qualify.
+        since:
+            When provided, only events whose ``timestamp`` is at or after
+            this ISO-8601 string are yielded. Pushed down to the store as a
+            ``WHERE e.timestamp >= ?`` clause (sqlite) or an inline
+            filter (jsonl) so time-bounded queries do not materialize
+            events outside the window. ``None`` (default) means no filter —
+            all matching events qualify.
         """
         if self.backend == "jsonl":
-            yield from self._query_events_jsonl(kind=kind, harness_version=harness_version)
+            yield from self._query_events_jsonl(
+                kind=kind, harness_version=harness_version, since=since
+            )
             return
-        yield from self._query_events_sqlite(kind=kind, harness_version=harness_version)
+        yield from self._query_events_sqlite(
+            kind=kind, harness_version=harness_version, since=since
+        )
 
     def _list_sessions_sqlite(self, harness_version: str | None = None) -> Sequence[TraceSession]:
         assert self._conn is not None  # backend == "sqlite"
@@ -1093,6 +1105,7 @@ class TraceLogger:
         self,
         kind: str | None = None,
         harness_version: str | None = None,
+        since: str | None = None,
     ) -> Iterator[TraceEvent]:
         # Issue #273 — one streaming cursor across all matching sessions.
         # The optional ``harness_version`` filter is implemented as a JOIN
@@ -1111,6 +1124,9 @@ class TraceLogger:
         if kind is not None:
             conditions.append("e.kind = ?")
             params.append(kind)
+        if since is not None:
+            conditions.append("e.timestamp >= ?")
+            params.append(since)
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY e.timestamp"
@@ -1496,6 +1512,7 @@ class TraceLogger:
         self,
         kind: str | None = None,
         harness_version: str | None = None,
+        since: str | None = None,
     ) -> Iterator[TraceEvent]:
         # Issue #273 — stream the JSONL file exactly once, yielding every
         # matching event in append order (which is timestamp order for a
@@ -1540,6 +1557,10 @@ class TraceLogger:
                 if harness_version is not None:
                     sid = record.get("session_id")
                     if session_versions.get(sid) != harness_version:
+                        continue
+                if since is not None:
+                    ts = record.get("timestamp")
+                    if ts is None or ts < since:
                         continue
                 yield TraceEvent.model_validate(record)
 
