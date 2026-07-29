@@ -71,8 +71,7 @@ class TestValidateMode:
         def mock_open(self, *args, **kwargs):
             raise OSError("Permission denied")
 
-        with mock.patch.object(Path, "open", mock_open), \
-                pytest.raises(SystemExit) as exc_info:
+        with mock.patch.object(Path, "open", mock_open), pytest.raises(SystemExit) as exc_info:
             main(run_task_fn=noop_run_task)
         assert exc_info.value.code == 2
 
