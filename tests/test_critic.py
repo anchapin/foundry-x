@@ -993,3 +993,105 @@ def test_smoke_tier_covered_tags_reflect_subset(
     assert "benchmark:infra" in passed
     assert "benchmark:core" not in passed
     assert "benchmark:heavy" not in passed
+
+
+# ---------------------------------------------------------------------------
+# Issue #1351: benchmark exit-code 5 regression test
+# ---------------------------------------------------------------------------
+
+
+def test_pytest_exit_5_no_tests_collected_yields_specific_failure_label(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pytest exit-5 (no tests collected) maps to ``failed_checks=["pytest:no_tests_collected"]``
+    rather than the generic ``["pytest"]`` label (issue #1351).
+
+    This matters for the smoke tier: when the ``-k`` expression matches nothing,
+    pytest exits 5 but the gate must correctly identify the root cause as a
+    misconfiguration rather than a test failure.
+    """
+    from benchmarks.models import BenchmarkTask
+
+    _capture_pytest_commands(monkeypatch, returncode=5)
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    verdict = critic.evaluate("", tier="smoke")
+    assert verdict.verdict is False
+    assert "pytest:no_tests_collected" in verdict.failed_checks
+    assert "pytest" not in verdict.failed_checks
+
+
+def test_pytest_exit_1_failures_yields_generic_pytest_failure_label(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pytest exit-1 (test failures) maps to ``failed_checks=["pytest"]``
+    to distinguish genuine failures from exit-5 (issue #1351).
+    """
+    from benchmarks.models import BenchmarkTask
+
+    _capture_pytest_commands(monkeypatch, returncode=1)
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    verdict = critic.evaluate("", tier="smoke")
+    assert verdict.verdict is False
+    assert "pytest" in verdict.failed_checks
+    assert "pytest:no_tests_collected" not in verdict.failed_checks
+
+
+def test_exit_5_and_exit_1_distinction_is_visible_in_verdict(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verdict distinguishes exit-5 from exit-1 so operators can see
+    the root cause at a glance (issue #1351 acceptance criterion 3).
+    """
+    from benchmarks.models import BenchmarkTask
+
+    _capture_pytest_commands(monkeypatch, returncode=5)
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    verdict_5 = critic.evaluate("", tier="smoke")
+
+    original_run = subprocess.run
+
+    def fake_run_exit_1(*args: object, **kwargs: object) -> object:
+        cmd = args[0] if args else kwargs.get("args")
+        if cmd is not None and "pytest" in str(cmd):
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout="", stderr=""
+            )
+        return original_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(subprocess, "run", fake_run_exit_1)
+    critic2 = Critic(
+        harness_dir,
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    verdict_1 = critic2.evaluate("", tier="smoke")
+
+    assert verdict_5.failed_checks != verdict_1.failed_checks
+    assert "pytest:no_tests_collected" in verdict_5.failed_checks
+    assert "pytest" not in verdict_5.failed_checks
+    assert "pytest" in verdict_1.failed_checks
+    assert "pytest:no_tests_collected" not in verdict_1.failed_checks

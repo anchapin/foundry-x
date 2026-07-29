@@ -1157,6 +1157,13 @@ class Critic:
                 covered_source = self.smoke_tasks if tier == "smoke" else self.benchmark_tasks
                 covered_tags = sorted({tag for task in covered_source for tag in task.tags})
                 passed_checks.extend(f"benchmark:{tag}" for tag in covered_tags)
+            elif pytest_result.returncode == 5:
+                # Exit code 5 means "no tests collected" — the smoke-tier -k
+                # expression matched nothing (issue #1351). Distinguish this
+                # from a genuine test failure (exit 1) so the verdict correctly
+                # surfaces the misconfiguration rather than a generic "pytest"
+                # label.
+                failed_checks.append("pytest:no_tests_collected")
             else:
                 failed_checks.append("pytest")
 
