@@ -142,7 +142,9 @@ def _render_tracked_edit(edit: TrackedProposedEdit, verbose: bool = False) -> st
     return "\n".join(lines)
 
 
-def _render_critic_verdict(verdict: CriticVerdict) -> str:
+def _render_critic_verdict(
+    verdict: CriticVerdict, cycle_time_seconds: float | None = None
+) -> str:
     """Render a CriticVerdict as a compact plain-text summary.
 
     A ``None`` verdict represents a skipped Critic gate (``--no-verify``,
@@ -169,6 +171,8 @@ def _render_critic_verdict(verdict: CriticVerdict) -> str:
         if len(verdict.notes) > 500:
             notes_preview += " [...truncated]"
         lines.append(f"  Notes: {notes_preview}")
+    if cycle_time_seconds is not None:
+        lines.append(f"  Cycle time: {cycle_time_seconds:.1f}s")
     return "\n".join(lines)
 
 
@@ -395,6 +399,19 @@ def _run_loop(
         critic = Critic(harness_dir=harness_dir)
         verdict = critic.evaluate(edit.unified_diff, failure_class=report.proposed_class)
         verdict.target_file = edit.target_file
+    verdict_timestamp = datetime.now(UTC)
+    task_received_ts: str | None = None
+    for event in events:
+        if event.kind == "task_received":
+            task_received_ts = event.timestamp
+            break
+    cycle_time_seconds: float | None = None
+    if task_received_ts:
+        try:
+            t0 = datetime.fromisoformat(task_received_ts)
+            cycle_time_seconds = (verdict_timestamp - t0).total_seconds()
+        except (ValueError, TypeError):
+            pass
     verdict_with_class = CriticVerdict(
         verdict=verdict.verdict,
         passed_checks=list(verdict.passed_checks),
@@ -407,7 +424,7 @@ def _run_loop(
     if export_prometheus:
         kpi_summary = compute_kpis(logger, harness_version=harness_version)
         _emit_prometheus_metrics(kpi_summary, harness_version)
-    print(_render_critic_verdict(verdict))
+    print(_render_critic_verdict(verdict, cycle_time_seconds=cycle_time_seconds))
     print()
 
     completed_at = _now_iso()
