@@ -23,7 +23,6 @@ from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 
 from benchmarks.models import BenchmarkTask
@@ -147,7 +146,7 @@ class _ScriptedCloudAdapter(CloudModelAdapter):
             raise RuntimeError(f"_ScriptedCloudAdapter exhausted after {self._call_count} calls")
         response = self._responses[self._call_count]
         self._call_count += 1
-        headers = httpx.Headers(self._rate_limit_headers)
+        headers = dict(self._rate_limit_headers)
         self._emit_cost_and_rate_limit(response, headers)
         return response
 
@@ -194,7 +193,7 @@ class _ScriptedCloudAdapter(CloudModelAdapter):
                 usage=response.usage,
             )
 
-        headers = httpx.Headers(self._rate_limit_headers)
+        headers = dict(self._rate_limit_headers)
         self._emit_cost_and_rate_limit(response, headers)
 
 
