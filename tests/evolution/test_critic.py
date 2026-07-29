@@ -30,9 +30,7 @@ class TestComputeTokenMetricsEdgeCases:
             logger.record(sid, kind="task_received", payload={"prompt": "do work"})
 
         critic = Critic(harness_dir=Path("/tmp/nonexistent"))
-        total_tokens, avg_cycle_time_s = critic._compute_token_metrics(
-            "Q4_K_S", str(trace_path)
-        )
+        total_tokens, avg_cycle_time_s = critic._compute_token_metrics("Q4_K_S", str(trace_path))
         assert total_tokens == 0
         assert avg_cycle_time_s is None
 
@@ -62,9 +60,7 @@ class TestComputeTokenMetricsEdgeCases:
             )
 
         critic = Critic(harness_dir=Path("/tmp/nonexistent"))
-        total_tokens, avg_cycle_time_s = critic._compute_token_metrics(
-            model_id, str(trace_path)
-        )
+        total_tokens, avg_cycle_time_s = critic._compute_token_metrics(model_id, str(trace_path))
         assert total_tokens == 15
         assert avg_cycle_time_s is None
 
@@ -132,9 +128,7 @@ class TestComputeTokenMetricsEdgeCases:
             )
 
         critic = Critic(harness_dir=Path("/tmp/nonexistent"))
-        total_tokens, avg_cycle_time_s = critic._compute_token_metrics(
-            model_id, str(trace_path)
-        )
+        total_tokens, avg_cycle_time_s = critic._compute_token_metrics(model_id, str(trace_path))
         assert total_tokens == 0
         assert avg_cycle_time_s is not None
         assert avg_cycle_time_s >= 0
