@@ -20,6 +20,9 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-extras --dev
 
+      - name: Harness load check
+        run: uv run python harness/scripts/load_check.py
+
       - name: Pytest (non-benchmark)
         run: |
           mkdir -p test-results
@@ -77,6 +80,9 @@ jobs:
 
       - name: Sync dependencies
         run: uv sync --all-extras --dev
+
+      - name: Harness load check
+        run: uv run python harness/scripts/load_check.py
 
       - name: Pytest (real model integration)
         env:

@@ -75,6 +75,9 @@ jobs:
       - name: Ruff lint
         run: uv run ruff check .
 
+      - name: Harness load check
+        run: uv run python harness/scripts/load_check.py
+
       - name: Pytest (non-benchmark + JUnit XML)
         run: |
           mkdir -p test-results
