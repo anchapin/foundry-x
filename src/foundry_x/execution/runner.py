@@ -1710,11 +1710,11 @@ async def run_task(
         adapter.on_retry = _on_retry
 
     # Wire cost + rate-limit trace events for cloud adapters (issue #1041,
-    # ADR-0029). `OpenAICompatibleAdapter` does not expose these hooks; only
-    # `CloudModelAdapter` subclasses surface per-response cost and rate-limit
-    # windows. The trace events feed the improvement-rate KPI's cost
-    # attribution and operator-visible rate-limit headroom.
-    if isinstance(adapter, CloudModelAdapter):
+    # ADR-0029, #1356). `OpenAICompatibleAdapter` surfaces these hooks via
+    # `_emit_cost_and_rate_limit` (issue #1235). The trace events feed the
+    # improvement-rate KPI's cost attribution and operator-visible rate-limit
+    # headroom.
+    if isinstance(adapter, CloudModelAdapter | OpenAICompatibleAdapter):
 
         def _on_cost(event: ModelCostEvent, _sid: str = session_id) -> None:
             log.record(

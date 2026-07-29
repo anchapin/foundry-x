@@ -13,6 +13,7 @@ from foundry_x.execution.model_adapter import (
     ModelAdapterResponseError,
     ModelCostEvent,
     ModelMessage,
+    ModelRateLimitInfo,
     ModelRequest,
     ModelResponse,
     ModelResponseChunk,
@@ -930,3 +931,97 @@ def test_openai_compatible_token_pricing_env_override(monkeypatch):
         import asyncio
 
         asyncio.run(adapter.aclose())
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_on_cost_callback_with_nonzero_cost(monkeypatch):
+    """OpenAICompatibleAdapter.complete() fires on_cost with non-zero estimated_cost_usd when pricing is known (issue #1356)."""
+    cost_events: list[ModelCostEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="test-model",
+            client=client,
+            on_cost=cost_events.append,
+        )
+        monkeypatch.setattr(adapter, "token_pricing", lambda: (0.5, 1.5))
+        response = await adapter.complete(
+            messages=[ModelMessage(role="user", content="hello")],
+        )
+
+    assert response.message.content == "done"
+    assert len(cost_events) == 1
+    assert cost_events[0].provider == "openai-compatible"
+    assert cost_events[0].model == "test-model"
+    assert cost_events[0].prompt_tokens == 100
+    assert cost_events[0].completion_tokens == 50
+    assert cost_events[0].estimated_cost_usd == pytest.approx(
+        0.5 * 100 / 1_000_000 + 1.5 * 50 / 1_000_000
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_on_rate_limit_callback_invoked():
+    """OpenAICompatibleAdapter.complete() fires on_rate_limit when x-ratelimit-* headers are present (issue #1356)."""
+    rate_limit_events: list[ModelRateLimitInfo] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                },
+            },
+            headers={
+                "x-ratelimit-remaining-requests": "49",
+                "x-ratelimit-remaining-tokens": "1000",
+                "x-ratelimit-reset-requests": "10s",
+                "x-ratelimit-reset-tokens": "100ms",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="llama-3.2",
+            client=client,
+            on_rate_limit=rate_limit_events.append,
+        )
+        response = await adapter.complete(
+            messages=[ModelMessage(role="user", content="hello")],
+        )
+
+    assert response.message.content == "done"
+    assert len(rate_limit_events) == 1
+    assert rate_limit_events[0].requests_remaining == 49
+    assert rate_limit_events[0].tokens_remaining == 1000
+    assert rate_limit_events[0].requests_reset_seconds == 10.0
+    assert rate_limit_events[0].tokens_reset_seconds == 100.0
