@@ -1297,7 +1297,7 @@ class TestDigestBatch:
         assert batch.failure_reports[1].proposed_class == "wrong-tool"
 
     def test_batch_context_overflow_takes_precedence(self):
-        """A context-overflow failure is the only report even with other failures."""
+        """Context-overflow appears first but does NOT short-circuit other failures (issue #1260)."""
         events = [
             _ev("user_prompt", {"text": "go"}, event_id="e1", seq=1),
             _ev(
@@ -1314,11 +1314,12 @@ class TestDigestBatch:
             ),
         ]
         batch = Digester().digest_batch(_SESSION, events)
-        assert batch.total_failures == 1
+        assert batch.total_failures == 2
         assert batch.failure_reports[0].proposed_class == "context-overflow"
+        assert batch.failure_reports[1].proposed_class == "wrong-tool"
 
     def test_batch_injection_blocks_takes_precedence(self):
-        """Injection blocks aggregate and take precedence over later failures."""
+        """Injection blocks appear first but do NOT short-circuit other failures (issue #1260)."""
         events = [
             _ev("user_prompt", {"text": "go"}, event_id="e1", seq=1),
             _ev(
@@ -1335,8 +1336,9 @@ class TestDigestBatch:
             ),
         ]
         batch = Digester().digest_batch(_SESSION, events)
-        assert batch.total_failures == 1
+        assert batch.total_failures == 2
         assert batch.failure_reports[0].proposed_class == INJECTION_ATTEMPT_CLASS
+        assert batch.failure_reports[1].proposed_class == "tool-error"
 
     def test_batch_failure_reports_have_correct_session_id(self):
         """All failure reports in the batch carry the correct session_id."""

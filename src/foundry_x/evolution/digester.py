@@ -599,23 +599,12 @@ class Digester:
         """
         ordered = sorted(events, key=lambda e: e.timestamp)
 
-        # Short-circuit for terminal conditions: these take precedence over
-        # any other failures that might exist in the same session.
+        # Collect special terminal-condition failures first; these are prepended
+        # to the generic failure list so they are processed first, but they do
+        # NOT short-circuit — other failures in the same session must still be
+        # reported (issue #1260).
         overflow_report = _aggregate_context_overflow(session_id, ordered)
-        if overflow_report is not None:
-            return BatchFailureReport(
-                session_id=session_id,
-                failure_reports=[overflow_report],
-                total_failures=1,
-            )
-
         injection_report = _aggregate_injection_blocks(session_id, ordered)
-        if injection_report is not None:
-            return BatchFailureReport(
-                session_id=session_id,
-                failure_reports=[injection_report],
-                total_failures=1,
-            )
 
         # Collect all failures and merge by proposed_class.
         failures_by_class: dict[str, FailureReport] = {}
@@ -648,6 +637,19 @@ class Digester:
                 failures_by_class[proposed_class] = report
 
         if not failures_by_class:
+            # No generic failures; if a terminal-condition report exists, use it.
+            if overflow_report is not None:
+                return BatchFailureReport(
+                    session_id=session_id,
+                    failure_reports=[overflow_report],
+                    total_failures=1,
+                )
+            if injection_report is not None:
+                return BatchFailureReport(
+                    session_id=session_id,
+                    failure_reports=[injection_report],
+                    total_failures=1,
+                )
             clean_report = FailureReport(
                 session_id=session_id,
                 summary=(f"No failures detected across {len(ordered)} trace event(s)."),
@@ -668,6 +670,15 @@ class Digester:
             return len(ordered)
 
         sorted_reports = sorted(failures_by_class.values(), key=first_failure_index)
+
+        # Prepend terminal-condition failures so they are processed first.
+        # overflow_report takes absolute priority; injection_report follows.
+        # Neither short-circuits: all failures are included (issue #1260).
+        if overflow_report is not None:
+            sorted_reports.insert(0, overflow_report)
+        if injection_report is not None and injection_report is not overflow_report:
+            sorted_reports.insert(0 if overflow_report is None else 1, injection_report)
+
         return BatchFailureReport(
             session_id=session_id,
             failure_reports=sorted_reports,
