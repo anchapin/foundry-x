@@ -90,6 +90,8 @@ events but does not spawn or kill anything.
 | `FOUNDRY_SERVER_NGpuLayers` | `0` | Layers to offload to the GPU when the manager launches `llama-server`. Mirrors the `--n-gpu-layers` flag from `infra/scripts/launch_llamacpp.sh`. |
 | `FOUNDRY_SERVER_CTXSize` | `8192` | Context window size when the manager launches `llama-server`. Mirrors the `--ctx-size` flag from `infra/scripts/launch_llamacpp.sh`. Recommended minimum is 8192 for tool-calling agents (see [§3](#3-minimum-model-requirements)). |
 | `FOUNDRY_SERVER_BIN` | `llama-server` | Path to the `llama-server` binary. Override when the binary is not on `PATH`. |
+| `FOUNDRY_SERVER_HEALTH_TIMEOUT_S` | `2.0` | Timeout in seconds for each individual `/health` probe. Increase when the server is slow to respond under load. |
+| `FOUNDRY_SERVER_HEALTH_READY_TIMEOUT_S` | `60.0` | Timeout in seconds for the server to become ready on startup. Increase when the model takes a long time to load. |
 
 ---
 
