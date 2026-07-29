@@ -440,6 +440,48 @@ def test_events_grep_unknown_session_returns_nonzero(tmp_path, capsys):
     assert rc == 1
 
 
+def test_events_grep_count_flag(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid_a, _ = _populate_two_versions(db)
+
+    rc = main(
+        [
+            "events-grep",
+            sid_a,
+            "--db",
+            str(db),
+            "--pattern",
+            r"BUG-1234",
+            "--count",
+        ]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.strip() == "1"
+
+
+def test_events_grep_count_flag_no_match(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid_a, _ = _populate_two_versions(db)
+
+    rc = main(
+        [
+            "events-grep",
+            sid_a,
+            "--db",
+            str(db),
+            "--pattern",
+            r"this-string-will-not-appear",
+            "--count",
+        ]
+    )
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert out.strip() == "0"
+
+
 # --- Issue #192: redact-session / redact-key ---------------------------------
 
 _BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
