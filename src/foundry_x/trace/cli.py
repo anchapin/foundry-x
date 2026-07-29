@@ -922,6 +922,7 @@ _TIMELINE_CATEGORIES: dict[str, tuple[str, str]] = {
     "task_completed": ("TASK", "OK"),
     "task_failed": ("TASK", "!!"),
     "task_aborted": ("TASK", "XX"),
+    "token_budget_aborted": ("TASK", "XX"),
     "user_prompt": ("PROMPT", ">>"),
     "model_request": ("MODEL", "->"),
     "model_response": ("MODEL", "<-"),
@@ -937,7 +938,14 @@ _TIMELINE_CATEGORIES: dict[str, tuple[str, str]] = {
 
 # Error kinds get a distinct visual marker in the timeline.
 _TIMELINE_ERROR_KINDS: frozenset[str] = frozenset(
-    {"model_error", "task_failed", "task_aborted", "hook_registry_error", "injection_blocked"}
+    {
+        "model_error",
+        "task_failed",
+        "task_aborted",
+        "token_budget_aborted",
+        "hook_registry_error",
+        "injection_blocked",
+    }
 )
 
 # Bar rendering: max bar width in characters, and the scale factor (ms → chars).

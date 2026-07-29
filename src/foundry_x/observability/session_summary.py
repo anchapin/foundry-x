@@ -27,6 +27,7 @@ from foundry_x.trace.logger import TraceEvent, TraceLogger
 OUTCOME_KIND = "outcome"
 TASK_ABORTED_KIND = "task_aborted"
 TOKEN_BUDGET_REASON = "token_budget"
+TOKEN_BUDGET_ABORTED_KIND = "token_budget_aborted"
 CRITIC_VERDICT_KIND = VERDICT_KIND
 
 # The kind string persisted on terminal ``outcome`` events by
@@ -249,7 +250,7 @@ def build_session_summary(
 
 
 def _has_token_budget_abort(logger: TraceLogger, session_id: str) -> bool | None:
-    """Return whether session has a ``task_aborted(reason="token_budget")`` event.
+    """Return whether session has a ``task_aborted(reason="token_budget")`` or ``token_budget_aborted`` event.
 
     Returns ``True`` when at least one such event exists, ``False``
     when the session has outcome data but no token budget abort, and
@@ -265,6 +266,9 @@ def _has_token_budget_abort(logger: TraceLogger, session_id: str) -> bool | None
     for event in logger.iter_events(session_id, kind=TASK_ABORTED_KIND):
         if event.payload.get("reason") == TOKEN_BUDGET_REASON:
             return True
+    # Issue #1355: also check for the dedicated token_budget_aborted event
+    for event in logger.iter_events(session_id, kind=TOKEN_BUDGET_ABORTED_KIND):
+        return True
     return False
 
 
