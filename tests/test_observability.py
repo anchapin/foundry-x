@@ -533,7 +533,17 @@ def test_cli_timeline_kind_filter_with_json_format(tmp_path, capsys):
     sid = _populate_session(db)
 
     rc = cli_main(
-        ["timeline", "--db", str(db), "--session-id", sid, "--kind", "tool_call", "--format", "json"]
+        [
+            "timeline",
+            "--db",
+            str(db),
+            "--session-id",
+            sid,
+            "--kind",
+            "tool_call",
+            "--format",
+            "json",
+        ]
     )
 
     assert rc == 0

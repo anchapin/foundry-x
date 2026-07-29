@@ -243,10 +243,7 @@ def _build_parser() -> argparse.ArgumentParser:
     timeline.add_argument(
         "--kind",
         default=None,
-        help=(
-            "Filter timeline to only events of this kind "
-            "(e.g. --kind tool_call). Issue #1257."
-        ),
+        help=("Filter timeline to only events of this kind (e.g. --kind tool_call). Issue #1257."),
     )
 
     # Issue #268: human-readable failure analysis for a single session.
