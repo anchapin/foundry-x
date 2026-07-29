@@ -842,3 +842,46 @@ async def test_resolve_adapter_max_retries_from_env():
 
     with pytest.raises(ValueError):
         resolve_adapter_max_retries({"FOUNDRY_ADAPTER_MAX_RETRIES": "abc"})
+
+
+def test_openai_compatible_token_pricing_known_model():
+    """OpenAICompatibleAdapter returns correct pricing for known OpenAI models."""
+    adapter = OpenAICompatibleAdapter(
+        base_url="http://model.test/v1",
+        model="gpt-4o",
+    )
+    try:
+        assert adapter.token_pricing() == (2.5, 10.0)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_openai_compatible_token_pricing_unknown_model():
+    """OpenAICompatibleAdapter returns (0.0, 0.0) for unknown models."""
+    adapter = OpenAICompatibleAdapter(
+        base_url="http://model.test/v1",
+        model="unknown-model",
+    )
+    try:
+        assert adapter.token_pricing() == (0.0, 0.0)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_openai_compatible_token_pricing_env_override(monkeypatch):
+    """OpenAICompatibleAdapter respects FOUNDRY_MODEL_PRICING_ env var override."""
+    monkeypatch.setenv("FOUNDRY_MODEL_PRICING_GPT_4O", "5.0,20.0")
+    adapter = OpenAICompatibleAdapter(
+        base_url="http://model.test/v1",
+        model="gpt-4o",
+    )
+    try:
+        assert adapter.token_pricing() == (5.0, 20.0)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
