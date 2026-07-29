@@ -1342,7 +1342,11 @@ class TestRunEvolutionBatch:
     def test_batch_propose_is_called_per_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The evolver's propose method is called for each non-clean failure."""
+        """The evolver's propose method is called as fallback when batch_edits is empty.
+
+        When propose_batch returns [], use_batch_attribution=False and propose()
+        is called per failure (issue #1344 fallback path).
+        """
         from foundry_x.evolution.evolver import ProposedEdit  # noqa: F401
         from foundry_x.evolution.loop import run_evolution_batch
 
@@ -1352,6 +1356,9 @@ class TestRunEvolutionBatch:
             _event("error", 1.0, {"error": "oops"}, event_id="e2"),
         ]
 
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return []
+
         call_count = 0
 
         def mock_propose(self, harness_dir, failure, current_diff=None):
@@ -1359,6 +1366,7 @@ class TestRunEvolutionBatch:
             call_count += 1
             return []
 
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
         monkeypatch.setattr(Evolver, "propose", mock_propose)
         run_evolution_batch("sess-batch-call", events, harness_dir)
         assert call_count >= 1, "propose should have been called at least once"
