@@ -863,6 +863,128 @@ def _plant_token_budget_abort_event(db_path, session_id, tokens_used, token_budg
         )
 
 
+# Issue #1352: per-session ``context_efficiency`` in SessionSummaryRow.
+# ---------------------------------------------------------------------------
+
+
+def _plant_context_pruned_events_with_efficiency(db_path, session_id, events):
+    """Plant ``context_pruned`` events for *session_id* with given event payloads (issue #1352).
+
+    *events* is a list of dicts, each dict containing ``dropped`` and ``threshold``
+    keys for event-count pruning.
+    """
+    import json
+    import sqlite3
+    import uuid
+
+    with sqlite3.connect(db_path) as conn:
+        for i, event in enumerate(events):
+            conn.execute(
+                "INSERT INTO events (event_id, session_id, timestamp, kind, payload) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    session_id,
+                    "2026-07-10T10:00:00+00:00",
+                    CONTEXT_PRUNED_KIND,
+                    json.dumps(event),
+                ),
+            )
+
+
+def test_build_session_summary_context_efficiency_is_none_when_no_outcome(tmp_path):
+    """Issue #1352: sessions without outcome have context_efficiency=None."""
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rows = build_session_summary(TraceLogger(db))
+
+    no_outcome = next(row for row in rows if row.session_id == "sess-0003-no-outcome")
+    assert no_outcome.context_efficiency is None
+
+
+def test_build_session_summary_context_efficiency_is_one_when_no_prunes(tmp_path):
+    """Issue #1352: sessions with outcome but no pruning events have efficiency=1.0."""
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rows = build_session_summary(TraceLogger(db))
+
+    success_row = next(row for row in rows if row.session_id == "sess-0001-old")
+    assert success_row.context_efficiency == 1.0
+
+
+def test_build_session_summary_context_efficiency_computed_from_prunes(tmp_path):
+    """Issue #1352: efficiency = 1 - (sum(dropped) / sum(threshold + dropped))."""
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    _plant_context_pruned_events_with_efficiency(
+        db, "sess-0001-old", [{"dropped": 100, "threshold": 200}]
+    )
+
+    rows = build_session_summary(TraceLogger(db))
+    row_map = {row.session_id: row for row in rows}
+
+    efficiency = row_map["sess-0001-old"].context_efficiency
+    expected = 1.0 - (100.0 / (200.0 + 100.0))
+    assert efficiency == expected
+
+
+def test_build_session_summary_context_efficiency_multiple_prune_events(tmp_path):
+    """Issue #1352: multiple prune events are summed before computing efficiency."""
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    _plant_context_pruned_events_with_efficiency(
+        db,
+        "sess-0002-mid",
+        [
+            {"dropped": 50, "threshold": 200},
+            {"dropped": 50, "threshold": 200},
+        ],
+    )
+
+    rows = build_session_summary(TraceLogger(db))
+    row_map = {row.session_id: row for row in rows}
+
+    efficiency = row_map["sess-0002-mid"].context_efficiency
+    total_dropped = 100
+    total_threshold = 400
+    expected = 1.0 - (total_dropped / (total_threshold + total_dropped))
+    assert efficiency == expected
+
+
+def test_build_session_summary_context_efficiency_token_aware(tmp_path):
+    """Issue #1352: token-aware pruning uses threshold_tokens instead of threshold."""
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    import json
+    import sqlite3
+    import uuid
+
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO events (event_id, session_id, timestamp, kind, payload) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                "sess-0004-new",
+                "2026-07-10T13:00:00+00:00",
+                CONTEXT_PRUNED_KIND,
+                json.dumps({"dropped": 100, "threshold_tokens": 8192}),
+            ),
+        )
+
+    rows = build_session_summary(TraceLogger(db))
+    row_map = {row.session_id: row for row in rows}
+
+    efficiency = row_map["sess-0004-new"].context_efficiency
+    expected = 1.0 - (100.0 / (8192.0 + 100.0))
+    assert efficiency == expected
+
+
 def test_build_session_summary_tokens_used_at_abort_none_when_no_abort(tmp_path):
     """Issue #1353: sessions without token-budget abort have tokens_used_at_abort as None."""
     db = tmp_path / "traces.db"
@@ -928,3 +1050,24 @@ def test_cli_session_summary_json_includes_token_budget_abort_fields(tmp_path, c
     assert row_map["sess-0002-mid"]["token_budget_at_abort"] == 10000
     assert row_map["sess-0001-old"]["tokens_used_at_abort"] is None
     assert row_map["sess-0001-old"]["token_budget_at_abort"] is None
+
+
+def test_cli_session_summary_json_includes_context_efficiency(tmp_path, capsys):
+    """Issue #1352: --format json output includes context_efficiency field."""
+    import json
+
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    _plant_context_pruned_events_with_efficiency(
+        db, "sess-0001-old", [{"dropped": 100, "threshold": 200}]
+    )
+
+    rc = cli_main(["session-summary", "--db", str(db), "--format", "json"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    row_map = {row["session_id"]: row for row in parsed["rows"]}
+    assert "context_efficiency" in row_map["sess-0001-old"]
+    expected = 1.0 - (100.0 / (200.0 + 100.0))
+    assert row_map["sess-0001-old"]["context_efficiency"] == expected
