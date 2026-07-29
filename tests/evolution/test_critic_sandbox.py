@@ -226,9 +226,7 @@ class TestDiffNoopEarlyExit:
         assert "diff_noop" in verdict.passed_checks
         assert verdict.failed_checks == []
 
-    def test_noop_diff_pyproject_approves_with_diff_noop_check(
-        self, tmp_path: Path
-    ) -> None:
+    def test_noop_diff_pyproject_approves_with_diff_noop_check(self, tmp_path: Path) -> None:
         harness_dir = self._make_harness(tmp_path)
         verdict = Critic(
             harness_dir=harness_dir,
