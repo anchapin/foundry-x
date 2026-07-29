@@ -995,6 +995,7 @@ def test_smoke_tier_covered_tags_reflect_subset(
     assert "benchmark:heavy" not in passed
 
 
+
 # ---------------------------------------------------------------------------
 # Issue #1351: benchmark exit-code 5 regression test
 # ---------------------------------------------------------------------------
@@ -1093,3 +1094,96 @@ def test_exit_5_and_exit_1_distinction_is_visible_in_verdict(
     assert "pytest" not in verdict_5.failed_checks
     assert "pytest" in verdict_1.failed_checks
     assert "pytest:no_tests_collected" not in verdict_1.failed_checks
+
+
+# Issue #1349: skipped_checks tests
+# ---------------------------------------------------------------------------
+
+
+def test_smoke_tier_failure_records_skipped_full_suite_tasks(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When smoke tier fails, skipped_checks names the full-suite tasks that were never run."""
+    from benchmarks.models import BenchmarkTask
+
+    _capture_pytest_commands(monkeypatch, returncode=1)
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke"]),
+            BenchmarkTask(name="beta", description="d", tags=["core"]),
+            BenchmarkTask(name="gamma", description="d", tags=["core"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    verdict = critic.evaluate("", tier="smoke")
+    assert verdict.verdict is False
+    assert "beta" in verdict.skipped_checks
+    assert "gamma" in verdict.skipped_checks
+    assert "alpha" not in verdict.skipped_checks
+
+
+def test_full_tier_failure_has_no_skipped_checks(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When full tier fails, no benchmark tasks are skipped (all were run)."""
+    from benchmarks.models import BenchmarkTask
+
+    _capture_pytest_commands(monkeypatch, returncode=1)
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke"]),
+            BenchmarkTask(name="beta", description="d", tags=["core"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    verdict = critic.evaluate("", tier="full")
+    assert verdict.verdict is False
+    assert "alpha" not in verdict.skipped_checks
+    assert "beta" not in verdict.skipped_checks
+
+
+def test_pytest_exit_5_records_skipped_checks(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pytest exit-5 (no tests collected) records the selected tasks as skipped (issue #1349)."""
+    from benchmarks.models import BenchmarkTask
+
+    _capture_pytest_commands(monkeypatch, returncode=5)
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    verdict = critic.evaluate("", tier="smoke")
+    assert verdict.verdict is False
+    assert "alpha" in verdict.skipped_checks
+    assert "pytest:no_tests_collected" in verdict.failed_checks
+
+
+def test_smoke_tier_success_has_no_skipped_checks(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When smoke tier passes, no benchmark tasks are recorded as skipped."""
+    from benchmarks.models import BenchmarkTask
+
+    _capture_pytest_commands(monkeypatch, returncode=0)
+    critic = Critic(
+        harness_dir,
+        pytest_args=["-q", "-m", "benchmark"],
+        benchmark_tasks=[
+            BenchmarkTask(name="alpha", description="d", tags=["smoke"]),
+            BenchmarkTask(name="beta", description="d", tags=["core"]),
+        ],
+        smoke_benchmark_tags=["smoke"],
+    )
+    verdict = critic.evaluate("", tier="smoke")
+    assert verdict.verdict is True
+    assert "beta" not in verdict.skipped_checks
+

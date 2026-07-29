@@ -322,6 +322,7 @@ class CriticVerdict(BaseModel):
     verdict: bool | None
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
+    skipped_checks: list[str] = Field(default_factory=list)
     notes: str = ""
     edit_index: int | None = None
     failure_class: str | None = None
@@ -1070,6 +1071,7 @@ class Critic:
 
             passed_checks: list[str] = []
             failed_checks: list[str] = []
+            skipped_checks: list[str] = []
 
             # Gate 1: Diff-size cap (issue #333).
             if proposed_diff.strip():
@@ -1229,14 +1231,29 @@ class Critic:
                 # surfaces the misconfiguration rather than a generic "pytest"
                 # label.
                 failed_checks.append("pytest:no_tests_collected")
+                # Record the selected-but-not-collected task names as skipped
+                # (issue #1349). In smoke tier the -k expression names the smoke
+                # tasks; in full tier this case should not occur.
+                skipped_names = [t.name for t in self.smoke_tasks] if tier == "smoke" else []
+                skipped_checks.extend(skipped_names)
+
             else:
                 failed_checks.append("pytest")
+
+            # When smoke tier fails, record the full-suite tasks that were never
+            # run as skipped_checks (issue #1349). These are benchmark tasks
+            # whose tags do NOT intersect smoke_benchmark_tags.
+            if tier == "smoke" and failed_checks:
+                smoke_names = {t.name for t in self.smoke_tasks}
+                skipped_names = [t.name for t in self.benchmark_tasks if t.name not in smoke_names]
+                skipped_checks.extend(skipped_names)
 
             combined = (pytest_result.stdout or "") + (pytest_result.stderr or "")
             return CriticVerdict(
                 verdict=not failed_checks,
                 passed_checks=passed_checks,
                 failed_checks=failed_checks,
+                skipped_checks=skipped_checks,
                 notes=_tail(combined),
                 edit_index=edit_index,
                 failure_class=failure_class,
