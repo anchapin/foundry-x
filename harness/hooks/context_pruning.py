@@ -116,7 +116,7 @@ class _SqlitePruner:
 
     def count_tokens(self, session_id: str) -> int:
         row = self._conn.execute(
-            "SELECT payload FROM events "
+            "SELECT payload, timestamp FROM events "
             "WHERE session_id = ? AND kind = 'model_response' "
             "ORDER BY timestamp DESC LIMIT 1",
             (session_id,),
@@ -124,7 +124,16 @@ class _SqlitePruner:
         if not row:
             return 0
         payload = json.loads(row[0])
-        return payload.get("tokens_used", 0)
+        timestamp = row[1]
+        if "tokens_used" not in payload:
+            _log.warning(
+                "count_tokens: session %r has a model_response event at %s "
+                "with no tokens_used field; returning 0",
+                session_id,
+                timestamp,
+            )
+            return 0
+        return payload["tokens_used"]
 
     def prune(self, session_id: str, keep_kinds: frozenset[str], target_count: int) -> int:
         self._conn.execute("BEGIN IMMEDIATE")
