@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from foundry_x.execution.model_adapter import (
+    _MAX_BACKOFF_MS,
     ModelAdapter,
     ModelAdapterError,
     ModelAdapterHTTPError,
@@ -23,6 +24,7 @@ from foundry_x.execution.model_adapter import (
     ToolCallFunctionChunk,
     ToolDefinition,
     ToolFunctionSchema,
+    _compute_429_backoff_ms,
 )
 from foundry_x.execution.runner import (
     _DEFAULT_REQUEST_TIMEOUT_S,
@@ -712,6 +714,141 @@ async def test_retry_429_is_retryable(monkeypatch):
     assert response.message.content == "done"
     assert len(retries) == 1
     assert retries[0].error_type == "HTTPStatusError"
+
+
+@pytest.mark.asyncio
+async def test_retry_429_with_retry_after_header_uses_header_value(monkeypatch):
+    """HTTP 429 with Retry-After header uses header value + jitter for backoff (issue #1358)."""
+    sleep_durations: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleep_durations.append(seconds)
+
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _record_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(429, text="rate limited", headers={"Retry-After": "2"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test",
+            model="foundry-test",
+            client=client,
+            max_retries=1,
+        )
+        with pytest.raises(ModelAdapterHTTPError):
+            await adapter.complete(messages=[ModelMessage(role="user", content="hello")])
+
+    assert calls["count"] == 2, "429 should be retried once"
+    assert len(sleep_durations) == 1
+    assert 2.0 <= sleep_durations[0] <= 2.5, (
+        f"sleep duration {sleep_durations[0]:.3f}s should be ~2s (Retry-After=2 + jitter)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_429_with_x_ratelimit_headers_uses_reset_value(monkeypatch):
+    """HTTP 429 with x-ratelimit-remaining-requests: 0 uses reset header (issue #1358)."""
+    sleep_durations: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleep_durations.append(seconds)
+
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _record_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(
+            429,
+            text="rate limited",
+            headers={
+                "x-ratelimit-remaining-requests": "0",
+                "x-ratelimit-reset-requests": "3.5",
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test",
+            model="foundry-test",
+            client=client,
+            max_retries=1,
+        )
+        with pytest.raises(ModelAdapterHTTPError):
+            await adapter.complete(messages=[ModelMessage(role="user", content="hello")])
+
+    assert calls["count"] == 2, "429 should be retried once"
+    assert len(sleep_durations) == 1
+    assert 3.5 <= sleep_durations[0] <= 4.0, (
+        f"sleep duration {sleep_durations[0]:.3f}s should be ~3.5s (reset=3.5 + jitter)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_429_without_headers_falls_back_to_exponential_jitter(monkeypatch):
+    """HTTP 429 without Retry-After falls back to exponential jitter (issue #1358)."""
+    sleep_durations: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleep_durations.append(seconds)
+
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _record_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(429, text="rate limited")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test",
+            model="foundry-test",
+            client=client,
+            max_retries=1,
+        )
+        with pytest.raises(ModelAdapterHTTPError):
+            await adapter.complete(messages=[ModelMessage(role="user", content="hello")])
+
+    assert calls["count"] == 2, "429 should be retried once"
+    assert len(sleep_durations) == 1
+    assert 0.0 <= sleep_durations[0] <= 1.5, (
+        f"sleep duration {sleep_durations[0]:.3f}s should be in [0, 1.5]s (exponential jitter)"
+    )
+
+
+def test_compute_429_backoff_ms_retry_after_capped_at_max_backoff():
+    """Retry-After value larger than _MAX_BACKOFF_MS is capped (issue #1358)."""
+    headers = httpx.Headers({"Retry-After": "20"})
+    backoff_ms = _compute_429_backoff_ms(0, headers)
+    assert backoff_ms <= _MAX_BACKOFF_MS + 500, (
+        "backoff should be capped at _MAX_BACKOFF_MS + jitter"
+    )
+
+
+def test_compute_429_backoff_ms_uses_anthropic_ratelimit_header():
+    """anthropic-ratelimit-requests-reset header is used when present (issue #1358)."""
+    headers = httpx.Headers(
+        {
+            "x-ratelimit-remaining-requests": "0",
+            "anthropic-ratelimit-requests-reset": "1.5",
+        }
+    )
+    backoff_ms = _compute_429_backoff_ms(0, headers)
+    assert 1500 <= backoff_ms <= 2000, (
+        f"backoff {backoff_ms}ms should be ~1500-2000ms (1.5s reset + jitter)"
+    )
 
 
 @pytest.mark.asyncio
