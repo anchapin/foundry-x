@@ -77,6 +77,7 @@ class HookRegistry:
         is intentional — ``reset`` is the nuclear option.
         """
         self._hooks.clear()
+        self._tracers.clear()
         self._on_error = on_error
 
     async def run_pre(self, call: ToolCall) -> ToolCall:
