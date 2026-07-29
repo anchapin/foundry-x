@@ -11,6 +11,7 @@ from foundry_x.trace.logger import TraceLogger
 VERDICT_KIND = "critic_verdict"
 TASK_ABORTED_KIND = "task_aborted"
 TOKEN_BUDGET_REASON = "token_budget"
+TOKEN_BUDGET_ABORTED_KIND = "token_budget_aborted"
 
 GroupByDim = Literal["skill", "task_family", "difficulty_tier"]
 
@@ -423,7 +424,7 @@ def _count_token_budget_aborts(
     logger: TraceLogger,
     since: str | None = None,
 ) -> int:
-    """Count sessions with at least one ``task_aborted(reason="token_budget")`` event.
+    """Count sessions with at least one ``task_aborted(reason="token_budget")`` or ``token_budget_aborted`` event.
 
     Issue #466: token budget aborts are task-shaped failures (a task exceeded
     the model's context budget), not harness regressions. They are reported
@@ -434,11 +435,16 @@ def _count_token_budget_aborts(
 
     Issue #1270 — the ``since`` filter is pushed down to the store so
     time-bounded queries do not materialize events outside the window.
+
+    Issue #1355: also counts the dedicated ``token_budget_aborted`` event.
     """
     sessions_with_abort: set[str] = set()
     for event in logger.query_events(kind=TASK_ABORTED_KIND, since=since):
         if event.payload.get("reason") == TOKEN_BUDGET_REASON:
             sessions_with_abort.add(event.session_id)
+    # Issue #1355: also count the dedicated token_budget_aborted event
+    for event in logger.query_events(kind=TOKEN_BUDGET_ABORTED_KIND, since=since):
+        sessions_with_abort.add(event.session_id)
     return len(sessions_with_abort)
 
 

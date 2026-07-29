@@ -43,7 +43,8 @@ class TraceLoggerAttributes(BaseModel):
     change; see ADR-0007 §Trace-driven development)
     ═══════════════════════════════════════════════════════════════════════
     Session lifecycle:  session_start | session_end | task_received |
-                       task_completed | task_failed | task_aborted
+                       task_completed | task_failed | task_aborted |
+                       token_budget_aborted
     Agent loop:         user_prompt | model_request | model_response |
                        model_error | tool_call | tool_result | outcome |
                        hook_registry_error
@@ -124,7 +125,9 @@ class TraceLoggerAttributes(BaseModel):
     message:         str         task_failed | model_error | hook_registry_error
                                  — str(exc) value
     timeout_s:       float       task_aborted — wall-clock timeout seconds
-    token_budget:    int         task_aborted — active token budget at abort
+    token_budget:    int         task_aborted | token_budget_aborted —
+                                 active token budget at abort
+    tokens_used:     int         token_budget_aborted — running token total at abort
     prompt:          str         task_received — raw --task argument
     markers:         list[str]   injection_blocked — sorted unique marker names
     preview:         str         injection_blocked — first 120 chars of blocked
@@ -195,7 +198,11 @@ class TraceLoggerAttributes(BaseModel):
         default=None, description="Wall-clock timeout seconds (task_aborted)"
     )
     token_budget: int | None = Field(
-        default=None, description="Active token budget at abort (task_aborted)"
+        default=None,
+        description="Active token budget at abort (task_aborted, token_budget_aborted)",
+    )
+    tokens_used: int | None = Field(
+        default=None, description="Running token total at abort (token_budget_aborted)"
     )
     markers: list | None = Field(
         default=None, description="Sorted unique marker names (injection_blocked)"

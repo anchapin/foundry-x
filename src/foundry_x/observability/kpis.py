@@ -98,6 +98,10 @@ def _get_trace_db(args: argparse.Namespace) -> str:
 
 TASK_ABORTED_KIND = "task_aborted"
 TOKEN_BUDGET_REASON = "token_budget"
+# Issue #1355: the runner emits ``token_budget_aborted`` as a dedicated
+# terminal failure marker when the running token total exceeds the budget.
+# This constant centralizes the kind spelling for KPI and regression consumers.
+TOKEN_BUDGET_ABORTED_KIND = "token_budget_aborted"
 # Issue #869: the runner emits ``task_aborted(reason="event_limit")`` when the
 # per-session event cap is exceeded (see ``execution/runner.py:1523``). The
 # constant lives next to ``TOKEN_BUDGET_REASON`` so any future reference
@@ -1848,6 +1852,12 @@ def _token_budget_aborts(
     ):
         if event.payload.get("reason") == TOKEN_BUDGET_REASON:
             sessions_with_abort.add(event.session_id)
+    # Issue #1355: also count the dedicated token_budget_aborted event
+    for event in logger.query_events(
+        kind=TOKEN_BUDGET_ABORTED_KIND,
+        harness_version=harness_version,
+    ):
+        sessions_with_abort.add(event.session_id)
     return len(sessions_with_abort)
 
 
@@ -1855,7 +1865,7 @@ def _token_budget_hit_rate(
     logger: TraceLogger,
     harness_version: str | None = None,
 ) -> float:
-    """Fraction of sessions with at least one ``task_aborted(reason="token_budget")`` event.
+    """Fraction of sessions with at least one ``task_aborted(reason="token_budget")`` or ``token_budget_aborted`` event.
 
     Issue #551 — the token budget hit rate is a fourth tracked metric
     exposed via ``foundry-kpis`` alongside the three PRD KPIs. It signals
@@ -1864,7 +1874,8 @@ def _token_budget_hit_rate(
     enough, or that the model-context window is being misspent.
 
     A session contributes to the numerator if it has at least one
-    ``task_aborted`` event whose ``payload["reason"] == "token_budget"``.
+    ``task_aborted`` event whose ``payload["reason"] == "token_budget"``,
+    or at least one ``token_budget_aborted`` event (issue #1355).
     The denominator is the total number of sessions that have a
     ``task_received`` event (matching the harness version filter), which
     is the natural population boundary for the KPI.
@@ -1879,6 +1890,12 @@ def _token_budget_hit_rate(
         if event.payload.get("reason") == "token_budget":
             sessions_with_abort.add(event.session_id)
 
+    # Issue #1355: also count the dedicated token_budget_aborted event
+    for event in logger.query_events(
+        kind=TOKEN_BUDGET_ABORTED_KIND, harness_version=harness_version
+    ):
+        sessions_with_abort.add(event.session_id)
+
     if not all_sessions:
         return 0.0
     return len(sessions_with_abort) / len(all_sessions)
@@ -1888,12 +1905,12 @@ def _token_budget_overrun(
     logger: TraceLogger,
     harness_version: str | None = None,
 ) -> float | None:
-    """Mean token budget overrun percentage across sessions that hit ``task_aborted(reason="token_budget")`` (issue #1112).
+    """Mean token budget overrun percentage across sessions that hit ``task_aborted(reason="token_budget")`` or ``token_budget_aborted`` (issues #1112, #1355).
 
     For each session that recorded at least one ``task_aborted`` event with
-    ``reason="token_budget"``, extracts ``tokens_used`` and ``token_budget`` from
-    the payload and computes the percentage overrun:
-    ``(tokens_used - token_budget) / token_budget * 100``.
+    ``reason="token_budget"``, or at least one ``token_budget_aborted`` event,
+    extracts ``tokens_used`` and ``token_budget`` from the payload and computes
+    the percentage overrun: ``(tokens_used - token_budget) / token_budget * 100``.
 
     Sessions are first-attempt-only (only the first abort event per session is
     considered) to avoid skewing the mean with repeated aborts in the same
@@ -1918,6 +1935,20 @@ def _token_budget_overrun(
             if isinstance(tokens_used, int) and isinstance(token_budget, int) and token_budget > 0:
                 overrun_pct = (tokens_used - token_budget) / token_budget * 100.0
                 session_overruns[sid] = overrun_pct
+
+    # Issue #1355: also process the dedicated token_budget_aborted event
+    for event in logger.query_events(
+        kind=TOKEN_BUDGET_ABORTED_KIND,
+        harness_version=harness_version,
+    ):
+        sid = event.session_id
+        if sid in session_overruns:
+            continue
+        tokens_used = event.payload.get("tokens_used")
+        token_budget = event.payload.get("token_budget")
+        if isinstance(tokens_used, int) and isinstance(token_budget, int) and token_budget > 0:
+            overrun_pct = (tokens_used - token_budget) / token_budget * 100.0
+            session_overruns[sid] = overrun_pct
 
     if not session_overruns:
         return None

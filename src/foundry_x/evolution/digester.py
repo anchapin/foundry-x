@@ -94,6 +94,11 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         # so the Evolver never proposes remediation. CONTEXT.md §Event kinds
         # already documents this as a failure signal; this aligns the code.
         "task_aborted",
+        # Issue #1355: ``token_budget_aborted`` is a dedicated terminal failure
+        # marker emitted by ``Runner.run_task`` when the token budget is
+        # exceeded. It provides a clearer, purpose-built abort signal for
+        # token-budget failures separate from the generic ``task_aborted`` event.
+        "token_budget_aborted",
         "run_failed",
         "agent_error",
         "error",

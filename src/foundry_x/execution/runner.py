@@ -2092,6 +2092,14 @@ async def run_task(
                         "token_budget": token_budget,
                     },
                 )
+                _record_and_count(
+                    session_id,
+                    kind="token_budget_aborted",
+                    payload={
+                        "tokens_used": tokens_used,
+                        "token_budget": token_budget,
+                    },
+                )
                 break
 
             if _check_event_limit(session_id):
