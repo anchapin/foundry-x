@@ -72,7 +72,12 @@ class TestZeroEditFailureClass:
     def test_zero_edit_and_producing_failure_classes_both_in_results(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A batch with one class producing edits and another returning [] shows both."""
+        """A batch with one class producing edits and another returning [] shows both.
+
+        When batch_edits is empty, propose() is called as fallback. If some
+        propose() calls return [] while others return edits, both zero-edit
+        and edit-producing results appear (issue #1117 invariant).
+        """
         harness_dir = _write_harness(tmp_path)
         events = [
             _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
@@ -91,10 +96,10 @@ class TestZeroEditFailureClass:
             unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
         )
 
-        call_count = 0
-
         def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
-            return [proposed_edit]
+            return []
+
+        call_count = 0
 
         def mock_propose(self, harness_dir, failure, current_diff=None):
             nonlocal call_count
@@ -181,7 +186,12 @@ class TestBatchDeduplication:
     def test_proposed_edits_deduplicated_by_target_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When two failures propose edits to the same file, only the first is retained."""
+        """When propose_batch returns edits to the same file, only the first is retained.
+
+        Deduplication is performed by propose_batch itself (issue #1258).
+        When use_batch_attribution=True, propose() is NOT called (issue #1344),
+        so deduplication relies entirely on propose_batch.
+        """
         harness_dir = _write_harness(tmp_path)
         events = [
             _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
@@ -206,16 +216,10 @@ class TestBatchDeduplication:
         )
 
         def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
-            return [edit_to_prompt]
-
-        call_count = 0
+            return [edit_to_prompt, edit_to_prompt2]
 
         def mock_propose(self, harness_dir, failure, current_diff=None):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return [edit_to_prompt]
-            return [edit_to_prompt2]
+            return [edit_to_prompt]
 
         monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
         monkeypatch.setattr(Evolver, "propose", mock_propose)
