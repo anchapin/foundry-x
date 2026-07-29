@@ -500,6 +500,63 @@ def test_cli_timeline_format_out_conflict_warns(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# Issue #1257: fx-trace timeline --kind filter.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_timeline_kind_filter_shows_only_matching_events(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+
+    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid, "--kind", "tool_call"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tool_call" in out
+    assert "user_prompt" not in out
+    assert "tool_result" not in out
+
+
+def test_cli_timeline_kind_filter_no_match_returns_nonzero(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+
+    rc = cli_main(["timeline", "--db", str(db), "--session-id", sid, "--kind", "nonexistent"])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "No events matching kind 'nonexistent'" in err
+
+
+def test_cli_timeline_kind_filter_with_json_format(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+
+    rc = cli_main(
+        ["timeline", "--db", str(db), "--session-id", sid, "--kind", "tool_call", "--format", "json"]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert isinstance(payload, list)
+    assert len(payload) == 1
+    assert payload[0]["kind"] == "tool_call"
+
+
+def test_cli_timeline_kind_filter_with_svg_format(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid = _populate_session(db)
+
+    rc = cli_main(
+        ["timeline", "--db", str(db), "--session-id", sid, "--kind", "tool_call", "--format", "svg"]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.startswith("<svg")
+
+
+# ---------------------------------------------------------------------------
 # Issue #268: fx-trace failure-report subcommand.
 # ---------------------------------------------------------------------------
 

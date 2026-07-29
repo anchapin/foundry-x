@@ -240,6 +240,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write the timeline to this path instead of stdout.",
     )
+    timeline.add_argument(
+        "--kind",
+        default=None,
+        help=(
+            "Filter timeline to only events of this kind "
+            "(e.g. --kind tool_call). Issue #1257."
+        ),
+    )
 
     # Issue #268: human-readable failure analysis for a single session.
     # Calls Digester.digest() then render_failure_report() so a developer
@@ -523,6 +531,13 @@ def main(argv: list[str] | None = None) -> int:
         if not events:
             sys.stderr.write(f"session {session_id} not found or empty\n")
             return 2
+        if args.kind is not None:
+            events = [e for e in events if e.kind == args.kind]
+            if not events:
+                sys.stderr.write(
+                    f"No events matching kind '{args.kind}' in session {session_id}.\n"
+                )
+                return 1
         fmt = _resolve_format(args.format, args.out)
         if args.format is not None and args.out is not None:
             expected_ext = "." + args.format
