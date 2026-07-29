@@ -852,11 +852,13 @@ def _plant_token_budget_abort_event(db_path, session_id, tokens_used, token_budg
                 session_id,
                 "2026-07-10T10:00:00+00:00",
                 "task_aborted",
-                json.dumps({
-                    "reason": "token_budget",
-                    "tokens_used": tokens_used,
-                    "token_budget": token_budget,
-                }),
+                json.dumps(
+                    {
+                        "reason": "token_budget",
+                        "tokens_used": tokens_used,
+                        "token_budget": token_budget,
+                    }
+                ),
             ),
         )
 
