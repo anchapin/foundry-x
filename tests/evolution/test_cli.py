@@ -467,3 +467,108 @@ class TestRunLoopIntegration:
         assert exit_code == 0
         assert _report is not None
         assert _report.proposed_class == "clean"
+
+
+class TestCycleTime:
+    """Tests for cycle time computation and display (issue #1361)."""
+
+    def test_failing_session_includes_cycle_time_in_output(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_failing_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        rc = main(
+            [
+                "evolve",
+                "--session-id",
+                sid,
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "Cycle time:" in captured.out
+        assert "s" in captured.out
+        assert rc == 1
+
+    def test_failing_session_cycle_time_is_positive(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_failing_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        main(
+            [
+                "evolve",
+                "--session-id",
+                sid,
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+            ]
+        )
+
+        captured = capsys.readouterr()
+        import re
+
+        match = re.search(r"Cycle time:\s+([\d.]+)s", captured.out)
+        assert match is not None, "Cycle time line not found in output"
+        cycle_time = float(match.group(1))
+        assert cycle_time >= 0, f"Cycle time should be non-negative, got {cycle_time}"
+
+    def test_clean_session_does_not_include_cycle_time(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_clean_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        rc = main(
+            [
+                "evolve",
+                "--session-id",
+                sid,
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "Cycle time:" not in captured.out
+        assert rc == 0
+
+    def test_render_critic_verdict_with_cycle_time(self):
+        from foundry_x.evolution.cli import _render_critic_verdict
+        from foundry_x.evolution.critic import CriticVerdict
+
+        verdict = CriticVerdict(
+            verdict=True,
+            passed_checks=["check1"],
+            failed_checks=[],
+            notes="Test notes",
+        )
+        output = _render_critic_verdict(verdict, cycle_time_seconds=42.5)
+        assert "Cycle time:" in output
+        assert "42.5s" in output
+
+    def test_render_critic_verdict_without_cycle_time(self):
+        from foundry_x.evolution.cli import _render_critic_verdict
+        from foundry_x.evolution.critic import CriticVerdict
+
+        verdict = CriticVerdict(
+            verdict=True,
+            passed_checks=["check1"],
+            failed_checks=[],
+            notes="Test notes",
+        )
+        output = _render_critic_verdict(verdict, cycle_time_seconds=None)
+        assert "Cycle time:" not in output
