@@ -79,6 +79,17 @@ def test_manifest_hooks_resolve_under_harness_hooks(manifest: dict) -> None:
         assert path.exists(), f"hook module {entry!r} not found at {path}"
 
 
+def test_manifest_all_hook_files_declared(manifest: dict) -> None:
+    """Every .py hook file under harness/hooks/ must be in manifest.hooks (issue #1267)."""
+    declared = set(manifest["hooks"])
+    for path in HOOKS_DIR.glob("*.py"):
+        if path.stem in ("__init__", "__pycache__"):
+            continue
+        assert path.stem in declared, (
+            f"hook file {path.name} is on disk but not in manifest.json hooks list"
+        )
+
+
 def test_manifest_skills_resolve_under_harness_skills(manifest: dict) -> None:
     for entry in manifest["skills"]:
         path = SKILLS_DIR / entry
