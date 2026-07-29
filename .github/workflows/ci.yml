@@ -78,7 +78,7 @@ jobs:
       - name: Pytest (non-benchmark + JUnit XML)
         run: |
           mkdir -p test-results
-          uv run pytest -m "not benchmark" --junit-xml=test-results/junit.xml
+          uv run pytest -n auto -m "not benchmark" --junit-xml=test-results/junit.xml
 
       - name: Upload JUnit XML
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

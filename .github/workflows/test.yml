@@ -23,7 +23,7 @@ jobs:
       - name: Pytest (non-benchmark)
         run: |
           mkdir -p test-results
-          uv run pytest -m "not benchmark" --junit-xml=test-results/junit.xml
+          uv run pytest -n auto -m "not benchmark" --junit-xml=test-results/junit.xml
 
       - name: Upload JUnit XML
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -52,7 +52,7 @@ jobs:
       - name: Pytest (benchmark only)
         run: |
           mkdir -p test-results
-          uv run pytest -m benchmark --junit-xml=test-results/junit.xml
+          uv run pytest -n auto -m benchmark --junit-xml=test-results/junit.xml
 
       - name: Upload JUnit XML
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -85,7 +85,7 @@ jobs:
           FOUNDRY_MODEL_API_KEY: ${{ secrets.FOUNDRY_MODEL_API_KEY }}
         run: |
           mkdir -p test-results
-          uv run pytest -m "not benchmark" --junit-xml=test-results/junit.xml
+          uv run pytest -n auto -m "not benchmark" --junit-xml=test-results/junit.xml
 
       - name: Upload JUnit XML
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
