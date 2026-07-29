@@ -73,6 +73,11 @@ class SessionSummaryRow(BaseModel):
 
     Issue #737 adds ``failure_class``: the failure class from the
     session's ``critic_verdict`` event, if any.
+
+    Issue #1353 adds ``tokens_used_at_abort`` and ``token_budget_at_abort``:
+    the ``tokens_used`` and ``token_budget`` values from the
+    ``task_aborted(reason="token_budget")`` event, ``None`` when
+    no token-budget abort occurred.
     """
 
     session_id: str
@@ -84,6 +89,8 @@ class SessionSummaryRow(BaseModel):
     token_budget_hit: bool | None = None
     context_pruned: int | None = None
     failure_class: str | None = None
+    tokens_used_at_abort: int | None = None
+    token_budget_at_abort: int | None = None
 
 
 def _truncate(value: str, width: int) -> str:
@@ -227,6 +234,9 @@ def build_session_summary(
         raw_steps = payload.get("steps")
         steps_value: int | None = raw_steps if isinstance(raw_steps, int) else None
         token_budget_hit = _has_token_budget_abort(logger, session.session_id)
+        tokens_used_at_abort, token_budget_at_abort = _get_token_budget_abort_details(
+            logger, session.session_id
+        )
         context_pruned_count = _count_context_pruned_events(logger, session.session_id)
         context_pruned_value: int | None = (
             context_pruned_count if context_pruned_count > 0 else None
@@ -243,6 +253,8 @@ def build_session_summary(
                 token_budget_hit=token_budget_hit,
                 context_pruned=context_pruned_value,
                 failure_class=failure_class,
+                tokens_used_at_abort=tokens_used_at_abort,
+                token_budget_at_abort=token_budget_at_abort,
             )
         )
     rows.sort(key=lambda row: row.started_at, reverse=True)
@@ -270,6 +282,30 @@ def _has_token_budget_abort(logger: TraceLogger, session_id: str) -> bool | None
     for event in logger.iter_events(session_id, kind=TOKEN_BUDGET_ABORTED_KIND):
         return True
     return False
+
+
+def _get_token_budget_abort_details(
+    logger: TraceLogger, session_id: str
+) -> tuple[int | None, int | None]:
+    """Return ``tokens_used`` and ``token_budget`` from the token-budget abort event (issue #1353).
+
+    Returns ``(tokens_used, token_budget)`` from the ``task_aborted(reason="token_budget")``
+    event's payload, or ``(None, None)`` if no such event exists or the session has no
+    ``outcome`` event at all.
+    """
+    has_outcome = False
+    for event in logger.iter_events(session_id, kind=OUTCOME_KIND):
+        has_outcome = True
+        break
+    if not has_outcome:
+        return None, None
+    for event in logger.iter_events(session_id, kind=TASK_ABORTED_KIND):
+        if event.payload.get("reason") == TOKEN_BUDGET_REASON:
+            tokens_used = event.payload.get("tokens_used")
+            token_budget = event.payload.get("token_budget")
+            if isinstance(tokens_used, int) and isinstance(token_budget, int):
+                return tokens_used, token_budget
+    return None, None
 
 
 def _string_or_none(value: object) -> str | None:

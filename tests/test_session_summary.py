@@ -829,3 +829,102 @@ def test_cli_session_summary_without_latest_remains_backward_compatible(tmp_path
     assert len(out_lines) == 5
     for sid, *_ in _FOUR_SESSIONS:
         assert any(sid in line for line in out_lines[1:])
+
+
+# ---------------------------------------------------------------------------
+# Issue #1353: tokens_used_at_abort and token_budget_at_abort surfaced in
+# SessionSummaryRow when a token-budget abort occurs.
+# ---------------------------------------------------------------------------
+
+
+def _plant_token_budget_abort_event(db_path, session_id, tokens_used, token_budget):
+    """Plant a ``task_aborted(reason="token_budget")`` event (issue #1353)."""
+    import json
+    import sqlite3
+    import uuid
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO events (event_id, session_id, timestamp, kind, payload) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                session_id,
+                "2026-07-10T10:00:00+00:00",
+                "task_aborted",
+                json.dumps(
+                    {
+                        "reason": "token_budget",
+                        "tokens_used": tokens_used,
+                        "token_budget": token_budget,
+                    }
+                ),
+            ),
+        )
+
+
+def test_build_session_summary_tokens_used_at_abort_none_when_no_abort(tmp_path):
+    """Issue #1353: sessions without token-budget abort have tokens_used_at_abort as None."""
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+
+    rows = build_session_summary(TraceLogger(db))
+
+    for row in rows:
+        assert row.tokens_used_at_abort is None
+        assert row.token_budget_at_abort is None
+
+
+def test_build_session_summary_tokens_used_at_abort_populated(tmp_path):
+    """Issue #1353: token-budget abort session populates tokens_used_at_abort and token_budget_at_abort."""
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    _plant_token_budget_abort_event(db, "sess-0002-mid", tokens_used=15000, token_budget=10000)
+
+    rows = build_session_summary(TraceLogger(db))
+
+    row_map = {row.session_id: row for row in rows}
+    assert row_map["sess-0002-mid"].tokens_used_at_abort == 15000
+    assert row_map["sess-0002-mid"].token_budget_at_abort == 10000
+    assert row_map["sess-0001-old"].tokens_used_at_abort is None
+    assert row_map["sess-0001-old"].token_budget_at_abort is None
+    assert row_map["sess-0003-no-outcome"].tokens_used_at_abort is None
+    assert row_map["sess-0003-no-outcome"].token_budget_at_abort is None
+    assert row_map["sess-0004-new"].tokens_used_at_abort is None
+    assert row_map["sess-0004-new"].token_budget_at_abort is None
+
+
+def test_build_session_summary_tokens_used_at_abort_respects_harness_version_filter(tmp_path):
+    """Issue #1353: harness_version filter applies to token_budget_abort details extraction."""
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    _plant_token_budget_abort_event(db, "sess-0001-old", tokens_used=20000, token_budget=10000)
+    _plant_token_budget_abort_event(db, "sess-0002-mid", tokens_used=15000, token_budget=10000)
+
+    rows = build_session_summary(TraceLogger(db), harness_version="0.1.0")
+
+    row_map = {row.session_id: row for row in rows}
+    assert row_map["sess-0001-old"].tokens_used_at_abort == 20000
+    assert row_map["sess-0001-old"].token_budget_at_abort == 10000
+    assert row_map["sess-0002-mid"].tokens_used_at_abort == 15000
+    assert row_map["sess-0002-mid"].token_budget_at_abort == 10000
+
+
+def test_cli_session_summary_json_includes_token_budget_abort_fields(tmp_path, capsys):
+    """Issue #1353: --format json output includes tokens_used_at_abort and token_budget_at_abort."""
+    import json
+
+    db = tmp_path / "traces.db"
+    _plant_four_sessions(db)
+    _plant_token_budget_abort_event(db, "sess-0002-mid", tokens_used=15000, token_budget=10000)
+
+    rc = cli_main(["session-summary", "--db", str(db), "--format", "json"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    row_map = {row["session_id"]: row for row in parsed["rows"]}
+    assert row_map["sess-0002-mid"]["tokens_used_at_abort"] == 15000
+    assert row_map["sess-0002-mid"]["token_budget_at_abort"] == 10000
+    assert row_map["sess-0001-old"]["tokens_used_at_abort"] is None
+    assert row_map["sess-0001-old"]["token_budget_at_abort"] is None
