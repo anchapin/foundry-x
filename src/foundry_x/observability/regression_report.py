@@ -151,15 +151,14 @@ def _load_verdict_events(
     Issue #273 — previously walked ``list_sessions()`` and called
     ``iter_events(sid)`` once per session, opening a fresh connection per
     session. :meth:`TraceLogger.query_events` collapses that nested loop
-    into a single streaming cursor across all sessions; the ``since``
-    filter is still applied after the fetch (the issue's
-    ``query_events`` signature deliberately does not include a timestamp
-    filter — keeping the surface narrow).
+    into a single streaming cursor across all sessions.
+
+    Issue #1270 — the ``since`` filter is pushed down to the store as a
+    ``WHERE e.timestamp >= ?`` clause (sqlite) or an inline filter (jsonl)
+    so time-bounded queries do not materialize events outside the window.
     """
     events: list[tuple[str, str, VerdictRecord]] = []
-    for event in logger.query_events(kind=VERDICT_KIND, harness_version=harness_version):
-        if since is not None and event.timestamp < since:
-            continue
+    for event in logger.query_events(kind=VERDICT_KIND, harness_version=harness_version, since=since):
         events.append(
             (
                 event.session_id,
@@ -430,11 +429,12 @@ def _count_token_budget_aborts(
 
     Sessions are counted once regardless of how many times the abort fires
     within them. Uses one :meth:`TraceLogger.query_events` cursor.
+
+    Issue #1270 — the ``since`` filter is pushed down to the store so
+    time-bounded queries do not materialize events outside the window.
     """
     sessions_with_abort: set[str] = set()
-    for event in logger.query_events(kind=TASK_ABORTED_KIND):
-        if since is not None and event.timestamp < since:
-            continue
+    for event in logger.query_events(kind=TASK_ABORTED_KIND, since=since):
         if event.payload.get("reason") == TOKEN_BUDGET_REASON:
             sessions_with_abort.add(event.session_id)
     return len(sessions_with_abort)
