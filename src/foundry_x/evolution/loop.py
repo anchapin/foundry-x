@@ -520,6 +520,32 @@ def run_evolution_batch(
     if evolver is None:
         evolver = Evolver(trace_logger=trace_logger, session_id=session_id)
 
+    for failure_report in batch_report.failure_reports:
+        if failure_report.proposed_class == "clean":
+            continue
+        if failure_pattern_store is not None:
+            _record_and_annotate_pattern(failure_report, failure_pattern_store)
+
+    evolver_duration_ms: float | None = None
+    batch_edits: list[ProposedEdit] = []
+    try:
+        t0 = time.time()
+        batch_edits = evolver.propose_batch(
+            harness_dir=harness_dir,
+            batch_report=batch_report,
+            current_diff=None,
+        )
+        evolver_duration_ms = (time.time() - t0) * 1000
+    except NotImplementedError:
+        batch_edits = []
+
+    target_to_edit: dict[str, ProposedEdit] = {}
+    for edit in batch_edits:
+        if edit.target_file not in target_to_edit:
+            target_to_edit[edit.target_file] = edit
+
+    use_batch_attribution = bool(batch_edits)
+
     results: list[EvolutionResult] = []
     all_edits: list[ProposedEdit] = []
 
@@ -527,20 +553,19 @@ def run_evolution_batch(
         if failure_report.proposed_class == "clean":
             continue
 
-        if failure_pattern_store is not None:
-            _record_and_annotate_pattern(failure_report, failure_pattern_store)
+        proposed_edits = evolver.propose(
+            harness_dir=harness_dir,
+            failure=failure_report,
+            current_diff=None,
+        )
 
-        evolver_duration_ms: float | None = None
-        try:
-            t0 = time.time()
-            proposed_edits = evolver.propose(
-                harness_dir=harness_dir,
-                failure=failure_report,
-                current_diff=None,
-            )
-            evolver_duration_ms = (time.time() - t0) * 1000
-        except NotImplementedError:
-            proposed_edits = []
+        if use_batch_attribution:
+            failure_edits = []
+            for edit in proposed_edits:
+                if edit.target_file in target_to_edit and target_to_edit[edit.target_file] == edit:
+                    failure_edits.append(edit)
+        else:
+            failure_edits = proposed_edits
 
         if evolver_duration_ms is not None:
             _emit_evolver_duration(
@@ -549,10 +574,10 @@ def run_evolution_batch(
                 session_id=session_id,
                 failure_class=failure_report.proposed_class,
                 evolver_duration_ms=evolver_duration_ms,
-                proposed_edits=proposed_edits,
+                proposed_edits=failure_edits,
             )
 
-        if not proposed_edits:
+        if not failure_edits:
             results.append(
                 EvolutionResult(
                     session_id=session_id,
@@ -570,7 +595,7 @@ def run_evolution_batch(
 
         verdict = None
         if no_verify:
-            for idx, edit in enumerate(proposed_edits):
+            for idx, edit in enumerate(failure_edits):
                 verdict = CriticVerdict(
                     verdict=None,
                     passed_checks=[],
@@ -583,7 +608,7 @@ def run_evolution_batch(
         else:
             if critic is None:
                 critic = Critic(harness_dir=harness_dir)
-            for idx, edit in enumerate(proposed_edits):
+            for idx, edit in enumerate(failure_edits):
                 verdict = critic.evaluate(
                     edit.unified_diff,
                     edit_index=idx,
@@ -597,7 +622,7 @@ def run_evolution_batch(
                 session_id=session_id,
                 failure_report=failure_report,
                 failure_class=failure_report.proposed_class,
-                proposed_edits=proposed_edits,
+                proposed_edits=failure_edits,
                 verdict=verdict,
                 evolver_duration_ms=evolver_duration_ms,
                 harness_version=harness_version,
@@ -605,7 +630,7 @@ def run_evolution_batch(
                 completed_at=_now_iso(),
             )
         )
-        all_edits.extend(proposed_edits)
+        all_edits.extend(failure_edits)
 
     return BatchEvolutionResult(
         session_id=session_id,
@@ -633,7 +658,7 @@ async def run_evolution_batch_async(
 ) -> BatchEvolutionResult:
     """Async variant of :func:`run_evolution_batch`.
 
-    Awaits ``evolver.propose_batch_async()`` instead of calling ``evolver.propose()``.
+    Awaits ``evolver.propose_batch_async()`` with the full batch report.
     """
     harness_version = resolve_harness_version(harness_dir).version
     started_at = _now_iso()
@@ -642,6 +667,32 @@ async def run_evolution_batch_async(
     if evolver is None:
         evolver = Evolver(trace_logger=trace_logger, session_id=session_id)
 
+    for failure_report in batch_report.failure_reports:
+        if failure_report.proposed_class == "clean":
+            continue
+        if failure_pattern_store is not None:
+            _record_and_annotate_pattern(failure_report, failure_pattern_store)
+
+    evolver_duration_ms: float | None = None
+    batch_edits: list[ProposedEdit] = []
+    try:
+        t0 = time.time()
+        batch_edits = await evolver.propose_batch_async(
+            harness_dir=harness_dir,
+            batch_report=batch_report,
+            current_diff=None,
+        )
+        evolver_duration_ms = (time.time() - t0) * 1000
+    except NotImplementedError:
+        batch_edits = []
+
+    target_to_edit: dict[str, ProposedEdit] = {}
+    for edit in batch_edits:
+        if edit.target_file not in target_to_edit:
+            target_to_edit[edit.target_file] = edit
+
+    use_batch_attribution = bool(batch_edits)
+
     results: list[EvolutionResult] = []
     all_edits: list[ProposedEdit] = []
 
@@ -649,24 +700,19 @@ async def run_evolution_batch_async(
         if failure_report.proposed_class == "clean":
             continue
 
-        if failure_pattern_store is not None:
-            _record_and_annotate_pattern(failure_report, failure_pattern_store)
+        proposed_edits = evolver.propose(
+            harness_dir=harness_dir,
+            failure=failure_report,
+            current_diff=None,
+        )
 
-        evolver_duration_ms: float | None = None
-        try:
-            t0 = time.time()
-            proposed_edits = await evolver.propose_batch_async(
-                harness_dir=harness_dir,
-                batch_report=BatchFailureReport(
-                    session_id=session_id,
-                    failure_reports=[failure_report],
-                    total_failures=1,
-                ),
-                current_diff=None,
-            )
-            evolver_duration_ms = (time.time() - t0) * 1000
-        except NotImplementedError:
-            proposed_edits = []
+        if use_batch_attribution:
+            failure_edits = []
+            for edit in proposed_edits:
+                if edit.target_file in target_to_edit and target_to_edit[edit.target_file] == edit:
+                    failure_edits.append(edit)
+        else:
+            failure_edits = proposed_edits
 
         if evolver_duration_ms is not None:
             _emit_evolver_duration(
@@ -675,10 +721,10 @@ async def run_evolution_batch_async(
                 session_id=session_id,
                 failure_class=failure_report.proposed_class,
                 evolver_duration_ms=evolver_duration_ms,
-                proposed_edits=proposed_edits,
+                proposed_edits=failure_edits,
             )
 
-        if not proposed_edits:
+        if not failure_edits:
             results.append(
                 EvolutionResult(
                     session_id=session_id,
@@ -696,7 +742,7 @@ async def run_evolution_batch_async(
 
         verdict = None
         if no_verify:
-            for idx, edit in enumerate(proposed_edits):
+            for idx, edit in enumerate(failure_edits):
                 verdict = CriticVerdict(
                     verdict=None,
                     passed_checks=[],
@@ -709,7 +755,7 @@ async def run_evolution_batch_async(
         else:
             if critic is None:
                 critic = Critic(harness_dir=harness_dir)
-            for idx, edit in enumerate(proposed_edits):
+            for idx, edit in enumerate(failure_edits):
                 verdict = critic.evaluate(
                     edit.unified_diff,
                     edit_index=idx,
@@ -723,7 +769,7 @@ async def run_evolution_batch_async(
                 session_id=session_id,
                 failure_report=failure_report,
                 failure_class=failure_report.proposed_class,
-                proposed_edits=proposed_edits,
+                proposed_edits=failure_edits,
                 verdict=verdict,
                 evolver_duration_ms=evolver_duration_ms,
                 harness_version=harness_version,
@@ -731,7 +777,7 @@ async def run_evolution_batch_async(
                 completed_at=_now_iso(),
             )
         )
-        all_edits.extend(proposed_edits)
+        all_edits.extend(failure_edits)
 
     return BatchEvolutionResult(
         session_id=session_id,

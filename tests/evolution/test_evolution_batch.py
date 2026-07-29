@@ -1,4 +1,4 @@
-"""Tests for run_evolution_batch — specifically the zero-edit failure-class path (issue #1117)."""
+"""Tests for run_evolution_batch — specifically the zero-edit failure-class path (issue #1117) and deduplication (issue #1258)."""
 
 from __future__ import annotations
 
@@ -54,9 +54,13 @@ class TestZeroEditFailureClass:
             _event("error", 1.0, {"error": "oops"}, event_id="e2"),
         ]
 
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return []
+
         def mock_propose(self, harness_dir, failure, current_diff=None):
             return []
 
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
         monkeypatch.setattr(Evolver, "propose", mock_propose)
         result = run_evolution_batch("sess-zero-edit", events, harness_dir)
 
@@ -89,6 +93,9 @@ class TestZeroEditFailureClass:
 
         call_count = 0
 
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return [proposed_edit]
+
         def mock_propose(self, harness_dir, failure, current_diff=None):
             nonlocal call_count
             call_count += 1
@@ -96,6 +103,7 @@ class TestZeroEditFailureClass:
                 return [proposed_edit]
             return []
 
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
         monkeypatch.setattr(Evolver, "propose", mock_propose)
         result = run_evolution_batch("sess-mixed-edit", events, harness_dir)
 
@@ -120,9 +128,14 @@ class TestZeroEditFailureClass:
             _event("error", 1.0, {"error": "oops"}, event_id="e2"),
         ]
 
-        monkeypatch.setattr(
-            Evolver, "propose", lambda self, harness_dir, failure, current_diff=None: []
-        )
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return []
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return []
+
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
         result = run_evolution_batch("sess-invariant", events, harness_dir)
 
         assert result.total_failures == len(result.results), (
@@ -139,9 +152,14 @@ class TestZeroEditFailureClass:
             _event("error", 1.0, {"error": "oops"}, event_id="e2"),
         ]
 
-        monkeypatch.setattr(
-            Evolver, "propose", lambda self, harness_dir, failure, current_diff=None: []
-        )
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return []
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            return []
+
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
         result = run_evolution_batch("sess-fields", events, harness_dir)
 
         assert len(result.results) == 1
@@ -155,3 +173,107 @@ class TestZeroEditFailureClass:
         assert zero_edit_result.harness_version is not None
         assert zero_edit_result.started_at is not None
         assert zero_edit_result.completed_at is not None
+
+
+class TestBatchDeduplication:
+    """Issue #1258: BatchEvolutionResult.proposed_edits has at most one edit per target_file."""
+
+    def test_proposed_edits_deduplicated_by_target_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When two failures propose edits to the same file, only the first is retained."""
+        harness_dir = _write_harness(tmp_path)
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event(
+                "tool_error",
+                1.0,
+                {"error": "no such tool: frobnicate"},
+                event_id="e-wrong-tool",
+            ),
+            _event("tool_error", 2.0, {"error": "traceback occurred"}, event_id="e-tool-err"),
+        ]
+
+        edit_to_prompt = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="fix prompt",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        edit_to_prompt2 = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="fix prompt differently",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+also new\n",
+        )
+
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return [edit_to_prompt]
+
+        call_count = 0
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [edit_to_prompt]
+            return [edit_to_prompt2]
+
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+        result = run_evolution_batch("sess-dedup", events, harness_dir, no_verify=True)
+
+        assert result.total_failures >= 2
+        assert len(result.results) == result.total_failures
+        target_files = [edit.target_file for edit in result.proposed_edits]
+        assert target_files.count("harness/system_prompt.txt") <= 1, (
+            "proposed_edits should have at most one edit per target_file"
+        )
+
+    def test_different_target_files_both_retained(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When failures propose edits to different files, both are retained."""
+        harness_dir = _write_harness(tmp_path)
+        events = [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event(
+                "tool_error",
+                1.0,
+                {"error": "no such tool: frobnicate"},
+                event_id="e-wrong-tool",
+            ),
+            _event("tool_error", 2.0, {"error": "traceback occurred"}, event_id="e-tool-err"),
+        ]
+
+        edit_to_prompt = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="fix prompt",
+            unified_diff="--- a/harness/system_prompt.txt\n+++ b/harness/system_prompt.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        edit_to_hook = ProposedEdit(
+            target_file="harness/hooks/my_hook.py",
+            rationale="fix hook",
+            unified_diff="--- a/harness/hooks/my_hook.py\n+++ b/harness/hooks/my_hook.py\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return [edit_to_prompt, edit_to_hook]
+
+        call_count = 0
+
+        def mock_propose(self, harness_dir, failure, current_diff=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [edit_to_prompt]
+            return [edit_to_hook]
+
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
+        monkeypatch.setattr(Evolver, "propose", mock_propose)
+        result = run_evolution_batch("sess-multi-target", events, harness_dir, no_verify=True)
+
+        assert result.total_failures >= 2
+        assert len(result.results) == result.total_failures
+        assert len(result.proposed_edits) == 2, "both edits to different files should be retained"
+        target_files = {edit.target_file for edit in result.proposed_edits}
+        assert "harness/system_prompt.txt" in target_files
+        assert "harness/hooks/my_hook.py" in target_files
