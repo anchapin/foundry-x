@@ -80,6 +80,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from foundry_x.evolution.digester import INJECTION_BLOCKED_KIND
+from foundry_x.evolution.loop import EVOLVER_DURATION_KIND
 from foundry_x.observability.regression_report import VerdictRecord
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
@@ -980,6 +981,7 @@ def compute_kpis(
     evolver_llm_failure_count, evolver_llm_failure_rate = _evolver_llm_failure(
         logger, harness_version=harness_version
     )
+    evolver_duration_ms = _evolver_duration_ms(logger, harness_version=harness_version)
     model_cost_count, total_model_cost_usd = _model_cost_count(
         logger, harness_version=harness_version
     )
@@ -1028,6 +1030,7 @@ def compute_kpis(
         excluded_other=excluded_other,
         evolver_llm_failure_count=evolver_llm_failure_count,
         evolver_llm_failure_rate=evolver_llm_failure_rate,
+        evolver_duration_ms=evolver_duration_ms,
         model_cost_count=model_cost_count,
         total_model_cost_usd=total_model_cost_usd,
         model_rate_limit_count=model_rate_limit_count,
@@ -1228,6 +1231,10 @@ def _compute_deltas(
         ),
         "evolver_llm_failure_rate": _delta(
             baseline.evolver_llm_failure_rate, candidate.evolver_llm_failure_rate
+        ),
+        # Issue #1346: evolver duration delta (lower is better — faster evolver).
+        "evolver_duration_ms": _delta(
+            baseline.evolver_duration_ms, candidate.evolver_duration_ms
         ),
         # Issue #1281: model cost, rate limit, and fetch blocked deltas.
         "model_cost_count": candidate.model_cost_count - baseline.model_cost_count,
@@ -2332,6 +2339,36 @@ def _evolver_llm_failure(
 
     rate = len(sessions_with_exhausted) / len(sessions_with_task) if sessions_with_task else 0.0
     return total_count, rate
+
+
+def _evolver_duration_ms(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> float | None:
+    """Mean ``evolver_duration_ms`` from ``evolver_duration`` events (issue #1346).
+
+    Queries every ``evolver_duration`` trace event emitted by
+    :func:`~foundry_x.evolution.loop._emit_evolver_duration` and returns
+    the mean of their ``evolver_duration_ms`` payload field.
+
+    Returns ``None`` when no evolver phase was recorded for any session, so
+    the field stays compact in the JSON output and operators can distinguish
+    "no evolver ran" (None) from "evolver ran with 0 ms duration" (0.0).
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    durations: list[float] = []
+    for event in logger.query_events(
+        kind=EVOLVER_DURATION_KIND,
+        harness_version=harness_version,
+    ):
+        ms = event.payload.get("evolver_duration_ms")
+        if ms is not None:
+            durations.append(ms)
+    if not durations:
+        return None
+    return sum(durations) / len(durations)
 
 
 def _model_cost_count(
@@ -3483,10 +3520,23 @@ def _render_validation_markdown(results: list[TaskValidationResult]) -> str:
     return "\n".join(lines)
 
 
+_TOKEN_BUDGET_OVERRUN_EPILOG = """
+Environment variables for alert thresholds:
+  FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX
+                        Exit 3 when token_budget_overrun_pct exceeds this value.
+                        Example: FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX=100.0
+                        (issue #1354).
+  FOUNDRY_CONTEXT_EFFICIENCY_MIN
+                        Exit 2 when context_efficiency falls below this value.
+                        (issue #1286).
+"""
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="foundry-kpis",
         description="Compute and display the three PRD success-metric KPIs.",
+        epilog=_TOKEN_BUDGET_OVERRUN_EPILOG,
     )
     parser.add_argument(
         "--trace-db",
@@ -3783,6 +3833,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             f" is below FOUNDRY_CONTEXT_EFFICIENCY_MIN={min_efficiency}\n"
         )
         return 2
+
+    # Issue #1354: FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX triggers exit 3 when overrun
+    # exceeds the configured ceiling. Backward-compatible: absent env var is ignored.
+    max_overrun = os.environ.get("FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX")
+    if (
+        max_overrun is not None
+        and summary.token_budget_overrun_pct is not None
+        and summary.token_budget_overrun_pct > float(max_overrun)
+    ):
+        sys.stderr.write(
+            f"[ALERT] token_budget_overrun_pct {summary.token_budget_overrun_pct:.4f}"
+            f" exceeds FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX={max_overrun}\n"
+        )
+        return 3
 
     return 0
 
