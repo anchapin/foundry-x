@@ -792,6 +792,45 @@ async def test_openai_compatible_on_cost_callback_not_invoked_when_no_usage():
 
 
 @pytest.mark.asyncio
+async def test_openai_compatible_stream_emits_cost_callback():
+    """OpenAICompatibleAdapter.stream() calls on_cost when usage data is present (issue #1360)."""
+    cost_events: list[ModelCostEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = "\n".join([
+            "data: " + json.dumps({"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]}),
+            "data: " + json.dumps({"usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}}),
+            "data: [DONE]",
+            "",
+        ])
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="llama-3.2",
+            client=client,
+            on_cost=cost_events.append,
+        )
+        chunks = []
+        async for chunk in adapter.stream(
+            messages=[ModelMessage(role="user", content="hello")],
+        ):
+            chunks.append(chunk)
+
+    assert len(chunks) == 2
+    assert chunks[0].content == "hi"
+    assert chunks[1].usage is not None
+    assert chunks[1].usage.prompt_tokens == 100
+    assert chunks[1].usage.completion_tokens == 50
+    assert len(cost_events) == 1
+    assert cost_events[0].provider == "openai-compatible"
+    assert cost_events[0].model == "llama-3.2"
+    assert cost_events[0].prompt_tokens == 100
+    assert cost_events[0].completion_tokens == 50
+
+
+@pytest.mark.asyncio
 async def test_stream_retries_503_then_succeeds(monkeypatch):
     """The SSE stream retries a 503 connection error, then yields chunks."""
     monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
