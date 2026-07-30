@@ -49,10 +49,36 @@ Steps:
     If the check fails, run `gh pr edit <PR> --body "Closes #N\n\n<minimal body>"`
     to strip spurious references, then re-run the check.
 
-    NOTE: After this step the orchestrator independently verifies the PR exists.
-    If the sub-agent exits before completing step 7 or 8, the orchestrator's
-    wave-level recovery sequence (see SKILL.md Phase 3c § Recovery) will push
-    the branch and create the PR directly using --force-with-lease.
+     NOTE: After this step the orchestrator independently verifies the PR exists.
+     If the sub-agent exits before completing step 7 or 8, the orchestrator's
+     wave-level recovery sequence (see SKILL.md Phase 3c § Recovery) will push
+     the branch and create the PR directly using --force-with-lease.
+
+ 10. Verify changes before reporting done:
+     ```bash
+     # Must have at least 1 commit ahead of develop
+     if ! git log develop..HEAD --oneline | head -1 > /dev/null 2>&1; then
+       echo "ERROR: No commits found ahead of develop"
+       exit 1
+     fi
+
+     # Must be pushable (dry-run must not show errors)
+     if ! git push --dry-run origin fix/issue-{NUMBER}-{SLUG} 2>&1 | \
+        grep -qE "Everything up-to-date|Total 0|new branch|updating"; then
+       echo "ERROR: Dry-run push failed — check remote state"
+       exit 1
+     fi
+
+     # PR must exist
+     PR_NUM=$(gh pr list --search "fix/issue-{NUMBER}" --json number --jq '.[0].number' 2>/dev/null)
+     if [ -z "$PR_NUM" ]; then
+       echo "ERROR: No PR found for this branch"
+       exit 1
+     fi
+     echo "VERIFIED: $PR_NUM"
+     ```
+     If any check fails, **do NOT report done**. Fix the missing step
+     (commit, push, or PR creation) before continuing.
 
 Rules:
 - Work ONLY in your assigned worktree ({WORKDIR})
