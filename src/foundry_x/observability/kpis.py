@@ -410,6 +410,10 @@ class KpiSummary(BaseModel):
     excluded_token_budget: int = 0
     excluded_event_limit: int = 0
     excluded_other: int = 0
+    # Issue #1337: total sessions with a ``task_received`` event for the
+    # harness version filter. Used to compute the exclusion percentage so the
+    # markdown advisory can fire when >20% of sessions were excluded.
+    total_sessions: int = 0
     evolver_llm_failure_count: int = 0
     evolver_llm_failure_rate: float = 0.0
     token_budget_overrun_pct: float | None = None
@@ -954,6 +958,14 @@ def compute_kpis(
     excluded_from_cycle_time = (
         excluded_wall_clock + excluded_token_budget + excluded_event_limit + excluded_other
     )
+    # Issue #1337: count all sessions with task_received so the markdown advisory
+    # can fire when >20% were excluded from cycle_time.
+    total_sessions = len(
+        {
+            e.session_id
+            for e in logger.query_events(kind="task_received", harness_version=harness_version)
+        }
+    )
     regression_rate, improvement_rate = _verdict_rates(
         logger, harness_version=harness_version, task_metadata=task_metadata
     )
@@ -1028,6 +1040,7 @@ def compute_kpis(
         excluded_token_budget=excluded_token_budget,
         excluded_event_limit=excluded_event_limit,
         excluded_other=excluded_other,
+        total_sessions=total_sessions,
         evolver_llm_failure_count=evolver_llm_failure_count,
         evolver_llm_failure_rate=evolver_llm_failure_rate,
         evolver_duration_ms=evolver_duration_ms,
@@ -2740,6 +2753,17 @@ def _render_markdown(summary: KpiSummary) -> str:
             lines.append(f"| token_budget | {summary.excluded_token_budget} |")
             lines.append(f"| event_limit | {summary.excluded_event_limit} |")
             lines.append(f"| other | {summary.excluded_other} |")
+    # Issue #1337: when >20% of sessions were excluded, surface a one-line
+    # advisory so operators can tell a representative mean from a survivorship-
+    # biased one.
+    if (
+        summary.total_sessions > 0
+        and summary.excluded_from_cycle_time / summary.total_sessions > 0.20
+    ):
+        lines.append("")
+        lines.append(
+            "⚠️ Cycle time mean reflects only surviving sessions; see excluded_from_cycle_time."
+        )
     if summary.failure_class_distribution:
         total = sum(summary.failure_class_distribution.values())
         lines.append("")

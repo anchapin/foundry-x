@@ -483,6 +483,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "excluded_token_budget",
         "excluded_event_limit",
         "excluded_other",
+        "total_sessions",
         "evolver_llm_failure_count",
         "evolver_llm_failure_rate",
         "per_skill",
