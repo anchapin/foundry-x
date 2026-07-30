@@ -149,6 +149,14 @@ MODEL_RATE_LIMIT_KIND = "model_rate_limit"
 # ``fetch_blocked_count`` KPI is the total number of such events.
 FETCH_BLOCKED_KIND = "fetch_blocked"
 
+# Issue #1334: the schema version of the KPI history log. Bump this whenever
+# a field is added to or removed from :class:`KpiHistoryEntry`. Readers compare
+# the entry's embedded ``schema_version`` against this constant and emit a
+# warning when the entry was written by a newer schema (forward-compatibility)
+# or an older one (backward-compatibility — fields added in newer schemas
+# will be absent and readers should degrade gracefully).
+KPI_SCHEMA_VERSION = 1
+
 #: Dimension accepted by :func:`compute_kpis`'s ``group_by`` parameter
 #: (issue #898, #1039). Each value selects which field drives the
 #: per-slice breakdown of ``improvement_rate`` and ``regression_rate``.
@@ -561,8 +569,13 @@ class KpiHistoryEntry(BaseModel):
     the p50/p95 of all tool_call events' ``hook_overhead_ms`` and
     ``hook_post_overhead_ms`` fields, respectively, across all tools in
     the analysis window.
+
+    Issue #1334 adds ``schema_version`` — the module's
+    :const:`KPI_SCHEMA_VERSION` is written into every new entry so readers
+    can detect schema drift and warn gracefully.
     """
 
+    schema_version: int = KPI_SCHEMA_VERSION
     timestamp: str
     harness_version: str | None = None
     cycle_time_seconds: float | None = None
@@ -3239,6 +3252,7 @@ def append_kpi_history(
     payload["timestamp"] = _now_iso()
     if harness_version is not None:
         payload["harness_version"] = harness_version
+    payload["schema_version"] = KPI_SCHEMA_VERSION
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(payload) + "\n")
 
@@ -3253,6 +3267,10 @@ def read_kpi_history(path: Path) -> list[KpiHistoryEntry]:
     does not blank the trend table. A missing file yields an empty
     list so the caller can render the placeholder table without a
     precondition check.
+
+    Issue #1334: emits a warning when an entry's ``schema_version`` is
+    lower than the module's :const:`KPI_SCHEMA_VERSION`, indicating the
+    entry was written by an older schema and may be missing fields.
     """
     if not path.exists():
         return []
@@ -3263,9 +3281,20 @@ def read_kpi_history(path: Path) -> list[KpiHistoryEntry]:
             if not stripped:
                 continue
             try:
-                entries.append(KpiHistoryEntry.model_validate_json(stripped))
+                entry = KpiHistoryEntry.model_validate_json(stripped)
             except ValidationError:
                 continue
+            if entry.schema_version < KPI_SCHEMA_VERSION:
+                warnings.warn(
+                    f"KPI history entry written by schema_version="
+                    f"{entry.schema_version} is older than the current "
+                    f"schema_version={KPI_SCHEMA_VERSION}; some fields may "
+                    f"be absent or defaulted. Consider re-running with an "
+                    f"updated foundry-x to read this history entry.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            entries.append(entry)
     return entries
 
 
@@ -3342,6 +3371,10 @@ def render_history_markdown(
 
     Issue #705: a Failure Class Distribution section is appended when
     at least one entry carries a non-empty ``failure_class_distribution``.
+
+    Issue #1334: a trailing comment reports the schema version range
+    across the loaded entries so operators can see at a glance whether
+    the history was written with a consistent schema.
     """
     if not entries:
         return "_No KPI history entries yet._"
@@ -3407,6 +3440,10 @@ def render_history_markdown(
                 count = entry.failure_class_distribution.get(cls, 0)
                 row.append(f" {count} |")
             lines.append("".join(row))
+    schema_versions = sorted({e.schema_version for e in entries})
+    lines.append(
+        f"<!-- KPI history schema_version: min={schema_versions[0]}, max={schema_versions[-1]}, current={KPI_SCHEMA_VERSION} -->"
+    )
     return "\n".join(lines)
 
 
