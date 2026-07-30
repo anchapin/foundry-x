@@ -308,6 +308,7 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     # streaming_quality_mean_ttft_ms, streaming_quality_p50_ttft_ms,
     # streaming_quality_p95_ttft_ms, mean_prompt_tokens_per_step, and
     # mean_completion_tokens_per_step are the issue #1271 aggregate metrics.
+    # total_sessions is the issue #1337 session count for survivorship bias.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
@@ -340,6 +341,7 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "hook_overhead_ms_p95",
         "hook_post_overhead_ms_p50",
         "hook_post_overhead_ms_p95",
+        "total_sessions",
     }
     assert "injection_blocks" not in payload
     assert "token_totals" not in payload

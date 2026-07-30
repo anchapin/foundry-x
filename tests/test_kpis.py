@@ -782,6 +782,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     # streaming_quality_mean_ttft_ms, streaming_quality_p50_ttft_ms,
     # streaming_quality_p95_ttft_ms, mean_prompt_tokens_per_step, and
     # mean_completion_tokens_per_step are the issue #1271 aggregate metrics.
+    # total_sessions is the issue #1337 session count for survivorship bias.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
@@ -830,6 +831,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "streaming_quality_p95_ttft_ms",
         "mean_prompt_tokens_per_step",
         "mean_completion_tokens_per_step",
+        "total_sessions",
     }
 
 
