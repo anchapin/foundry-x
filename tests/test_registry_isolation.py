@@ -333,3 +333,132 @@ def test_legacy_register_hook_positional_signature_unchanged() -> None:
             get_registry()._hooks.remove(tag)
         except ValueError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Issue #1342: register_tracer public API
+# ---------------------------------------------------------------------------
+
+
+class TracerCaptureHook:
+    _phase = 1
+
+    def __init__(self, tracer=None):
+        self._tracer = tracer
+
+    async def pre_tool(self, call):
+        return call
+
+    async def post_tool(self, call, result):
+        return result
+
+
+def test_register_tracer_stores_tracer_for_hook_class() -> None:
+    """register_tracer(hook_cls, tracer) stores the tracer keyed by class."""
+    registry = HookRegistry()
+
+    captured: list[tuple[str, dict]] = []
+    tracer = lambda kind, p: captured.append((kind, p))
+
+    registry.register_tracer(TracerCaptureHook, tracer)
+
+    assert TracerCaptureHook in registry._tracers
+    assert registry._tracers[TracerCaptureHook] is tracer
+
+
+def test_register_tracer_auto_wires_pre_registered_hook() -> None:
+    """A hook registered before register_tracer is called gets wired."""
+    registry = HookRegistry()
+
+    captured: list[tuple[str, dict]] = []
+    tracer = lambda kind, p: captured.append((kind, p))
+
+    hook = TracerCaptureHook(tracer=None)
+    registry.register(hook)
+
+    assert hook._tracer is None
+
+    registry.register_tracer(TracerCaptureHook, tracer)
+
+    assert hook._tracer is tracer
+
+
+def test_register_tracer_auto_wires_newly_registered_hook() -> None:
+    """A hook registered after register_tracer is called gets wired immediately."""
+    registry = HookRegistry()
+
+    captured: list[tuple[str, dict]] = []
+    tracer = lambda kind, p: captured.append((kind, p))
+
+    registry.register_tracer(TracerCaptureHook, tracer)
+
+    hook = TracerCaptureHook(tracer=None)
+    registry.register(hook)
+
+    assert hook._tracer is tracer
+
+
+def test_register_tracer_does_not_overwrite_existing_tracer() -> None:
+    """A hook with an explicit tracer is not overwritten by register_tracer."""
+    registry = HookRegistry()
+
+    existing_tracer = lambda kind, p: None
+    new_tracer = lambda kind, p: None
+
+    hook = TracerCaptureHook(tracer=existing_tracer)
+    registry.register(hook)
+
+    registry.register_tracer(TracerCaptureHook, new_tracer)
+
+    assert hook._tracer is existing_tracer
+
+
+def test_register_tracer_multiple_hooks_same_class() -> None:
+    """Multiple hooks of the same class all get wired by register_tracer."""
+    registry = HookRegistry()
+
+    tracer = lambda kind, p: None
+
+    hook1 = TracerCaptureHook(tracer=None)
+    hook2 = TracerCaptureHook(tracer=None)
+
+    registry.register(hook1)
+    registry.register(hook2)
+
+    registry.register_tracer(TracerCaptureHook, tracer)
+
+    assert hook1._tracer is tracer
+    assert hook2._tracer is tracer
+
+
+def test_register_tracer_different_classes_independent() -> None:
+    """Tracer registered for one class does not affect another class."""
+
+    class OtherHook:
+        _phase = 1
+
+        def __init__(self, tracer=None):
+            self._tracer = tracer
+
+        async def pre_tool(self, call):
+            return call
+
+        async def post_tool(self, call, result):
+            return result
+
+    registry = HookRegistry()
+
+    tracer_a = lambda kind, p: None
+    tracer_b = lambda kind, p: None
+
+    hook_a = TracerCaptureHook(tracer=None)
+    hook_b = OtherHook(tracer=None)
+
+    registry.register(hook_a)
+    registry.register(hook_b)
+
+    registry.register_tracer(TracerCaptureHook, tracer_a)
+    registry.register_tracer(OtherHook, tracer_b)
+
+    assert hook_a._tracer is tracer_a
+    assert hook_b._tracer is tracer_b

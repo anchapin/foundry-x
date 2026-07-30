@@ -46,6 +46,7 @@ format and process.
 | [0032](./0032-external-eval-pearson-study-protocol.md) | External-eval Pearson correlation study protocol (issue #1028) | Proposed |
 | [0033](./0033-context-efficiency-kpi-definition.md) | `context_efficiency` KPI definition | Accepted |
 | [0034](./0034-smoke-difficulty-tier.md) | Define the "smoke" DifficultyTier | Accepted |
+| [0035](./0035-parallel-issue-generation-prompt.md) | Parallel Sub-Agent Issue Generation | Proposed |
 
 When adding a new ADR, append it to this table in the same PR.
 Mark the status `Accepted` in the same PR that ships the implementation;

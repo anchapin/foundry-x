@@ -45,6 +45,8 @@ from pathlib import Path
 
 import pytest
 
+from benchmarks.conftest import FIXTURES_ROOT, _seed_workspace
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARKS_DIR = REPO_ROOT / "benchmarks"
 TASKS_DIR = BENCHMARKS_DIR / "tasks"
@@ -264,3 +266,24 @@ def test_every_benchmark_task_has_matching_fixture_directory() -> None:
         + "\n  - ".join(missing)
         + f"\n\nDeclared tasks: {[name for name, _ in declared]}"
     )
+
+
+def test_benchmark_fixture_env_var_seeds_workspace(
+    benchmark_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``PYTEST_BENCHMARK_FIXTURE`` env var exercises the same seeding path as ``@parametrize``.
+
+    ``benchmark_workspace`` falls back to ``os.environ["PYTEST_BENCHMARK_FIXTURE"]``
+    when ``request.param`` is absent (conftest.py:234). This test exercises that
+    code path and asserts the seeded content is identical to the ``@parametrize``
+    path verified in ``benchmarks/test_workspace_fixture.py::test_workspace_seeds_from_fixtures``.
+
+    This test intentionally carries no ``@pytest.mark.benchmark`` marker: it is
+    an infrastructure contract test, not a benchmark task for the Critic gate
+    (issue #1367 acceptance criteria).
+    """
+    monkeypatch.setenv("PYTEST_BENCHMARK_FIXTURE", "sample")
+    _seed_workspace(benchmark_workspace, "sample")
+
+    expected = FIXTURES_ROOT / "sample" / "expected.txt"
+    assert (benchmark_workspace / "expected.txt").read_text() == expected.read_text()

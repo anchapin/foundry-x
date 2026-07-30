@@ -7,12 +7,14 @@ import pytest
 from pydantic import ValidationError
 
 from foundry_x.execution.model_adapter import (
+    _MAX_BACKOFF_MS,
     ModelAdapter,
     ModelAdapterError,
     ModelAdapterHTTPError,
     ModelAdapterResponseError,
     ModelCostEvent,
     ModelMessage,
+    ModelRateLimitInfo,
     ModelRequest,
     ModelResponse,
     ModelResponseChunk,
@@ -22,6 +24,7 @@ from foundry_x.execution.model_adapter import (
     ToolCallFunctionChunk,
     ToolDefinition,
     ToolFunctionSchema,
+    _compute_429_backoff_ms,
 )
 from foundry_x.execution.runner import (
     _DEFAULT_REQUEST_TIMEOUT_S,
@@ -714,6 +717,141 @@ async def test_retry_429_is_retryable(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_retry_429_with_retry_after_header_uses_header_value(monkeypatch):
+    """HTTP 429 with Retry-After header uses header value + jitter for backoff (issue #1358)."""
+    sleep_durations: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleep_durations.append(seconds)
+
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _record_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(429, text="rate limited", headers={"Retry-After": "2"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test",
+            model="foundry-test",
+            client=client,
+            max_retries=1,
+        )
+        with pytest.raises(ModelAdapterHTTPError):
+            await adapter.complete(messages=[ModelMessage(role="user", content="hello")])
+
+    assert calls["count"] == 2, "429 should be retried once"
+    assert len(sleep_durations) == 1
+    assert 2.0 <= sleep_durations[0] <= 2.5, (
+        f"sleep duration {sleep_durations[0]:.3f}s should be ~2s (Retry-After=2 + jitter)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_429_with_x_ratelimit_headers_uses_reset_value(monkeypatch):
+    """HTTP 429 with x-ratelimit-remaining-requests: 0 uses reset header (issue #1358)."""
+    sleep_durations: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleep_durations.append(seconds)
+
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _record_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(
+            429,
+            text="rate limited",
+            headers={
+                "x-ratelimit-remaining-requests": "0",
+                "x-ratelimit-reset-requests": "3.5",
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test",
+            model="foundry-test",
+            client=client,
+            max_retries=1,
+        )
+        with pytest.raises(ModelAdapterHTTPError):
+            await adapter.complete(messages=[ModelMessage(role="user", content="hello")])
+
+    assert calls["count"] == 2, "429 should be retried once"
+    assert len(sleep_durations) == 1
+    assert 3.5 <= sleep_durations[0] <= 4.0, (
+        f"sleep duration {sleep_durations[0]:.3f}s should be ~3.5s (reset=3.5 + jitter)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_429_without_headers_falls_back_to_exponential_jitter(monkeypatch):
+    """HTTP 429 without Retry-After falls back to exponential jitter (issue #1358)."""
+    sleep_durations: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleep_durations.append(seconds)
+
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _record_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(429, text="rate limited")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test",
+            model="foundry-test",
+            client=client,
+            max_retries=1,
+        )
+        with pytest.raises(ModelAdapterHTTPError):
+            await adapter.complete(messages=[ModelMessage(role="user", content="hello")])
+
+    assert calls["count"] == 2, "429 should be retried once"
+    assert len(sleep_durations) == 1
+    assert 0.0 <= sleep_durations[0] <= 1.5, (
+        f"sleep duration {sleep_durations[0]:.3f}s should be in [0, 1.5]s (exponential jitter)"
+    )
+
+
+def test_compute_429_backoff_ms_retry_after_capped_at_max_backoff():
+    """Retry-After value larger than _MAX_BACKOFF_MS is capped (issue #1358)."""
+    headers = httpx.Headers({"Retry-After": "20"})
+    backoff_ms = _compute_429_backoff_ms(0, headers)
+    assert backoff_ms <= _MAX_BACKOFF_MS + 500, (
+        "backoff should be capped at _MAX_BACKOFF_MS + jitter"
+    )
+
+
+def test_compute_429_backoff_ms_uses_anthropic_ratelimit_header():
+    """anthropic-ratelimit-requests-reset header is used when present (issue #1358)."""
+    headers = httpx.Headers(
+        {
+            "x-ratelimit-remaining-requests": "0",
+            "anthropic-ratelimit-requests-reset": "1.5",
+        }
+    )
+    backoff_ms = _compute_429_backoff_ms(0, headers)
+    assert 1500 <= backoff_ms <= 2000, (
+        f"backoff {backoff_ms}ms should be ~1500-2000ms (1.5s reset + jitter)"
+    )
+
+
+@pytest.mark.asyncio
 async def test_openai_compatible_on_cost_callback_invoked():
     """OpenAICompatibleAdapter calls on_cost when usage data is present (issue #1165)."""
 
@@ -792,6 +930,51 @@ async def test_openai_compatible_on_cost_callback_not_invoked_when_no_usage():
 
 
 @pytest.mark.asyncio
+async def test_openai_compatible_stream_emits_cost_callback():
+    """OpenAICompatibleAdapter.stream() calls on_cost when usage data is present (issue #1360)."""
+    cost_events: list[ModelCostEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = "\n".join(
+            [
+                "data: "
+                + json.dumps({"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]}),
+                "data: "
+                + json.dumps(
+                    {"usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}}
+                ),
+                "data: [DONE]",
+                "",
+            ]
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="llama-3.2",
+            client=client,
+            on_cost=cost_events.append,
+        )
+        chunks = []
+        async for chunk in adapter.stream(
+            messages=[ModelMessage(role="user", content="hello")],
+        ):
+            chunks.append(chunk)
+
+    assert len(chunks) == 2
+    assert chunks[0].content == "hi"
+    assert chunks[1].usage is not None
+    assert chunks[1].usage.prompt_tokens == 100
+    assert chunks[1].usage.completion_tokens == 50
+    assert len(cost_events) == 1
+    assert cost_events[0].provider == "openai-compatible"
+    assert cost_events[0].model == "llama-3.2"
+    assert cost_events[0].prompt_tokens == 100
+    assert cost_events[0].completion_tokens == 50
+
+
+@pytest.mark.asyncio
 async def test_stream_retries_503_then_succeeds(monkeypatch):
     """The SSE stream retries a 503 connection error, then yields chunks."""
     monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
@@ -842,3 +1025,140 @@ async def test_resolve_adapter_max_retries_from_env():
 
     with pytest.raises(ValueError):
         resolve_adapter_max_retries({"FOUNDRY_ADAPTER_MAX_RETRIES": "abc"})
+
+
+def test_openai_compatible_token_pricing_known_model():
+    """OpenAICompatibleAdapter returns correct pricing for known OpenAI models."""
+    adapter = OpenAICompatibleAdapter(
+        base_url="http://model.test/v1",
+        model="gpt-4o",
+    )
+    try:
+        assert adapter.token_pricing() == (2.5, 10.0)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_openai_compatible_token_pricing_unknown_model():
+    """OpenAICompatibleAdapter returns (0.0, 0.0) for unknown models."""
+    adapter = OpenAICompatibleAdapter(
+        base_url="http://model.test/v1",
+        model="unknown-model",
+    )
+    try:
+        assert adapter.token_pricing() == (0.0, 0.0)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_openai_compatible_token_pricing_env_override(monkeypatch):
+    """OpenAICompatibleAdapter respects FOUNDRY_MODEL_PRICING_ env var override."""
+    monkeypatch.setenv("FOUNDRY_MODEL_PRICING_GPT_4O", "5.0,20.0")
+    adapter = OpenAICompatibleAdapter(
+        base_url="http://model.test/v1",
+        model="gpt-4o",
+    )
+    try:
+        assert adapter.token_pricing() == (5.0, 20.0)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_on_cost_callback_with_nonzero_cost(monkeypatch):
+    """OpenAICompatibleAdapter.complete() fires on_cost with non-zero estimated_cost_usd when pricing is known (issue #1356)."""
+    cost_events: list[ModelCostEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="test-model",
+            client=client,
+            on_cost=cost_events.append,
+        )
+        monkeypatch.setattr(adapter, "token_pricing", lambda: (0.5, 1.5))
+        response = await adapter.complete(
+            messages=[ModelMessage(role="user", content="hello")],
+        )
+
+    assert response.message.content == "done"
+    assert len(cost_events) == 1
+    assert cost_events[0].provider == "openai-compatible"
+    assert cost_events[0].model == "test-model"
+    assert cost_events[0].prompt_tokens == 100
+    assert cost_events[0].completion_tokens == 50
+    assert cost_events[0].estimated_cost_usd == pytest.approx(
+        0.5 * 100 / 1_000_000 + 1.5 * 50 / 1_000_000
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_on_rate_limit_callback_invoked():
+    """OpenAICompatibleAdapter.complete() fires on_rate_limit when x-ratelimit-* headers are present (issue #1356)."""
+    rate_limit_events: list[ModelRateLimitInfo] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                },
+            },
+            headers={
+                "x-ratelimit-remaining-requests": "49",
+                "x-ratelimit-remaining-tokens": "1000",
+                "x-ratelimit-reset-requests": "10s",
+                "x-ratelimit-reset-tokens": "100ms",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="llama-3.2",
+            client=client,
+            on_rate_limit=rate_limit_events.append,
+        )
+        response = await adapter.complete(
+            messages=[ModelMessage(role="user", content="hello")],
+        )
+
+    assert response.message.content == "done"
+    assert len(rate_limit_events) == 1
+    assert rate_limit_events[0].requests_remaining == 49
+    assert rate_limit_events[0].tokens_remaining == 1000
+    assert rate_limit_events[0].requests_reset_seconds == 10.0
+    assert rate_limit_events[0].tokens_reset_seconds == 100.0

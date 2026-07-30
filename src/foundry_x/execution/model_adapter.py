@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+# trivial change to trigger fresh CI
 import asyncio
 import json
 import os
 import random
 import re
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Literal, Protocol, Self, TypeAlias, runtime_checkable
@@ -325,8 +327,10 @@ class OpenAICompatibleAdapter(ModelAdapter):
         **kwargs: JsonValue,
     ) -> ModelResponse:
         request = _build_request(self.model, messages, tools, stream=False, extra_params=kwargs)
-        response = await self._post_json(request.to_openai_payload())
-        return _parse_completion_response(response)
+        response_data, headers = await self._post_json(request.to_openai_payload())
+        response = _parse_completion_response(response_data)
+        self._emit_cost_and_rate_limit(response, headers)
+        return response
 
     async def chat(
         self,
@@ -387,14 +391,29 @@ class OpenAICompatibleAdapter(ModelAdapter):
             # Phase 2 — stream the body.  Mid-stream failures are NOT
             # retried; issue #200 explicitly excludes partially-received
             # SSE from the retry boundary.
+            final_usage: ModelUsage | None = None
+            last_headers: httpx.Headers | None = response.headers
             try:
                 async for line in response.aiter_lines():
                     chunk = _parse_sse_line(line)
                     if chunk is None:
                         continue
+                    if chunk.usage is not None:
+                        final_usage = chunk.usage
                     yield chunk
             finally:
                 await cm.__aexit__(None, None, None)
+
+            if final_usage is not None and last_headers is not None:
+                self._emit_cost_and_rate_limit(
+                    ModelResponse(
+                        message=ModelMessage(role="assistant"),
+                        usage=final_usage,
+                    ),
+                    last_headers,
+                )
+            if last_headers is not None:
+                self._emit_rate_limit(last_headers)
             return
 
     def _emit_retry(self, attempt: int, exc: Exception, backoff_ms: int) -> None:
@@ -409,7 +428,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
             )
         )
 
-    async def _post_json(self, payload: JsonObject) -> JsonObject:
+    async def _post_json(self, payload: JsonObject) -> tuple[JsonObject, httpx.Headers]:
         """POST *payload* with bounded retry on transient failures (issue #200).
 
         Retries fire only on ``httpx.ConnectError``, ``httpx.ReadTimeout``,
@@ -435,7 +454,9 @@ class OpenAICompatibleAdapter(ModelAdapter):
                     ) from exc
                 if status == 429:
                     self._emit_rate_limit(exc.response.headers)
-                backoff_ms = _compute_backoff_ms(attempt)
+                    backoff_ms = _compute_429_backoff_ms(attempt, exc.response.headers)
+                else:
+                    backoff_ms = _compute_backoff_ms(attempt)
                 self._emit_retry(attempt + 1, exc, backoff_ms)
                 await asyncio.sleep(backoff_ms / 1000)
                 continue
@@ -457,8 +478,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 data = response.json()
             except json.JSONDecodeError as exc:
                 raise ModelAdapterResponseError("model endpoint returned invalid JSON") from exc
-            self._emit_cost(data)
-            return _JSON_OBJECT_ADAPTER.validate_python(data)
+            validated = _JSON_OBJECT_ADAPTER.validate_python(data)
+            return validated, response.headers
 
         raise ModelAdapterError("model endpoint request failed: retries exhausted")
 
@@ -471,13 +492,15 @@ class OpenAICompatibleAdapter(ModelAdapter):
             return
         prompt_tokens = usage.get("prompt_tokens", 0) or 0
         completion_tokens = usage.get("completion_tokens", 0) or 0
+        in_price, out_price = self.token_pricing()
+        cost = (prompt_tokens * in_price + completion_tokens * out_price) / 1_000_000.0
         self.on_cost(
             ModelCostEvent(
                 provider="openai-compatible",
                 model=self.model,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                estimated_cost_usd=0.0,
+                estimated_cost_usd=round(cost, 8),
             )
         )
 
@@ -513,6 +536,71 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 requests_reset_seconds=_parse_duration(lowered.get("x-ratelimit-reset-requests")),
                 tokens_reset_seconds=_parse_duration(lowered.get("x-ratelimit-reset-tokens")),
             )
+        )
+
+    def token_pricing(self) -> tuple[float, float]:
+        """Return ``(input_per_1m_usd, output_per_1m_usd)`` for the model."""
+        return _resolve_token_pricing(self.model, _OPENAI_PRICING_PER_1M)
+
+    def _emit_cost_and_rate_limit(
+        self,
+        response: ModelResponse,
+        headers: httpx.Headers | Mapping[str, str],
+    ) -> None:
+        """Fire ``on_cost`` / ``on_rate_limit`` callbacks when wired (issue #1235)."""
+        if self.on_cost is not None and response.usage is not None:
+            prompt_tokens = response.usage.prompt_tokens
+            completion_tokens = response.usage.completion_tokens
+            in_price, out_price = self.token_pricing()
+            cost = (prompt_tokens * in_price + completion_tokens * out_price) / 1_000_000.0
+            self.on_cost(
+                ModelCostEvent(
+                    provider="openai-compatible",
+                    model=self.model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    estimated_cost_usd=round(cost, 8),
+                )
+            )
+        if self.on_rate_limit is not None:
+            info = self._extract_rate_limit(headers)
+            if info is not None:
+                self.on_rate_limit(info)
+
+    def _extract_rate_limit(
+        self, headers: httpx.Headers | Mapping[str, str]
+    ) -> ModelRateLimitInfo | None:
+        """Extract rate-limit info from headers if present."""
+        lowered = {key.lower(): value for key, value in headers.items()}
+        names_lower = {name.lower() for name in self._RATE_LIMIT_HEADERS}
+        if not names_lower.intersection(lowered):
+            return None
+        return self._parse_rate_limit(lowered)
+
+    def _parse_rate_limit(self, headers_lower: Mapping[str, str]) -> ModelRateLimitInfo:
+        """Parse rate-limit headers into ModelRateLimitInfo."""
+
+        def _to_int(value: str | None) -> int | None:
+            if value is None or value == "":
+                return None
+            try:
+                return int(value)
+            except ValueError:
+                return None
+
+        def _parse_duration(value: str | None) -> float | None:
+            if value is None or value == "":
+                return None
+            try:
+                return float(value.rstrip("s").rstrip("ms"))
+            except ValueError:
+                return None
+
+        return ModelRateLimitInfo(
+            requests_remaining=_to_int(headers_lower.get("x-ratelimit-remaining-requests")),
+            tokens_remaining=_to_int(headers_lower.get("x-ratelimit-remaining-tokens")),
+            requests_reset_seconds=_parse_duration(headers_lower.get("x-ratelimit-reset-requests")),
+            tokens_reset_seconds=_parse_duration(headers_lower.get("x-ratelimit-reset-tokens")),
         )
 
     @property
@@ -564,6 +652,43 @@ def _compute_backoff_ms(attempt: int) -> int:
     """
     ceiling = min(_BASE_BACKOFF_MS * (2**attempt), _MAX_BACKOFF_MS)
     return random.randint(0, ceiling)
+
+
+def _compute_429_backoff_ms(attempt: int, headers: httpx.Headers) -> int:
+    """Backoff for HTTP 429 using Retry-After or rate-limit reset headers (issue #1358).
+
+    Priority:
+    1. ``Retry-After`` header (seconds, possibly fractional) — used directly + jitter.
+    2. ``x-ratelimit-remaining-requests: 0`` + reset header — parsed and used + jitter.
+    3. Falls back to exponential jitter via :func:`_compute_backoff_ms`.
+
+    The result is capped at :data:`_MAX_BACKOFF_MS`. A small uniform random
+    jitter in ``[0, 500]`` ms is added on top of any header-derived value to
+    avoid thundering-herd synchronisation.
+    """
+    lowered = {k.lower(): v for k, v in headers.items()}
+
+    retry_after = lowered.get("retry-after")
+    if retry_after is not None:
+        try:
+            seconds = float(retry_after)
+            backoff_ms = min(int(seconds * 1000), _MAX_BACKOFF_MS)
+            return backoff_ms + random.randint(0, 500)
+        except ValueError:
+            pass
+
+    if lowered.get("x-ratelimit-remaining-requests") == "0":
+        reset = lowered.get("x-ratelimit-reset-requests") or lowered.get(
+            "anthropic-ratelimit-requests-reset"
+        )
+        if reset is not None:
+            try:
+                backoff_ms = min(int(float(reset) * 1000), _MAX_BACKOFF_MS)
+                return backoff_ms + random.randint(0, 500)
+            except ValueError:
+                pass
+
+    return _compute_backoff_ms(attempt)
 
 
 def _is_retryable_status(status_code: int) -> bool:
@@ -1004,7 +1129,10 @@ class CloudModelAdapter(ABC):
                         status_code=status,
                         response_body=exc.response.text,
                     ) from exc
-                backoff_ms = _compute_backoff_ms(attempt)
+                if status == 429:
+                    backoff_ms = _compute_429_backoff_ms(attempt, exc.response.headers)
+                else:
+                    backoff_ms = _compute_backoff_ms(attempt)
                 self._emit_retry(attempt + 1, exc, backoff_ms)
                 await asyncio.sleep(backoff_ms / 1000)
                 continue
@@ -1197,6 +1325,9 @@ class AnthropicAdapter(CloudModelAdapter):
                     self._content_block_to_tool_call_index[block_index] = len(
                         self._content_block_to_tool_call_index
                     )
+                if not hasattr(self, "_tool_call_name_by_block_index"):
+                    self._tool_call_name_by_block_index: dict[int, str] = {}
+                self._tool_call_name_by_block_index[block_index] = tool_name
                 tc_index = self._content_block_to_tool_call_index[block_index]
                 return ModelResponseChunk(
                     tool_calls=[
@@ -1225,12 +1356,13 @@ class AnthropicAdapter(CloudModelAdapter):
                         self._content_block_to_tool_call_index
                     )
                 tc_index = self._content_block_to_tool_call_index[block_index]
+                tool_name = getattr(self, "_tool_call_name_by_block_index", {}).get(block_index)
                 return ModelResponseChunk(
                     tool_calls=[
                         ModelToolCallChunk(
                             index=tc_index,
                             function=ToolCallFunctionChunk(
-                                name=None,
+                                name=tool_name,
                                 arguments=input_json if isinstance(input_json, str) else "",
                             ),
                         )
@@ -1324,7 +1456,40 @@ class AnthropicAdapter(CloudModelAdapter):
         )
 
     def token_pricing(self) -> tuple[float, float]:
-        return _ANTHROPIC_PRICING_PER_1M.get(self.model, (0.0, 0.0))
+        return _resolve_token_pricing(self.model, _ANTHROPIC_PRICING_PER_1M)
+
+
+def _resolve_token_pricing(
+    model: str, hardcoded: dict[str, tuple[float, float]]
+) -> tuple[float, float]:
+    """Return ``(input_per_1m_usd, output_per_1m_usd)`` for *model*.
+
+    Checks ``FOUNDRY_MODEL_PRICING_<MODEL>`` env var first (format:
+    ``input,output``, e.g. ``3.0,15.0``). Falls back to *hardcoded*
+    table. Returns ``(0.0, 0.0)`` when pricing is unknown.
+    """
+    env_key = f"FOUNDRY_MODEL_PRICING_{model.upper().replace('-', '_')}"
+    raw = os.environ.get(env_key)
+    if raw is not None:
+        parts = raw.split(",")
+        if len(parts) == 2:
+            try:
+                return (float(parts[0]), float(parts[1]))
+            except ValueError:
+                warnings.warn(
+                    f"Invalid pricing in {env_key}={raw!r}; expected 'input,output' float pair; "
+                    f"falling back to hardcoded table.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        else:
+            warnings.warn(
+                f"Invalid pricing in {env_key}={raw!r}; expected 'input,output' float pair; "
+                f"falling back to hardcoded table.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    return hardcoded.get(model, (0.0, 0.0))
 
 
 _ANTHROPIC_PRICING_PER_1M: dict[str, tuple[float, float]] = {
@@ -1427,7 +1592,7 @@ class OpenAINativeAdapter(CloudModelAdapter):
         )
 
     def token_pricing(self) -> tuple[float, float]:
-        return _OPENAI_PRICING_PER_1M.get(self.model, (0.0, 0.0))
+        return _resolve_token_pricing(self.model, _OPENAI_PRICING_PER_1M)
 
 
 _OPENAI_PRICING_PER_1M: dict[str, tuple[float, float]] = {
@@ -1464,6 +1629,12 @@ _ADAPTER_PREFIXES: dict[str, str] = {
     "openai/": "openai",
 }
 
+_ADAPTER_CLASSES: dict[str, type[ModelAdapter]] = {
+    "AnthropicAdapter": AnthropicAdapter,
+    "OpenAINativeAdapter": OpenAINativeAdapter,
+    "OpenAICompatibleAdapter": OpenAICompatibleAdapter,
+}
+
 
 def resolve_model_adapter(
     model_id: str,
@@ -1479,7 +1650,12 @@ def resolve_model_adapter(
 ) -> ModelAdapter:
     """Resolve the adapter class for *model_id* and construct it (ADR-0029 §5).
 
-    Prefix matching (highest precedence first):
+    Environment variable ``FOUNDRY_MODEL_ADAPTER`` overrides the resolved adapter
+    class (checked before prefix-based routing). Valid values:
+    ``AnthropicAdapter``, ``OpenAINativeAdapter``, ``OpenAICompatibleAdapter``.
+    Unknown values raise ``ValueError`` at resolution time.
+
+    Prefix matching (highest precedence after env-var override):
 
     | Prefix        | Adapter                |
     | ------------- | ---------------------- |
@@ -1491,6 +1667,69 @@ def resolve_model_adapter(
     provider so the request body carries the bare provider model name
     (e.g. ``claude-3-5-sonnet-20241022`` not ``anthropic/claude-...``).
     """
+    if FOUNDRY_MODEL_ADAPTER := os.environ.get("FOUNDRY_MODEL_ADAPTER"):
+        if FOUNDRY_MODEL_ADAPTER not in _ADAPTER_CLASSES:
+            valid = ", ".join(sorted(_ADAPTER_CLASSES))
+            raise ValueError(
+                f"Unknown FOUNDRY_MODEL_ADAPTER value {FOUNDRY_MODEL_ADAPTER!r}. "
+                f"Valid values: {valid}"
+            )
+        if FOUNDRY_MODEL_ADAPTER == "AnthropicAdapter":
+            for prefix in ("anthropic/",):
+                if model_id.startswith(prefix):
+                    bare = model_id.removeprefix(prefix)
+                    break
+            else:
+                bare = model_id
+            resolved_base = base_url or "https://api.anthropic.com"
+            return AnthropicAdapter(
+                model=bare,
+                base_url=resolved_base,
+                api_key=api_key,
+                client=client,
+                timeout=timeout,
+                max_retries=max_retries,
+                on_retry=on_retry,
+                on_cost=on_cost,
+                on_rate_limit=on_rate_limit,
+            )
+        if FOUNDRY_MODEL_ADAPTER == "OpenAINativeAdapter":
+            for prefix in ("openai/",):
+                if model_id.startswith(prefix):
+                    bare = model_id.removeprefix(prefix)
+                    break
+            else:
+                bare = model_id
+            resolved_base = base_url or "https://api.openai.com"
+            return OpenAINativeAdapter(
+                model=bare,
+                base_url=resolved_base,
+                api_key=api_key,
+                client=client,
+                timeout=timeout,
+                max_retries=max_retries,
+                on_retry=on_retry,
+                on_cost=on_cost,
+                on_rate_limit=on_rate_limit,
+            )
+        resolved_base = base_url or ""
+        if not resolved_base:
+            raise ValueError(
+                "OpenAICompatibleAdapter resolution requires a base_url; "
+                "set OPENCODE_SERVER_URL or pass base_url explicitly"
+            )
+        return OpenAICompatibleAdapter(
+            base_url=resolved_base,
+            model=model_id,
+            api_key=api_key,
+            client=client,
+            timeout=timeout,
+            max_retries=max_retries,
+            on_retry=on_retry,
+            on_cost=on_cost,
+            on_rate_limit=on_rate_limit,
+        )
+
     for prefix, provider in _ADAPTER_PREFIXES.items():
         if model_id.startswith(prefix):
             bare = model_id.removeprefix(prefix)

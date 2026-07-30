@@ -302,7 +302,12 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     # scalar field introduced for issue #899. context_pruned_count is a
     # per-session dict excluded by issue #933. context_efficiency is a
     # scalar field included by issue #951. token_budget_overrun_pct is a
-    # scalar field introduced for issue #1112.
+    # scalar field introduced for issue #1112. model_cost_count,
+    # total_model_cost_usd, model_rate_limit_count, and fetch_blocked_count
+    # are scalar fields introduced for issue #1281.
+    # streaming_quality_mean_ttft_ms, streaming_quality_p50_ttft_ms,
+    # streaming_quality_p95_ttft_ms, mean_prompt_tokens_per_step, and
+    # mean_completion_tokens_per_step are the issue #1271 aggregate metrics.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
@@ -322,6 +327,19 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "server_restart_count",
         "evolver_llm_failure_count",
         "evolver_llm_failure_rate",
+        "model_cost_count",
+        "total_model_cost_usd",
+        "model_rate_limit_count",
+        "fetch_blocked_count",
+        "streaming_quality_mean_ttft_ms",
+        "streaming_quality_p50_ttft_ms",
+        "streaming_quality_p95_ttft_ms",
+        "mean_prompt_tokens_per_step",
+        "mean_completion_tokens_per_step",
+        "hook_overhead_ms_p50",
+        "hook_overhead_ms_p95",
+        "hook_post_overhead_ms_p50",
+        "hook_post_overhead_ms_p95",
     }
     assert "injection_blocks" not in payload
     assert "token_totals" not in payload

@@ -43,6 +43,58 @@ _GATE_TIMEOUT_S_ENV = "FOUNDRY_GATE_TIMEOUT_S"
 
 _NOTES_TAIL_CHARS = 4000
 
+#: Patterns for files that are NOT critical to benchmark outcomes.
+#: A diff that touches ONLY these files (and no harness/, benchmarks/tasks/,
+#: or src/ files) can early-exit the Critic gate without running pytest.
+_NON_CRITICAL_PATTERNS: tuple[str, ...] = (
+    "docs/",
+    ".pre-commit-config.yaml",
+    "pyproject.toml",
+)
+
+#: Patterns for files that ARE critical to benchmark outcomes.
+#: A diff touching ANY of these must run the full Critic gate.
+_CRITICAL_PATTERNS: tuple[str, ...] = (
+    "harness/",
+    "benchmarks/tasks/",
+    "src/",
+)
+
+
+def _diff_touches_only_non_critical_files(diff: str) -> bool:
+    """Return True when every file path in *diff* is non-critical.
+
+    Parses ``--- a/<path>`` lines from the unified diff to extract the set of
+    files the diff touches, then checks each path against
+    :data:`_CRITICAL_PATTERNS`.  If none of the touched files match a critical
+    pattern, the diff is a no-op for benchmark purposes and the Critic gate can
+    exit early without running pytest.
+
+    Args:
+        diff: A unified-diff string (same format as
+            ``Critic.evaluate(proposed_diff=...)``).
+
+    Returns:
+        True when all touched files are non-critical (docs/, .pre-commit-config.yaml,
+        or pyproject.toml); False when any touched file is critical or when the
+        diff is empty.
+    """
+    if not diff.strip():
+        return False
+    touched_files: list[str] = []
+    for line in diff.splitlines():
+        if line.startswith("--- a/"):
+            path = line[5:].lstrip("/")
+            touched_files.append(path)
+    if not touched_files:
+        return False
+    for path in touched_files:
+        for critical in _CRITICAL_PATTERNS:
+            if path.startswith(critical):
+                return False
+    return True
+
+
 #: GGUF v3 quantization types studied in ADR-0020 (K-quants and legacy
 #: types). These are the quantizations for which the intelligence floor
 #: table in ADR-0020 has (projected) pass-rate data.
@@ -270,6 +322,7 @@ class CriticVerdict(BaseModel):
     verdict: bool | None
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
+    skipped_checks: list[str] = Field(default_factory=list)
     notes: str = ""
     edit_index: int | None = None
     failure_class: str | None = None
@@ -1012,45 +1065,13 @@ class Critic:
         The verdict's ``approved`` flag is ``True`` only when every check that
         runs succeeds. All filesystem mutations are confined to the temp copy.
         """
-        """Apply ``proposed_diff`` to a sandbox copy of the harness and gate it.
-
-        Steps (ADR-0004):
-
-        1. Copy ``harness_dir`` into a fresh ``TemporaryDirectory``.
-        2. Enforce the diff-size cap (``max_diff_lines``). An oversized diff
-           is rejected immediately (``failed_checks=["diff_size_cap"]``).
-        3. Scan the diff for prompt-injection markers (SECURITY.md Threat #2).
-           A diff carrying ``ignore previous instructions``-style phrases or
-           role-tag sequences is rejected immediately
-           (``failed_checks=["injection_detected"]``).
-        4. Apply ``proposed_diff`` via ``git apply``. A patch that does not
-           apply cleanly is rejected immediately (``failed_checks=["git apply"]``).
-        5. Run ``harness/scripts/load_check.py`` against the sandbox copy
-           (issue #187). A harness that fails to load -- broken
-           ``skills/*.json``, an unimportable hook, an empty system prompt
-           -- is rejected *before* pytest is spawned, so the verdict names
-           the precondition (``failed_checks=["load_check"]``) rather than
-           a confusing downstream pytest error.
-        6. Run pytest with ``self.pytest_args`` in the sandbox.
-
-        Every subprocess inside this method is bounded by
-        ``self.gate_timeout_s`` (issue #188). On
-        :class:`subprocess.TimeoutExpired` the verdict is
-        ``approved=False`` with ``failed_checks`` carrying the offending check
-        name suffixed ``":timeout"`` (e.g. ``"pytest:timeout"``), and
-        ``notes`` holds the trailing window of any partial output the
-        process managed to write before being killed — or a wall-clock-cap
-        message when no partial output was captured.
-
-        The verdict's ``approved`` flag is ``True`` only when every check that
-        runs succeeds. All filesystem mutations are confined to the temp copy.
-        """
         with tempfile.TemporaryDirectory(prefix="critic-sandbox-") as sandbox:
             sandbox_root = Path(sandbox) / "harness"
             shutil.copytree(self.harness_dir, sandbox_root)
 
             passed_checks: list[str] = []
             failed_checks: list[str] = []
+            skipped_checks: list[str] = []
 
             # Gate 1: Diff-size cap (issue #333).
             if proposed_diff.strip():
@@ -1074,6 +1095,19 @@ class Critic:
                         passed_checks=[],
                         failed_checks=["injection_detected"],
                         notes=f"injection pattern(s) in diff: {', '.join(injection_markers)}",
+                        edit_index=edit_index,
+                        failure_class=failure_class,
+                    )
+                # Gate 3: No-op diff check (issue #1347).
+                #    A diff that touches only non-critical files (docs/, CI configs,
+                #    .pre-commit-config.yaml, pyproject.toml) cannot affect benchmark
+                #    outcomes, so we approve it immediately without spawning pytest.
+                if _diff_touches_only_non_critical_files(proposed_diff):
+                    return CriticVerdict(
+                        verdict=True,
+                        passed_checks=["diff_noop"],
+                        failed_checks=[],
+                        notes="diff touches only non-critical files; gate skipped",
                         edit_index=edit_index,
                         failure_class=failure_class,
                     )
@@ -1190,14 +1224,36 @@ class Critic:
                 covered_source = self.smoke_tasks if tier == "smoke" else self.benchmark_tasks
                 covered_tags = sorted({tag for task in covered_source for tag in task.tags})
                 passed_checks.extend(f"benchmark:{tag}" for tag in covered_tags)
+            elif pytest_result.returncode == 5:
+                # Exit code 5 means "no tests collected" — the smoke-tier -k
+                # expression matched nothing (issue #1351). Distinguish this
+                # from a genuine test failure (exit 1) so the verdict correctly
+                # surfaces the misconfiguration rather than a generic "pytest"
+                # label.
+                failed_checks.append("pytest:no_tests_collected")
+                # Record the selected-but-not-collected task names as skipped
+                # (issue #1349). In smoke tier the -k expression names the smoke
+                # tasks; in full tier this case should not occur.
+                skipped_names = [t.name for t in self.smoke_tasks] if tier == "smoke" else []
+                skipped_checks.extend(skipped_names)
+
             else:
                 failed_checks.append("pytest")
+
+            # When smoke tier fails, record the full-suite tasks that were never
+            # run as skipped_checks (issue #1349). These are benchmark tasks
+            # whose tags do NOT intersect smoke_benchmark_tags.
+            if tier == "smoke" and failed_checks:
+                smoke_names = {t.name for t in self.smoke_tasks}
+                skipped_names = [t.name for t in self.benchmark_tasks if t.name not in smoke_names]
+                skipped_checks.extend(skipped_names)
 
             combined = (pytest_result.stdout or "") + (pytest_result.stderr or "")
             return CriticVerdict(
                 verdict=not failed_checks,
                 passed_checks=passed_checks,
                 failed_checks=failed_checks,
+                skipped_checks=skipped_checks,
                 notes=_tail(combined),
                 edit_index=edit_index,
                 failure_class=failure_class,

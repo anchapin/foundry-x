@@ -777,6 +777,11 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     # issue #898 slice fields (empty unless ``--group-by`` is supplied).
     # ``per_model_id`` / ``per_quantization`` / ``per_harness_version``
     # are the issue #1039 session-level slice fields.
+    # model_cost_count, total_model_cost_usd, model_rate_limit_count,
+    # and fetch_blocked_count are the issue #1281 auxiliary metrics.
+    # streaming_quality_mean_ttft_ms, streaming_quality_p50_ttft_ms,
+    # streaming_quality_p95_ttft_ms, mean_prompt_tokens_per_step, and
+    # mean_completion_tokens_per_step are the issue #1271 aggregate metrics.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "regression_rate",
@@ -805,12 +810,26 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "excluded_other",
         "evolver_llm_failure_count",
         "evolver_llm_failure_rate",
+        "hook_overhead_ms_p50",
+        "hook_overhead_ms_p95",
+        "hook_post_overhead_ms_p50",
+        "hook_post_overhead_ms_p95",
+        "hook_overhead",
         "per_skill",
         "per_task_family",
         "per_difficulty_tier",
         "per_model_id",
         "per_quantization",
         "per_harness_version",
+        "model_cost_count",
+        "total_model_cost_usd",
+        "model_rate_limit_count",
+        "fetch_blocked_count",
+        "streaming_quality_mean_ttft_ms",
+        "streaming_quality_p50_ttft_ms",
+        "streaming_quality_p95_ttft_ms",
+        "mean_prompt_tokens_per_step",
+        "mean_completion_tokens_per_step",
     }
 
 
@@ -1544,6 +1563,71 @@ def test_main_json_includes_context_efficiency(tmp_path, capsys):
     payload = json.loads(captured.out)
     assert "context_efficiency" in payload
     assert payload["context_efficiency"] is not None
+
+
+# Issue #1286: FOUNDRY_CONTEXT_EFFICIENCY_MIN triggers exit 2 when efficiency
+# falls below the floor. Absent env var → backward-compatible zero exit.
+# ---------------------------------------------------------------------------
+
+
+def test_context_efficiency_min_exits_2_when_below_threshold(tmp_path, capsys, monkeypatch):
+    """Alert fires and main returns 2 when context_efficiency is below the env floor."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=1)
+
+    monkeypatch.setenv("FOUNDRY_CONTEXT_EFFICIENCY_MIN", "0.999")
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "context_efficiency" in captured.err
+    assert "FOUNDRY_CONTEXT_EFFICIENCY_MIN" in captured.err
+
+
+def test_context_efficiency_min_exits_0_when_at_or_above_threshold(tmp_path, capsys, monkeypatch):
+    """No alert when context_efficiency is at or above the env floor."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=1)
+
+    monkeypatch.setenv("FOUNDRY_CONTEXT_EFFICIENCY_MIN", "0.10")
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ALERT" not in captured.err
+
+
+def test_context_efficiency_min_exits_0_when_env_var_absent(tmp_path, capsys, monkeypatch):
+    """Backward-compatible: no alert when FOUNDRY_CONTEXT_EFFICIENCY_MIN is unset."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_context_pruned(logger, "v1", prune_count=1)
+
+    monkeypatch.delenv("FOUNDRY_CONTEXT_EFFICIENCY_MIN", raising=False)
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ALERT" not in captured.err
+
+
+def test_context_efficiency_min_exits_0_when_no_context_efficiency_data(
+    tmp_path, capsys, monkeypatch
+):
+    """No alert is possible when context_efficiency is None (no sessions)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1") as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+
+    monkeypatch.setenv("FOUNDRY_CONTEXT_EFFICIENCY_MIN", "0.80")
+    rc = main(["--db", str(db)])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "ALERT" not in captured.err
 
 
 # Issue #621: --cycle-time-alert-threshold exits non-zero when
@@ -2942,3 +3026,102 @@ def test_read_kpi_history_round_trips_trend_data(tmp_path):
     assert entry.cycle_time_seconds is not None
     assert entry.improvement_rate == 1.0
     assert entry.regression_rate == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Issue #1346: ``evolver_duration_ms`` is the mean of ``evolver_duration``
+# events' ``evolver_duration_ms`` payload field, sourced from the trace
+# store by ``_evolver_duration_ms``.
+# ---------------------------------------------------------------------------
+
+
+def _seed_evolver_duration(
+    logger: TraceLogger,
+    harness_version: str,
+    durations_ms: list[float],
+) -> str:
+    """Plant ``evolver_duration`` events for one session (issue #1346)."""
+    from foundry_x.evolution.loop import EVOLVER_DURATION_KIND
+
+    with logger.session(harness_version=harness_version) as sid:
+        logger.record(sid, kind="task_received", payload={"prompt": "do work"})
+        for ms in durations_ms:
+            logger.record(
+                sid,
+                kind=EVOLVER_DURATION_KIND,
+                payload={
+                    "evolver_duration_ms": ms,
+                    "failure_class": "tool-error",
+                    "proposed_edits_count": 1,
+                },
+            )
+    return sid
+
+
+def test_kpis_aggregates_evolver_duration_ms(tmp_path):
+    """Mean evolver_duration_ms across events is surfaced in KPI summary (issue #1346).
+
+    Plants three sessions with evolver durations of 100.0, 200.0, and 300.0 ms.
+    The KPI summary should report 200.0 ms (the mean of the three values).
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_evolver_duration(logger, "v1", [100.0, 200.0, 300.0])
+
+    summary = compute_kpis(logger)
+
+    assert summary.evolver_duration_ms == 200.0
+    assert isinstance(summary.evolver_duration_ms, float)
+
+
+def test_evolver_duration_ms_none_when_no_events(tmp_path):
+    """When no evolver_duration events exist, evolver_duration_ms is None (issue #1346)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+
+    summary = compute_kpis(logger)
+
+    assert summary.evolver_duration_ms is None
+
+
+def test_evolver_duration_ms_respects_harness_version_filter(tmp_path):
+    """The evolver_duration_ms aggregation honors ``harness_version`` filtering (issue #1346)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_evolver_duration(logger, "v1", [100.0])
+    _seed_evolver_duration(logger, "v2", [500.0])
+
+    v1_summary = compute_kpis(logger, harness_version="v1")
+    v2_summary = compute_kpis(logger, harness_version="v2")
+
+    assert v1_summary.evolver_duration_ms == 100.0
+    assert v2_summary.evolver_duration_ms == 500.0
+
+
+def test_evolver_duration_ms_in_json_output(tmp_path, capsys):
+    """``foundry-kpis --format json`` includes evolver_duration_ms (issue #1346)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_evolver_duration(logger, "v1", [150.0])
+
+    rc = main(["--db", str(db), "--format", "json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    payload = json.loads(captured.out)
+    assert payload["evolver_duration_ms"] == 150.0
+
+
+def test_evolver_duration_ms_in_compare_kpis(tmp_path):
+    """``compare_kpis`` includes evolver_duration_ms delta (issue #1346)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_evolver_duration(logger, "v1", [100.0])
+    _seed_evolver_duration(logger, "v2", [300.0])
+
+    comparison = compare_kpis(logger, "v1", "v2")
+
+    assert comparison.baseline.evolver_duration_ms == 100.0
+    assert comparison.candidate.evolver_duration_ms == 300.0
+    assert comparison.deltas["evolver_duration_ms"] == 200.0

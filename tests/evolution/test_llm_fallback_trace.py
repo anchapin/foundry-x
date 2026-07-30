@@ -342,7 +342,11 @@ class TestEvolverLlmEnvVar:
     async def test_batch_uses_llm_when_env_var_set(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """propose_batch uses LLM path when env var is set and ModelAdapter is configured."""
+        """propose_batch uses LLM path when env var is set and ModelAdapter is configured.
+
+        Issue #1259: The LLM is called once per batch via _generate_batch_edits_async,
+        not once per failure via generate_edits.
+        """
         monkeypatch.setenv("FOUNDRY_EVOLVER_LLM_ENABLED", "true")
         from foundry_x.evolution.digester import BatchFailureReport
 
@@ -361,7 +365,7 @@ class TestEvolverLlmEnvVar:
                 "@@ -1 +1 @@\n-old\n+new\n"
             ),
         )
-        evolver.generate_edits = AsyncMock(return_value=[good_edit])
+        evolver._generate_batch_edits_async = AsyncMock(return_value=[good_edit])
 
         batch = BatchFailureReport(
             session_id="s",
@@ -371,7 +375,7 @@ class TestEvolverLlmEnvVar:
         edits = await evolver.propose_batch_async(harness_dir, batch)
 
         assert len(edits) == 1
-        assert evolver.generate_edits.call_count == 1
+        assert evolver._generate_batch_edits_async.call_count == 1
 
     def test_batch_uses_template_when_env_var_not_set(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

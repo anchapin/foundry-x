@@ -67,7 +67,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import sys
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -77,11 +80,29 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from foundry_x.evolution.digester import INJECTION_BLOCKED_KIND
+from foundry_x.evolution.loop import EVOLVER_DURATION_KIND
 from foundry_x.observability.regression_report import VerdictRecord
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
+
+def _get_trace_db(args: argparse.Namespace) -> str:
+    """Return the trace-db path, emitting a deprecation warning if --db was used."""
+    if getattr(args, "db", None) is not None:
+        warnings.warn(
+            "--db is deprecated; use --trace-db instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return args.db
+    return args.trace_db
+
+
 TASK_ABORTED_KIND = "task_aborted"
 TOKEN_BUDGET_REASON = "token_budget"
+# Issue #1355: the runner emits ``token_budget_aborted`` as a dedicated
+# terminal failure marker when the running token total exceeds the budget.
+# This constant centralizes the kind spelling for KPI and regression consumers.
+TOKEN_BUDGET_ABORTED_KIND = "token_budget_aborted"
 # Issue #869: the runner emits ``task_aborted(reason="event_limit")`` when the
 # per-session event cap is exceeded (see ``execution/runner.py:1523``). The
 # constant lives next to ``TOKEN_BUDGET_REASON`` so any future reference
@@ -114,6 +135,19 @@ SERVER_UNAVAILABLE_KIND = "server_unavailable"
 # ``evolver_llm_failure_rate`` is the fraction of sessions with at least one.
 GENERATION_EXHAUSTED_KIND = "generation_exhausted"
 
+# Issue #1281: the runner emits ``model_cost`` when the CloudModelAdapter
+# receives a cost event from the provider. The ``model_cost_count`` KPI is
+# the total number of such events; ``total_model_cost_usd`` is the cumulative
+# estimated cost in USD.
+MODEL_COST_KIND = "model_cost"
+# Issue #1281: the runner emits ``model_rate_limit`` when the CloudModelAdapter
+# receives a rate-limit update from the provider. The ``model_rate_limit_count``
+# KPI is the total number of such events.
+MODEL_RATE_LIMIT_KIND = "model_rate_limit"
+# Issue #1281: the runner emits ``fetch_blocked`` when the WebFetchHook
+# detects a URL whose host is not in FETCH_ALLOWED_DOMAINS. The
+# ``fetch_blocked_count`` KPI is the total number of such events.
+FETCH_BLOCKED_KIND = "fetch_blocked"
 
 #: Dimension accepted by :func:`compute_kpis`'s ``group_by`` parameter
 #: (issue #898, #1039). Each value selects which field drives the
@@ -335,6 +369,21 @@ class KpiSummary(BaseModel):
     across aborted sessions. Returns ``None`` when no session hit the token
     budget, so operators can distinguish a clean store (None) from one where
     all sessions exceeded their budgets (a real percentage).
+
+    Issue #1281 adds ``model_cost_count`` and ``total_model_cost_usd``: the
+    total number of ``model_cost`` events and the cumulative estimated cost in
+    USD, sourced from the ``estimated_cost_usd`` field on each event. Also adds
+    ``model_rate_limit_count``: the total number of ``model_rate_limit`` events.
+    And ``fetch_blocked_count``: the total number of ``fetch_blocked`` events
+    emitted when the WebFetchHook blocks a URL not in FETCH_ALLOWED_DOMAINS.
+    All three are auxiliary operator signals surfaced alongside
+    ``model_retry_count`` and ``server_restart_count``.
+
+    Issue #1271 adds ``streaming_quality_mean_ttft_ms``,
+    ``streaming_quality_p50_ttft_ms``, and ``streaming_quality_p95_ttft_ms``:
+    aggregate TTFT statistics across all sessions, plus
+    ``mean_prompt_tokens_per_step`` and ``mean_completion_tokens_per_step``
+    for token efficiency analysis per model response step.
     """
 
     cycle_time_seconds: float | None = None
@@ -364,6 +413,22 @@ class KpiSummary(BaseModel):
     evolver_llm_failure_count: int = 0
     evolver_llm_failure_rate: float = 0.0
     token_budget_overrun_pct: float | None = None
+    model_cost_count: int = 0
+    total_model_cost_usd: float = 0.0
+    model_rate_limit_count: int = 0
+    fetch_blocked_count: int = 0
+    # Issue #1271: aggregate streaming quality across all sessions for the
+    # given harness version.  ``streaming_quality_mean_ttft_ms`` is the mean
+    # of per-session average TTFT values; ``streaming_quality_p50_ttft_ms``
+    # and ``streaming_quality_p95_ttft_ms`` are the 50th and 95th percentiles
+    # of those per-session averages.  ``mean_prompt_tokens_per_step`` and
+    # ``mean_completion_tokens_per_step`` are the mean prompt and completion
+    # token counts per ``model_response`` step, aggregated across all sessions.
+    streaming_quality_mean_ttft_ms: float | None = None
+    streaming_quality_p50_ttft_ms: float | None = None
+    streaming_quality_p95_ttft_ms: float | None = None
+    mean_prompt_tokens_per_step: float | None = None
+    mean_completion_tokens_per_step: float | None = None
     per_skill: dict[str, SkillKpiSlice] = {}
     per_task_family: dict[str, SkillKpiSlice] = {}
     per_difficulty_tier: dict[str, SkillKpiSlice] = {}
@@ -375,6 +440,16 @@ class KpiSummary(BaseModel):
     per_model_id: dict[str, SkillKpiSlice] = {}
     per_quantization: dict[str, SkillKpiSlice] = {}
     per_harness_version: dict[str, SkillKpiSlice] = {}
+    # Issue #1269: hook overhead percentiles per tool, computed from
+    # ``hook_overhead_ms`` and ``hook_post_overhead_ms`` on tool_call events.
+    hook_overhead: dict[str, HookOverheadRow] = {}
+    # Issue #1269: aggregate hook overhead percentiles across all tools for
+    # ``foundry-kpis --format json`` output (the dict above is the per-tool
+    # breakdown; these scalars are the overall aggregates).
+    hook_overhead_ms_p50: float = 0.0
+    hook_overhead_ms_p95: float = 0.0
+    hook_post_overhead_ms_p50: float = 0.0
+    hook_post_overhead_ms_p95: float = 0.0
 
 
 class StreamingQualityData(BaseModel):
@@ -387,6 +462,21 @@ class StreamingQualityData(BaseModel):
     avg_ttft_ms: float | None = None
     total_chunks: int = 0
     avg_chunk_interval_ms: float | None = None
+
+
+class HookOverheadRow(BaseModel):
+    """Hook overhead percentiles for one tool (issue #1269).
+
+    Aggregated from the ``hook_overhead_ms`` and ``hook_post_overhead_ms``
+    fields on every ``tool_call`` event the Runner emits. Computed via one
+    ``query_events`` cursor with the kind filter pushed down.
+    """
+
+    count: int = 0
+    hook_overhead_ms_p50: float = 0.0
+    hook_overhead_ms_p95: float = 0.0
+    hook_post_overhead_ms_p50: float = 0.0
+    hook_post_overhead_ms_p95: float = 0.0
 
 
 class KpiComparison(BaseModel):
@@ -451,6 +541,20 @@ class KpiHistoryEntry(BaseModel):
     Issue #1112 adds ``token_budget_overrun_pct``: the mean percentage by which
     sessions that hit ``task_aborted(reason="token_budget")`` exceeded their
     token budget. ``None`` when no session hit the token budget.
+
+    Issue #1281 adds ``model_cost_count``, ``total_model_cost_usd``,
+    ``model_rate_limit_count``, and ``fetch_blocked_count``.
+
+    Issue #1271 adds ``streaming_quality_mean_ttft_ms``,
+    ``streaming_quality_p50_ttft_ms``, and ``streaming_quality_p95_ttft_ms``,
+    plus ``mean_prompt_tokens_per_step`` and ``mean_completion_tokens_per_step``.
+
+    Issue #1269 adds the four aggregate hook overhead percentiles:
+    ``hook_overhead_ms_p50``, ``hook_overhead_ms_p95``,
+    ``hook_post_overhead_ms_p50``, ``hook_post_overhead_ms_p95``. These are
+    the p50/p95 of all tool_call events' ``hook_overhead_ms`` and
+    ``hook_post_overhead_ms`` fields, respectively, across all tools in
+    the analysis window.
     """
 
     timestamp: str
@@ -470,6 +574,20 @@ class KpiHistoryEntry(BaseModel):
     failure_class_distribution: dict[str, int] = {}
     evolver_llm_failure_count: int = 0
     evolver_llm_failure_rate: float = 0.0
+    model_cost_count: int = 0
+    total_model_cost_usd: float = 0.0
+    model_rate_limit_count: int = 0
+    fetch_blocked_count: int = 0
+    streaming_quality_mean_ttft_ms: float | None = None
+    streaming_quality_p50_ttft_ms: float | None = None
+    streaming_quality_p95_ttft_ms: float | None = None
+    mean_prompt_tokens_per_step: float | None = None
+    mean_completion_tokens_per_step: float | None = None
+    # Issue #1269: aggregate hook overhead percentiles across all tools.
+    hook_overhead_ms_p50: float = 0.0
+    hook_overhead_ms_p95: float = 0.0
+    hook_post_overhead_ms_p50: float = 0.0
+    hook_post_overhead_ms_p95: float = 0.0
 
 
 class KpiTrends(BaseModel):
@@ -641,6 +759,24 @@ def _trend_direction(
     if (delta > 0) is higher_is_better:
         return "improving"
     return "worsening"
+
+
+def percentile(sorted_values: list[float], q: float) -> float:
+    """Return the *q*-th percentile of *sorted_values* using nearest-rank.
+
+    *sorted_values* must be in ascending order; the function does not
+    re-sort. Nearest-rank (a.k.a. ``ceil(q/100 * n)``) is deliberately
+    chosen over linear interpolation: it is deterministic, has no
+    floating-point interpolation edge cases, and matches the operator
+    intuition "p95 means the worst of the top 5%".
+
+    Returns ``0.0`` for an empty input.
+    """
+    n = len(sorted_values)
+    if n == 0:
+        return 0.0
+    rank = max(1, math.ceil(q / 100.0 * n))
+    return float(sorted_values[min(rank, n) - 1])
 
 
 def _percent_change(first: float | None, last: float | None) -> float | None:
@@ -818,7 +954,9 @@ def compute_kpis(
     excluded_from_cycle_time = (
         excluded_wall_clock + excluded_token_budget + excluded_event_limit + excluded_other
     )
-    regression_rate, improvement_rate = _verdict_rates(logger, harness_version=harness_version)
+    regression_rate, improvement_rate = _verdict_rates(
+        logger, harness_version=harness_version, task_metadata=task_metadata
+    )
     injection_blocks = _injection_blocks(logger, harness_version=harness_version)
     token_totals = _token_totals(logger, harness_version=harness_version)
     hooks_disabled_count, hooks_disabled_rate = _hook_registry_errors(
@@ -843,6 +981,27 @@ def compute_kpis(
     evolver_llm_failure_count, evolver_llm_failure_rate = _evolver_llm_failure(
         logger, harness_version=harness_version
     )
+    evolver_duration_ms = _evolver_duration_ms(logger, harness_version=harness_version)
+    model_cost_count, total_model_cost_usd = _model_cost_count(
+        logger, harness_version=harness_version
+    )
+    model_rate_limit_count = _model_rate_limit_count(logger, harness_version=harness_version)
+    fetch_blocked_count = _fetch_blocked_count(logger, harness_version=harness_version)
+    (
+        streaming_quality_mean_ttft_ms,
+        streaming_quality_p50_ttft_ms,
+        streaming_quality_p95_ttft_ms,
+    ) = _streaming_quality_aggregate(logger, harness_version=harness_version)
+    mean_prompt_tokens_per_step, mean_completion_tokens_per_step = _token_per_step(
+        logger, harness_version=harness_version
+    )
+    (
+        hook_overhead,
+        hook_overhead_ms_p50,
+        hook_overhead_ms_p95,
+        hook_post_overhead_ms_p50,
+        hook_post_overhead_ms_p95,
+    ) = _hook_overhead(logger, harness_version=harness_version)
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
@@ -871,6 +1030,21 @@ def compute_kpis(
         excluded_other=excluded_other,
         evolver_llm_failure_count=evolver_llm_failure_count,
         evolver_llm_failure_rate=evolver_llm_failure_rate,
+        evolver_duration_ms=evolver_duration_ms,
+        model_cost_count=model_cost_count,
+        total_model_cost_usd=total_model_cost_usd,
+        model_rate_limit_count=model_rate_limit_count,
+        fetch_blocked_count=fetch_blocked_count,
+        streaming_quality_mean_ttft_ms=streaming_quality_mean_ttft_ms,
+        streaming_quality_p50_ttft_ms=streaming_quality_p50_ttft_ms,
+        streaming_quality_p95_ttft_ms=streaming_quality_p95_ttft_ms,
+        mean_prompt_tokens_per_step=mean_prompt_tokens_per_step,
+        mean_completion_tokens_per_step=mean_completion_tokens_per_step,
+        hook_overhead=hook_overhead,
+        hook_overhead_ms_p50=hook_overhead_ms_p50,
+        hook_overhead_ms_p95=hook_overhead_ms_p95,
+        hook_post_overhead_ms_p50=hook_post_overhead_ms_p50,
+        hook_post_overhead_ms_p95=hook_post_overhead_ms_p95,
         **_slice_field(
             _session_slice_or_task_slice(
                 logger,
@@ -1058,12 +1232,56 @@ def _compute_deltas(
         "evolver_llm_failure_rate": _delta(
             baseline.evolver_llm_failure_rate, candidate.evolver_llm_failure_rate
         ),
+        # Issue #1346: evolver duration delta (lower is better — faster evolver).
+        "evolver_duration_ms": _delta(baseline.evolver_duration_ms, candidate.evolver_duration_ms),
+        # Issue #1281: model cost, rate limit, and fetch blocked deltas.
+        "model_cost_count": candidate.model_cost_count - baseline.model_cost_count,
+        "total_model_cost_usd": _delta(
+            baseline.total_model_cost_usd, candidate.total_model_cost_usd
+        ),
+        "model_rate_limit_count": (
+            candidate.model_rate_limit_count - baseline.model_rate_limit_count
+        ),
+        "fetch_blocked_count": candidate.fetch_blocked_count - baseline.fetch_blocked_count,
+        # Issue #1271: aggregate streaming quality TTFT deltas (lower is better —
+        # faster first token is improvement; slower is regression).
+        "streaming_quality_mean_ttft_ms": _delta(
+            baseline.streaming_quality_mean_ttft_ms, candidate.streaming_quality_mean_ttft_ms
+        ),
+        "streaming_quality_p50_ttft_ms": _delta(
+            baseline.streaming_quality_p50_ttft_ms, candidate.streaming_quality_p50_ttft_ms
+        ),
+        "streaming_quality_p95_ttft_ms": _delta(
+            baseline.streaming_quality_p95_ttft_ms, candidate.streaming_quality_p95_ttft_ms
+        ),
+        # Issue #1271: token per-step deltas (higher is better — more tokens
+        # per step means more efficient model usage).
+        "mean_prompt_tokens_per_step": _delta(
+            baseline.mean_prompt_tokens_per_step, candidate.mean_prompt_tokens_per_step
+        ),
+        "mean_completion_tokens_per_step": _delta(
+            baseline.mean_completion_tokens_per_step, candidate.mean_completion_tokens_per_step
+        ),
+        # Issue #1269: hook overhead deltas (higher hook overhead is worse).
+        "hook_overhead_ms_p50": _delta(
+            baseline.hook_overhead_ms_p50, candidate.hook_overhead_ms_p50
+        ),
+        "hook_overhead_ms_p95": _delta(
+            baseline.hook_overhead_ms_p95, candidate.hook_overhead_ms_p95
+        ),
+        "hook_post_overhead_ms_p50": _delta(
+            baseline.hook_post_overhead_ms_p50, candidate.hook_post_overhead_ms_p50
+        ),
+        "hook_post_overhead_ms_p95": _delta(
+            baseline.hook_post_overhead_ms_p95, candidate.hook_post_overhead_ms_p95
+        ),
     }
 
 
 def _cycle_time(
     logger: TraceLogger,
     harness_version: str | None = None,
+    since: str | None = None,
 ) -> tuple[float | None, int, int, int, int]:
     """Mean wall-clock time from ``task_received`` to ``critic_verdict`` plus exclusion breakdown.
 
@@ -1096,18 +1314,27 @@ def _cycle_time(
     field of the ``task_aborted`` event for each excluded session:
     ``wall_clock``, ``token_budget``, ``event_limit``, or ``other``
     (e.g. no abort event or a reason not in the three tracked categories).
+
+    Issue #1270 — the ``since`` filter is pushed down to the store so
+    time-bounded queries do not materialize events outside the window.
     """
     start_events: dict[str, TraceEvent] = {}
-    for event in logger.query_events(kind="task_received", harness_version=harness_version):
+    for event in logger.query_events(
+        kind="task_received", harness_version=harness_version, since=since
+    ):
         start_events.setdefault(event.session_id, event)
     end_events: dict[str, TraceEvent] = {}
-    for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
+    for event in logger.query_events(
+        kind="critic_verdict", harness_version=harness_version, since=since
+    ):
         end_events.setdefault(event.session_id, event)
 
     # Issue #1113: build a session_id -> reason map from task_aborted events
     # so we can attribute excluded sessions to their abort reason.
     abort_reasons: dict[str, str] = {}
-    for event in logger.query_events(kind="task_aborted", harness_version=harness_version):
+    for event in logger.query_events(
+        kind="task_aborted", harness_version=harness_version, since=since
+    ):
         if event.session_id not in abort_reasons:
             abort_reasons[event.session_id] = event.payload.get("reason", "other")
 
@@ -1168,6 +1395,7 @@ def _cycle_time(
 def _verdict_rates(
     logger: TraceLogger,
     harness_version: str | None = None,
+    task_metadata: dict[str, TaskKpiMetadata] | None = None,
 ) -> tuple[float, float]:
     """Derive regression and improvement rates from persisted Critic verdicts.
 
@@ -1181,24 +1409,21 @@ def _verdict_rates(
     timestamp order, so the ``prior_passed`` tracker sees verdicts in
     the same order the previous per-session nested loop produced.
 
-    * *improvement_rate* = approved verdicts / total verdicts.
+    * *improvement_rate* = approved non-smoke verdicts / total non-smoke verdicts.
     * *regression_rate* = sessions with >=1 regressed task / sessions with a
       verdict, where a task regresses when it appears in ``failed_checks`` after
       having appeared in ``passed_checks`` in an earlier verdict.
 
-    Infrastructure / golden-solution tasks (issue #1120)
-    ---------------------------------------------------
-    Benchmark tasks tagged ``infrastructure`` (e.g. ``implementation_fizzbuzz``,
-    ``sort_a_list``, ``nth_fibonacci``) use ``run_solution`` to plant a
-    complete golden solution and assert the infrastructure works -- they do NOT
-    test whether the agent can independently solve the problem. These tasks are
-    INCLUDED in the improvement-rate denominator as of this writing. Operators
-    who wish to exclude them should filter by the ``infrastructure`` tag when
-    grouping by ``task_family``: the ``infrastructure`` group captures only
-    these planted-solution tasks, and the rate computed over that slice reflects
-    infrastructure reliability only. The aggregate improvement-rate denominator
-    includes all verdicts regardless of tag; future work may add an optional
-    ``exclude_infrastructure`` parameter to filter them from the denominator.
+    ADR-0034 §2 — smoke-tier exclusion
+    ----------------------------------
+    Smoke-tier tasks do not exercise agent capability, so a harness that
+    passes all smoke tasks but fails all easy/medium/hard tasks has NOT
+    improved. When *task_metadata* is supplied, verdicts whose every task
+    belongs to the ``smoke`` difficulty tier are EXCLUDED from the
+    improvement-rate denominator (but still counted in regression-rate, since
+    a smoke-task failure indicates a broken pipeline, not an agent regression).
+    Verdicts that mix smoke and non-smoke tasks are attributed to the
+    non-smoke portion and count normally.
     """
 
     total_verdicts = 0
@@ -1208,11 +1433,29 @@ def _verdict_rates(
     regression_sessions: set[str] = set()
 
     for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
-        total_verdicts += 1
         sessions_with_verdicts.add(event.session_id)
         record = VerdictRecord(**event.payload)
-        if record.verdict:
-            approved += 1
+
+        has_non_smoke = False
+        has_smoke_failed = False
+        if task_metadata is not None:
+            all_tasks = set(record.passed_checks) | set(record.failed_checks)
+            has_non_smoke = any(
+                task_metadata.get(t) is not None and task_metadata[t].difficulty_tier != "smoke"
+                for t in all_tasks
+            )
+            has_smoke_failed = any(
+                task_metadata.get(t) is not None
+                and task_metadata[t].difficulty_tier == "smoke"
+                and t in set(record.failed_checks)
+                for t in all_tasks
+            )
+
+        if task_metadata is None or (has_non_smoke and not has_smoke_failed):
+            total_verdicts += 1
+            if record.verdict:
+                approved += 1
+
         for task in record.failed_checks:
             if task in prior_passed:
                 regression_sessions.add(event.session_id)
@@ -1292,6 +1535,13 @@ def _slice_verdict_rates(
     acc: dict[str, _SliceAcc] = {}
     for event in logger.query_events(kind="critic_verdict", harness_version=harness_version):
         record = VerdictRecord(**event.payload)
+
+        all_tasks = set(record.passed_checks) | set(record.failed_checks)
+        has_non_smoke = any(
+            task_metadata.get(t) is not None and task_metadata[t].difficulty_tier != "smoke"
+            for t in all_tasks
+        )
+
         # Resolve every group this verdict touches up front so the per-
         # group loop below does not re-walk the metadata per check.
         touched: set[str] = set()
@@ -1305,10 +1555,31 @@ def _slice_verdict_rates(
         # loop below, so the guard was dead code with no behavioural effect.
         for group in touched:
             bucket = acc.setdefault(group, _SliceAcc())
-            bucket.total += 1
             bucket.sessions.add(event.session_id)
-            if record.verdict:
-                bucket.approved += 1
+            if has_non_smoke:
+                bucket.total += 1
+                if group == "smoke":
+                    if record.verdict:
+                        bucket.approved += 1
+                else:
+                    tier_passed = any(
+                        task_metadata.get(t) is not None
+                        and group in _groups_for_task(task_metadata[t], group_by)
+                        and t in set(record.passed_checks)
+                        for t in all_tasks
+                    )
+                    if tier_passed:
+                        bucket.approved += 1
+            elif group == "smoke":
+                bucket.total += 1
+                tier_passed = any(
+                    task_metadata.get(t) is not None
+                    and task_metadata[t].difficulty_tier == "smoke"
+                    and t in set(record.passed_checks)
+                    for t in all_tasks
+                )
+                if tier_passed:
+                    bucket.approved += 1
             for task in record.failed_checks:
                 if task in bucket.prior_passed:
                     bucket.regression_sessions.add(event.session_id)
@@ -1586,6 +1857,12 @@ def _token_budget_aborts(
     ):
         if event.payload.get("reason") == TOKEN_BUDGET_REASON:
             sessions_with_abort.add(event.session_id)
+    # Issue #1355: also count the dedicated token_budget_aborted event
+    for event in logger.query_events(
+        kind=TOKEN_BUDGET_ABORTED_KIND,
+        harness_version=harness_version,
+    ):
+        sessions_with_abort.add(event.session_id)
     return len(sessions_with_abort)
 
 
@@ -1593,7 +1870,7 @@ def _token_budget_hit_rate(
     logger: TraceLogger,
     harness_version: str | None = None,
 ) -> float:
-    """Fraction of sessions with at least one ``task_aborted(reason="token_budget")`` event.
+    """Fraction of sessions with at least one ``task_aborted(reason="token_budget")`` or ``token_budget_aborted`` event.
 
     Issue #551 — the token budget hit rate is a fourth tracked metric
     exposed via ``foundry-kpis`` alongside the three PRD KPIs. It signals
@@ -1602,7 +1879,8 @@ def _token_budget_hit_rate(
     enough, or that the model-context window is being misspent.
 
     A session contributes to the numerator if it has at least one
-    ``task_aborted`` event whose ``payload["reason"] == "token_budget"``.
+    ``task_aborted`` event whose ``payload["reason"] == "token_budget"``,
+    or at least one ``token_budget_aborted`` event (issue #1355).
     The denominator is the total number of sessions that have a
     ``task_received`` event (matching the harness version filter), which
     is the natural population boundary for the KPI.
@@ -1617,6 +1895,12 @@ def _token_budget_hit_rate(
         if event.payload.get("reason") == "token_budget":
             sessions_with_abort.add(event.session_id)
 
+    # Issue #1355: also count the dedicated token_budget_aborted event
+    for event in logger.query_events(
+        kind=TOKEN_BUDGET_ABORTED_KIND, harness_version=harness_version
+    ):
+        sessions_with_abort.add(event.session_id)
+
     if not all_sessions:
         return 0.0
     return len(sessions_with_abort) / len(all_sessions)
@@ -1626,12 +1910,12 @@ def _token_budget_overrun(
     logger: TraceLogger,
     harness_version: str | None = None,
 ) -> float | None:
-    """Mean token budget overrun percentage across sessions that hit ``task_aborted(reason="token_budget")`` (issue #1112).
+    """Mean token budget overrun percentage across sessions that hit ``task_aborted(reason="token_budget")`` or ``token_budget_aborted`` (issues #1112, #1355).
 
     For each session that recorded at least one ``task_aborted`` event with
-    ``reason="token_budget"``, extracts ``tokens_used`` and ``token_budget`` from
-    the payload and computes the percentage overrun:
-    ``(tokens_used - token_budget) / token_budget * 100``.
+    ``reason="token_budget"``, or at least one ``token_budget_aborted`` event,
+    extracts ``tokens_used`` and ``token_budget`` from the payload and computes
+    the percentage overrun: ``(tokens_used - token_budget) / token_budget * 100``.
 
     Sessions are first-attempt-only (only the first abort event per session is
     considered) to avoid skewing the mean with repeated aborts in the same
@@ -1656,6 +1940,20 @@ def _token_budget_overrun(
             if isinstance(tokens_used, int) and isinstance(token_budget, int) and token_budget > 0:
                 overrun_pct = (tokens_used - token_budget) / token_budget * 100.0
                 session_overruns[sid] = overrun_pct
+
+    # Issue #1355: also process the dedicated token_budget_aborted event
+    for event in logger.query_events(
+        kind=TOKEN_BUDGET_ABORTED_KIND,
+        harness_version=harness_version,
+    ):
+        sid = event.session_id
+        if sid in session_overruns:
+            continue
+        tokens_used = event.payload.get("tokens_used")
+        token_budget = event.payload.get("token_budget")
+        if isinstance(tokens_used, int) and isinstance(token_budget, int) and token_budget > 0:
+            overrun_pct = (tokens_used - token_budget) / token_budget * 100.0
+            session_overruns[sid] = overrun_pct
 
     if not session_overruns:
         return None
@@ -1713,6 +2011,70 @@ def _streaming_quality(
             avg_chunk_interval_ms=avg_interval,
         )
     return result
+
+
+def _streaming_quality_aggregate(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> tuple[float | None, float | None, float | None]:
+    """Aggregate TTFT statistics across all sessions (issue #1271).
+
+    Returns ``(mean_ttft_ms, p50_ttft_ms, p95_ttft_ms)`` where each value is
+    computed over the per-session average TTFT values.  Sessions with no
+    ``model_response`` events carrying ``time_to_first_token_ms`` are omitted.
+    Returns ``(None, None, None)`` when no session has TTFT data.
+
+    Uses the ``percentile`` function from :mod:`foundry_x.observability`
+    (nearest-rank method, deterministic, matches operator intuition).
+    """
+    all_ttfts: list[int] = []
+    for event in logger.query_events(
+        kind="model_response",
+        harness_version=harness_version,
+    ):
+        ttft = event.payload.get("time_to_first_token_ms")
+        if isinstance(ttft, int):
+            all_ttfts.append(ttft)
+
+    if not all_ttfts:
+        return None, None, None
+
+    mean_ttft = sum(all_ttfts) / len(all_ttfts)
+    sorted_ttfts = sorted(all_ttfts)
+    p50_ttft = percentile(sorted_ttfts, 50.0)
+    p95_ttft = percentile(sorted_ttfts, 95.0)
+    return mean_ttft, p50_ttft, p95_ttft
+
+
+def _token_per_step(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> tuple[float | None, float | None]:
+    """Mean prompt and completion tokens per ``model_response`` step (issue #1271).
+
+    Walks every ``model_response`` event and extracts ``token_usage.prompt_tokens``
+    and ``token_usage.completion_tokens``.  Returns the mean across all steps.
+    Returns ``(None, None)`` when no event carries token usage data.
+    """
+    prompt_tokens: list[int] = []
+    completion_tokens: list[int] = []
+    for event in logger.query_events(
+        kind="model_response",
+        harness_version=harness_version,
+    ):
+        usage = event.payload.get("token_usage")
+        if not isinstance(usage, dict):
+            continue
+        pt = usage.get("prompt_tokens")
+        ct = usage.get("completion_tokens")
+        if isinstance(pt, int):
+            prompt_tokens.append(pt)
+        if isinstance(ct, int):
+            completion_tokens.append(ct)
+
+    mean_prompt = sum(prompt_tokens) / len(prompt_tokens) if prompt_tokens else None
+    mean_completion = sum(completion_tokens) / len(completion_tokens) if completion_tokens else None
+    return mean_prompt, mean_completion
 
 
 def _context_pruned(
@@ -1797,6 +2159,7 @@ def _context_efficiency(
 def _wall_clock_abort_count(
     logger: TraceLogger,
     harness_version: str | None = None,
+    since: str | None = None,
 ) -> int:
     """Count sessions aborted by the FOUNDRY_TASK_TIMEOUT wall-clock cap (issue #711, #1005).
 
@@ -1804,11 +2167,15 @@ def _wall_clock_abort_count(
     ``reason="wall_clock"``, fired by :func:`foundry_x.execution.runner.run_with_limits`
     when ``asyncio.wait_for`` raises :class:`asyncio.TimeoutError`. Sessions are
     counted once regardless of how many times the abort fires within them.
+
+    Issue #1270 — the ``since`` filter is pushed down to the store so
+    time-bounded queries do not materialize events outside the window.
     """
     sessions_with_abort: set[str] = set()
     for event in logger.query_events(
         kind="task_aborted",
         harness_version=harness_version,
+        since=since,
     ):
         if event.payload.get("reason") == "wall_clock":
             sessions_with_abort.add(event.session_id)
@@ -1970,6 +2337,193 @@ def _evolver_llm_failure(
 
     rate = len(sessions_with_exhausted) / len(sessions_with_task) if sessions_with_task else 0.0
     return total_count, rate
+
+
+def _evolver_duration_ms(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> float | None:
+    """Mean ``evolver_duration_ms`` from ``evolver_duration`` events (issue #1346).
+
+    Queries every ``evolver_duration`` trace event emitted by
+    :func:`~foundry_x.evolution.loop._emit_evolver_duration` and returns
+    the mean of their ``evolver_duration_ms`` payload field.
+
+    Returns ``None`` when no evolver phase was recorded for any session, so
+    the field stays compact in the JSON output and operators can distinguish
+    "no evolver ran" (None) from "evolver ran with 0 ms duration" (0.0).
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    durations: list[float] = []
+    for event in logger.query_events(
+        kind=EVOLVER_DURATION_KIND,
+        harness_version=harness_version,
+    ):
+        ms = event.payload.get("evolver_duration_ms")
+        if ms is not None:
+            durations.append(ms)
+    if not durations:
+        return None
+    return sum(durations) / len(durations)
+
+
+def _model_cost_count(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> tuple[int, float]:
+    """Count ``model_cost`` events and sum estimated_cost_usd (issue #1281).
+
+    Returns ``(cost_count, total_cost_usd)`` where ``cost_count`` is the
+    total number of ``model_cost`` events and ``total_cost_usd`` is the
+    cumulative estimated cost in USD, summed from the ``estimated_cost_usd``
+    field on each event payload.
+
+    Surfaced as an auxiliary operator signal alongside
+    :func:`_model_retry_count` and :func:`_server_restart_count`.
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    total_cost = 0.0
+    count = 0
+    for event in logger.query_events(
+        kind=MODEL_COST_KIND,
+        harness_version=harness_version,
+    ):
+        count += 1
+        cost = event.payload.get("estimated_cost_usd")
+        if cost is not None:
+            total_cost += cost
+    return count, total_cost
+
+
+def _model_rate_limit_count(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> int:
+    """Count ``model_rate_limit`` events emitted by the runner (issue #1281).
+
+    The runner records one ``model_rate_limit`` event each time the
+    CloudModelAdapter receives a rate-limit update from the provider. The
+    count is aggregated across matching sessions so operators can monitor
+    provider headroom.
+
+    Surfaced as an auxiliary operator signal alongside
+    :func:`_model_cost_count` and :func:`_fetch_blocked_count`.
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    count = 0
+    for event in logger.query_events(
+        kind=MODEL_RATE_LIMIT_KIND,
+        harness_version=harness_version,
+    ):
+        count += 1
+    return count
+
+
+def _fetch_blocked_count(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> int:
+    """Count ``fetch_blocked`` events emitted by the WebFetchHook (issue #1281).
+
+    The hook records one ``fetch_blocked`` event each time a ``web_fetch``
+    tool call is blocked because the URL's host is not in FETCH_ALLOWED_DOMAINS.
+    The count is aggregated across matching sessions so operators can audit
+    which URLs are being blocked.
+
+    Surfaced as an auxiliary operator signal alongside
+    :func:`_model_rate_limit_count` and :func:`_model_cost_count`.
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    count = 0
+    for event in logger.query_events(
+        kind=FETCH_BLOCKED_KIND,
+        harness_version=harness_version,
+    ):
+        count += 1
+    return count
+
+
+def _percentile(sorted_values: list[float], q: float) -> float:
+    """Return the *q*-th percentile of *sorted_values* using nearest-rank.
+
+    Mirrors the formula used in ``tool_latency.aggregate_tool_latency`` so
+    the hook overhead percentiles use the same deterministic method as tool
+    execution latency percentiles.
+    """
+    import math
+
+    n = len(sorted_values)
+    if n == 0:
+        return 0.0
+    rank = max(1, math.ceil(q / 100.0 * n))
+    return float(sorted_values[min(rank, n) - 1])
+
+
+def _hook_overhead(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> tuple[dict[str, HookOverheadRow], float, float, float, float]:
+    """Aggregate hook overhead percentiles per tool and overall (issue #1269).
+
+    Streams ``tool_call`` events via :meth:`TraceLogger.query_events` and
+    buckets ``hook_overhead_ms`` and ``hook_post_overhead_ms`` by tool name.
+    Computes p50/p95 per tool and the overall aggregate across all tools.
+
+    Returns
+    -------
+    ``(per_tool, overall_p50, overall_p95, post_p50, post_p95)`` where the
+    scalar values are the overall percentiles across all tools (for
+    :class:`KpiHistoryEntry`) and ``per_tool`` is the per-tool breakdown
+    for :attr:`KpiSummary.hook_overhead`.
+    """
+    per_tool_hook: dict[str, list[float]] = {}
+    per_tool_post: dict[str, list[float]] = {}
+    all_hook: list[float] = []
+    all_post: list[float] = []
+
+    for event in logger.query_events(kind="tool_call", harness_version=harness_version):
+        payload = event.payload or {}
+        hook_ms = payload.get("hook_overhead_ms")
+        post_ms = payload.get("hook_post_overhead_ms")
+        name = payload.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if isinstance(hook_ms, (int, float)) and not isinstance(hook_ms, bool) and hook_ms >= 0:
+            per_tool_hook.setdefault(name, []).append(float(hook_ms))
+            all_hook.append(float(hook_ms))
+        if isinstance(post_ms, (int, float)) and not isinstance(post_ms, bool) and post_ms >= 0:
+            per_tool_post.setdefault(name, []).append(float(post_ms))
+            all_post.append(float(post_ms))
+
+    all_hook.sort()
+    all_post.sort()
+    overall_hook_p50 = _percentile(all_hook, 50.0)
+    overall_hook_p95 = _percentile(all_hook, 95.0)
+    overall_post_p50 = _percentile(all_post, 50.0)
+    overall_post_p95 = _percentile(all_post, 95.0)
+
+    rows: dict[str, HookOverheadRow] = {}
+    all_tools = set(per_tool_hook.keys()) | set(per_tool_post.keys())
+    for tool in all_tools:
+        hook_vals = sorted(per_tool_hook.get(tool, []))
+        post_vals = sorted(per_tool_post.get(tool, []))
+        rows[tool] = HookOverheadRow(
+            count=len(hook_vals) + len(post_vals),
+            hook_overhead_ms_p50=_percentile(hook_vals, 50.0),
+            hook_overhead_ms_p95=_percentile(hook_vals, 95.0),
+            hook_post_overhead_ms_p50=_percentile(post_vals, 50.0),
+            hook_post_overhead_ms_p95=_percentile(post_vals, 95.0),
+        )
+
+    return rows, overall_hook_p50, overall_hook_p95, overall_post_p50, overall_post_p95
 
 
 def _format_value(value: float | None) -> str:
@@ -2137,6 +2691,27 @@ def _render_markdown(summary: KpiSummary) -> str:
             f"Evolver LLM Failures: {summary.evolver_llm_failure_count} "
             f"generation_exhausted event(s) "
             f"(rate: {_format_value(summary.evolver_llm_failure_rate)})."
+        )
+    # Issue #1281: surface model cost events when at least one was recorded.
+    if summary.model_cost_count > 0:
+        lines.append("")
+        lines.append(
+            f"Model Cost: {summary.model_cost_count} cost event(s) recorded "
+            f"(total: ${summary.total_model_cost_usd:.4f} USD)."
+        )
+    # Issue #1281: surface model rate-limit events when at least one was recorded.
+    if summary.model_rate_limit_count > 0:
+        lines.append("")
+        lines.append(
+            f"Model Rate Limits: {summary.model_rate_limit_count} "
+            "rate-limit event(s) recorded by the runner."
+        )
+    # Issue #1281: surface fetch_blocked events when at least one was recorded.
+    if summary.fetch_blocked_count > 0:
+        lines.append("")
+        lines.append(
+            f"Fetch Blocked: {summary.fetch_blocked_count} "
+            "fetch_blocked event(s) — URL(s) blocked by WebFetchHook."
         )
     # Issue #895, #1113: surface the cycle-time exclusion count and its
     # per-abort-reason breakdown when > 0 so the survivorship bias in
@@ -2391,6 +2966,90 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
             f"{_format_value(candidate.evolver_llm_failure_rate)} | "
             f"{_format_delta(baseline.evolver_llm_failure_rate, candidate.evolver_llm_failure_rate, higher_is_better=False)} |"
         ),
+        # Issue #1281: model cost, rate limit, and fetch blocked counts.
+        (
+            "| Model Cost Count | "
+            f"{baseline.model_cost_count} | "
+            f"{candidate.model_cost_count} | "
+            f"{_format_delta(float(baseline.model_cost_count), float(candidate.model_cost_count), higher_is_better=False)} |"
+        ),
+        (
+            "| Total Model Cost (USD) | "
+            f"{baseline.total_model_cost_usd:.4f} | "
+            f"{candidate.total_model_cost_usd:.4f} | "
+            f"{_format_delta(baseline.total_model_cost_usd, candidate.total_model_cost_usd, higher_is_better=False)} |"
+        ),
+        (
+            "| Model Rate Limit Count | "
+            f"{baseline.model_rate_limit_count} | "
+            f"{candidate.model_rate_limit_count} | "
+            f"{_format_delta(float(baseline.model_rate_limit_count), float(candidate.model_rate_limit_count), higher_is_better=False)} |"
+        ),
+        (
+            "| Fetch Blocked Count | "
+            f"{baseline.fetch_blocked_count} | "
+            f"{candidate.fetch_blocked_count} | "
+            f"{_format_delta(float(baseline.fetch_blocked_count), float(candidate.fetch_blocked_count), higher_is_better=False)} |"
+        ),
+        # Issue #1271: aggregate streaming quality TTFT rows (lower is better —
+        # faster first token is improvement; slower is regression).
+        (
+            "| Mean TTFT (ms) | "
+            f"{_format_value(baseline.streaming_quality_mean_ttft_ms)} | "
+            f"{_format_value(candidate.streaming_quality_mean_ttft_ms)} | "
+            f"{_format_delta(baseline.streaming_quality_mean_ttft_ms, candidate.streaming_quality_mean_ttft_ms, higher_is_better=False)} |"
+        ),
+        (
+            "| p50 TTFT (ms) | "
+            f"{_format_value(baseline.streaming_quality_p50_ttft_ms)} | "
+            f"{_format_value(candidate.streaming_quality_p50_ttft_ms)} | "
+            f"{_format_delta(baseline.streaming_quality_p50_ttft_ms, candidate.streaming_quality_p50_ttft_ms, higher_is_better=False)} |"
+        ),
+        (
+            "| p95 TTFT (ms) | "
+            f"{_format_value(baseline.streaming_quality_p95_ttft_ms)} | "
+            f"{_format_value(candidate.streaming_quality_p95_ttft_ms)} | "
+            f"{_format_delta(baseline.streaming_quality_p95_ttft_ms, candidate.streaming_quality_p95_ttft_ms, higher_is_better=False)} |"
+        ),
+        # Issue #1271: token per-step rows (higher is better — more tokens
+        # per step means more efficient model usage).
+        (
+            "| Mean Prompt Tokens/Step | "
+            f"{_format_value(baseline.mean_prompt_tokens_per_step)} | "
+            f"{_format_value(candidate.mean_prompt_tokens_per_step)} | "
+            f"{_format_delta(baseline.mean_prompt_tokens_per_step, candidate.mean_prompt_tokens_per_step, higher_is_better=True)} |"
+        ),
+        (
+            "| Mean Completion Tokens/Step | "
+            f"{_format_value(baseline.mean_completion_tokens_per_step)} | "
+            f"{_format_value(candidate.mean_completion_tokens_per_step)} | "
+            f"{_format_delta(baseline.mean_completion_tokens_per_step, candidate.mean_completion_tokens_per_step, higher_is_better=True)} |"
+        ),
+        # Issue #1269: hook overhead deltas (higher is worse — adds latency to every tool call).
+        (
+            "| Hook Overhead ms p50 | "
+            f"{_format_value(baseline.hook_overhead_ms_p50)} | "
+            f"{_format_value(candidate.hook_overhead_ms_p50)} | "
+            f"{_format_delta(baseline.hook_overhead_ms_p50, candidate.hook_overhead_ms_p50, higher_is_better=False)} |"
+        ),
+        (
+            "| Hook Overhead ms p95 | "
+            f"{_format_value(baseline.hook_overhead_ms_p95)} | "
+            f"{_format_value(candidate.hook_overhead_ms_p95)} | "
+            f"{_format_delta(baseline.hook_overhead_ms_p95, candidate.hook_overhead_ms_p95, higher_is_better=False)} |"
+        ),
+        (
+            "| Hook Post Overhead ms p50 | "
+            f"{_format_value(baseline.hook_post_overhead_ms_p50)} | "
+            f"{_format_value(candidate.hook_post_overhead_ms_p50)} | "
+            f"{_format_delta(baseline.hook_post_overhead_ms_p50, candidate.hook_post_overhead_ms_p50, higher_is_better=False)} |"
+        ),
+        (
+            "| Hook Post Overhead ms p95 | "
+            f"{_format_value(baseline.hook_post_overhead_ms_p95)} | "
+            f"{_format_value(candidate.hook_post_overhead_ms_p95)} | "
+            f"{_format_delta(baseline.hook_post_overhead_ms_p95, candidate.hook_post_overhead_ms_p95, higher_is_better=False)} |"
+        ),
     ]
     return "\n".join(lines)
 
@@ -2465,7 +3124,9 @@ def append_kpi_history(
     ``token_budget_overrun_pct``, ``model_retry_count``,
     ``tool_argument_parse_error_count``,
     ``event_limit_abort_count``, ``server_restart_count``,
-    ``evolver_llm_failure_count``, and ``evolver_llm_failure_rate`` are scalar
+    ``evolver_llm_failure_count``, ``evolver_llm_failure_rate``,
+    ``model_cost_count``, ``total_model_cost_usd``,
+    ``model_rate_limit_count``, and ``fetch_blocked_count`` are scalar
     fields and are included so the trend table can show their drift
     across harness edits. Then ``timestamp`` and the optional
     ``harness_version`` are added. Parent directories are created on
@@ -2512,6 +3173,10 @@ def append_kpi_history(
             "per_model_id",
             "per_quantization",
             "per_harness_version",
+            # Issue #1269: ``hook_overhead`` is a per-tool dict, not a scalar
+            # trend metric — exclude it so the JSONL history line stays compact.
+            # The four scalar hook overhead fields are included directly.
+            "hook_overhead",
         },
     )
     payload["timestamp"] = _now_iso()
@@ -2589,6 +3254,10 @@ _RELIABILITY_SIGNALS: list[tuple[str, str]] = [
     ("hooks_disabled_rate", "Hooks Disabled Rate"),
     ("evolver_llm_failure_count", "Evol LLM Failures"),
     ("evolver_llm_failure_rate", "Evol LLM Failure Rate"),
+    ("model_cost_count", "Model Costs"),
+    ("total_model_cost_usd", "Total Model Cost (USD)"),
+    ("model_rate_limit_count", "Model Rate Limits"),
+    ("fetch_blocked_count", "Fetch Blocked"),
 ]
 
 
@@ -2849,15 +3518,33 @@ def _render_validation_markdown(results: list[TaskValidationResult]) -> str:
     return "\n".join(lines)
 
 
+_TOKEN_BUDGET_OVERRUN_EPILOG = """
+Environment variables for alert thresholds:
+  FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX
+                        Exit 3 when token_budget_overrun_pct exceeds this value.
+                        Example: FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX=100.0
+                        (issue #1354).
+  FOUNDRY_CONTEXT_EFFICIENCY_MIN
+                        Exit 2 when context_efficiency falls below this value.
+                        (issue #1286).
+"""
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="foundry-kpis",
         description="Compute and display the three PRD success-metric KPIs.",
+        epilog=_TOKEN_BUDGET_OVERRUN_EPILOG,
+    )
+    parser.add_argument(
+        "--trace-db",
+        default="./logs/traces.db",
+        help="Path to the trace SQLite database (default: ./logs/traces.db).",
     )
     parser.add_argument(
         "--db",
-        default="./logs/traces.db",
-        help="Path to the trace SQLite database (default: ./logs/traces.db).",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     parser.add_argument(
         "--harness-version",
@@ -3050,7 +3737,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.validate_metadata:
-        logger = TraceLogger(args.db)
+        logger = TraceLogger(_get_trace_db(args))
         results = validate_task_metadata(logger, harness_version=args.harness_version)
         output = _render_validation_markdown(results)
         if args.out:
@@ -3060,7 +3747,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     fmt = _resolve_format(args.format, args.out)
-    logger = TraceLogger(args.db)
+    logger = TraceLogger(_get_trace_db(args))
 
     # Issue #898, #1039: build the task-name -> metadata map only for
     # task-level dimensions; session-level dimensions (model_id,
@@ -3130,6 +3817,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             f" exceeds threshold {args.alert_threshold:.4f}\n"
         )
         return 1
+
+    # Issue #1286: FOUNDRY_CONTEXT_EFFICIENCY_MIN triggers exit 2 when efficiency
+    # falls below the configured floor. Backward-compatible: absent env var is ignored.
+    min_efficiency = os.environ.get("FOUNDRY_CONTEXT_EFFICIENCY_MIN")
+    if (
+        min_efficiency is not None
+        and summary.context_efficiency is not None
+        and summary.context_efficiency < float(min_efficiency)
+    ):
+        sys.stderr.write(
+            f"[ALERT] context_efficiency {summary.context_efficiency:.4f}"
+            f" is below FOUNDRY_CONTEXT_EFFICIENCY_MIN={min_efficiency}\n"
+        )
+        return 2
+
+    # Issue #1354: FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX triggers exit 3 when overrun
+    # exceeds the configured ceiling. Backward-compatible: absent env var is ignored.
+    max_overrun = os.environ.get("FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX")
+    if (
+        max_overrun is not None
+        and summary.token_budget_overrun_pct is not None
+        and summary.token_budget_overrun_pct > float(max_overrun)
+    ):
+        sys.stderr.write(
+            f"[ALERT] token_budget_overrun_pct {summary.token_budget_overrun_pct:.4f}"
+            f" exceeds FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX={max_overrun}\n"
+        )
+        return 3
+
     return 0
 
 

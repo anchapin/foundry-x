@@ -27,6 +27,7 @@ from foundry_x.trace.logger import TraceEvent, TraceLogger
 OUTCOME_KIND = "outcome"
 TASK_ABORTED_KIND = "task_aborted"
 TOKEN_BUDGET_REASON = "token_budget"
+TOKEN_BUDGET_ABORTED_KIND = "token_budget_aborted"
 CRITIC_VERDICT_KIND = VERDICT_KIND
 
 # The kind string persisted on terminal ``outcome`` events by
@@ -72,6 +73,17 @@ class SessionSummaryRow(BaseModel):
 
     Issue #737 adds ``failure_class``: the failure class from the
     session's ``critic_verdict`` event, if any.
+
+    Issue #1353 adds ``tokens_used_at_abort`` and ``token_budget_at_abort``:
+    the ``tokens_used`` and ``token_budget`` values from the
+    ``task_aborted(reason="token_budget")`` event, ``None`` when
+    no token-budget abort occurred.
+
+    Issue #1352 adds ``context_efficiency``: per-session context efficiency
+    computed from ``context_pruned`` events using the ADR-0033 formula:
+    ``1 - (sum(dropped) / sum(threshold + dropped))``. Sessions with no
+    ``context_pruned`` events contribute ``1.0`` (perfect efficiency).
+    ``None`` when the session has no ``outcome`` event at all.
     """
 
     session_id: str
@@ -83,6 +95,9 @@ class SessionSummaryRow(BaseModel):
     token_budget_hit: bool | None = None
     context_pruned: int | None = None
     failure_class: str | None = None
+    tokens_used_at_abort: int | None = None
+    token_budget_at_abort: int | None = None
+    context_efficiency: float | None = None
 
 
 def _truncate(value: str, width: int) -> str:
@@ -167,6 +182,49 @@ def _get_session_failure_class(logger: TraceLogger, session_id: str) -> str | No
     return None
 
 
+def _compute_session_context_efficiency(
+    logger: TraceLogger,
+    session_id: str,
+) -> float | None:
+    """Compute per-session context efficiency using the ADR-0033 formula (issue #1352).
+
+    Returns ``None`` when the session has no ``outcome`` event (the underscore
+    contract for sessions without outcome data).
+
+    Per-session efficiency = 1 - (sum(dropped) / sum(threshold + dropped))
+    where ``dropped`` and ``threshold`` are summed across every ``context_pruned``
+    event in the session. Sessions with zero pruning (dropped=0, threshold=0)
+    contribute ``1.0`` (perfect efficiency — nothing was dropped).
+
+    Uses ``threshold_tokens`` when present (token-aware pruner), otherwise ``threshold``
+    (event-count pruner).
+    """
+    has_outcome = False
+    total_dropped = 0
+    total_threshold = 0
+
+    for event in logger.iter_events(session_id, kind=OUTCOME_KIND):
+        has_outcome = True
+        break
+
+    if not has_outcome:
+        return None
+
+    for event in logger.iter_events(session_id, kind=CONTEXT_PRUNED_KIND):
+        payload = event.payload or {}
+        dropped = payload.get("dropped", 0)
+        threshold = payload.get("threshold", 0)
+        if threshold == 0:
+            threshold = payload.get("threshold_tokens", 0)
+        total_dropped += dropped
+        total_threshold += threshold
+
+    denominator = total_threshold + total_dropped
+    if denominator > 0:
+        return 1.0 - (total_dropped / denominator)
+    return 1.0
+
+
 class SessionSummaryReport(BaseModel):
     """Report containing session summary rows and failure class distribution (issue #737).
 
@@ -226,11 +284,15 @@ def build_session_summary(
         raw_steps = payload.get("steps")
         steps_value: int | None = raw_steps if isinstance(raw_steps, int) else None
         token_budget_hit = _has_token_budget_abort(logger, session.session_id)
+        tokens_used_at_abort, token_budget_at_abort = _get_token_budget_abort_details(
+            logger, session.session_id
+        )
         context_pruned_count = _count_context_pruned_events(logger, session.session_id)
         context_pruned_value: int | None = (
             context_pruned_count if context_pruned_count > 0 else None
         )
         failure_class = _get_session_failure_class(logger, session.session_id)
+        context_efficiency = _compute_session_context_efficiency(logger, session.session_id)
         rows.append(
             SessionSummaryRow(
                 session_id=session.session_id,
@@ -242,6 +304,9 @@ def build_session_summary(
                 token_budget_hit=token_budget_hit,
                 context_pruned=context_pruned_value,
                 failure_class=failure_class,
+                tokens_used_at_abort=tokens_used_at_abort,
+                token_budget_at_abort=token_budget_at_abort,
+                context_efficiency=context_efficiency,
             )
         )
     rows.sort(key=lambda row: row.started_at, reverse=True)
@@ -249,7 +314,7 @@ def build_session_summary(
 
 
 def _has_token_budget_abort(logger: TraceLogger, session_id: str) -> bool | None:
-    """Return whether session has a ``task_aborted(reason="token_budget")`` event.
+    """Return whether session has a ``task_aborted(reason="token_budget")`` or ``token_budget_aborted`` event.
 
     Returns ``True`` when at least one such event exists, ``False``
     when the session has outcome data but no token budget abort, and
@@ -265,7 +330,34 @@ def _has_token_budget_abort(logger: TraceLogger, session_id: str) -> bool | None
     for event in logger.iter_events(session_id, kind=TASK_ABORTED_KIND):
         if event.payload.get("reason") == TOKEN_BUDGET_REASON:
             return True
+    # Issue #1355: also check for the dedicated token_budget_aborted event
+    for event in logger.iter_events(session_id, kind=TOKEN_BUDGET_ABORTED_KIND):
+        return True
     return False
+
+
+def _get_token_budget_abort_details(
+    logger: TraceLogger, session_id: str
+) -> tuple[int | None, int | None]:
+    """Return ``tokens_used`` and ``token_budget`` from the token-budget abort event (issue #1353).
+
+    Returns ``(tokens_used, token_budget)`` from the ``task_aborted(reason="token_budget")``
+    event's payload, or ``(None, None)`` if no such event exists or the session has no
+    ``outcome`` event at all.
+    """
+    has_outcome = False
+    for event in logger.iter_events(session_id, kind=OUTCOME_KIND):
+        has_outcome = True
+        break
+    if not has_outcome:
+        return None, None
+    for event in logger.iter_events(session_id, kind=TASK_ABORTED_KIND):
+        if event.payload.get("reason") == TOKEN_BUDGET_REASON:
+            tokens_used = event.payload.get("tokens_used")
+            token_budget = event.payload.get("token_budget")
+            if isinstance(tokens_used, int) and isinstance(token_budget, int):
+                return tokens_used, token_budget
+    return None, None
 
 
 def _string_or_none(value: object) -> str | None:

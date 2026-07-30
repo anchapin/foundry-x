@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import AsyncIterator
 
 import httpx
@@ -26,6 +27,7 @@ from foundry_x.execution.model_adapter import (
     ModelCostEvent,
     ModelRateLimitInfo,
     ModelRetryEvent,
+    OpenAICompatibleAdapter,
     OpenAINativeAdapter,
     resolve_model_adapter,
 )
@@ -241,6 +243,50 @@ async def test_anthropic_stream_parses_event_framing():
     assert len(finish_chunks) == 1
     usage_chunks = [c for c in chunks if c.usage is not None]
     assert len(usage_chunks) >= 1
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_preserves_tool_call_name():
+    """content_block_start carries tool name; content_block_delta must preserve it (issue #1275)."""
+    body = (
+        "event: content_block_start\n"
+        'data: {"type":"content_block_start","index":0,'
+        '"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file"}}\n\n'
+        "event: content_block_delta\n"
+        'data: {"type":"content_block_delta","index":0,'
+        '"delta":{"type":"tool_use","input_json":"{\\"path\\": \\"README.md\\"}"}}\n\n'
+        "event: message_delta\n"
+        'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},'
+        '"usage":{"output_tokens":3}}\n\n'
+        "event: message_stop\n"
+        'data: {"type":"message_stop"}\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+        )
+        chunks = []
+        async for chunk in adapter.stream(messages=[{"role": "user", "content": "read"}]):
+            chunks.append(chunk)
+
+    tool_chunks = [c for c in chunks if c.tool_calls]
+    assert len(tool_chunks) == 2
+    start_chunk = tool_chunks[0]
+    assert start_chunk.tool_calls[0].function.name == "read_file"
+    delta_chunk = tool_chunks[1]
+    assert delta_chunk.tool_calls[0].function.name == "read_file"
+    assert delta_chunk.tool_calls[0].function.arguments == '{"path": "README.md"}'
 
 
 @pytest.mark.asyncio
@@ -501,6 +547,65 @@ async def test_build_model_adapter_with_overrides_routes_openai():
         await adapter.aclose()
 
 
+def test_resolve_model_adapter_env_override_compatible(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_ADAPTER", "OpenAICompatibleAdapter")
+    adapter = resolve_model_adapter(
+        "anthropic/claude-3-5-sonnet-20241022",
+        api_key="test",
+        base_url="http://localhost:8080",
+    )
+    try:
+        assert isinstance(adapter, OpenAICompatibleAdapter)
+        assert adapter.model == "anthropic/claude-3-5-sonnet-20241022"
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_resolve_model_adapter_env_override_unknown(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_ADAPTER", "NonExistentAdapter")
+    with pytest.raises(ValueError, match="Unknown FOUNDRY_MODEL_ADAPTER"):
+        resolve_model_adapter("test-model", api_key="test")
+
+
+def test_resolve_model_adapter_env_override_compatible_requires_base_url(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_ADAPTER", "OpenAICompatibleAdapter")
+    with pytest.raises(ValueError, match="base_url"):
+        resolve_model_adapter("anthropic/claude-3-5-sonnet-20241022", api_key="test")
+
+
+def test_resolve_model_adapter_env_override_anthropic(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_ADAPTER", "AnthropicAdapter")
+    adapter = resolve_model_adapter(
+        "anthropic/claude-3-5-sonnet-20241022",
+        api_key="sk-ant-test",
+        base_url="https://api.anthropic.com",
+    )
+    try:
+        assert isinstance(adapter, AnthropicAdapter)
+        assert adapter.model == "claude-3-5-sonnet-20241022"
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_resolve_model_adapter_env_override_openai(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_ADAPTER", "OpenAINativeAdapter")
+    adapter = resolve_model_adapter(
+        "openai/gpt-4o-mini",
+        api_key="sk-openai-test",
+    )
+    try:
+        assert isinstance(adapter, OpenAINativeAdapter)
+        assert adapter.model == "gpt-4o-mini"
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
 # ---------------------------------------------------------------------------
 # CloudModelAdapter ABC contract
 # ---------------------------------------------------------------------------
@@ -536,8 +641,134 @@ class _FailingLinesResponse(httpx.Response):
 
 
 # ---------------------------------------------------------------------------
-# Mid-stream retry boundary — issue #200 / #1164
+# Mid-stream retry boundary — issue #200 / #1164 / #1278
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_anthropic_adapter_stream_retries_transport_error(monkeypatch):
+    """Transport errors (ConnectError) are retried during streaming."""
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+    retries: list[ModelRetryEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            raise httpx.ConnectError("connection refused", request=request)
+        body = (
+            "event: message_start\n"
+            'data: {"type":"message_start","message":{"usage":{"input_tokens":5}}}\n\n'
+            "event: content_block_delta\n"
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}\n\n'
+            "event: message_stop\n"
+            'data: {"type":"message_stop"}\n\n'
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        chunks = []
+        async for chunk in adapter.stream(messages=[{"role": "user", "content": "hi"}]):
+            chunks.append(chunk)
+
+    assert calls["count"] == 3, "ConnectError should be retried twice then succeed"
+    assert len(retries) == 2
+    assert retries[0].error_type == "ConnectError"
+    assert retries[1].error_type == "ConnectError"
+    contents = [c.content for c in chunks if c.content]
+    assert contents == ["Hi"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_adapter_stream_retries_429(monkeypatch):
+    """HTTP 429 (rate-limit) is retried during streaming."""
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+    retries: list[ModelRetryEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            return httpx.Response(429, text="rate limited")
+        body = (
+            "event: message_start\n"
+            'data: {"type":"message_start","message":{"usage":{"input_tokens":5}}}\n\n'
+            "event: content_block_delta\n"
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}\n\n'
+            "event: message_stop\n"
+            'data: {"type":"message_stop"}\n\n'
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        chunks = []
+        async for chunk in adapter.stream(messages=[{"role": "user", "content": "hi"}]):
+            chunks.append(chunk)
+
+    assert calls["count"] == 3, "429 should be retried twice then succeed"
+    assert len(retries) == 2
+    assert retries[0].error_type == "HTTPStatusError"
+    assert retries[1].error_type == "HTTPStatusError"
+    contents = [c.content for c in chunks if c.content]
+    assert contents == ["Hi"]
+
+
+@pytest.mark.asyncio
+async def test_openai_native_adapter_stream_retries_503(monkeypatch):
+    """HTTP 503 is retried during streaming for OpenAINativeAdapter."""
+    monkeypatch.setattr("foundry_x.execution.model_adapter.asyncio.sleep", _no_sleep)
+
+    calls: dict[str, int] = {"count": 0}
+    retries: list[ModelRetryEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            return httpx.Response(503, text="down")
+        body = (
+            "data: "
+            + json.dumps({"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]})
+            + "\n\ndata: [DONE]\n\n"
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAINativeAdapter(
+            model="gpt-4o",
+            base_url="https://api.openai.com",
+            api_key="sk-openai-test",
+            client=client,
+            max_retries=2,
+            on_retry=retries.append,
+        )
+        chunks = []
+        async for chunk in adapter.stream(messages=[{"role": "user", "content": "hi"}]):
+            chunks.append(chunk)
+
+    assert calls["count"] == 3, "503 should be retried twice then succeed"
+    assert len(retries) == 2
+    assert retries[0].error_type == "HTTPStatusError"
+    assert retries[1].error_type == "HTTPStatusError"
+    contents = [c.content for c in chunks if c.content]
+    assert contents == ["hi"]
 
 
 @pytest.mark.asyncio
@@ -634,6 +865,57 @@ def test_unknown_model_pricing_returns_zero():
     )
     try:
         assert adapter.token_pricing() == (0.0, 0.0)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_pricing_env_var_override_anthropic(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_PRICING_CLAUDE_3_5_SONNET_20241022", "5.0,25.0")
+    adapter = AnthropicAdapter(
+        model="claude-3-5-sonnet-20241022",
+        base_url="https://api.anthropic.com",
+        api_key="sk-test",
+    )
+    try:
+        assert adapter.token_pricing() == (5.0, 25.0)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_pricing_env_var_override_openai(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_PRICING_GPT_4O", "10.0,40.0")
+    adapter = OpenAINativeAdapter(
+        model="gpt-4o",
+        base_url="https://api.openai.com",
+        api_key="sk-test",
+    )
+    try:
+        assert adapter.token_pricing() == (10.0, 40.0)
+    finally:
+        import asyncio
+
+        asyncio.run(adapter.aclose())
+
+
+def test_pricing_env_var_invalid_format_falls_back_to_hardcoded(monkeypatch):
+    monkeypatch.setenv("FOUNDRY_MODEL_PRICING_CLAUDE_3_5_SONNET_20241022", "not-a-number")
+    adapter = AnthropicAdapter(
+        model="claude-3-5-sonnet-20241022",
+        base_url="https://api.anthropic.com",
+        api_key="sk-test",
+    )
+    try:
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            pricing = adapter.token_pricing()
+            assert pricing == (3.0, 15.0)
+            assert len(w) == 1
+            assert "Invalid pricing" in str(w[0].message)
+            assert "RuntimeWarning" in str(w[0].category)
     finally:
         import asyncio
 

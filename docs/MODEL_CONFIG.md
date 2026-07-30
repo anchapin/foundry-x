@@ -56,6 +56,24 @@ If your endpoint requires no token, leave both unset.
 | `FOUNDRY_REQUEST_TIMEOUT_S` | `30` | Per-request round-trip cap in seconds |
 | `FOUNDRY_ADAPTER_MAX_RETRIES` | `2` | Retry limit on transient errors (408/429/5xx, connect failures) |
 
+### Pricing override
+
+Cloud provider pricing tables (`AnthropicAdapter`, `OpenAINativeAdapter`) are
+hardcoded in [`model_adapter.py`][foundry_x.execution.model_adapter]. When a
+provider updates pricing, you can override per-model without a code change:
+
+```bash
+# Format: input_price_per_1m,output_price_per_1m (USD)
+FOUNDRY_MODEL_PRICING_CLAUDE_3_5_SONNET_20241022=3.5,17.5
+```
+
+The env var name is the model ID uppercased with `-` replaced by `_` (e.g.
+`claude-3-5-sonnet-20241022` → `FOUNDRY_MODEL_PRICING_CLAUDE_3_5_SONNET_20241022`).
+
+The override takes precedence over the hardcoded table. Unknown models (not in
+the hardcoded table and no env var) return `(0.0, 0.0)` and emit a
+`RuntimeWarning`.
+
 ### Server supervision (issue #899)
 
 When `fx-runner` is launched against a local `llama-server` (or any
@@ -72,6 +90,8 @@ events but does not spawn or kill anything.
 | `FOUNDRY_SERVER_NGpuLayers` | `0` | Layers to offload to the GPU when the manager launches `llama-server`. Mirrors the `--n-gpu-layers` flag from `infra/scripts/launch_llamacpp.sh`. |
 | `FOUNDRY_SERVER_CTXSize` | `8192` | Context window size when the manager launches `llama-server`. Mirrors the `--ctx-size` flag from `infra/scripts/launch_llamacpp.sh`. Recommended minimum is 8192 for tool-calling agents (see [§3](#3-minimum-model-requirements)). |
 | `FOUNDRY_SERVER_BIN` | `llama-server` | Path to the `llama-server` binary. Override when the binary is not on `PATH`. |
+| `FOUNDRY_SERVER_HEALTH_TIMEOUT_S` | `2.0` | Timeout in seconds for each individual `/health` probe. Increase when the server is slow to respond under load. |
+| `FOUNDRY_SERVER_HEALTH_READY_TIMEOUT_S` | `60.0` | Timeout in seconds for the server to become ready on startup. Increase when the model takes a long time to load. |
 
 ---
 

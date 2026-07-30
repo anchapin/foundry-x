@@ -53,6 +53,7 @@ from foundry_x.evolution.loop import run_evolution_daemon
 from foundry_x.evolution.store import ProposedEditStatus, ProposedEditStore, TrackedProposedEdit
 from foundry_x.execution.runner import resolve_harness_version
 from foundry_x.infra.server_manager import ServerConfig, ServerPool
+from foundry_x.observability.kpis import KpiSummary, compute_kpis
 from foundry_x.observability.regression_report import record_verdict
 from foundry_x.trace.logger import TraceLogger
 
@@ -141,7 +142,7 @@ def _render_tracked_edit(edit: TrackedProposedEdit, verbose: bool = False) -> st
     return "\n".join(lines)
 
 
-def _render_critic_verdict(verdict: CriticVerdict) -> str:
+def _render_critic_verdict(verdict: CriticVerdict, cycle_time_seconds: float | None = None) -> str:
     """Render a CriticVerdict as a compact plain-text summary.
 
     A ``None`` verdict represents a skipped Critic gate (``--no-verify``,
@@ -168,6 +169,8 @@ def _render_critic_verdict(verdict: CriticVerdict) -> str:
         if len(verdict.notes) > 500:
             notes_preview += " [...truncated]"
         lines.append(f"  Notes: {notes_preview}")
+    if cycle_time_seconds is not None:
+        lines.append(f"  Cycle time: {cycle_time_seconds:.1f}s")
     return "\n".join(lines)
 
 
@@ -242,6 +245,32 @@ def _render_model_family_verdict(verdict: ModelFamilyVerdict) -> str:
     return "\n".join(lines)
 
 
+def _emit_prometheus_metrics(summary: KpiSummary, harness_version: str) -> None:
+    """Emit the three PRD KPIs as Prometheus gauge lines to stdout (issue #1364)."""
+    ts = _now_iso()
+    lines = [
+        "# HELP foundryx_kpi_entry FoundryX KPI (issue #1364)",
+        "# TYPE foundryx_kpi_entry gauge",
+    ]
+    cycle_val = (
+        f"{summary.cycle_time_seconds:.6f}" if summary.cycle_time_seconds is not None else "NaN"
+    )
+    lines.append(
+        f'foundryx_kpi_entry{{harness_version="{harness_version}",kpi="cycle_time_seconds"}} '
+        f"{cycle_val} {ts}"
+    )
+    lines.append(
+        f'foundryx_kpi_entry{{harness_version="{harness_version}",kpi="regression_rate"}} '
+        f"{summary.regression_rate:.6f} {ts}"
+    )
+    lines.append(
+        f'foundryx_kpi_entry{{harness_version="{harness_version}",kpi="improvement_rate"}} '
+        f"{summary.improvement_rate:.6f} {ts}"
+    )
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
 def _load_pool_manifest(path: str | None = None) -> dict[str, ServerConfig]:
     """Load a pool manifest JSON into ``{slot: ServerConfig}`` (issue #1046).
 
@@ -288,6 +317,7 @@ def _run_loop(
     harness_dir: Path,
     verbose: bool = False,
     no_verify: bool = False,
+    export_prometheus: bool = False,
 ) -> tuple[FailureReport, ProposedEdit | None, CriticVerdict | None, int, str]:
     """Execute the evolution loop: Digester -> Evolver -> Critic.
 
@@ -319,6 +349,9 @@ def _run_loop(
     print()
 
     if report.proposed_class == "clean":
+        if export_prometheus:
+            kpi_summary = compute_kpis(logger, harness_version=harness_version)
+            _emit_prometheus_metrics(kpi_summary, harness_version)
         completed_at = _now_iso()
         print(f"Started: {started_at} | Completed: {completed_at}")
         print()
@@ -364,6 +397,19 @@ def _run_loop(
         critic = Critic(harness_dir=harness_dir)
         verdict = critic.evaluate(edit.unified_diff, failure_class=report.proposed_class)
         verdict.target_file = edit.target_file
+    verdict_timestamp = datetime.now(UTC)
+    task_received_ts: str | None = None
+    for event in events:
+        if event.kind == "task_received":
+            task_received_ts = event.timestamp
+            break
+    cycle_time_seconds: float | None = None
+    if task_received_ts:
+        try:
+            t0 = datetime.fromisoformat(task_received_ts)
+            cycle_time_seconds = (verdict_timestamp - t0).total_seconds()
+        except (ValueError, TypeError):
+            pass
     verdict_with_class = CriticVerdict(
         verdict=verdict.verdict,
         passed_checks=list(verdict.passed_checks),
@@ -373,7 +419,10 @@ def _run_loop(
         target_file=verdict.target_file,
     )
     record_verdict(logger, session_id, verdict_with_class)
-    print(_render_critic_verdict(verdict))
+    if export_prometheus:
+        kpi_summary = compute_kpis(logger, harness_version=harness_version)
+        _emit_prometheus_metrics(kpi_summary, harness_version)
+    print(_render_critic_verdict(verdict, cycle_time_seconds=cycle_time_seconds))
     print()
 
     completed_at = _now_iso()
@@ -760,6 +809,17 @@ def _build_evolve_subparser(parser: argparse.ArgumentParser) -> None:
             "main; use only for local experimentation (issue #888)."
         ),
     )
+    parser.add_argument(
+        "--export-prometheus",
+        dest="export_prometheus",
+        action="store_true",
+        help=(
+            "Emit Prometheus-format KPI metrics (cycle_time_seconds, "
+            "improvement_rate, regression_rate) to stdout before the verdict "
+            "block. Useful for piping evolve output into Prometheus for "
+            "dashboard ingestion (issue #1364)."
+        ),
+    )
 
 
 def _build_sweep_subparser(parser: argparse.ArgumentParser) -> None:
@@ -937,6 +997,7 @@ def _main_evolve(args: argparse.Namespace) -> int:
         harness_dir=args.harness_dir,
         verbose=args.verbose,
         no_verify=no_verify,
+        export_prometheus=getattr(args, "export_prometheus", False),
     )
     return exit_code
 

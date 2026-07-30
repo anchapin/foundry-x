@@ -75,7 +75,6 @@ def _task_metadata_for_names(
     return out
 
 
-@pytest.mark.xfail(reason="smoke-tier exclusion not yet implemented in kpi computation")
 def test_smoke_tier_excluded_from_improvement_rate(tmp_path):
     """Smoke-tier verdicts must not appear in the improvement-rate denominator.
 
@@ -154,7 +153,6 @@ def test_smoke_tier_included_in_regression_rate(tmp_path):
     )
 
 
-@pytest.mark.xfail(reason="smoke-tier exclusion not yet implemented in kpi computation")
 def test_smoke_tier_kpi_contract_with_live_registry(tmp_path):
     """Integration test using the live benchmark registry.
 
@@ -193,15 +191,14 @@ def test_smoke_tier_kpi_contract_with_live_registry(tmp_path):
     )
 
     # regression-rate: smoke regressions count
-    # s1 passed smoke_a; s3 failed smoke_a → 1 regression out of 3 sessions
-    expected_reg = 1 / 3
+    # s1 passed smoke_a; s2 bench regressed; s3 smoke_a regressed → 2 regressions out of 3 sessions
+    expected_reg = 2 / 3
     assert summary.regression_rate == pytest.approx(expected_reg), (
         f"regression_rate={summary.regression_rate} but expected {expected_reg}; "
         f"smoke-task regressions must be included (ADR-0034 §2)"
     )
 
 
-@pytest.mark.xfail(reason="smoke-tier exclusion not yet implemented in kpi computation")
 def test_smoke_tier_kpi_slices_show_correct_rates(tmp_path):
     """The per-difficulty_tier slices must also respect the exclusion contract.
 

@@ -189,3 +189,126 @@ def test_proposed_edit_accepts_multi_hunk_diff():
         unified_diff=multi_hunk,
     )
     assert edit.unified_diff == multi_hunk
+
+
+class TestDiffNoopEarlyExit:
+    """Early-exit for no-op diffs touching only non-critical files (issue #1347)."""
+
+    def _make_harness(self, tmp_path: Path) -> Path:
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir(parents=True, exist_ok=True)
+        tests_dir = harness_dir / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        (harness_dir / "system_prompt.txt").write_text("original\n")
+        (tests_dir / "test_gate.py").write_text("def test_pass():\n    assert True\n")
+        install_load_check_prerequisites(harness_dir)
+        return harness_dir
+
+    def test_noop_diff_docs_approves_with_diff_noop_check(self, tmp_path: Path) -> None:
+        harness_dir = self._make_harness(tmp_path)
+        verdict = Critic(
+            harness_dir=harness_dir,
+            pytest_args=["-q", "tests/test_gate.py"],
+        ).evaluate(_diff("docs/README.md", "old\n", "new\n"))
+        assert verdict.verdict is True
+        assert "diff_noop" in verdict.passed_checks
+        assert verdict.failed_checks == []
+
+    def test_noop_diff_pre_commit_config_approves_with_diff_noop_check(
+        self, tmp_path: Path
+    ) -> None:
+        harness_dir = self._make_harness(tmp_path)
+        verdict = Critic(
+            harness_dir=harness_dir,
+            pytest_args=["-q", "tests/test_gate.py"],
+        ).evaluate(_diff(".pre-commit-config.yaml", "old\n", "new\n"))
+        assert verdict.verdict is True
+        assert "diff_noop" in verdict.passed_checks
+        assert verdict.failed_checks == []
+
+    def test_noop_diff_pyproject_approves_with_diff_noop_check(self, tmp_path: Path) -> None:
+        harness_dir = self._make_harness(tmp_path)
+        verdict = Critic(
+            harness_dir=harness_dir,
+            pytest_args=["-q", "tests/test_gate.py"],
+        ).evaluate(_diff("pyproject.toml", "[project]\n", "[project]\nversion = '0.1.0'\n"))
+        assert verdict.verdict is True
+        assert "diff_noop" in verdict.passed_checks
+        assert verdict.failed_checks == []
+
+    def test_diff_touching_harness_runs_full_gate(self, tmp_path: Path) -> None:
+        harness_dir = self._make_harness(tmp_path)
+        verdict = Critic(
+            harness_dir=harness_dir,
+            pytest_args=["-q", "tests/test_gate.py"],
+        ).evaluate(_diff("harness/system_prompt.txt", "original\n", "patched\n"))
+        assert verdict.verdict is True
+        assert "diff_noop" not in verdict.passed_checks
+        assert "pytest" in verdict.passed_checks
+
+    def test_diff_touching_benchmarks_tasks_is_not_noop(self, tmp_path: Path) -> None:
+        harness_dir = self._make_harness(tmp_path)
+        verdict = Critic(
+            harness_dir=harness_dir,
+            pytest_args=["-q", "tests/test_gate.py"],
+        ).evaluate(_diff("benchmarks/tasks/test_example.py", "old\n", "new\n"))
+        assert "diff_noop" not in verdict.passed_checks
+
+    def test_diff_touching_src_is_not_noop(self, tmp_path: Path) -> None:
+        harness_dir = self._make_harness(tmp_path)
+        verdict = Critic(
+            harness_dir=harness_dir,
+            pytest_args=["-q", "tests/test_gate.py"],
+        ).evaluate(_diff("src/foundry_x/foo.py", "old\n", "new\n"))
+        assert "diff_noop" not in verdict.passed_checks
+
+    def test_mixed_critical_and_non_critical_is_not_noop(self, tmp_path: Path) -> None:
+        harness_dir = self._make_harness(tmp_path)
+        diff = (
+            _diff("docs/README.md", "old\n", "new\n")
+            + "\n"
+            + _diff("harness/system_prompt.txt", "original\n", "patched\n")
+        )
+        verdict = Critic(
+            harness_dir=harness_dir,
+            pytest_args=["-q", "tests/test_gate.py"],
+        ).evaluate(diff)
+        assert "diff_noop" not in verdict.passed_checks
+
+    def test_empty_diff_runs_full_gate(self, tmp_path: Path) -> None:
+        harness_dir = self._make_harness(tmp_path)
+        verdict = Critic(
+            harness_dir=harness_dir,
+            pytest_args=["-q", "tests/test_gate.py"],
+        ).evaluate("")
+        assert verdict.verdict is True
+        assert "diff_noop" not in verdict.passed_checks
+        assert "pytest" in verdict.passed_checks
+
+    def test_noop_diff_does_not_spawn_pytest(self, tmp_path: Path) -> None:
+        harness_dir = self._make_harness(tmp_path)
+        critic = Critic(
+            harness_dir=harness_dir,
+            pytest_args=["-q", "tests/test_gate.py"],
+        )
+        import subprocess
+
+        original_run = subprocess.run
+
+        spawn_count = 0
+
+        def counting_run(*args, **kwargs):
+            nonlocal spawn_count
+            if "pytest" in str(args[0]):
+                spawn_count += 1
+            return original_run(*args, **kwargs)
+
+        subprocess.run = counting_run
+        try:
+            verdict = critic.evaluate(_diff("docs/README.md", "old\n", "new\n"))
+        finally:
+            subprocess.run = original_run
+
+        assert verdict.verdict is True
+        assert "diff_noop" in verdict.passed_checks
+        assert spawn_count == 0

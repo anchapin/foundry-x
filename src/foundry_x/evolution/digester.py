@@ -94,6 +94,11 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         # so the Evolver never proposes remediation. CONTEXT.md §Event kinds
         # already documents this as a failure signal; this aligns the code.
         "task_aborted",
+        # Issue #1355: ``token_budget_aborted`` is a dedicated terminal failure
+        # marker emitted by ``Runner.run_task`` when the token budget is
+        # exceeded. It provides a clearer, purpose-built abort signal for
+        # token-budget failures separate from the generic ``task_aborted`` event.
+        "token_budget_aborted",
         "run_failed",
         "agent_error",
         "error",
@@ -443,17 +448,19 @@ def _aggregate_context_overflow(
     session_id: str,
     ordered: Sequence[TraceEvent],
 ) -> FailureReport | None:
-    """Aggregate a context-overflow failure (issue #805).
+    """Aggregate a context-overflow failure (issue #805, issue #1345).
 
     Triggered when the runner agent loop terminates via
     ``outcome.status='truncated'`` / ``outcome.reason='max_steps'``
-    (ADR-0010 §Termination semantics). This is a terminal condition: the
-    session ended because the context budget was exhausted before the agent
-    produced a final answer. The Evolver should propose a pruning-hook
-    adjustment or prompt the model to avoid repetitive tool-call loops.
+    (ADR-0010 §Termination semantics) or via
+    ``task_aborted(reason='token_budget')`` (issue #1345). Both are terminal
+    conditions: the session ended because the context budget was exhausted
+    before the agent produced a final answer. The Evolver should propose a
+    pruning-hook adjustment or prompt the model to avoid repetitive tool-call
+    loops.
 
-    Returns ``None`` when no outcome event with the trigger payload is
-    present, so the caller can fall through to subsequent checks.
+    Returns ``None`` when no matching event is present, so the caller can
+    fall through to subsequent checks.
     """
     for i, event in enumerate(ordered):
         if event.kind == "outcome":
@@ -478,6 +485,35 @@ def _aggregate_context_overflow(
                         f"{CONTEXT_OVERFLOW_CLASS} failure: agent loop reached "
                         f"max_steps ({steps}) before producing a final answer"
                     ),
+                    failed_steps=failed_steps,
+                    suspected_causes=causes,
+                    proposed_class=CONTEXT_OVERFLOW_CLASS,
+                )
+        if event.kind == "task_aborted":
+            reason = event.payload.get("reason")
+            if reason == "token_budget":
+                token_budget = event.payload.get("token_budget")
+                failed_steps = [
+                    {
+                        "index": i,
+                        "event_id": event.event_id,
+                        "kind": event.kind,
+                        "timestamp": event.timestamp,
+                        "signal": "task_aborted:token_budget",
+                        "payload": event.payload,
+                    }
+                ]
+                causes = [
+                    _CLASS_CAUSE_TEMPLATES[CONTEXT_OVERFLOW_CLASS].format(match="token_budget")
+                ]
+                summary_parts = [
+                    f"{CONTEXT_OVERFLOW_CLASS} failure: task aborted due to token_budget exhaustion"
+                ]
+                if token_budget is not None:
+                    summary_parts.append(f"(budget={token_budget})")
+                return FailureReport(
+                    session_id=session_id,
+                    summary=" ".join(summary_parts),
                     failed_steps=failed_steps,
                     suspected_causes=causes,
                     proposed_class=CONTEXT_OVERFLOW_CLASS,
@@ -599,23 +635,12 @@ class Digester:
         """
         ordered = sorted(events, key=lambda e: e.timestamp)
 
-        # Short-circuit for terminal conditions: these take precedence over
-        # any other failures that might exist in the same session.
+        # Collect special terminal-condition failures first; these are prepended
+        # to the generic failure list so they are processed first, but they do
+        # NOT short-circuit — other failures in the same session must still be
+        # reported (issue #1260).
         overflow_report = _aggregate_context_overflow(session_id, ordered)
-        if overflow_report is not None:
-            return BatchFailureReport(
-                session_id=session_id,
-                failure_reports=[overflow_report],
-                total_failures=1,
-            )
-
         injection_report = _aggregate_injection_blocks(session_id, ordered)
-        if injection_report is not None:
-            return BatchFailureReport(
-                session_id=session_id,
-                failure_reports=[injection_report],
-                total_failures=1,
-            )
 
         # Collect all failures and merge by proposed_class.
         failures_by_class: dict[str, FailureReport] = {}
@@ -648,6 +673,19 @@ class Digester:
                 failures_by_class[proposed_class] = report
 
         if not failures_by_class:
+            # No generic failures; if a terminal-condition report exists, use it.
+            if overflow_report is not None:
+                return BatchFailureReport(
+                    session_id=session_id,
+                    failure_reports=[overflow_report],
+                    total_failures=1,
+                )
+            if injection_report is not None:
+                return BatchFailureReport(
+                    session_id=session_id,
+                    failure_reports=[injection_report],
+                    total_failures=1,
+                )
             clean_report = FailureReport(
                 session_id=session_id,
                 summary=(f"No failures detected across {len(ordered)} trace event(s)."),
@@ -668,6 +706,15 @@ class Digester:
             return len(ordered)
 
         sorted_reports = sorted(failures_by_class.values(), key=first_failure_index)
+
+        # Prepend terminal-condition failures so they are processed first.
+        # overflow_report takes absolute priority; injection_report follows.
+        # Neither short-circuits: all failures are included (issue #1260).
+        if overflow_report is not None:
+            sorted_reports.insert(0, overflow_report)
+        if injection_report is not None and injection_report is not overflow_report:
+            sorted_reports.insert(0 if overflow_report is None else 1, injection_report)
+
         return BatchFailureReport(
             session_id=session_id,
             failure_reports=sorted_reports,

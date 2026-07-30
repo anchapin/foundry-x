@@ -43,7 +43,8 @@ class TraceLoggerAttributes(BaseModel):
     change; see ADR-0007 §Trace-driven development)
     ═══════════════════════════════════════════════════════════════════════
     Session lifecycle:  session_start | session_end | task_received |
-                       task_completed | task_failed | task_aborted
+                       task_completed | task_failed | task_aborted |
+                       token_budget_aborted
     Agent loop:         user_prompt | model_request | model_response |
                        model_error | tool_call | tool_result | outcome |
                        hook_registry_error
@@ -124,7 +125,9 @@ class TraceLoggerAttributes(BaseModel):
     message:         str         task_failed | model_error | hook_registry_error
                                  — str(exc) value
     timeout_s:       float       task_aborted — wall-clock timeout seconds
-    token_budget:    int         task_aborted — active token budget at abort
+    token_budget:    int         task_aborted | token_budget_aborted —
+                                 active token budget at abort
+    tokens_used:     int         token_budget_aborted — running token total at abort
     prompt:          str         task_received — raw --task argument
     markers:         list[str]   injection_blocked — sorted unique marker names
     preview:         str         injection_blocked — first 120 chars of blocked
@@ -195,7 +198,11 @@ class TraceLoggerAttributes(BaseModel):
         default=None, description="Wall-clock timeout seconds (task_aborted)"
     )
     token_budget: int | None = Field(
-        default=None, description="Active token budget at abort (task_aborted)"
+        default=None,
+        description="Active token budget at abort (task_aborted, token_budget_aborted)",
+    )
+    tokens_used: int | None = Field(
+        default=None, description="Running token total at abort (token_budget_aborted)"
     )
     markers: list | None = Field(
         default=None, description="Sorted unique marker names (injection_blocked)"
@@ -720,31 +727,43 @@ class TraceLogger:
                     return True
         return False
 
-    def list_unevolved_sessions(self) -> list[str]:
+    def list_unevolved_sessions(self, harness_version: str | None = None) -> list[str]:
         """Return session IDs that have not yet been evolved (issue #1047).
 
         Only sessions that have ended (``ended_at`` is set) are returned, so
         the daemon does not try to evolve a session that is still recording
         events. Ordering is by ``started_at`` ascending, matching
         :meth:`list_sessions`.
+
+        Parameters
+        ----------
+        harness_version:
+            When provided, only sessions whose ``harness_version`` matches
+            are returned. Mirrors the filter accepted by :meth:`list_sessions`.
         """
         if self.backend == "jsonl":
-            return self._list_unevolved_sessions_jsonl()
-        return self._list_unevolved_sessions_sqlite()
+            return self._list_unevolved_sessions_jsonl(harness_version=harness_version)
+        return self._list_unevolved_sessions_sqlite(harness_version=harness_version)
 
-    def _list_unevolved_sessions_sqlite(self) -> list[str]:
+    def _list_unevolved_sessions_sqlite(self, harness_version: str | None = None) -> list[str]:
         assert self._conn is not None  # backend == "sqlite"
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)")}
         evolved_col = "evolved" if "evolved" in columns else "0"
         ended_col = "ended_at" if "ended_at" in columns else "NULL"
-        rows = self._conn.execute(
-            f"SELECT session_id FROM sessions WHERE {evolved_col} = 0 "
-            f"AND {ended_col} IS NOT NULL ORDER BY started_at"
-        ).fetchall()
+        query = (
+            f"SELECT session_id FROM sessions WHERE {evolved_col} = 0 AND {ended_col} IS NOT NULL"
+        )
+        params: list[Any] = []
+        if harness_version is not None:
+            query += " AND harness_version = ?"
+            params.append(harness_version)
+        query += " ORDER BY started_at"
+        rows = self._conn.execute(query, params).fetchall()
         return [row[0] for row in rows]
 
-    def _list_unevolved_sessions_jsonl(self) -> list[str]:
+    def _list_unevolved_sessions_jsonl(self, harness_version: str | None = None) -> list[str]:
         sessions = self._list_sessions_jsonl()
+        session_version_map = {s.session_id: s.harness_version for s in sessions}
         evolved_ids: set[str] = set()
         if self.path.exists():
             with self.path.open("r", encoding="utf-8") as fh:
@@ -762,11 +781,114 @@ class TraceLogger:
                         and record.get("session_id") is not None
                     ):
                         evolved_ids.add(record["session_id"])
-        return [
+        result = [
             s.session_id
             for s in sessions
             if s.session_id not in evolved_ids and s.ended_at is not None
         ]
+        if harness_version is not None:
+            result = [sid for sid in result if session_version_map.get(sid) == harness_version]
+        return result
+
+    def iter_unevolved_verdicts(self, harness_version: str | None = None) -> Iterator[TraceEvent]:
+        """Yield critic_verdict events for unevolved sessions in a single streaming cursor.
+
+        Issue #1272 — this is the O(1) store call the evolution daemon uses
+        instead of calling ``list_unevolved_sessions`` (O(S) sessions) and
+        then ``load_session`` per session (another O(S) calls), for a total
+        of O(2S) round-trips. ``iter_unevolved_verdicts`` pushes the
+        evolved-vs-unevolved filter down to the store layer: for sqlite it is
+        a JOIN; for jsonl it is inline session tracking during a single pass.
+
+        Only sessions that have ended (``ended_at`` is set) are included,
+        matching the contract of :meth:`list_unevolved_sessions`.
+
+        Parameters
+        ----------
+        harness_version:
+            When provided, only critic_verdict events belonging to sessions
+            whose ``harness_version`` matches are yielded.
+        """
+        if self.backend == "jsonl":
+            yield from self._iter_unevolved_verdicts_jsonl(harness_version=harness_version)
+            return
+        yield from self._iter_unevolved_verdicts_sqlite(harness_version=harness_version)
+
+    def _iter_unevolved_verdicts_sqlite(
+        self, harness_version: str | None = None
+    ) -> Iterator[TraceEvent]:
+        assert self._conn is not None  # backend == "sqlite"
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)")}
+        evolved_col = "s.evolved" if "evolved" in columns else "0"
+        ended_col = "s.ended_at" if "ended_at" in columns else "NULL"
+        query = (
+            f"SELECT e.event_id, e.session_id, e.timestamp, e.kind, e.payload "
+            f"FROM events e JOIN sessions s ON e.session_id = s.session_id "
+            f"WHERE {evolved_col} = 0 AND {ended_col} IS NOT NULL AND e.kind = 'critic_verdict'"
+        )
+        params: list[Any] = []
+        if harness_version is not None:
+            query += " AND s.harness_version = ?"
+            params.append(harness_version)
+        query += " ORDER BY e.timestamp"
+        cursor = self._conn.execute(query, params)
+        for event_id, sid, ts, k, payload in cursor:
+            yield TraceEvent.model_validate(
+                {
+                    "event_id": event_id,
+                    "session_id": sid,
+                    "timestamp": ts,
+                    "kind": k,
+                    "payload": json.loads(payload),
+                }
+            )
+
+    def _iter_unevolved_verdicts_jsonl(
+        self, harness_version: str | None = None
+    ) -> Iterator[TraceEvent]:
+        if not self.path.exists():
+            return
+        pending: dict[str, list[dict[str, Any]]] = {}
+        evolved_sessions: set[str] = set()
+        session_versions: dict[str, str] = {}
+        ended_sessions: dict[str, str] = {}
+        with self.path.open("r", encoding="utf-8") as fh:
+            for lineno, line in enumerate(fh, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record: dict[str, Any] = json.loads(line)
+                except json.JSONDecodeError:
+                    self._record_jsonl_skip(None, lineno, "json_decode_error")
+                    continue
+                record_kind = record.get("kind")
+                sid = record.get("session_id")
+                if record_kind == "session_evolved" and sid is not None:
+                    evolved_sessions.add(sid)
+                    pending.pop(sid, None)
+                    ended_sessions.pop(sid, None)
+                elif record_kind == "session_start" and sid is not None:
+                    session_versions[sid] = record.get("harness_version", "")
+                    pending.setdefault(sid, [])
+                elif record_kind == "session_end" and sid is not None:
+                    ended_sessions[sid] = record.get("ended_at", "")
+                elif "event_id" in record and record_kind == "critic_verdict":
+                    if sid is None:
+                        continue
+                    if sid in evolved_sessions:
+                        continue
+                    pending.setdefault(sid, []).append(record)
+        for sid, events in pending.items():
+            if sid in evolved_sessions:
+                continue
+            ended_at = ended_sessions.get(sid, None)
+            if ended_at is None or ended_at == "":
+                continue
+            if harness_version is not None and session_versions.get(sid) != harness_version:
+                continue
+            for event in events:
+                yield TraceEvent.model_validate(event)
 
     def session_duration(self, session_id: str) -> timedelta | None:
         """Wall-clock duration of a session, or ``None`` if not yet ended.
@@ -904,6 +1026,7 @@ class TraceLogger:
         self,
         kind: str | None = None,
         harness_version: str | None = None,
+        since: str | None = None,
     ) -> Iterator[TraceEvent]:
         """Yield :class:`TraceEvent` rows across **all** matching sessions.
 
@@ -938,11 +1061,22 @@ class TraceLogger:
             JOIN against the ``sessions`` table (sqlite) or by tracking
             ``session_start`` marker lines inline (jsonl). ``None`` means
             no filter — events from every session qualify.
+        since:
+            When provided, only events whose ``timestamp`` is at or after
+            this ISO-8601 string are yielded. Pushed down to the store as a
+            ``WHERE e.timestamp >= ?`` clause (sqlite) or an inline
+            filter (jsonl) so time-bounded queries do not materialize
+            events outside the window. ``None`` (default) means no filter —
+            all matching events qualify.
         """
         if self.backend == "jsonl":
-            yield from self._query_events_jsonl(kind=kind, harness_version=harness_version)
+            yield from self._query_events_jsonl(
+                kind=kind, harness_version=harness_version, since=since
+            )
             return
-        yield from self._query_events_sqlite(kind=kind, harness_version=harness_version)
+        yield from self._query_events_sqlite(
+            kind=kind, harness_version=harness_version, since=since
+        )
 
     def _list_sessions_sqlite(self, harness_version: str | None = None) -> Sequence[TraceSession]:
         assert self._conn is not None  # backend == "sqlite"
@@ -1093,6 +1227,7 @@ class TraceLogger:
         self,
         kind: str | None = None,
         harness_version: str | None = None,
+        since: str | None = None,
     ) -> Iterator[TraceEvent]:
         # Issue #273 — one streaming cursor across all matching sessions.
         # The optional ``harness_version`` filter is implemented as a JOIN
@@ -1111,6 +1246,9 @@ class TraceLogger:
         if kind is not None:
             conditions.append("e.kind = ?")
             params.append(kind)
+        if since is not None:
+            conditions.append("e.timestamp >= ?")
+            params.append(since)
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY e.timestamp"
@@ -1496,6 +1634,7 @@ class TraceLogger:
         self,
         kind: str | None = None,
         harness_version: str | None = None,
+        since: str | None = None,
     ) -> Iterator[TraceEvent]:
         # Issue #273 — stream the JSONL file exactly once, yielding every
         # matching event in append order (which is timestamp order for a
@@ -1540,6 +1679,10 @@ class TraceLogger:
                 if harness_version is not None:
                     sid = record.get("session_id")
                     if session_versions.get(sid) != harness_version:
+                        continue
+                if since is not None:
+                    ts = record.get("timestamp")
+                    if ts is None or ts < since:
                         continue
                 yield TraceEvent.model_validate(record)
 

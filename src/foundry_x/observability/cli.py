@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import warnings
 from pathlib import Path
 
 from foundry_x.evolution.digester import Digester
@@ -38,6 +39,26 @@ from foundry_x.observability.tool_latency import (
     render_tool_latency_markdown,
 )
 from foundry_x.trace.logger import TraceLogger
+
+
+def _get_trace_db(args: argparse.Namespace) -> str:
+    """Return the trace-db path, emitting a deprecation warning if --db was used.
+
+    Raises:
+        ValueError: if neither --db nor --trace-db was provided.
+    """
+    db_val = getattr(args, "db", None)
+    trace_db_val = getattr(args, "trace_db", None)
+    if db_val is not None:
+        warnings.warn(
+            "--db is deprecated; use --trace-db instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return db_val
+    if trace_db_val is not None:
+        return trace_db_val
+    raise ValueError("neither --trace-db nor --db was provided")
 
 
 def _load_task_metadata(path: Path) -> dict[str, TaskKpiMetadata]:
@@ -97,9 +118,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Aggregate Critic verdicts into a regression report.",
     )
     regression.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace sqlite database (default: logs/traces.db).",
+    )
+    regression.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     regression.add_argument(
         "--since",
@@ -178,9 +204,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print the formatted timeline of a session from the trace store.",
     )
     timeline.add_argument(
-        "--db",
-        required=True,
+        "--trace-db",
+        default=None,
         help="Path to the trace store (sqlite .db or jsonl).",
+    )
+    timeline.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     timeline.add_argument(
         "--session-id",
@@ -209,6 +240,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write the timeline to this path instead of stdout.",
     )
+    timeline.add_argument(
+        "--kind",
+        default=None,
+        help=("Filter timeline to only events of this kind (e.g. --kind tool_call). Issue #1257."),
+    )
 
     # Issue #268: human-readable failure analysis for a single session.
     # Calls Digester.digest() then render_failure_report() so a developer
@@ -218,9 +254,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Render the classified FailureReport for a single session.",
     )
     failure_report.add_argument(
-        "--db",
-        required=True,
+        "--trace-db",
+        default=None,
         help="Path to the trace store (sqlite .db or jsonl).",
+    )
+    failure_report.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     failure_report.add_argument(
         "--session-id",
@@ -247,9 +288,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Render a one-row-per-session roll-up of recorded outcomes.",
     )
     session_summary.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace store (sqlite .db or jsonl).",
+    )
+    session_summary.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     session_summary.add_argument(
         "--harness-version",
@@ -298,9 +344,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Render a one-screen per-session triage card (issue #804).",
     )
     session_card.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace store (sqlite .db or jsonl).",
+    )
+    session_card.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     session_card.add_argument(
         "--session-id",
@@ -336,9 +387,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Aggregate per-tool latency percentiles across sessions.",
     )
     tool_latency.add_argument(
-        "--db",
+        "--trace-db",
         default="logs/traces.db",
         help="Path to the trace sqlite database (default: logs/traces.db).",
+    )
+    tool_latency.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
     )
     tool_latency.add_argument(
         "--since",
@@ -372,6 +428,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "report. Choices: last_5_sessions, last_24h, last_7d. "
             "Default (no flag): single all-time aggregate, no trend "
             "section."
+        ),
+    )
+    tool_latency.add_argument(
+        "--trend",
+        action="store_true",
+        default=False,
+        help=(
+            "Show trend analysis for the last 24 hours (issue #1227). "
+            "Adds trend_p95 and delta_p95_ms columns to the output. "
+            "Recommended mode for operational monitoring. "
+            "--trend implies --window last_24h when no --window flags "
+            "are provided; explicit --window flags are respected alongside "
+            "--trend."
         ),
     )
 
@@ -414,7 +483,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
     if args.command == "regression-report":
-        logger = TraceLogger(args.db)
+        logger = TraceLogger(_get_trace_db(args))
         task_metadata: dict[str, TaskKpiMetadata] | None = None
         if args.group_by is not None:
             if args.task_metadata is not None:
@@ -443,8 +512,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "timeline":
-        backend = _infer_backend(args.db)
-        logger = TraceLogger(args.db, backend=backend)
+        backend = _infer_backend(_get_trace_db(args))
+        logger = TraceLogger(_get_trace_db(args), backend=backend)
         session_id = args.session_id
         if session_id is None:
             if args.harness_version is None:
@@ -459,6 +528,13 @@ def main(argv: list[str] | None = None) -> int:
         if not events:
             sys.stderr.write(f"session {session_id} not found or empty\n")
             return 2
+        if args.kind is not None:
+            events = [e for e in events if e.kind == args.kind]
+            if not events:
+                sys.stderr.write(
+                    f"No events matching kind '{args.kind}' in session {session_id}.\n"
+                )
+                return 1
         fmt = _resolve_format(args.format, args.out)
         if args.format is not None and args.out is not None:
             expected_ext = "." + args.format
@@ -482,8 +558,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "failure-report":
-        backend = _infer_backend(args.db)
-        logger = TraceLogger(args.db, backend=backend)
+        backend = _infer_backend(_get_trace_db(args))
+        logger = TraceLogger(_get_trace_db(args), backend=backend)
         events = logger.load_session(args.session_id)
         if not events:
             sys.stderr.write(f"session {args.session_id} not found or empty\n")
@@ -507,8 +583,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "session-summary":
-        backend = _infer_backend(args.db)
-        logger = TraceLogger(args.db, backend=backend)
+        backend = _infer_backend(_get_trace_db(args))
+        logger = TraceLogger(_get_trace_db(args), backend=backend)
         rows = build_session_summary(
             logger,
             harness_version=args.harness_version,
@@ -547,8 +623,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "session-card":
-        backend = _infer_backend(args.db)
-        logger = TraceLogger(args.db, backend=backend)
+        backend = _infer_backend(_get_trace_db(args))
+        logger = TraceLogger(_get_trace_db(args), backend=backend)
         # Issue #902: --latest auto-selects the most recent session. The two
         # selectors are mutually exclusive; missing both is a usage error.
         # --harness-version narrows the latest search to a single build.
@@ -581,11 +657,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "tool-latency":
-        backend = _infer_backend(args.db)
-        logger = TraceLogger(args.db, backend=backend)
-        windows = (
-            [LatencyWindow(value) for value in args.window] if args.window is not None else None
-        )
+        backend = _infer_backend(_get_trace_db(args))
+        logger = TraceLogger(_get_trace_db(args), backend=backend)
+        if args.window is not None:
+            windows = [LatencyWindow(value) for value in args.window]
+        elif args.trend:
+            windows = [LatencyWindow.LAST_24H]
+        else:
+            windows = None
         report = aggregate_tool_latency(
             logger,
             since=args.since,

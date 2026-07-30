@@ -1,6 +1,6 @@
 """Benchmark task: debug a circular import across two packages (ADR-0028 H1).
 
-This is a ``difficulty_tier='medium'`` task in the suite.  It
+This is a ``difficulty_tier='hard'`` task in the suite.  It
 implements Archetype H1 ("complex debugging across modules") from
 ADR-0028 §3:
 
@@ -82,18 +82,18 @@ TASK = BenchmarkTask(
         "After your fix, 'python -m pytest' must exit 0 with all tests "
         "passing."
     ),
-    difficulty_tier="medium",
+    difficulty_tier="hard",
     expected_outcome=(
         "After breaking the circular import, 'python -m pytest' exits 0 "
         "and both tests in tests/test_integration.py pass."
     ),
-    timeout_seconds=60,
-    requires_skills=["bash", "edit_file"],
+    timeout_seconds=300,
+    requires_skills=["bash", "grep_search", "edit_file"],
     tags=["debugging", "import-cycle", "cross-module", "multi-file"],
 )
 
 #: Root of the static fixture data for this task.
-_FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / TASK.name
+_FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "hard" / TASK.name
 
 #: Golden ``pkg_b/serializers.py`` -- the top-level import is deferred into
 #: ``serialize()`` to break the cycle.  No other file changes.

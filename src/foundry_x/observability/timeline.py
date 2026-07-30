@@ -191,7 +191,9 @@ def render_timeline_svg(events: Sequence[TraceEvent]) -> str:
     if not records:
         return ""
 
-    total_duration = max(r.offset_seconds for r in records) if records else 1
+    total_duration = max((r.offset_seconds for r in records), default=1)
+    if total_duration == 0:
+        total_duration = 1
     padding = 40
     row_height = 24
     row_spacing = 8

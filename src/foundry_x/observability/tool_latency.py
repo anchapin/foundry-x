@@ -96,6 +96,10 @@ class ToolLatencyRow(BaseModel):
     ``tool_call`` events). ``count`` is the number of tool_call events
     in the analysis window that landed in this bucket; the three
     percentile fields are durations in milliseconds.
+
+    Issue #1269 adds the four hook overhead percentiles:
+    ``hook_overhead_ms_p50``, ``hook_overhead_ms_p95``,
+    ``hook_post_overhead_ms_p50``, ``hook_post_overhead_ms_p95``.
     """
 
     tool: str
@@ -103,6 +107,10 @@ class ToolLatencyRow(BaseModel):
     p50_ms: float
     p95_ms: float
     p99_ms: float
+    hook_overhead_ms_p50: float = 0.0
+    hook_overhead_ms_p95: float = 0.0
+    hook_post_overhead_ms_p50: float = 0.0
+    hook_post_overhead_ms_p95: float = 0.0
 
 
 class WindowedToolLatencyRow(BaseModel):
@@ -113,6 +121,10 @@ class WindowedToolLatencyRow(BaseModel):
     previous equal-sized window (issue #877). ``delta_p95_ms`` is
     ``current - previous`` in milliseconds; ``None`` when the comparison
     is not possible (missing data in one window or insufficient samples).
+
+    Issue #1269 adds the four hook overhead percentiles:
+    ``hook_overhead_ms_p50``, ``hook_overhead_ms_p95``,
+    ``hook_post_overhead_ms_p50``, ``hook_post_overhead_ms_p95``.
     """
 
     tool: str
@@ -122,6 +134,10 @@ class WindowedToolLatencyRow(BaseModel):
     p99_ms: float
     trend_p95: TrendDirection
     delta_p95_ms: float | None = None
+    hook_overhead_ms_p50: float = 0.0
+    hook_overhead_ms_p95: float = 0.0
+    hook_post_overhead_ms_p50: float = 0.0
+    hook_post_overhead_ms_p95: float = 0.0
 
 
 class WindowedLatencySection(BaseModel):
@@ -217,10 +233,61 @@ def _extract_duration_ms(payload: dict) -> float | None:
     return number
 
 
+def _extract_hook_overhead_ms(payload: dict) -> float | None:
+    """Pull ``hook_overhead_ms`` from a ``tool_call`` payload, tolerating bad rows.
+
+    Mirrors the defensive coercion in :func:`_extract_duration_ms`.
+    """
+    value = payload.get("hook_overhead_ms")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    if math.isnan(number) or number < 0:
+        return None
+    return number
+
+
+def _extract_post_overhead_ms(payload: dict) -> float | None:
+    """Pull ``hook_post_overhead_ms`` from a ``tool_call`` payload, tolerating bad rows.
+
+    Mirrors the defensive coercion in :func:`_extract_duration_ms`.
+    """
+    value = payload.get("hook_post_overhead_ms")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    if math.isnan(number) or number < 0:
+        return None
+    return number
+
+
 def _bucket_durations(
     events: Iterable[TraceEvent],
     since: str | None = None,
-) -> tuple[dict[str, list[float]], int, str | None, str | None]:
+) -> tuple[
+    dict[str, list[float]],
+    dict[str, list[float]],
+    dict[str, list[float]],
+    int,
+    str | None,
+    str | None,
+]:
     """Bucket ``tool_call`` event durations under their ``name`` field.
 
     Shared by the all-time aggregate (issue #181) and the windowed
@@ -230,11 +297,17 @@ def _bucket_durations(
     accept a timestamp filter on ``iter_events`` — see
     regression_report.py:94-96).
 
-    Returns ``(buckets, total_calls, earliest, latest)`` where the two
-    timestamps are the lexicographic min/max of the accepted event
-    timestamps (``None`` when the input is empty).
+    Returns ``(duration_buckets, hook_overhead_buckets, post_overhead_buckets,
+    total_calls, earliest, latest)`` where the two timestamps are the
+    lexicographic min/max of the accepted event timestamps (``None`` when
+    the input is empty).
+
+    Issue #1269 adds hook overhead bucketing for ``hook_overhead_ms`` and
+    ``hook_post_overhead_ms`` alongside the existing duration bucketing.
     """
-    buckets: dict[str, list[float]] = {}
+    duration_buckets: dict[str, list[float]] = {}
+    hook_overhead_buckets: dict[str, list[float]] = {}
+    post_overhead_buckets: dict[str, list[float]] = {}
     total_calls = 0
     earliest: str | None = None
     latest: str | None = None
@@ -243,33 +316,55 @@ def _bucket_durations(
             continue
         name = event.payload.get("name")
         if not isinstance(name, str) or not name:
-            # A tool_call without a name cannot be bucketed; skip
-            # rather than synthesize a key like "<unknown>" that
-            # would skew the operator's view of named-tool latency.
             continue
         duration = _extract_duration_ms(event.payload)
         if duration is None:
             continue
-        buckets.setdefault(name, []).append(duration)
+        duration_buckets.setdefault(name, []).append(duration)
         total_calls += 1
         if earliest is None or event.timestamp < earliest:
             earliest = event.timestamp
         if latest is None or event.timestamp > latest:
             latest = event.timestamp
-    return buckets, total_calls, earliest, latest
+
+        hook_overhead = _extract_hook_overhead_ms(event.payload)
+        if hook_overhead is not None:
+            hook_overhead_buckets.setdefault(name, []).append(hook_overhead)
+        post_overhead = _extract_post_overhead_ms(event.payload)
+        if post_overhead is not None:
+            post_overhead_buckets.setdefault(name, []).append(post_overhead)
+
+    return (
+        duration_buckets,
+        hook_overhead_buckets,
+        post_overhead_buckets,
+        total_calls,
+        earliest,
+        latest,
+    )
 
 
-def _rows_from_buckets(buckets: dict[str, list[float]]) -> list[ToolLatencyRow]:
+def _rows_from_buckets(
+    buckets: dict[str, list[float]],
+    hook_overhead_buckets: dict[str, list[float]] | None = None,
+    post_overhead_buckets: dict[str, list[float]] | None = None,
+) -> list[ToolLatencyRow]:
     """Build the deterministic per-tool percentile rows from a bucket map.
 
     Buckets with zero entries cannot occur by construction (see
     :func:`_bucket_durations`), so the resulting list contains only
     tools that actually fired in the input stream. Rows are sorted by
     tool name so the Markdown table is reproducible across runs.
+
+    Issue #1269 adds ``hook_overhead_buckets`` and ``post_overhead_buckets``
+    for the hook overhead percentiles. When provided, the corresponding
+    p50/p95 fields are populated on each row.
     """
     rows: list[ToolLatencyRow] = []
     for tool, durations in buckets.items():
         durations.sort()
+        hook_vals = sorted(hook_overhead_buckets.get(tool, [])) if hook_overhead_buckets else []
+        post_vals = sorted(post_overhead_buckets.get(tool, [])) if post_overhead_buckets else []
         rows.append(
             ToolLatencyRow(
                 tool=tool,
@@ -277,6 +372,10 @@ def _rows_from_buckets(buckets: dict[str, list[float]]) -> list[ToolLatencyRow]:
                 p50_ms=percentile(durations, 50.0),
                 p95_ms=percentile(durations, 95.0),
                 p99_ms=percentile(durations, 99.0),
+                hook_overhead_ms_p50=percentile(hook_vals, 50.0) if hook_vals else 0.0,
+                hook_overhead_ms_p95=percentile(hook_vals, 95.0) if hook_vals else 0.0,
+                hook_post_overhead_ms_p50=percentile(post_vals, 50.0) if post_vals else 0.0,
+                hook_post_overhead_ms_p95=percentile(post_vals, 95.0) if post_vals else 0.0,
             )
         )
     rows.sort(key=lambda r: r.tool)
@@ -320,8 +419,15 @@ def aggregate_tool_latency(
         for session in logger.list_sessions(harness_version=harness_version)
         for event in logger.iter_events(session.session_id, kind=TOOL_CALL_KIND)
     )
-    buckets, total_calls, earliest, latest = _bucket_durations(all_events, since=since)
-    rows = _rows_from_buckets(buckets)
+    (
+        buckets,
+        hook_overhead_buckets,
+        post_overhead_buckets,
+        total_calls,
+        earliest,
+        latest,
+    ) = _bucket_durations(all_events, since=since)
+    rows = _rows_from_buckets(buckets, hook_overhead_buckets, post_overhead_buckets)
 
     sections: list[WindowedLatencySection] = []
     if windows:
@@ -565,8 +671,22 @@ def _build_window_section(
             previous_end,
         ) = _time_window_bounds(spec, latest_event_ts, all_events)
 
-    current_buckets, current_total, _cs, _ce = _bucket_durations(current_events)
-    previous_buckets, _, _ps, _pe = _bucket_durations(previous_events)
+    (
+        current_buckets,
+        current_hook_buckets,
+        current_post_buckets,
+        current_total,
+        _cs,
+        _ce,
+    ) = _bucket_durations(current_events)
+    (
+        previous_buckets,
+        _previous_hook_buckets,
+        _previous_post_buckets,
+        _,
+        _ps,
+        _pe,
+    ) = _bucket_durations(previous_events)
 
     # Build rows for every tool that fired in the current window; tools
     # that fired in the previous window but not the current get a
@@ -575,6 +695,8 @@ def _build_window_section(
     rows: list[WindowedToolLatencyRow] = []
     for tool in sorted(current_buckets):
         durations = sorted(current_buckets[tool])
+        hook_vals = sorted(current_hook_buckets.get(tool, []))
+        post_vals = sorted(current_post_buckets.get(tool, []))
         p95 = percentile(durations, 95.0)
         previous_durations = previous_buckets.get(tool)
         if previous_durations is None or len(previous_durations) < _MIN_SAMPLES_FOR_TREND:
@@ -606,6 +728,10 @@ def _build_window_section(
                 p99_ms=percentile(durations, 99.0),
                 trend_p95=trend,
                 delta_p95_ms=delta,
+                hook_overhead_ms_p50=percentile(hook_vals, 50.0) if hook_vals else 0.0,
+                hook_overhead_ms_p95=percentile(hook_vals, 95.0) if hook_vals else 0.0,
+                hook_post_overhead_ms_p50=percentile(post_vals, 50.0) if post_vals else 0.0,
+                hook_post_overhead_ms_p95=percentile(post_vals, 95.0) if post_vals else 0.0,
             )
         )
 
