@@ -19,7 +19,7 @@ jobs:
         uses: ./.github/actions/install-uv
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install 3.14
 
       - name: Sync dependencies
         run: uv sync --all-extras --dev
@@ -48,7 +48,7 @@ jobs:
         uses: ./.github/actions/install-uv
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install 3.14
 
       - name: Sync dependencies
         run: uv sync --all-extras --dev
@@ -67,7 +67,7 @@ jobs:
         uses: ./.github/actions/install-uv
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install 3.14
 
       - name: Sync dependencies
         run: uv sync --all-extras --dev
