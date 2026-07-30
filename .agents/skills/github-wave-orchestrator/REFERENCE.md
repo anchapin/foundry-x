@@ -76,6 +76,11 @@ Steps:
           `gh pr merge {NUMBER} --squash`
           If second attempt also yields null mergedAt → report BLOCKED and STOP
     d. Clean up (ORDER MATTERS — worktree remove BEFORE branch delete):
+       **CRITICAL: Never modify the `origin` remote.** Worktrees share the
+       repository's git config, so `git remote remove origin` would remove
+       the shared origin remote and break all subsequent sub-agents and
+       orchestrator commands (issue #1407). Only the specific worktree, local
+       branch, and remote branch may be deleted.
        ```bash
        # Step 1: Remove worktree FIRST (branch must not be deleted yet)
        git worktree remove ../worktrees/issue-{NUMBER}-{SLUG}
@@ -89,6 +94,11 @@ Steps:
        # Step 4: Prune any stale worktree references
        git worktree prune
        ```
+
+       **NEVER run any of the following — they will break the repository:**
+       - `git remote remove origin` — destroys the shared origin remote
+       - `git remote remove <any>` — never remove any shared remote
+       - Any command that modifies or deletes remotes
 3. IF CI is failing:
    a. Get failing run: gh run list --branch fix/issue-{NUMBER}-{SLUG} --limit 1
    b. Get logs: gh run view {RUN_ID} --log
@@ -158,6 +168,7 @@ Within a wave, merge PRs in a specific order to minimize conflicts:
 git fetch origin develop
 
 # Cleanup (ORDER MATTERS: worktree remove BEFORE branch delete)
+# CRITICAL: Never modify the origin remote — worktrees share the repo's remotes.
 git worktree remove ../worktrees/issue-{N}-{slug}
 git branch -d fix/issue-{N}-{slug}
 git push origin --delete fix/issue-{N}-{slug}
@@ -403,6 +414,12 @@ Before creating a worktree:
 3. Verify `develop` is up to date: `git fetch origin develop`
 
 ### Cleanup
+
+**CRITICAL: Never modify the `origin` remote (issue #1407).**
+Worktrees share the repository's git config, so `git remote remove origin`
+or any remote-modifying command breaks all subsequent sub-agents and
+orchestrator commands. Only the specific worktree, branch, and remote ref
+may be deleted.
 
 After PR merge:
 ```bash
