@@ -339,6 +339,44 @@ async def test_token_budget_preserves_outcome_reason(tmp_path):
     assert adapter.calls == 2
 
 
+@pytest.mark.asyncio
+async def test_token_budget_abort_includes_step_index(tmp_path):
+    """Issue #1340: ``task_aborted(reason='token_budget')`` payload must
+    include ``step`` — the 0-based agent-step index at which the budget was
+    exceeded.  Two tool-call turns of 100 tokens each; budget=150.  The
+    abort fires after step 1 (tokens_used=200 > 150)."""
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+    db = tmp_path / "traces.db"
+
+    responses = [
+        _tool_call_response("call_1", total_tokens=100),
+        _tool_call_response("call_2", total_tokens=100),
+        _final_response(total_tokens=10),
+    ]
+    adapter = _StreamingScriptedAdapter(responses)
+    limits = RunLimits(token_budget=150)
+
+    logger = TraceLogger(db)
+    with logger.session(harness_version="0.1.0") as session_id:
+        await run_task(
+            "issue-1340-token-budget-step",
+            harness_dir,
+            logger,
+            session_id,
+            model_adapter=adapter,
+            skill_executor=_noop_executor,
+            limits=limits,
+        )
+
+    events = logger.load_session(session_id)
+    aborted = [e for e in events if e.kind == "task_aborted"]
+    assert len(aborted) == 1
+    assert aborted[0].payload["reason"] == "token_budget"
+    assert "step" in aborted[0].payload, "step must be in task_aborted payload"
+    assert aborted[0].payload["step"] == 1
+
+
 # --- max_steps abort path ---------------------------------------------------
 
 
