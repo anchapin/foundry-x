@@ -387,6 +387,8 @@ class KpiSummary(BaseModel):
     """
 
     cycle_time_seconds: float | None = None
+    cycle_time_p50_seconds: float | None = None
+    cycle_time_p95_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
     injection_blocks: dict[str, int] = {}
@@ -560,6 +562,8 @@ class KpiHistoryEntry(BaseModel):
     timestamp: str
     harness_version: str | None = None
     cycle_time_seconds: float | None = None
+    cycle_time_p50_seconds: float | None = None
+    cycle_time_p95_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
     hooks_disabled_count: int = 0
@@ -946,6 +950,8 @@ def compute_kpis(
     """
     (
         cycle_time,
+        cycle_time_p50,
+        cycle_time_p95,
         excluded_wall_clock,
         excluded_token_budget,
         excluded_event_limit,
@@ -1005,6 +1011,8 @@ def compute_kpis(
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
+        cycle_time_p50_seconds=cycle_time_p50,
+        cycle_time_p95_seconds=cycle_time_p95,
         regression_rate=regression_rate,
         improvement_rate=improvement_rate,
         injection_blocks=injection_blocks,
@@ -1194,6 +1202,8 @@ def _compute_deltas(
 
     return {
         "cycle_time_seconds": _delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds),
+        "cycle_time_p50_seconds": _delta(baseline.cycle_time_p50_seconds, candidate.cycle_time_p50_seconds),
+        "cycle_time_p95_seconds": _delta(baseline.cycle_time_p95_seconds, candidate.cycle_time_p95_seconds),
         "regression_rate": _delta(baseline.regression_rate, candidate.regression_rate),
         "improvement_rate": _delta(baseline.improvement_rate, candidate.improvement_rate),
         "token_budget_hit_rate": _delta(
@@ -1282,12 +1292,12 @@ def _cycle_time(
     logger: TraceLogger,
     harness_version: str | None = None,
     since: str | None = None,
-) -> tuple[float | None, int, int, int, int]:
+) -> tuple[float | None, float | None, float | None, int, int, int, int]:
     """Mean wall-clock time from ``task_received`` to ``critic_verdict`` plus exclusion breakdown.
 
     Returns
     -------
-    ``(mean_seconds, excluded_wall_clock, excluded_token_budget, excluded_event_limit, excluded_other)``.
+    ``(mean_seconds, p50_seconds, p95_seconds, excluded_wall_clock, excluded_token_budget, excluded_event_limit, excluded_other)``.
 
     The mean is over sessions that have both a ``task_received`` and a
     ``critic_verdict`` event with a strictly positive delta; it is
@@ -1378,13 +1388,18 @@ def _cycle_time(
     if not deltas:
         return (
             None,
+            None,
+            None,
             excluded_wall_clock,
             excluded_token_budget,
             excluded_event_limit,
             excluded_other,
         )
+    sorted_deltas = sorted(deltas)
     return (
         sum(deltas) / len(deltas),
+        _percentile(sorted_deltas, 50),
+        _percentile(sorted_deltas, 95),
         excluded_wall_clock,
         excluded_token_budget,
         excluded_event_limit,
@@ -2562,6 +2577,8 @@ def _render_markdown(summary: KpiSummary) -> str:
         "| KPI | Value |",
         "| --- | --- |",
         f"| Cycle Time (seconds) | {_format_value(summary.cycle_time_seconds)} |",
+        f"| Cycle Time p50 (seconds) | {_format_value(summary.cycle_time_p50_seconds)} |",
+        f"| Cycle Time p95 (seconds) | {_format_value(summary.cycle_time_p95_seconds)} |",
         f"| Regression Rate | {_format_value(summary.regression_rate)} |",
         f"| Improvement Rate | {_format_value(summary.improvement_rate)} |",
         f"| Hooks Disabled Count | {summary.hooks_disabled_count} |",
@@ -2852,6 +2869,18 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
             f"{_format_value(baseline.cycle_time_seconds)} | "
             f"{_format_value(candidate.cycle_time_seconds)} | "
             f"{_format_delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds, higher_is_better=False)} |"
+        ),
+        (
+            "| Cycle Time p50 (seconds) | "
+            f"{_format_value(baseline.cycle_time_p50_seconds)} | "
+            f"{_format_value(candidate.cycle_time_p50_seconds)} | "
+            f"{_format_delta(baseline.cycle_time_p50_seconds, candidate.cycle_time_p50_seconds, higher_is_better=False)} |"
+        ),
+        (
+            "| Cycle Time p95 (seconds) | "
+            f"{_format_value(baseline.cycle_time_p95_seconds)} | "
+            f"{_format_value(candidate.cycle_time_p95_seconds)} | "
+            f"{_format_delta(baseline.cycle_time_p95_seconds, candidate.cycle_time_p95_seconds, higher_is_better=False)} |"
         ),
         (
             "| Regression Rate | "

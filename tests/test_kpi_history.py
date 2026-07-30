@@ -310,6 +310,8 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     # mean_completion_tokens_per_step are the issue #1271 aggregate metrics.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
+        "cycle_time_p50_seconds",
+        "cycle_time_p95_seconds",
         "regression_rate",
         "improvement_rate",
         "token_budget_abort_count",
