@@ -694,9 +694,7 @@ def _info(args: argparse.Namespace) -> int:
     logger = _logger_for(_get_trace_db(args))
     sessions = list(logger.list_sessions())
 
-    wal_threshold_bytes = int(
-        os.environ.get("FOUNDRY_WAL_WARN_BYTES", str(100 * 1024 * 1024))
-    )
+    wal_threshold_bytes = int(os.environ.get("FOUNDRY_WAL_WARN_BYTES", str(100 * 1024 * 1024)))
 
     fmt = getattr(args, "format", "text")
 
@@ -733,8 +731,7 @@ def _info(args: argparse.Namespace) -> int:
                 )
                 if has_open_session:
                     sys.stderr.write(
-                        " Note: store has open session(s) — "
-                        "WAL may include uncommitted writes."
+                        " Note: store has open session(s) — WAL may include uncommitted writes."
                     )
                 sys.stderr.write("\n")
     else:
