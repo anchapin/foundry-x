@@ -785,6 +785,8 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     # total_sessions is the issue #1337 session count for survivorship bias.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
+        "cycle_time_p50_seconds",
+        "cycle_time_p95_seconds",
         "regression_rate",
         "improvement_rate",
         "injection_blocks",

@@ -311,6 +311,8 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     # total_sessions is the issue #1337 session count for survivorship bias.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
+        "cycle_time_p50_seconds",
+        "cycle_time_p95_seconds",
         "regression_rate",
         "improvement_rate",
         "token_budget_abort_count",
