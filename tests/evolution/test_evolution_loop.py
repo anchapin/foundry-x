@@ -1331,11 +1331,7 @@ class TestRunEvolutionBatch:
         def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
             return [proposed_edit]
 
-        def mock_propose(self, harness_dir, failure, current_diff=None):
-            return [proposed_edit]
-
         monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
-        monkeypatch.setattr(Evolver, "propose", mock_propose)
         result = run_evolution_batch("sess-batch-edits", events, harness_dir)
         assert proposed_edit in result.proposed_edits
 
@@ -1418,11 +1414,7 @@ class TestRunEvolutionBatch:
         def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
             return [proposed_edit]
 
-        def mock_propose(self, harness_dir, failure, current_diff=None):
-            return [proposed_edit]
-
         monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
-        monkeypatch.setattr(Evolver, "propose", mock_propose)
         result = run_evolution_batch("sess-batch-target-file", events, harness_dir)
 
         assert result.total_failures >= 1

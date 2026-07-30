@@ -2098,12 +2098,14 @@ async def run_task(
                         "token_budget": token_budget,
                     },
                 )
+                overrun_pct = (tokens_used - token_budget) / token_budget * 100.0
                 _record_and_count(
                     session_id,
                     kind="token_budget_aborted",
                     payload={
                         "tokens_used": tokens_used,
                         "token_budget": token_budget,
+                        "overrun_pct": overrun_pct,
                     },
                 )
                 break

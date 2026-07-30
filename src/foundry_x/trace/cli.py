@@ -690,6 +690,12 @@ def _info(args: argparse.Namespace) -> int:
     whether the store is actively written to (open session without
     ended_at) so the warning can distinguish expected WAL growth from
     accumulated bloat.
+
+    Issue #1335: ``--format json`` exposes a machine-readable payload
+    with ``backend``, ``db_size_bytes``, ``wal_size_bytes``,
+    ``session_count``, and ``wal_warning`` (true when WAL > 100 MB).
+    ``--out`` writes output to a file; for JSON the content is also
+    echoed to stdout so operators can pipe and redirect simultaneously.
     """
     logger = _logger_for(_get_trace_db(args))
     sessions = list(logger.list_sessions())
@@ -697,6 +703,7 @@ def _info(args: argparse.Namespace) -> int:
     wal_threshold_bytes = int(os.environ.get("FOUNDRY_WAL_WARN_BYTES", str(100 * 1024 * 1024)))
 
     fmt = getattr(args, "format", "text")
+    out_path = getattr(args, "out", None)
 
     if logger.backend == "sqlite":
         db_path = Path(_get_trace_db(args))
@@ -706,24 +713,45 @@ def _info(args: argparse.Namespace) -> int:
         session_count = len(sessions)
 
         has_open_session = any(s.ended_at is None for s in sessions)
+        wal_warning = wal_size > wal_threshold_bytes
 
         if fmt == "json":
             result = {
                 "backend": "sqlite",
                 "db_size_bytes": db_size,
                 "wal_size_bytes": wal_size,
-                "sessions": session_count,
-                "wal_threshold_bytes": wal_threshold_bytes,
-                "wal_is_active_writer": has_open_session,
+                "session_count": session_count,
+                "wal_warning": wal_warning,
             }
-            sys.stdout.write(json.dumps(result, indent=2) + "\n")
+            output = json.dumps(result, indent=2) + "\n"
+            if out_path:
+                Path(out_path).write_text(output, encoding="utf-8")
+            sys.stdout.write(output)
+            if wal_warning:
+                sys.stderr.write(
+                    f"WARNING: WAL size ({wal_size} bytes) exceeds "
+                    f"{wal_threshold_bytes} bytes threshold. "
+                    f"Run `foundry-trace prune --vacuum` to reclaim WAL space."
+                )
+                if has_open_session:
+                    sys.stderr.write(
+                        " Note: store has open session(s) — WAL may include uncommitted writes."
+                    )
+                sys.stderr.write("\n")
         else:
-            sys.stdout.write("Backend: sqlite\n")
-            sys.stdout.write(f"DB size: {db_size} bytes\n")
-            sys.stdout.write(f"WAL size: {wal_size} bytes\n")
-            sys.stdout.write(f"Sessions: {session_count}\n")
+            out_lines = [
+                "Backend: sqlite",
+                f"DB size: {db_size} bytes",
+                f"WAL size: {wal_size} bytes",
+                f"Sessions: {session_count}",
+                "",
+            ]
+            out_text = "\n".join(out_lines)
+            if out_path:
+                Path(out_path).write_text(out_text, encoding="utf-8")
+            sys.stdout.write(out_text)
 
-            if wal_size > wal_threshold_bytes:
+            if wal_warning:
                 sys.stderr.write(
                     f"WARNING: WAL size ({wal_size} bytes) exceeds "
                     f"{wal_threshold_bytes} bytes threshold. "
@@ -742,14 +770,26 @@ def _info(args: argparse.Namespace) -> int:
         if fmt == "json":
             result = {
                 "backend": "jsonl",
-                "file_size_bytes": db_size,
-                "sessions": session_count,
+                "db_size_bytes": db_size,
+                "wal_size_bytes": 0,
+                "session_count": session_count,
+                "wal_warning": False,
             }
-            sys.stdout.write(json.dumps(result, indent=2) + "\n")
+            output = json.dumps(result, indent=2) + "\n"
+            if out_path:
+                Path(out_path).write_text(output, encoding="utf-8")
+            sys.stdout.write(output)
         else:
-            sys.stdout.write("Backend: jsonl\n")
-            sys.stdout.write(f"File size: {db_size} bytes\n")
-            sys.stdout.write(f"Sessions: {session_count}\n")
+            out_lines = [
+                "Backend: jsonl",
+                f"File size: {db_size} bytes",
+                f"Sessions: {session_count}",
+                "",
+            ]
+            out_text = "\n".join(out_lines)
+            if out_path:
+                Path(out_path).write_text(out_text, encoding="utf-8")
+            sys.stdout.write(out_text)
 
     return 0
 
@@ -1692,8 +1732,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default="text",
         help=(
             "Output format: 'text' (default) prints human-readable lines; "
-            "'json' exposes wal_threshold_bytes and wal_is_active_writer (issue #1336)."
+            "'json' emits a machine-readable payload with backend, db_size_bytes, "
+            "wal_size_bytes, session_count, and wal_warning (issue #1335)."
         ),
+    )
+    info_parser.add_argument(
+        "--out",
+        default=None,
+        help="Write output to this path (JSON is also echoed to stdout; issue #1335).",
     )
     info_parser.set_defaults(func=_info)
 

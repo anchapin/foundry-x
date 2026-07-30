@@ -1367,8 +1367,8 @@ def test_info_empty_db_shows_zero_sessions(tmp_path, capsys):
     assert "Sessions: 0" in out
 
 
-def test_info_sqlite_json_format_includes_wal_metadata(tmp_path, capsys):
-    """JSON output exposes wal_threshold_bytes and wal_is_active_writer."""
+def test_info_sqlite_json_format_includes_wal_warning(tmp_path, capsys):
+    """JSON output exposes wal_warning boolean and required keys per issue #1335."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db, backend="sqlite")
     with logger.session(harness_version="0.1.0") as sid:
@@ -1380,15 +1380,15 @@ def test_info_sqlite_json_format_includes_wal_metadata(tmp_path, capsys):
     out = capsys.readouterr().out
     data = json.loads(out)
     assert data["backend"] == "sqlite"
-    assert "wal_threshold_bytes" in data
-    assert "wal_is_active_writer" in data
-    assert isinstance(data["wal_threshold_bytes"], int)
-    assert isinstance(data["wal_is_active_writer"], bool)
+    assert "db_size_bytes" in data
+    assert "wal_size_bytes" in data
+    assert "session_count" in data
+    assert "wal_warning" in data
+    assert isinstance(data["wal_warning"], bool)
 
 
-def test_info_sqlite_json_format_wal_active_writer_true(tmp_path, capsys):
-    """When a session is open (no ended_at), wal_is_active_writer is True."""
-
+def test_info_sqlite_json_format_wal_warning_false_when_small_wal(tmp_path, capsys):
+    """When WAL is small (no bloat), wal_warning is False even with an open session."""
     import sqlite3
     from datetime import UTC, datetime
 
@@ -1408,23 +1408,22 @@ def test_info_sqlite_json_format_wal_active_writer_true(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert data["wal_is_active_writer"] is True
+    assert data["wal_warning"] is False
 
 
-def test_info_sqlite_json_format_wal_active_writer_false(tmp_path, capsys):
-    """When all sessions are closed, wal_is_active_writer is False."""
+def test_info_sqlite_json_format_wal_warning_false_when_closed_session(tmp_path, capsys):
+    """When all sessions are closed and WAL is small, wal_warning is False."""
     db = tmp_path / "traces.db"
     logger = TraceLogger(db, backend="sqlite")
     with logger.session(harness_version="0.1.0") as sid:
         logger.record(sid, "tool_call", {"name": "read_file"})
-    # session is now closed (ended_at is set)
 
     rc = main(["info", "--db", str(db), "--format", "json"])
 
     assert rc == 0
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert data["wal_is_active_writer"] is False
+    assert data["wal_warning"] is False
 
 
 def test_info_wal_threshold_from_env_var(tmp_path, capsys, monkeypatch):
@@ -1454,7 +1453,7 @@ def test_info_wal_threshold_from_env_var(tmp_path, capsys, monkeypatch):
 
 
 def test_info_jsonl_json_format(tmp_path, capsys):
-    """JSONL backend JSON output includes backend, file_size_bytes, and sessions."""
+    """JSONL backend JSON output per issue #1335."""
     db = tmp_path / "traces.jsonl"
     logger = TraceLogger(db, backend="jsonl")
     with logger.session(harness_version="0.1.0") as sid:
@@ -1466,8 +1465,10 @@ def test_info_jsonl_json_format(tmp_path, capsys):
     out = capsys.readouterr().out
     data = json.loads(out)
     assert data["backend"] == "jsonl"
-    assert "file_size_bytes" in data
-    assert data["sessions"] == 1
+    assert "db_size_bytes" in data
+    assert data["wal_size_bytes"] == 0
+    assert data["session_count"] == 1
+    assert data["wal_warning"] is False
 
 
 # --- Issue #1044: diagnose subcommand tests ---------------------------------
