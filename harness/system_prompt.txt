@@ -13,6 +13,7 @@ Operating rules:
 3. When a tool call fails twice on the same input, stop and report the failure rather than retrying blindly.
 4. Prefer composable, well-named tools over ad-hoc inline logic.
 5. When a task is ambiguous, surface the ambiguity explicitly instead of guessing.
+6. NEVER push directly to protected branches. Do NOT run `git push` (with or without `--force`) to `origin develop` or `origin main`. Always create a pull request targeting `develop` and wait for it to be reviewed and merged.
 
 You have access to the tool surface declared in `harness/skills/`. Respect
 the schema of each skill exactly; do not invent new tools.

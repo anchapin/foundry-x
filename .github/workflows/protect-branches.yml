@@ -1,0 +1,57 @@
+name: protected-branch
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+
+jobs:
+  detect-force-push:
+    name: detect force-push to protected branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check for force-push
+        run: |
+          current_branch="${{ github.ref_name }}"
+          echo "Checking protected branch: $current_branch"
+
+          # Get the current commit SHA
+          current_sha="${{ github.sha }}"
+
+          # Get the commit that should be the parent (what's on the remote)
+          # If this is a force-push, the parent chain will be broken
+
+          # Get the first parent (previous commit on this branch)
+          expected_parent="$(git rev-parse HEAD^1 2>/dev/null)"
+
+          if [ -z "$expected_parent" ]; then
+            echo "First commit on branch - no force-push possible"
+            exit 0
+          fi
+
+          # Check if the expected parent is actually in the commit history
+          # A force-push replaces the history, so the "expected" parent won't be found
+          if git cat-file -t "$expected_parent" >/dev/null 2>&1; then
+            # The parent exists in this checkout - check if it's reachable from HEAD
+            if git merge-base --is-ancestor "$expected_parent" HEAD; then
+              echo "Parent commit is reachable - normal push"
+              exit 0
+            else
+              echo "ERROR: Force-push detected! Parent commit $expected_parent is NOT an ancestor of HEAD."
+              echo "This indicates a force-push to the protected branch '$current_branch'."
+              echo ""
+              echo "Protected branches must NEVER be force-pushed."
+              echo "This violation must be manually reviewed and reverted."
+              exit 1
+            fi
+          else
+            echo "ERROR: Force-push detected! Expected parent commit $expected_parent not found in local history."
+            echo "This indicates the remote history was rewritten."
+            exit 1
+          fi
