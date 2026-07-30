@@ -931,7 +931,7 @@ async def test_openai_compatible_on_cost_callback_not_invoked_when_no_usage():
 
 @pytest.mark.asyncio
 async def test_openai_compatible_stream_emits_cost_callback():
-    """OpenAICompatibleAdapter.stream() calls on_cost when usage data is present (issue #1360)."""
+    """OpenAICompatibleAdapter.stream() calls on_cost when usage data is present (issue #1333, #1360)."""
     cost_events: list[ModelCostEvent] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -952,7 +952,7 @@ async def test_openai_compatible_stream_emits_cost_callback():
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         adapter = OpenAICompatibleAdapter(
             base_url="http://model.test/v1",
-            model="llama-3.2",
+            model="gpt-4o",
             client=client,
             on_cost=cost_events.append,
         )
@@ -969,9 +969,10 @@ async def test_openai_compatible_stream_emits_cost_callback():
     assert chunks[1].usage.completion_tokens == 50
     assert len(cost_events) == 1
     assert cost_events[0].provider == "openai-compatible"
-    assert cost_events[0].model == "llama-3.2"
+    assert cost_events[0].model == "gpt-4o"
     assert cost_events[0].prompt_tokens == 100
     assert cost_events[0].completion_tokens == 50
+    assert cost_events[0].estimated_cost_usd > 0
 
 
 @pytest.mark.asyncio
