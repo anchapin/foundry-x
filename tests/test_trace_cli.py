@@ -1367,6 +1367,105 @@ def test_info_empty_db_shows_zero_sessions(tmp_path, capsys):
     assert "Sessions: 0" in out
 
 
+def test_info_format_json_sqlite(tmp_path, capsys):
+    """--format json emits a JSON object with the expected keys for sqlite backend."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db, backend="sqlite")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    rc = main(["info", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["backend"] == "sqlite"
+    assert "db_size_bytes" in data
+    assert "wal_size_bytes" in data
+    assert data["wal_size_bytes"] >= 0
+    assert data["session_count"] == 1
+    assert "wal_warning" in data
+    assert isinstance(data["wal_warning"], bool)
+
+
+def test_info_format_json_jsonl(tmp_path, capsys):
+    """--format json emits a JSON object with wal_size_bytes=0 for jsonl backend."""
+    db = tmp_path / "traces.jsonl"
+    logger = TraceLogger(db, backend="jsonl")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    rc = main(["info", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["backend"] == "jsonl"
+    assert data["wal_size_bytes"] == 0
+    assert data["session_count"] == 1
+    assert data["wal_warning"] is False
+
+
+def test_info_format_json_wal_warning(tmp_path, capsys):
+    """--format json sets wal_warning=true when WAL exceeds 100 MB."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db, backend="sqlite")
+
+    with logger.session(harness_version="0.1.0") as sid:
+        blob = "x" * 1024
+        for _ in range(500):
+            logger.record(sid, "tool_call", {"name": "read_file", "blob": blob})
+
+    wal_path = db.with_suffix(db.suffix + "-wal")
+
+    import os
+
+    if wal_path.stat().st_size < 100 * 1024 * 1024:
+        os.truncate(str(wal_path), 100 * 1024 * 1024 + 1)
+
+    rc = main(["info", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["wal_warning"] is True
+
+
+def test_info_format_json_out_writes_to_stdout(tmp_path, capsys):
+    """--format json --out writes JSON to stdout AND to the file."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db, backend="sqlite")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    out_file = tmp_path / "info_output.json"
+
+    rc = main(["info", "--db", str(db), "--format", "json", "--out", str(out_file)])
+
+    assert rc == 0
+    stdout = capsys.readouterr().out
+    assert json.loads(stdout)["backend"] == "sqlite"
+    assert out_file.read_text() == stdout
+
+
+def test_info_format_text_out(tmp_path, capsys):
+    """--out with text format writes human-readable output to the file instead of stdout."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db, backend="sqlite")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    out_file = tmp_path / "info_output.txt"
+
+    rc = main(["info", "--db", str(db), "--out", str(out_file)])
+
+    assert rc == 0
+    stdout = capsys.readouterr().out
+    assert stdout == ""
+    assert "Backend: sqlite" in out_file.read_text()
+    assert "Sessions: 1" in out_file.read_text()
+
+
 # --- Issue #1044: diagnose subcommand tests ---------------------------------
 # Each failure mode from ARCHITECTURE.md §Common failure modes gets a
 # dedicated check, plus coverage for the clean-session, unknown-session,

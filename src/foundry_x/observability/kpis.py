@@ -84,6 +84,8 @@ from foundry_x.evolution.loop import EVOLVER_DURATION_KIND
 from foundry_x.observability.regression_report import VerdictRecord
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
+KPI_HISTORY_SCHEMA_VERSION = 1
+
 
 def _get_trace_db(args: argparse.Namespace) -> str:
     """Return the trace-db path, emitting a deprecation warning if --db was used."""
@@ -233,6 +235,12 @@ class SkillKpiSlice(BaseModel):
 
 class KpiSummary(BaseModel):
     """Structured summary of the three PRD KPIs.
+
+    Issue #1338 adds ``cycle_time_p50_seconds`` and ``cycle_time_p95_seconds``:
+    the 50th and 95th percentiles of the per-session ``task_received`` →
+    ``critic_verdict`` deltas, complementing the mean in
+    ``cycle_time_seconds`` so operators can tell whether a mean shift reflects
+    a uniform change across all sessions or a long-tail of outlier sessions.
 
     Issue #120 adds ``injection_blocks``: a ``session_id -> count`` map
     of ``injection_blocked`` events per session, sourced from the firewall
@@ -387,6 +395,9 @@ class KpiSummary(BaseModel):
     """
 
     cycle_time_seconds: float | None = None
+    # Issue #1338: p50 and p95 of per-session cycle-time deltas.
+    cycle_time_p50_seconds: float | None = None
+    cycle_time_p95_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
     injection_blocks: dict[str, int] = {}
@@ -555,11 +566,21 @@ class KpiHistoryEntry(BaseModel):
     the p50/p95 of all tool_call events' ``hook_overhead_ms`` and
     ``hook_post_overhead_ms`` fields, respectively, across all tools in
     the analysis window.
+
+    Issue #1338 adds ``cycle_time_p50_seconds`` and ``cycle_time_p95_seconds``:
+    the 50th and 95th percentiles of per-session cycle-time deltas.
+
+    Issue #1334 adds ``schema_version`` so readers built against an older
+    schema can detect and warn about unknown fields rather than silently
+    dropping them via pydantic's ``extra='ignore'`` default.
     """
 
+    schema_version: int = 1
     timestamp: str
     harness_version: str | None = None
     cycle_time_seconds: float | None = None
+    cycle_time_p50_seconds: float | None = None
+    cycle_time_p95_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
     hooks_disabled_count: int = 0
@@ -946,6 +967,8 @@ def compute_kpis(
     """
     (
         cycle_time,
+        cycle_time_p50,
+        cycle_time_p95,
         excluded_wall_clock,
         excluded_token_budget,
         excluded_event_limit,
@@ -1005,6 +1028,8 @@ def compute_kpis(
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
+        cycle_time_p50_seconds=cycle_time_p50,
+        cycle_time_p95_seconds=cycle_time_p95,
         regression_rate=regression_rate,
         improvement_rate=improvement_rate,
         injection_blocks=injection_blocks,
@@ -1194,6 +1219,13 @@ def _compute_deltas(
 
     return {
         "cycle_time_seconds": _delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds),
+        # Issue #1338: cycle-time percentile deltas (lower is better).
+        "cycle_time_p50_seconds": _delta(
+            baseline.cycle_time_p50_seconds, candidate.cycle_time_p50_seconds
+        ),
+        "cycle_time_p95_seconds": _delta(
+            baseline.cycle_time_p95_seconds, candidate.cycle_time_p95_seconds
+        ),
         "regression_rate": _delta(baseline.regression_rate, candidate.regression_rate),
         "improvement_rate": _delta(baseline.improvement_rate, candidate.improvement_rate),
         "token_budget_hit_rate": _delta(
@@ -1282,16 +1314,17 @@ def _cycle_time(
     logger: TraceLogger,
     harness_version: str | None = None,
     since: str | None = None,
-) -> tuple[float | None, int, int, int, int]:
-    """Mean wall-clock time from ``task_received`` to ``critic_verdict`` plus exclusion breakdown.
+) -> tuple[float | None, float | None, float | None, int, int, int, int]:
+    """Mean, p50, and p95 wall-clock time from ``task_received`` to ``critic_verdict`` plus exclusion breakdown.
 
     Returns
     -------
-    ``(mean_seconds, excluded_wall_clock, excluded_token_budget, excluded_event_limit, excluded_other)``.
+    ``(mean_seconds, p50_seconds, p95_seconds, excluded_wall_clock, excluded_token_budget, excluded_event_limit, excluded_other)``.
 
     The mean is over sessions that have both a ``task_received`` and a
     ``critic_verdict`` event with a strictly positive delta; it is
-    ``None`` when no session qualified.
+    ``None`` when no session qualified. ``p50_seconds`` and ``p95_seconds``
+    are the 50th and 95th percentiles of the same deltas (issue #1338).
 
     Issue #273 — previously looped every session id and called
     ``iter_events`` twice per session to find the first event of each
@@ -1317,6 +1350,9 @@ def _cycle_time(
 
     Issue #1270 — the ``since`` filter is pushed down to the store so
     time-bounded queries do not materialize events outside the window.
+
+    Issue #1338 — per-session deltas are collected into a list and sorted
+    to derive p50 and p95 via the ``percentile()`` function.
     """
     start_events: dict[str, TraceEvent] = {}
     for event in logger.query_events(
@@ -1378,13 +1414,18 @@ def _cycle_time(
     if not deltas:
         return (
             None,
+            None,
+            None,
             excluded_wall_clock,
             excluded_token_budget,
             excluded_event_limit,
             excluded_other,
         )
+    sorted_deltas = sorted(deltas)
     return (
         sum(deltas) / len(deltas),
+        percentile(sorted_deltas, 50.0),
+        percentile(sorted_deltas, 95.0),
         excluded_wall_clock,
         excluded_token_budget,
         excluded_event_limit,
@@ -2562,6 +2603,9 @@ def _render_markdown(summary: KpiSummary) -> str:
         "| KPI | Value |",
         "| --- | --- |",
         f"| Cycle Time (seconds) | {_format_value(summary.cycle_time_seconds)} |",
+        # Issue #1338: cycle-time percentiles.
+        f"| Cycle Time p50 (seconds) | {_format_value(summary.cycle_time_p50_seconds)} |",
+        f"| Cycle Time p95 (seconds) | {_format_value(summary.cycle_time_p95_seconds)} |",
         f"| Regression Rate | {_format_value(summary.regression_rate)} |",
         f"| Improvement Rate | {_format_value(summary.improvement_rate)} |",
         f"| Hooks Disabled Count | {summary.hooks_disabled_count} |",
@@ -2853,6 +2897,19 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
             f"{_format_value(candidate.cycle_time_seconds)} | "
             f"{_format_delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds, higher_is_better=False)} |"
         ),
+        # Issue #1338: cycle-time percentile rows (lower is better).
+        (
+            "| Cycle Time p50 (seconds) | "
+            f"{_format_value(baseline.cycle_time_p50_seconds)} | "
+            f"{_format_value(candidate.cycle_time_p50_seconds)} | "
+            f"{_format_delta(baseline.cycle_time_p50_seconds, candidate.cycle_time_p50_seconds, higher_is_better=False)} |"
+        ),
+        (
+            "| Cycle Time p95 (seconds) | "
+            f"{_format_value(baseline.cycle_time_p95_seconds)} | "
+            f"{_format_value(candidate.cycle_time_p95_seconds)} | "
+            f"{_format_delta(baseline.cycle_time_p95_seconds, candidate.cycle_time_p95_seconds, higher_is_better=False)} |"
+        ),
         (
             "| Regression Rate | "
             f"{_format_value(baseline.regression_rate)} | "
@@ -3129,9 +3186,11 @@ def append_kpi_history(
     ``model_rate_limit_count``, and ``fetch_blocked_count`` are scalar
     fields and are included so the trend table can show their drift
     across harness edits. Then ``timestamp`` and the optional
-    ``harness_version`` are added. Parent directories are created on
-    demand so the operator does not have to ``mkdir`` before the first
-    run. ``failure_class_distribution`` is included so the trend table
+    ``harness_version`` are added. ``schema_version`` is written so
+    readers can detect when they are running against an older schema
+    (issue #1334). Parent directories are created on demand so the
+    operator does not have to ``mkdir`` before the first run.
+    ``failure_class_distribution`` is included so the trend table
     can show per-class deltas (issue #705).
 
     The file is opened in append mode and a single ``\\n``-terminated
@@ -3182,6 +3241,7 @@ def append_kpi_history(
     payload["timestamp"] = _now_iso()
     if harness_version is not None:
         payload["harness_version"] = harness_version
+    payload["schema_version"] = KPI_HISTORY_SCHEMA_VERSION
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(payload) + "\n")
 
@@ -3196,6 +3256,11 @@ def read_kpi_history(path: Path) -> list[KpiHistoryEntry]:
     does not blank the trend table. A missing file yields an empty
     list so the caller can render the placeholder table without a
     precondition check.
+
+    Issue #1334: when an entry's ``schema_version`` is lower than the
+    module's ``KPI_HISTORY_SCHEMA_VERSION``, a warning is emitted so
+    operators can detect when their history reader is older than the
+    writer and may be silently dropping newly added fields.
     """
     if not path.exists():
         return []
@@ -3206,9 +3271,18 @@ def read_kpi_history(path: Path) -> list[KpiHistoryEntry]:
             if not stripped:
                 continue
             try:
-                entries.append(KpiHistoryEntry.model_validate_json(stripped))
+                entry = KpiHistoryEntry.model_validate_json(stripped)
             except ValidationError:
                 continue
+            if entry.schema_version < KPI_HISTORY_SCHEMA_VERSION:
+                warnings.warn(
+                    f"KPI history entry has schema_version={entry.schema_version} "
+                    f"but the module expects {KPI_HISTORY_SCHEMA_VERSION}. "
+                    "Some fields may be missing. Consider upgrading your tools.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            entries.append(entry)
     return entries
 
 
@@ -3285,6 +3359,9 @@ def render_history_markdown(
 
     Issue #705: a Failure Class Distribution section is appended when
     at least one entry carries a non-empty ``failure_class_distribution``.
+
+    Issue #1334: a Schema Info section is appended showing the current
+    ``KPI_HISTORY_SCHEMA_VERSION`` for debugging clarity.
     """
     if not entries:
         return "_No KPI history entries yet._"
@@ -3350,6 +3427,10 @@ def render_history_markdown(
                 count = entry.failure_class_distribution.get(cls, 0)
                 row.append(f" {count} |")
             lines.append("".join(row))
+    lines.append("")
+    lines.append("### Schema Info")
+    lines.append("")
+    lines.append(f"Schema version: {KPI_HISTORY_SCHEMA_VERSION}")
     return "\n".join(lines)
 
 

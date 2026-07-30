@@ -507,6 +507,60 @@ def test_cycle_time_exclusion_breakdown_respects_harness_version(tmp_path):
     assert v2_summary.excluded_other == 0
 
 
+# Issue #1338: cycle_time_p50_seconds and cycle_time_p95_seconds:
+
+
+def test_cycle_time_p50_and_p95_computed_from_session_deltas(tmp_path):
+    """``cycle_time_p50_seconds`` and ``cycle_time_p95_seconds`` are derived from per-session deltas.
+
+    Plants three sessions with known cycle-time spread and verifies the p50 and p95
+    match the expected percentiles of the per-session deltas.
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+
+    summary = compute_kpis(logger)
+
+    assert summary.cycle_time_seconds is not None
+    assert summary.cycle_time_p50_seconds is not None
+    assert summary.cycle_time_p95_seconds is not None
+    assert summary.cycle_time_p50_seconds <= summary.cycle_time_p95_seconds
+    assert (
+        summary.cycle_time_p50_seconds
+        <= summary.cycle_time_seconds
+        <= summary.cycle_time_p95_seconds
+    )
+
+
+def test_cycle_time_p50_and_p95_none_when_no_sessions(tmp_path):
+    """p50 and p95 are ``None`` when no sessions have a cycle time."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    summary = compute_kpis(logger)
+
+    assert summary.cycle_time_seconds is None
+    assert summary.cycle_time_p50_seconds is None
+    assert summary.cycle_time_p95_seconds is None
+
+
+def test_cycle_time_p50_and_p95_respects_harness_version(tmp_path):
+    """p50 and p95 honor ``harness_version`` filtering."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+    _seed_session(logger, "v2", verdict=True)
+
+    v1_summary = compute_kpis(logger, harness_version="v1")
+    v2_summary = compute_kpis(logger, harness_version="v2")
+
+    assert v1_summary.cycle_time_p50_seconds is not None
+    assert v2_summary.cycle_time_p50_seconds is not None
+
+
 def test_main_markdown_renders_exclusion_breakdown_table(tmp_path, capsys):
     """``foundry-kpis`` renders the per-abort-reason breakdown table (issue #1113)."""
     db = tmp_path / "traces.db"
@@ -782,8 +836,12 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     # streaming_quality_mean_ttft_ms, streaming_quality_p50_ttft_ms,
     # streaming_quality_p95_ttft_ms, mean_prompt_tokens_per_step, and
     # mean_completion_tokens_per_step are the issue #1271 aggregate metrics.
+    # cycle_time_p50_seconds and cycle_time_p95_seconds are the issue #1338
+    # cycle-time distribution percentiles.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
+        "cycle_time_p50_seconds",
+        "cycle_time_p95_seconds",
         "regression_rate",
         "improvement_rate",
         "injection_blocks",

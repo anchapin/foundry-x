@@ -683,6 +683,9 @@ def _info(args: argparse.Namespace) -> int:
 
     Prints WAL size, DB size, and session count for operators to detect
     WAL bloat before it becomes problematic.
+
+    Issue #1335: --format json emits machine-readable JSON with keys:
+    backend, db_size_bytes, wal_size_bytes, session_count, wal_warning.
     """
     logger = _logger_for(_get_trace_db(args))
     sessions = list(logger.list_sessions())
@@ -694,24 +697,71 @@ def _info(args: argparse.Namespace) -> int:
         db_size = db_path.stat().st_size if db_path.exists() else 0
         session_count = len(sessions)
 
-        sys.stdout.write("Backend: sqlite\n")
-        sys.stdout.write(f"DB size: {db_size} bytes\n")
-        sys.stdout.write(f"WAL size: {wal_size} bytes\n")
-        sys.stdout.write(f"Sessions: {session_count}\n")
+        info: dict[str, object] = {
+            "backend": "sqlite",
+            "db_size_bytes": db_size,
+            "wal_size_bytes": wal_size,
+            "session_count": session_count,
+            "wal_warning": wal_size > 100 * 1024 * 1024,
+        }
 
-        if wal_size > 100 * 1024 * 1024:
-            sys.stderr.write(
-                f"WARNING: WAL size ({wal_size} bytes) exceeds 100 MB threshold. "
-                f"Run `foundry-trace prune --vacuum` to reclaim WAL space.\n"
-            )
+        if getattr(args, "format", None) == "json":
+            output = json.dumps(info, indent=2) + "\n"
+            if getattr(args, "out", None):
+                Path(args.out).write_text(output, encoding="utf-8")
+            sys.stdout.write(output)
+            if info["wal_warning"]:
+                sys.stderr.write(
+                    f"WARNING: WAL size ({wal_size} bytes) exceeds 100 MB threshold. "
+                    f"Run `foundry-trace prune --vacuum` to reclaim WAL space.\n"
+                )
+        else:
+            out_lines = [
+                "Backend: sqlite\n",
+                f"DB size: {db_size} bytes\n",
+                f"WAL size: {wal_size} bytes\n",
+                f"Sessions: {session_count}\n",
+            ]
+            out_text = "".join(out_lines)
+            if getattr(args, "out", None):
+                Path(args.out).write_text(out_text, encoding="utf-8")
+            else:
+                sys.stdout.write(out_text)
+
+            if wal_size > 100 * 1024 * 1024:
+                sys.stderr.write(
+                    f"WARNING: WAL size ({wal_size} bytes) exceeds 100 MB threshold. "
+                    f"Run `foundry-trace prune --vacuum` to reclaim WAL space.\n"
+                )
     else:
         db_path = Path(_get_trace_db(args))
         db_size = db_path.stat().st_size if db_path.exists() else 0
         session_count = len(sessions)
 
-        sys.stdout.write("Backend: jsonl\n")
-        sys.stdout.write(f"File size: {db_size} bytes\n")
-        sys.stdout.write(f"Sessions: {session_count}\n")
+        info = {
+            "backend": "jsonl",
+            "db_size_bytes": db_size,
+            "wal_size_bytes": 0,
+            "session_count": session_count,
+            "wal_warning": False,
+        }
+
+        if getattr(args, "format", None) == "json":
+            output = json.dumps(info, indent=2) + "\n"
+            if getattr(args, "out", None):
+                Path(args.out).write_text(output, encoding="utf-8")
+            sys.stdout.write(output)
+        else:
+            out_lines = [
+                "Backend: jsonl\n",
+                f"File size: {db_size} bytes\n",
+                f"Sessions: {session_count}\n",
+            ]
+            out_text = "".join(out_lines)
+            if getattr(args, "out", None):
+                Path(args.out).write_text(out_text, encoding="utf-8")
+            else:
+                sys.stdout.write(out_text)
 
     return 0
 
@@ -1647,6 +1697,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--db",
         default=None,
         help="Deprecated: use --trace-db instead.",
+    )
+    info_parser.add_argument(
+        "--format",
+        default="text",
+        choices=["text", "json"],
+        help="Output format: 'text' (human-readable, default) or 'json' (machine-readable, issue #1335).",
+    )
+    info_parser.add_argument(
+        "--out",
+        default=None,
+        help="Write output to this path instead of stdout. Works with both --format text and --format json.",
     )
     info_parser.set_defaults(func=_info)
 
