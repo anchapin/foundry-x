@@ -448,7 +448,7 @@ def _aggregate_context_overflow(
     session_id: str,
     ordered: Sequence[TraceEvent],
 ) -> FailureReport | None:
-    """Aggregate a context-overflow failure (issue #805, issue #1345).
+    """Aggregate a context-overflow failure (issue #805, issue #1326, issue #1345).
 
     Triggered when the runner agent loop terminates via
     ``outcome.status='truncated'`` / ``outcome.reason='max_steps'``
