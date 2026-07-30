@@ -723,8 +723,7 @@ def _info(args: argparse.Namespace) -> int:
                 "session_count": session_count,
                 "wal_warning": wal_warning,
             }
-            output = json.dumps(result, indent=2) + "
-"
+            output = json.dumps(result, indent=2) + "\n"
             if out_path:
                 Path(out_path).write_text(output, encoding="utf-8")
             sys.stdout.write(output)
@@ -738,8 +737,7 @@ def _info(args: argparse.Namespace) -> int:
                     sys.stderr.write(
                         " Note: store has open session(s) — WAL may include uncommitted writes."
                     )
-                sys.stderr.write("
-")
+                sys.stderr.write("\\n")
         else:
             out_lines = [
                 "Backend: sqlite",
@@ -748,8 +746,7 @@ def _info(args: argparse.Namespace) -> int:
                 f"Sessions: {session_count}",
                 "",
             ]
-            out_text = "
-".join(out_lines)
+            out_text = "\n".join(out_lines)
             if out_path:
                 Path(out_path).write_text(out_text, encoding="utf-8")
             sys.stdout.write(out_text)
@@ -764,8 +761,7 @@ def _info(args: argparse.Namespace) -> int:
                     sys.stderr.write(
                         " Note: store has open session(s) — WAL may include uncommitted writes."
                     )
-                sys.stderr.write("
-")
+                sys.stderr.write("\\n")
     else:
         db_path = Path(_get_trace_db(args))
         db_size = db_path.stat().st_size if db_path.exists() else 0
@@ -779,8 +775,7 @@ def _info(args: argparse.Namespace) -> int:
                 "session_count": session_count,
                 "wal_warning": False,
             }
-            output = json.dumps(result, indent=2) + "
-"
+            output = json.dumps(result, indent=2) + "\n"
             if out_path:
                 Path(out_path).write_text(output, encoding="utf-8")
             sys.stdout.write(output)
@@ -791,14 +786,12 @@ def _info(args: argparse.Namespace) -> int:
                 f"Sessions: {session_count}",
                 "",
             ]
-            out_text = "
-".join(out_lines)
+            out_text = "\n".join(out_lines)
             if out_path:
                 Path(out_path).write_text(out_text, encoding="utf-8")
             sys.stdout.write(out_text)
 
     return 0
-
 
 
 # --- Issue #1044:
