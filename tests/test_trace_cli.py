@@ -1367,6 +1367,109 @@ def test_info_empty_db_shows_zero_sessions(tmp_path, capsys):
     assert "Sessions: 0" in out
 
 
+def test_info_sqlite_json_format_includes_wal_metadata(tmp_path, capsys):
+    """JSON output exposes wal_threshold_bytes and wal_is_active_writer."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db, backend="sqlite")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    rc = main(["info", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["backend"] == "sqlite"
+    assert "wal_threshold_bytes" in data
+    assert "wal_is_active_writer" in data
+    assert isinstance(data["wal_threshold_bytes"], int)
+    assert isinstance(data["wal_is_active_writer"], bool)
+
+
+def test_info_sqlite_json_format_wal_active_writer_true(tmp_path, capsys):
+    """When a session is open (no ended_at), wal_is_active_writer is True."""
+
+    import sqlite3
+    from datetime import UTC, datetime
+
+    db = tmp_path / "traces.db"
+    TraceLogger(db, backend="sqlite")
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO sessions (session_id, started_at, harness_version) VALUES (?, ?, ?)",
+        ("open-session", datetime.now(UTC).isoformat(), "0.1.0"),
+    )
+    conn.commit()
+    conn.close()
+
+    rc = main(["info", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["wal_is_active_writer"] is True
+
+
+def test_info_sqlite_json_format_wal_active_writer_false(tmp_path, capsys):
+    """When all sessions are closed, wal_is_active_writer is False."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db, backend="sqlite")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+    # session is now closed (ended_at is set)
+
+    rc = main(["info", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["wal_is_active_writer"] is False
+
+
+def test_info_wal_threshold_from_env_var(tmp_path, capsys, monkeypatch):
+    """FOUNDRY_WAL_WARN_BYTES controls the WAL warning threshold."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db, backend="sqlite")
+
+    with logger.session(harness_version="0.1.0") as sid:
+        blob = "x" * 1024
+        for _ in range(500):
+            logger.record(sid, "tool_call", {"name": "read_file", "blob": blob})
+
+    wal_path = db.with_suffix(db.suffix + "-wal")
+
+    import os
+
+    os.truncate(str(wal_path), 10 * 1024 * 1024 + 1)  # 10 MB
+
+    monkeypatch.setenv("FOUNDRY_WAL_WARN_BYTES", str(5 * 1024 * 1024))
+
+    rc = main(["info", "--db", str(db)])
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "10 MB" in err or "exceeds" in err
+
+
+def test_info_jsonl_json_format(tmp_path, capsys):
+    """JSONL backend JSON output includes backend, file_size_bytes, and sessions."""
+    db = tmp_path / "traces.jsonl"
+    logger = TraceLogger(db, backend="jsonl")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    rc = main(["info", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["backend"] == "jsonl"
+    assert "file_size_bytes" in data
+    assert data["sessions"] == 1
+
+
 # --- Issue #1044: diagnose subcommand tests ---------------------------------
 # Each failure mode from ARCHITECTURE.md §Common failure modes gets a
 # dedicated check, plus coverage for the clean-session, unknown-session,

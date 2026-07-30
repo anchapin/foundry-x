@@ -4,6 +4,7 @@ import argparse
 import csv
 import difflib
 import json
+import os
 import re
 import sys
 import warnings
@@ -683,9 +684,19 @@ def _info(args: argparse.Namespace) -> int:
 
     Prints WAL size, DB size, and session count for operators to detect
     WAL bloat before it becomes problematic.
+
+    Issue #1336: WAL auto-vacuum advice adds FOUNDRY_WAL_WARN_BYTES
+    (default 100 MB) to make the threshold configurable, and detects
+    whether the store is actively written to (open session without
+    ended_at) so the warning can distinguish expected WAL growth from
+    accumulated bloat.
     """
     logger = _logger_for(_get_trace_db(args))
     sessions = list(logger.list_sessions())
+
+    wal_threshold_bytes = int(os.environ.get("FOUNDRY_WAL_WARN_BYTES", str(100 * 1024 * 1024)))
+
+    fmt = getattr(args, "format", "text")
 
     if logger.backend == "sqlite":
         db_path = Path(_get_trace_db(args))
@@ -694,24 +705,51 @@ def _info(args: argparse.Namespace) -> int:
         db_size = db_path.stat().st_size if db_path.exists() else 0
         session_count = len(sessions)
 
-        sys.stdout.write("Backend: sqlite\n")
-        sys.stdout.write(f"DB size: {db_size} bytes\n")
-        sys.stdout.write(f"WAL size: {wal_size} bytes\n")
-        sys.stdout.write(f"Sessions: {session_count}\n")
+        has_open_session = any(s.ended_at is None for s in sessions)
 
-        if wal_size > 100 * 1024 * 1024:
-            sys.stderr.write(
-                f"WARNING: WAL size ({wal_size} bytes) exceeds 100 MB threshold. "
-                f"Run `foundry-trace prune --vacuum` to reclaim WAL space.\n"
-            )
+        if fmt == "json":
+            result = {
+                "backend": "sqlite",
+                "db_size_bytes": db_size,
+                "wal_size_bytes": wal_size,
+                "sessions": session_count,
+                "wal_threshold_bytes": wal_threshold_bytes,
+                "wal_is_active_writer": has_open_session,
+            }
+            sys.stdout.write(json.dumps(result, indent=2) + "\n")
+        else:
+            sys.stdout.write("Backend: sqlite\n")
+            sys.stdout.write(f"DB size: {db_size} bytes\n")
+            sys.stdout.write(f"WAL size: {wal_size} bytes\n")
+            sys.stdout.write(f"Sessions: {session_count}\n")
+
+            if wal_size > wal_threshold_bytes:
+                sys.stderr.write(
+                    f"WARNING: WAL size ({wal_size} bytes) exceeds "
+                    f"{wal_threshold_bytes} bytes threshold. "
+                    f"Run `foundry-trace prune --vacuum` to reclaim WAL space."
+                )
+                if has_open_session:
+                    sys.stderr.write(
+                        " Note: store has open session(s) — WAL may include uncommitted writes."
+                    )
+                sys.stderr.write("\n")
     else:
         db_path = Path(_get_trace_db(args))
         db_size = db_path.stat().st_size if db_path.exists() else 0
         session_count = len(sessions)
 
-        sys.stdout.write("Backend: jsonl\n")
-        sys.stdout.write(f"File size: {db_size} bytes\n")
-        sys.stdout.write(f"Sessions: {session_count}\n")
+        if fmt == "json":
+            result = {
+                "backend": "jsonl",
+                "file_size_bytes": db_size,
+                "sessions": session_count,
+            }
+            sys.stdout.write(json.dumps(result, indent=2) + "\n")
+        else:
+            sys.stdout.write("Backend: jsonl\n")
+            sys.stdout.write(f"File size: {db_size} bytes\n")
+            sys.stdout.write(f"Sessions: {session_count}\n")
 
     return 0
 
@@ -1647,6 +1685,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--db",
         default=None,
         help="Deprecated: use --trace-db instead.",
+    )
+    info_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help=(
+            "Output format: 'text' (default) prints human-readable lines; "
+            "'json' exposes wal_threshold_bytes and wal_is_active_writer (issue #1336)."
+        ),
     )
     info_parser.set_defaults(func=_info)
 
