@@ -1202,8 +1202,12 @@ def _compute_deltas(
 
     return {
         "cycle_time_seconds": _delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds),
-        "cycle_time_p50_seconds": _delta(baseline.cycle_time_p50_seconds, candidate.cycle_time_p50_seconds),
-        "cycle_time_p95_seconds": _delta(baseline.cycle_time_p95_seconds, candidate.cycle_time_p95_seconds),
+        "cycle_time_p50_seconds": _delta(
+            baseline.cycle_time_p50_seconds, candidate.cycle_time_p50_seconds
+        ),
+        "cycle_time_p95_seconds": _delta(
+            baseline.cycle_time_p95_seconds, candidate.cycle_time_p95_seconds
+        ),
         "regression_rate": _delta(baseline.regression_rate, candidate.regression_rate),
         "improvement_rate": _delta(baseline.improvement_rate, candidate.improvement_rate),
         "token_budget_hit_rate": _delta(
