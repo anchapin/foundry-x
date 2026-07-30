@@ -27,58 +27,9 @@ Steps:
  7. Push: git push -u origin fix/issue-{NUMBER}-{SLUG} --force-with-lease
     NOTE: If push fails (e.g., remote branch exists with newer commits), use
     `git pull --rebase origin develop` first, then push again with --force-with-lease.
- 8. Open PR with an EXPLICIT body (no `--fill` — see PR-body conventions):
-    ```
-    gh pr create --base develop \
-      --title "{fix|feat}: resolve #{NUMBER} — {TITLE}" \
-      --body "$(cat <<'EOF'
-   Closes #{NUMBER}
-
-   <one-paragraph description of the change>
-   EOF
-   )"
-    ```
-    The body must list ALL issues that this PR resolves (issue #961). If the
-    commit also fixes a related issue, add a second `Closes #N` line.
-    Do NOT include issue numbers in the title — see
-    `docs/orchestration/pr-body-conventions.md` for the rationale.
- 9. Verify closingReferences count matches the number of issues this PR resolves:
-    ```
-    bash scripts/check_pr_closing_refs.sh <PR_NUMBER> <COUNT>
-    ```
-    If the check fails, run `gh pr edit <PR> --body "Closes #N\n\n<minimal body>"`
-    to strip spurious references, then re-run the check.
-
-     NOTE: After this step the orchestrator independently verifies the PR exists.
-     If the sub-agent exits before completing step 7 or 8, the orchestrator's
-     wave-level recovery sequence (see SKILL.md Phase 3c § Recovery) will push
-     the branch and create the PR directly using --force-with-lease.
-
- 10. Verify changes before reporting done:
-     ```bash
-     # Must have at least 1 commit ahead of develop
-     if ! git log develop..HEAD --oneline | head -1 > /dev/null 2>&1; then
-       echo "ERROR: No commits found ahead of develop"
-       exit 1
-     fi
-
-     # Must be pushable (dry-run must not show errors)
-     if ! git push --dry-run origin fix/issue-{NUMBER}-{SLUG} 2>&1 | \
-        grep -qE "Everything up-to-date|Total 0|new branch|updating"; then
-       echo "ERROR: Dry-run push failed — check remote state"
-       exit 1
-     fi
-
-     # PR must exist
-     PR_NUM=$(gh pr list --search "fix/issue-{NUMBER}" --json number --jq '.[0].number' 2>/dev/null)
-     if [ -z "$PR_NUM" ]; then
-       echo "ERROR: No PR found for this branch"
-       exit 1
-     fi
-     echo "VERIFIED: $PR_NUM"
-     ```
-     If any check fails, **do NOT report done**. Fix the missing step
-     (commit, push, or PR creation) before continuing.
+     NOTE: After this step the orchestrator independently verifies the PR exists
+     and creates it if missing. See SKILL.md Phase 3c § Recovery. Do NOT create
+     the PR yourself — the orchestrator owns PR creation for all sub-agents.
 
 Rules:
 - Work ONLY in your assigned worktree ({WORKDIR})

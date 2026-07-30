@@ -69,7 +69,8 @@ git worktree add ../worktrees/issue-{N}-{slug} -b fix/issue-{N}-{slug} develop
 Spawn one Task sub-agent per issue using the prompt template in
 [REFERENCE.md — Implementation Sub-agent Template](REFERENCE.md#implementation-sub-agent-template).
 
-Each sub-agent implements the fix and opens a PR.
+Each sub-agent implements the fix and pushes the branch. The orchestrator
+creates the PR (see Phase 3c § Recovery for the creation logic).
 
 ### 3c. Wait + Verify
 
