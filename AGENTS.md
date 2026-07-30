@@ -34,31 +34,37 @@ Before you write code in this repo, read in this order:
    TraceLogger, Digester, Evolver, Critic and how they connect).
 8. `docs/OPERATOR.md` — human-side workflow that mirrors the agent
    loop in §3 below.
-9. `docs/MODEL_CONFIG.md` — the full set of model-side env vars
+ 9. `docs/MODEL_CONFIG.md` — the full set of model-side env vars
    (`OPENCODE_SERVER_URL`, `FOUNDRY_TOKEN_BUDGET`, `FOUNDRY_TASK_TIMEOUT`,
    `FOUNDRY_MAX_EVENTS_PER_SESSION`, `FOUNDRY_REQUEST_TIMEOUT_S`, …) and the
    resolution order. Three resource caps guard against runaway loops:
    `FOUNDRY_TASK_TIMEOUT` (wall-clock, default 600 s),
    `FOUNDRY_TOKEN_BUDGET` (total tokens, unset), and
    `FOUNDRY_MAX_EVENTS_PER_SESSION` (event count, unset).
+   Key derived caps: `FOUNDRY_CONTEXT_TOKENS` (set to a positive int to
+   switch from event-count pruning to token-aware pruning — see ADR-0021).
+   `FOUNDRY_SMOKE_BENCHMARK_TAGS` (comma-separated, default `smoke`) selects
+   the fast-reject benchmark subset for rapid iteration.
+   `FOUNDRY_GATE_TIMEOUT_S` (float, default unbounded) bounds every Critic
+   subprocess so a hanging child cannot inflate cycle-time KPIs.
 10. `docs/adr/` — read the relevant ADR before changing that area:
     - `harness/` → ADR-0004 | `pyproject.toml` / deps → ADR-0002
     - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
     - Module-boundary models → ADR-0006 | `src/foundry_x/execution/` → ADR-0010
     - `src/foundry_x/evolution/` → ADR-0010 | `evolution/loop.py` → ADR-0010
-      - Run `ls docs/adr/` for the full current set (0001–0035); key decisions:
-        - Conventional Commits → ADR-0008
-        - Security-eval benchmarks → ADR-0009
-        - Manifest as evolver target → ADR-0012
-        - Model abstraction → ADR-0014 (ADR-0015 merged into it)
-        - Review state machine → ADR-0017
-        - Context pruning at scale → ADR-0021
-        - External eval validation study → ADR-0023
-        - Cross-session failure accumulator → ADR-0030
-        - Security benchmark vectors → ADR-0031
-        - Smoke DifficultyTier definition → ADR-0034
-        - Parallel issue-generation prompt → ADR-0035
-        - Cloud model adapters → ADR-0029
+      - Run `ls docs/adr/` for the full current set (0001–0035); key decisions recently added:
+         - ADR-0035 (parallel issue-generation prompt)
+         - ADR-0034 (Smoke DifficultyTier definition)
+         - ADR-0031 (security benchmark vectors)
+         - ADR-0030 (cross-session failure accumulator)
+         - ADR-0029 (cloud model adapters)
+         - Conventional Commits → ADR-0008
+         - Security-eval benchmarks → ADR-0009
+         - Manifest as evolver target → ADR-0012
+         - Model abstraction → ADR-0014 (ADR-0015 merged into it)
+         - Review state machine → ADR-0017
+         - Context pruning at scale → ADR-0021
+         - External eval validation study → ADR-0023
 11. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
@@ -84,6 +90,9 @@ and ask the human.
   `foundry-evolve evolve --no-verify` skips the gate locally and records
   a synthetic "skipped" `CriticVerdict` (documented in SECURITY.md) — it
   cannot ship a harness edit to `main`.
+  **Early-exit:** diffs touching only `docs/`, `.pre-commit-config.yaml`,
+  or `pyproject.toml` skip the benchmark suite (they are not critical to
+  benchmark outcomes); all other changes run the full gate.
 - **Never run destructive commands** (`rm -rf`, `git reset --hard`,
   force-push to a branch other than your own throwaway, dropping a
   database) without an explicit rollback path stated in the response.
@@ -188,14 +197,11 @@ mirrors the way our product works:
     `--model-id`, `--quantization`, `--path-or-endpoint`; same module
     as `python -m foundry_x.execution.runner`)
   - `uv run foundry-x-trace` (alias `foundry-trace`) — trace-driven
-     inspection. Key subcommands:
-     - `sessions` — list recorded sessions
-     - `show <sid>` — print the event timeline
-     - `events-grep` — grep events by pattern
-     - `render-failure` — render a failure report
-     - `seed-sample-trace` — plant a deterministic offline session
-     - `prune` — drop old sessions from `logs/traces.db`
-     Run `foundry-x-trace --help` for the full subcommand list.
+    inspection. Subcommands worth knowing: `sessions`, `show <sid>`,
+    `events-grep`, `render-failure`, `seed-sample-trace` (plant a
+    deterministic offline session), and `prune` (drop old sessions
+    from `logs/traces.db` — see Operational notes below). `--help` for
+    the full list.
   - `uv run foundry-kpis` — compute the three PRD success-metric
     KPIs (cycle time, regression rate, improvement rate) plus the
     tracked token-budget metric from traces.
@@ -206,16 +212,9 @@ mirrors the way our product works:
     session. Use `approve <uuid>` to mark a ProposedEdit as reviewed
     and `apply <uuid>` to apply it to the harness. Pass `--no-verify`
     to skip the Critic gate (local-only, audit-logged). Pass `--background`
-    to run non-blocking. Pass `--latest` to auto-select the most recent
-    session without needing the UUID. All flags are documented in
-    `foundry-evolve evolve --help`.
-  - `uv run foundry-evolve daemon` — poll the trace store for unevolved
-    sessions and run the evolution loop on each automatically;
-    graceful SIGTERM shutdown (issue #1047).
+    to run non-blocking. Both flags are documented in SECURITY.md.
   - `uv run foundry-sweep` — parametric sweep of harness variants
-    (e.g. quantization sweep; Phase 3). Each model file is matched via
-    glob (default `*.<quant>.gguf`); `FOUNDRY_MODEL_PATH` must point to
-    the directory containing model files.
+    (e.g. quantization sweep; Phase 3).
   - `uv run fx-trace` (from `observability/cli.py`) — KPI reports,
     regression reports, session summaries, tool-latency percentiles.
   - `uv run foundry-x-trace` / `foundry-trace` (from `trace/cli.py`) —
