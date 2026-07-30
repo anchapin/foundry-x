@@ -727,17 +727,6 @@ def _info(args: argparse.Namespace) -> int:
             if out_path:
                 Path(out_path).write_text(output, encoding="utf-8")
             sys.stdout.write(output)
-            if wal_warning:
-                sys.stderr.write(
-                    f"WARNING: WAL size ({wal_size} bytes) exceeds "
-                    f"{wal_threshold_bytes} bytes threshold. "
-                    f"Run `foundry-trace prune --vacuum` to reclaim WAL space."
-                )
-                if has_open_session:
-                    sys.stderr.write(
-                        " Note: store has open session(s) — WAL may include uncommitted writes."
-                    )
-                sys.stderr.write("\n")
         else:
             out_lines = [
                 "Backend: sqlite",
@@ -751,17 +740,17 @@ def _info(args: argparse.Namespace) -> int:
                 Path(out_path).write_text(out_text, encoding="utf-8")
             sys.stdout.write(out_text)
 
-            if wal_warning:
+        if wal_warning:
+            sys.stderr.write(
+                f"WARNING: WAL size ({wal_size} bytes) exceeds "
+                f"{wal_threshold_bytes} bytes threshold. "
+                f"Run `foundry-trace prune --vacuum` to reclaim WAL space."
+            )
+            if has_open_session:
                 sys.stderr.write(
-                    f"WARNING: WAL size ({wal_size} bytes) exceeds "
-                    f"{wal_threshold_bytes} bytes threshold. "
-                    f"Run `foundry-trace prune --vacuum` to reclaim WAL space."
+                    " Note: store has open session(s) — WAL may include uncommitted writes."
                 )
-                if has_open_session:
-                    sys.stderr.write(
-                        " Note: store has open session(s) — WAL may include uncommitted writes."
-                    )
-                sys.stderr.write("\n")
+            sys.stderr.write("\n")
     else:
         db_path = Path(_get_trace_db(args))
         db_size = db_path.stat().st_size if db_path.exists() else 0
@@ -794,6 +783,7 @@ def _info(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- Issue #1044:
 # --- Issue #1044: diagnose — guided failure-mode triage ---------------------
 # Implements the six-row "Common failure modes" table from
 # docs/ARCHITECTURE.md §Common failure modes as a single automated pass.
