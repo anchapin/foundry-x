@@ -756,6 +756,7 @@ async def test_token_budget_abort_emits_dedicated_event(tmp_path):
     )
     assert token_aborted[0].payload["tokens_used"] == 200
     assert token_aborted[0].payload["token_budget"] == 150
+    assert token_aborted[0].payload["overrun_pct"] == pytest.approx(33.333333, rel=1e-3)
 
     # Existing task_aborted event must still be emitted with reason="token_budget"
     task_aborted = [event for event in events if event.kind == "task_aborted"]
