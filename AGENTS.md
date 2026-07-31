@@ -294,3 +294,9 @@ Mixing these up is the most common mistake newcomers make.
 - **Stale AGENTS files**: `AGENTS_BASE_*.md`, `AGENTS_LOCAL_*.md`, and
   `AGENTS_REMOTE_*.md` in the repo root are stale backups from a previous
   session — not the canonical `AGENTS.md`.
+- **README CLI table is incomplete**: `README.md` documents only three
+  console scripts (`fx-trace`, `foundry-kpis`, `foundry-x-trace`/
+  `foundry-trace`), but `pyproject.toml` §`[project.scripts]` registers
+  seven. The full set — including `fx-runner`, `foundry-evolve`, and
+  `foundry-sweep` — is in §4 below; treat that list, not the README
+  table, as authoritative.
