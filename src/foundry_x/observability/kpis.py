@@ -569,7 +569,6 @@ class KpiHistoryEntry(BaseModel):
     the p50/p95 of all tool_call events' ``hook_overhead_ms`` and
     ``hook_post_overhead_ms`` fields, respectively, across all tools in
     the analysis window.
-
     Issue #1334 adds ``schema_version`` — the module's
     :const:`KPI_SCHEMA_VERSION` is written into every new entry so readers
     can detect schema drift and warn gracefully.
