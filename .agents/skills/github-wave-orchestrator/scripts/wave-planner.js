@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const fs = require("fs");
+const path = require("path");
 
 const MAX_PER_WAVE = 3;
 
@@ -22,6 +23,7 @@ const HIGH_COLLISION_FILES = [
 function extractFileRefs(text) {
   if (!text) return [];
   const files = new Set();
+  const highCollisionSet = new Set(HIGH_COLLISION_FILES);
 
   // Always add high-collision files — they are touched by gofmt/alignment even
   // when not explicitly mentioned in the issue body.
@@ -53,7 +55,26 @@ function extractFileRefs(text) {
     }
   }
 
-  return [...files];
+  // Filter out non-existent files (but keep HIGH_COLLISION_FILES regardless of existence)
+  const repoRoot = findRepoRoot();
+  const filtered = [...files].filter((f) => {
+    if (highCollisionSet.has(f)) return true;
+    const fullPath = repoRoot ? path.join(repoRoot, f) : f;
+    return fs.existsSync(fullPath);
+  });
+
+  return filtered;
+}
+
+function findRepoRoot() {
+  let dir = process.cwd();
+  for (let i = 0; i < 10; i++) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
 }
 
 function extractModuleRefs(text) {
