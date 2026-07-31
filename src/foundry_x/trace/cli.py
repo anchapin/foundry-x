@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from foundry_x.evolution.digester import Digester
-from foundry_x.observability.render import render_failure_report
+from foundry_x.observability.render import render_failure_report, render_failure_report_json
 from foundry_x.observability.timeline import format_timeline
 from foundry_x.trace.logger import TraceEvent, TraceLogger, TraceSession
 
@@ -31,15 +31,51 @@ def _get_trace_db(args: argparse.Namespace) -> str:
     return args.trace_db
 
 
+def _get_render_failure_db(args: argparse.Namespace) -> str:
+    """Return the trace-db path for ``render-failure`` (issue #1253).
+
+    Resolves ``--trace-db`` (primary), ``--db`` (deprecated alias), and
+    ``--trace-path`` (deprecated, unique to this subcommand) in priority
+    order, emitting a :class:`DeprecationWarning` for the legacy flags.
+    """
+    trace_path = getattr(args, "trace_path", None)
+    db_val = getattr(args, "db", None)
+    if trace_path is not None:
+        warnings.warn(
+            "--trace-path is deprecated; use --trace-db instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return trace_path
+    if db_val is not None:
+        warnings.warn(
+            "--db is deprecated; use --trace-db instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return db_val
+    return args.trace_db
+
+
 def _render_failure(args: argparse.Namespace) -> int:
-    logger = TraceLogger(args.trace_path)
+    db_path = _get_render_failure_db(args)
+    logger = _logger_for(db_path)
     events = logger.load_session(args.session_id)
     report = Digester().digest(args.session_id, events)
-    markdown = render_failure_report(report)
+    fmt = getattr(args, "format", None)
+    if fmt is None and args.out is not None and args.out.endswith(".json"):
+        fmt = "json"
+    if fmt is None:
+        fmt = "markdown"
+    rendered = (
+        render_failure_report_json(report) if fmt == "json" else render_failure_report(report)
+    )
     if args.out:
-        Path(args.out).write_text(markdown, encoding="utf-8")
+        Path(args.out).write_text(rendered, encoding="utf-8")
     else:
-        sys.stdout.write(markdown + "\n")
+        sys.stdout.write(rendered)
+        if not rendered.endswith("\n"):
+            sys.stdout.write("\n")
     return 0
 
 
@@ -1380,18 +1416,36 @@ def _build_parser() -> argparse.ArgumentParser:
 
     render_parser = sub.add_parser(
         "render-failure",
-        help="Render a Digester FailureReport as Markdown.",
+        help="Render a Digester FailureReport as Markdown or JSON.",
     )
     render_parser.add_argument("session_id", help="Trace session to digest.")
     render_parser.add_argument(
-        "--trace-path",
+        "--trace-db",
         default="logs/traces.db",
-        help="Path to the trace SQLite database.",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    render_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
+    )
+    render_parser.add_argument(
+        "--trace-path",
+        default=None,
+        help="Deprecated: use --trace-db instead (issue #1253).",
+    )
+    render_parser.add_argument(
+        "--format",
+        choices=["markdown", "json"],
+        default=None,
+        help=(
+            "Output format (default: markdown). When --out ends in '.json', JSON is auto-selected."
+        ),
     )
     render_parser.add_argument(
         "--out",
         default=None,
-        help="Write Markdown to this path instead of stdout.",
+        help="Write output to this path instead of stdout.",
     )
     render_parser.set_defaults(func=_render_failure)
 
