@@ -1,4 +1,5 @@
 """Tests for wave-planner.js — issue #1404 regression suite."""
+
 from __future__ import annotations
 
 import json
