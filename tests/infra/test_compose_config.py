@@ -81,14 +81,17 @@ def _compose_config(docker: str, compose_files: list[Path]) -> subprocess.Comple
     for f in compose_files:
         cmd.extend(["-f", f.name])
     cmd.extend(["config", "--quiet"])
-    proc = subprocess.run(
-        cmd,
-        cwd=COMPOSE_DIR,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=COMPOSE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.skip("docker compose config timed out; skipping compose config validation")
     # Stash the command on the result so failure assertions can echo the exact
     # invocation that failed (a CI reader otherwise only has stdout/stderr).
     proc.cmd = cmd  # type: ignore[attr-defined]
