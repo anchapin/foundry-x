@@ -289,6 +289,10 @@ def _setup_harness(tmp_path: Path) -> Path:
     (harness_dir / "system_prompt.txt").write_text("original prompt\n", encoding="utf-8")
     hooks_dir = harness_dir / "hooks"
     hooks_dir.mkdir()
+    manifest = {"version": "0.1.0", "model_target": "test", "hooks": [], "skills": []}
+    (harness_dir / "manifest.json").write_text(
+        __import__("json").dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
     return harness_dir
 
 
@@ -312,8 +316,9 @@ class TestEvolverStructuralFix:
         failure.seen_across_n_sessions = PATTERN_MIN_SESSIONS
 
         edits = evolver.propose(harness_dir=harness_dir, failure=failure)
-        assert len(edits) == 1
-        assert edits[0].target_file.startswith("harness/hooks/")
+        assert len(edits) == 2
+        assert any(e.target_file.startswith("harness/hooks/") for e in edits)
+        assert any(e.target_file == "harness/manifest.json" for e in edits)
 
     def test_recurring_failure_rationale_has_evidence(self, tmp_path: Path) -> None:
         """The structural edit rationale includes cross-session evidence."""
@@ -323,8 +328,8 @@ class TestEvolverStructuralFix:
         failure.seen_across_n_sessions = 5
 
         edits = evolver.propose(harness_dir=harness_dir, failure=failure)
-        assert len(edits) == 1
-        assert "[cross-session pattern: 5 sessions]" in edits[0].rationale
+        hook_edit = next(e for e in edits if e.target_file.startswith("harness/hooks/"))
+        assert "[cross-session pattern: 5 sessions]" in hook_edit.rationale
 
     def test_structural_edit_creates_new_file_diff(self, tmp_path: Path) -> None:
         """Structural template for a non-existent hook creates a new-file diff."""
@@ -334,9 +339,9 @@ class TestEvolverStructuralFix:
         failure.seen_across_n_sessions = PATTERN_MIN_SESSIONS
 
         edits = evolver.propose(harness_dir=harness_dir, failure=failure)
-        assert len(edits) == 1
-        assert "--- a/harness/hooks/" in edits[0].unified_diff
-        assert "+++ b/harness/hooks/" in edits[0].unified_diff
+        hook_edit = next(e for e in edits if e.target_file.startswith("harness/hooks/"))
+        assert "--- a/harness/hooks/" in hook_edit.unified_diff
+        assert "+++ b/harness/hooks/" in hook_edit.unified_diff
 
     def test_structural_edit_each_failure_class(self, tmp_path: Path) -> None:
         """Every failure class has a structural template."""
@@ -352,6 +357,85 @@ class TestEvolverStructuralFix:
             "unknown",
         }
         assert set(_STRUCTURAL_EDIT_TEMPLATES.keys()) == expected_classes
+
+    def test_structural_edit_includes_manifest_patch(self, tmp_path: Path) -> None:
+        """Structural edit creating a hook also patches manifest.json (issue #1239)."""
+        harness_dir = _setup_harness(tmp_path)
+        evolver = Evolver()
+        failure = _make_failure(proposed_class="wrong-tool")
+        failure.seen_across_n_sessions = PATTERN_MIN_SESSIONS
+
+        edits = evolver.propose(harness_dir=harness_dir, failure=failure)
+        assert len(edits) == 2
+        hook_edit = next(e for e in edits if e.target_file.startswith("harness/hooks/"))
+        manifest_edit = next(e for e in edits if e.target_file == "harness/manifest.json")
+        assert "tool_validator" in manifest_edit.unified_diff
+        assert hook_edit.target_file == "harness/hooks/tool_validator.py"
+
+    def test_structural_edit_manifest_patch_adds_hook_name(self, tmp_path: Path) -> None:
+        """The manifest patch adds the hook stem to the hooks[] array."""
+        harness_dir = _setup_harness(tmp_path)
+        evolver = Evolver()
+        failure = _make_failure(proposed_class="bad-prompt")
+        failure.seen_across_n_sessions = PATTERN_MIN_SESSIONS
+
+        edits = evolver.propose(harness_dir=harness_dir, failure=failure)
+        manifest_edit = next(e for e in edits if e.target_file == "harness/manifest.json")
+        assert '"prompt_clarifier"' in manifest_edit.unified_diff
+
+    def test_structural_edit_no_manifest_patch_if_hook_registered(self, tmp_path: Path) -> None:
+        """No manifest edit when the hook name is already in manifest hooks[]."""
+        harness_dir = _setup_harness(tmp_path)
+        import json
+
+        manifest_path = harness_dir / "manifest.json"
+        doc = json.loads(manifest_path.read_text())
+        doc["hooks"] = ["tool_validator"]
+        manifest_path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+
+        evolver = Evolver()
+        failure = _make_failure(proposed_class="wrong-tool")
+        failure.seen_across_n_sessions = PATTERN_MIN_SESSIONS
+
+        edits = evolver.propose(harness_dir=harness_dir, failure=failure)
+        manifest_edits = [e for e in edits if e.target_file == "harness/manifest.json"]
+        assert len(manifest_edits) == 0
+
+    def test_structural_edit_all_classes_include_manifest_patch(self, tmp_path: Path) -> None:
+        """Every structural failure class produces a manifest.json edit."""
+        from foundry_x.evolution.evolver import _STRUCTURAL_EDIT_TEMPLATES
+
+        for failure_class in _STRUCTURAL_EDIT_TEMPLATES:
+            sub = tmp_path / failure_class
+            sub.mkdir(parents=True, exist_ok=True)
+            harness_dir = _setup_harness(sub)
+            evolver = Evolver()
+            failure = _make_failure(proposed_class=failure_class)
+            failure.seen_across_n_sessions = PATTERN_MIN_SESSIONS
+            edits = evolver.propose(harness_dir=harness_dir, failure=failure)
+            manifest_edits = [e for e in edits if e.target_file == "harness/manifest.json"]
+            assert len(manifest_edits) == 1, f"{failure_class} missing manifest patch"
+
+    def test_manifest_coverage_validator_passes_for_synced(self, tmp_path: Path) -> None:
+        """validate_manifest_hook_coverage passes when manifest lists all hooks."""
+        from foundry_x.evolution.critic import validate_manifest_hook_coverage
+
+        harness_dir = _setup_harness(tmp_path)
+        ok, errors = validate_manifest_hook_coverage(harness_dir)
+        assert ok
+        assert errors == []
+
+    def test_manifest_coverage_validator_catches_undeclared_hook(self, tmp_path: Path) -> None:
+        """validate_manifest_hook_coverage catches an undeclared hook file."""
+        from foundry_x.evolution.critic import validate_manifest_hook_coverage
+
+        harness_dir = _setup_harness(tmp_path)
+        (harness_dir / "hooks" / "rogue_hook.py").write_text(
+            "# rogue hook not in manifest\n", encoding="utf-8"
+        )
+        ok, errors = validate_manifest_hook_coverage(harness_dir)
+        assert not ok
+        assert any("rogue_hook" in e for e in errors)
 
     def test_llm_prompt_includes_pattern_section(self, tmp_path: Path) -> None:
         """_build_llm_prompt includes CROSS-SESSION PATTERN section for recurring."""

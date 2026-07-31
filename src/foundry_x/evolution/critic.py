@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import glob
+import json
 import os
 import re
 import shutil
@@ -95,6 +96,56 @@ def _diff_touches_only_non_critical_files(diff: str) -> bool:
     return True
 
 
+def validate_manifest_hook_coverage(harness_dir: Path) -> tuple[bool, list[str]]:
+    """Verify manifest.json ``hooks`` entries are a superset of hook files.
+
+    Issue #1239: when the Evolver's structural templates create a new hook
+    file, the manifest must also list it. This standalone check reads the
+    harness tree and compares the set of ``*.py`` files under
+    ``harness/hooks/`` (excluding ``__init__.py`` and ``base.py``) against
+    the ``hooks`` array in ``manifest.json``. Any on-disk hook file not
+    listed in the manifest would be silently ignored at load time by
+    ``HookRegistry``.
+
+    This mirrors the undeclared-hook check already performed by
+    ``harness/scripts/load_check.py`` (issue #1010) but is callable
+    directly from tests and the evolution pipeline without spawning a
+    subprocess.
+
+    Args:
+        harness_dir: Path to the harness directory.
+
+    Returns:
+        ``(ok, errors)`` where *ok* is ``True`` when every hook file on
+        disk is listed in the manifest's ``hooks`` array, and *errors*
+        lists each undeclared hook file name.
+    """
+    manifest = harness_dir / "manifest.json"
+    if not manifest.exists():
+        return True, []
+    try:
+        doc = json.loads(manifest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return True, []
+    declared = doc.get("hooks", [])
+    if not isinstance(declared, list):
+        return True, []
+    declared_set = {str(h) for h in declared}
+
+    hooks_dir = harness_dir / "hooks"
+    errors: list[str] = []
+    if hooks_dir.is_dir():
+        for hook_file in sorted(hooks_dir.glob("*.py")):
+            if hook_file.name in ("__init__.py", "base.py"):
+                continue
+            stem = hook_file.stem
+            if stem not in declared_set:
+                errors.append(
+                    f"hook file {hook_file.name!r} is not listed in manifest.json hooks[]"
+                )
+    return len(errors) == 0, errors
+
+
 #: GGUF v3 quantization types studied in ADR-0020 (K-quants and legacy
 #: types). These are the quantizations for which the intelligence floor
 #: table in ADR-0020 has (projected) pass-rate data.
@@ -176,8 +227,6 @@ def _parse_model_registry() -> dict[str, dict[str, str]] | None:
     if not raw:
         return None
     try:
-        import json
-
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
             sys.stderr.write(

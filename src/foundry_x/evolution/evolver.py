@@ -1527,6 +1527,60 @@ class Evolver:
         self._record_proposals(edit=edit, failure_class=failure.proposed_class)
         return [edit]
 
+    def _build_manifest_hook_patch(
+        self,
+        harness_dir: Path,
+        hook_name: str,
+    ) -> ProposedEdit | None:
+        """Build a ProposedEdit for ``manifest.json`` adding *hook_name* to ``hooks[]``.
+
+        When a structural template creates a new hook file the manifest must
+        also list it so ``HookRegistry`` loads it at runtime (issue #1239).
+        Uses :func:`_apply_json_merge_patch` (RFC 7396) so the result is
+        syntactically valid JSON that round-trips through the Critic's
+        ``load_check`` gate.
+
+        Returns ``None`` when the hook is already registered (no-op), when
+        the manifest is absent or unparseable (non-fatal — the hook-file
+        edit still ships; ``load_check`` will surface the drift).
+        """
+        manifest_path = harness_dir / _HARNESS_MANIFEST
+        if not manifest_path.exists():
+            return None
+        original = manifest_path.read_text(encoding="utf-8")
+        try:
+            doc = json.loads(original)
+        except json.JSONDecodeError:
+            return None
+        existing = doc.get("hooks", [])
+        if not isinstance(existing, list):
+            return None
+        if hook_name in existing:
+            return None
+        patch = {"hooks": [*existing, hook_name]}
+        try:
+            modified = _apply_json_merge_patch(original, patch)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        confined = f"{_HARNESS_ROOT}/{_HARNESS_MANIFEST}"
+        diff_lines = list(
+            difflib.unified_diff(
+                original.splitlines(keepends=True),
+                modified.splitlines(keepends=True),
+                fromfile=f"a/{confined}",
+                tofile=f"b/{confined}",
+                lineterm="\n",
+            )
+        )
+        unified_diff = "".join(diff_lines)
+        if not unified_diff:
+            return None
+        return ProposedEdit(
+            target_file=confined,
+            rationale=f"register {hook_name!r} hook in manifest.json hooks[] (issue #1239)",
+            unified_diff=unified_diff,
+        )
+
     def _propose_structural_edit(
         self,
         harness_dir: Path,
@@ -1540,6 +1594,11 @@ class Evolver:
         (ADR-0030, issue #1038). When the hook file does not exist yet,
         the diff is a new-file creation; when it does, ``extra_lines`` are
         appended to the existing content.
+
+        Also produces a JSON Merge Patch for ``manifest.json`` adding the
+        hook name to the ``hooks`` array so the hook is actually loaded at
+        runtime by ``HookRegistry`` (issue #1239). Previously, new hooks
+        were silently ignored because the manifest was never updated.
         """
         relative_target, rationale, extra_lines, _json_patch = template
         prefix = f"[cross-session pattern: {failure.seen_across_n_sessions} sessions] "
@@ -1582,8 +1641,23 @@ class Evolver:
                 f"structural edit for {failure.proposed_class!r} failed validation: {exc}"
             )
             return []
-        self._record_proposals(edit=edit, failure_class=failure.proposed_class)
-        return [edit]
+
+        edits: list[ProposedEdit] = [edit]
+
+        # Issue #1239: patch manifest.json so the new hook is registered.
+        hook_name = Path(relative_target).stem
+        manifest_edit = self._build_manifest_hook_patch(harness_dir, hook_name)
+        if manifest_edit is not None:
+            try:
+                self._validate_edit(manifest_edit)
+            except EvolverGuardError:
+                manifest_edit = None
+        if manifest_edit is not None:
+            edits.append(manifest_edit)
+
+        for e in edits:
+            self._record_proposals(edit=e, failure_class=failure.proposed_class)
+        return edits
 
     def _emit_template_failure(self, error: str) -> None:
         """Emit generation_attempt + generation_exhausted for a template-path failure.
