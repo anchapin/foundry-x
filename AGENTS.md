@@ -1,302 +1,209 @@
 # AGENTS.md
 
-> Operational ground rules for AI coding agents (Claude, GPT, local models
-> driven by FoundryX itself, etc.) collaborating on this repository.
+> Operational ground rules for AI coding agents collaborating on this repository.
 >
 > - Humans: see [CONTRIBUTING.md](./CONTRIBUTING.md).
 > - Why these rules exist: see [docs/PHILOSOPHY.md](./docs/PHILOSOPHY.md).
-> - What you can and cannot touch in `harness/`: see [docs/SECURITY.md](./docs/SECURITY.md).
+> - Harness guardrails: see [docs/SECURITY.md](./docs/SECURITY.md).
 
 ## 1. Read first, then act
 
 First session here? Work through [`docs/TUTORIAL.md`](./docs/TUTORIAL.md)
-(<30 min, fully offline): it plants a trace, walks the six core events
-the `TraceLogger` emits, and reads the KPIs. It establishes the mental
-model the rest of this file assumes.
+(<30 min, fully offline): plants a trace, walks the six core events the
+`TraceLogger` emits, reads the KPIs.
 
-Before you write code in this repo, read in this order:
+Before writing code, read in this order:
 
 1. `README.md` — what this is.
 2. `docs/PRD.md` — product requirements and KPIs.
-3. `docs/ROADMAP.md` — all three phases shipped (929b327, 2026-07-11).
-   Detailed delivery status is in that file.
-4. `docs/PHILOSOPHY.md` — the principles you must not violate.
-5. `docs/SECURITY.md` — guardrails, especially for `harness/` edits.
+3. `docs/PHILOSOPHY.md` — principles you must not violate.
+4. `docs/SECURITY.md` — guardrails, especially for `harness/` edits.
    `harness/manifest.json` controls which hooks are active; adding or
    removing a hook file requires updating the manifest.
-6. `docs/CONTEXT.md` — glossary of project terms and the `kind`
-   vocabulary produced by the `TraceLogger`. The §Event kinds table
-   is the canonical reference for trace event payload contracts
-   (relevant any time you read, emit, or change a `kind` value).
-   Adding a new `kind` is a vocabulary change that must ship in the
-   same PR as the code that emits it.
-7. `docs/ARCHITECTURE.md` — runtime architecture map (Runner,
-   TraceLogger, Digester, Evolver, Critic and how they connect).
-8. `docs/OPERATOR.md` — human-side workflow that mirrors the agent
-   loop in §3 below.
- 9. `docs/MODEL_CONFIG.md` — the full set of model-side env vars
-   (`OPENCODE_SERVER_URL`, `FOUNDRY_TOKEN_BUDGET`, `FOUNDRY_TASK_TIMEOUT`,
-   `FOUNDRY_MAX_EVENTS_PER_SESSION`, `FOUNDRY_REQUEST_TIMEOUT_S`, …) and the
-   resolution order. Three resource caps guard against runaway loops:
-   `FOUNDRY_TASK_TIMEOUT` (wall-clock, default 600 s),
-   `FOUNDRY_TOKEN_BUDGET` (total tokens, unset), and
-   `FOUNDRY_MAX_EVENTS_PER_SESSION` (event count, unset).
-   Key derived caps: `FOUNDRY_CONTEXT_TOKENS` (set to a positive int to
-   switch from event-count pruning to token-aware pruning — see ADR-0021).
-   `FOUNDRY_SMOKE_BENCHMARK_TAGS` (comma-separated, default `smoke`) selects
-   the fast-reject benchmark subset for rapid iteration.
-   `FOUNDRY_GATE_TIMEOUT_S` (float, default unbounded) bounds every Critic
-   subprocess so a hanging child cannot inflate cycle-time KPIs.
-10. `docs/adr/` — read the relevant ADR before changing that area:
-    - `harness/` → ADR-0004 | `pyproject.toml` / deps → ADR-0002
-    - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
-    - Module-boundary models → ADR-0006 | `src/foundry_x/execution/` → ADR-0010
-    - `src/foundry_x/evolution/` → ADR-0010 | `evolution/loop.py` → ADR-0010
-      - Run `ls docs/adr/` for the full current set (0001–0035); key decisions recently added:
-         - ADR-0035 (parallel issue-generation prompt)
-         - ADR-0034 (Smoke DifficultyTier definition)
-         - ADR-0031 (security benchmark vectors)
-         - ADR-0030 (cross-session failure accumulator)
-         - ADR-0029 (cloud model adapters)
-         - Conventional Commits → ADR-0008
-         - Security-eval benchmarks → ADR-0009
-         - Manifest as evolver target → ADR-0012
-         - Model abstraction → ADR-0014 (ADR-0015 merged into it)
-         - Review state machine → ADR-0017
-         - Context pruning at scale → ADR-0021
-         - External eval validation study → ADR-0023
-11. The relevant module under `src/foundry_x/`.
+5. `docs/CONTEXT.md` — glossary and the `kind` vocabulary produced by the
+   `TraceLogger`. The §Event kinds table is the canonical trace event
+   payload contract. Adding a new `kind` is a vocabulary change that must
+   ship in the same PR as the code that emits it.
+6. `docs/ARCHITECTURE.md` — runtime map (Runner, TraceLogger, Digester,
+   Evolver, Critic and how they connect).
+7. `docs/MODEL_CONFIG.md` — model-side env vars and resolution order.
+   Three resource caps guard against runaway loops: `FOUNDRY_TASK_TIMEOUT`
+   (wall-clock, default 600 s), `FOUNDRY_TOKEN_BUDGET` (total tokens,
+   unset), `FOUNDRY_MAX_EVENTS_PER_SESSION` (event count, unset).
+8. `docs/adr/` — read the relevant ADR before changing that area:
+   - `harness/` → ADR-0004 | deps → ADR-0002 | `trace/` → ADR-0003, ADR-0007
+   - `benchmarks/` → ADR-0004, ADR-0005 | models → ADR-0006 | `execution/` → ADR-0010
+   - `evolution/` → ADR-0010 | Conventional Commits → ADR-0008
+   - Run `ls docs/adr/` for the full current set (0001–0035).
+9. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
 stop and read it. Speculation is not evidence.
 
 ## 2. Hard rules (do not violate)
 
-These are non-negotiable. If a task appears to require violating one, stop
-and ask the human.
+If a task appears to require violating one of these, stop and ask the human.
 
 - **Never edit `harness/system_prompt.txt`, `harness/hooks/*`, or
-  `harness/skills/*` as a code change.** These files are the agent's
-  DNA. They are evolved by the `Evolver` -> `Critic` loop, not
-  hand-edited. If you think the harness needs to change, produce a
-  `ProposedEdit` and route it through the evolution pipeline. See
-  ADR-0004.
-- **Never bypass the `Critic` gate.** No "I'll just push and run tests
-  later." Every harness edit ships through the Critic or it does not
-  ship. The `Critic` runs in an isolated sandbox and evaluates harness
-  edits against the full pytest suite *plus* the benchmark suite
-  (`benchmarks/tasks/`, marked `@pytest.mark.benchmark`). Regressing a
-  previously-passing benchmark blocks the gate. See ADR-0004.
-  `foundry-evolve evolve --no-verify` skips the gate locally and records
-  a synthetic "skipped" `CriticVerdict` (documented in SECURITY.md) — it
-  cannot ship a harness edit to `main`.
-  **Early-exit:** diffs touching only `docs/`, `.pre-commit-config.yaml`,
-  or `pyproject.toml` skip the benchmark suite (they are not critical to
-  benchmark outcomes); all other changes run the full gate.
+  `harness/skills/*` as a code change.** These are the agent's DNA —
+  evolved by the `Evolver` → `Critic` loop, not hand-edited. Route
+  harness changes through `ProposedEdit` (ADR-0004).
+- **Never bypass the `Critic` gate.** Every harness edit ships through
+  the Critic or it does not ship. The Critic evaluates harness edits
+  against the full pytest suite *plus* the benchmark suite
+  (`benchmarks/tasks/`, `@pytest.mark.benchmark`). Regressing a
+  previously-passing benchmark blocks the gate. Diffs touching only
+  `docs/`, `.pre-commit-config.yaml`, or `pyproject.toml` skip the
+  benchmark suite; all other changes run the full gate.
+  `foundry-evolve evolve --no-verify` skips the gate locally (audit-logged
+  via a synthetic "skipped" `CriticVerdict`) but cannot ship a harness
+  edit to `main`.
 - **Never run destructive commands** (`rm -rf`, `git reset --hard`,
   force-push to a branch other than your own throwaway, dropping a
   database) without an explicit rollback path stated in the response.
-- **Never commit secrets.** No API keys, tokens, or `.env` contents.
-  `.env.example` is the template; real values live in `.env` (gitignored).
-- **Never assume a library is available** without checking
-  `pyproject.toml` and `uv.lock` first. If it is not there, add it via
-  `uv add <package>` and explain why in the PR. The lockfile (`uv.lock`)
-  is committed — always run `uv sync` after adding a dependency so the
-  lockfile stays in sync with `pyproject.toml`.
-- **Never silently swallow an exception.** Log it via the project's
-  `TraceLogger`, surface it, or re-raise. Bare `except: pass` is a bug.
-- **Never widen scope.** A bug fix is not a refactor. A feature is not a
-  re-architecture. If you discover adjacent issues, file them and move on.
-- **Only merge agent-authored PRs after CI is green.** Agents may merge
-  their own PRs only when every required check is passing, the branch is
-  cleanly mergeable, and the PR does not contain harness hand-edits. Two
-  human approvals are still required for harness hand-edits.
+- **Never commit secrets.** `.env.example` is the template; real values
+  live in `.env` (gitignored).
+- **Never assume a library is available** without checking `pyproject.toml`
+  and `uv.lock` first. Add new deps via `uv add <package>`, then `uv sync`
+  so the lockfile stays in sync. Explain why in the PR.
+- **Never silently swallow an exception.** Log via `TraceLogger`, surface,
+  or re-raise. Bare `except: pass` is a bug.
+- **Never widen scope.** A bug fix is not a refactor. File adjacent
+  issues and move on.
 - **Never pretend a benchmark passed.** If a test fails, the change is
-  not done. Re-read the failure, do not paper over it.
-- **Never merge directly to `main`.** All changes go through PRs targeting
-  `develop`. The `main` branch is protected and requires PR reviews,
-  status checks (CI + benchmark gate), and linear history.
+  not done.
+- **Branch from `develop` and target `develop`.** `main` is protected
+  (PR reviews, status checks, linear history). Agents may merge their
+  own PRs only when all CI checks pass, the branch is cleanly mergeable,
+  and the PR has no harness hand-edits (those need two human approvals).
 
 ## 3. The FoundryX way
 
-This project is itself an agent harness foundry. The way we work here
-mirrors the way our product works:
+This project is an agent harness foundry — we work the way the product works:
 
-1. **Observe.** Read the trace (`logs/`) and the existing code before
-   proposing a change. The trace store is ground truth. Note: `logs/` is
-   gitignored; it contains live SQLite/JSONL trace data from agent runs.
-2. **Digest.** Write a small failure report ("the existing approach
-   breaks when X because Y").
-3. **Propose the smallest viable change.** One file if possible. One
-   concern per commit.
-4. **Evaluate.** Run the test suite. If you changed the harness, the
-   Critic must pass on a benchmark.
-5. **Commit atomically.** Conventional Commits. The subject must answer
-   "what changed and why" in one sentence.
-6. **Hand off.** Open a PR. Summarize the trace evidence that motivated
-   the change. Wait for human review.
+1. **Observe.** Read the trace (`logs/`) and existing code before proposing
+   changes. `logs/` is gitignored; it contains live SQLite/JSONL trace data.
+2. **Digest.** Write a small failure report ("breaks when X because Y").
+3. **Propose the smallest viable change.** One file if possible. One concern
+   per commit.
+4. **Evaluate.** Run the test suite. Harness changes must pass the Critic gate.
+5. **Commit atomically.** Conventional Commits. Subject answers "what changed
+   and why" in one sentence.
+6. **Hand off.** Open a PR with trace evidence. Wait for human review.
 
-## 4. Tooling you are expected to use
+## 4. Tooling
 
 - **Package manager:** `uv` (ADR-0002). Never `pip install` directly.
-  After `git clone`, run `uv sync` to install dependencies.
-- **Pre-commit hooks:** installed via `uv run pre-commit install`.
-  Run on demand with `uv run pre-commit run --all-files`. Hooks
-  include ruff, ruff-format, gitleaks (secret scan), and standard
-  hygiene checks. See `.pre-commit-config.yaml`.
-- **Lint:** `uv run ruff check .` must pass before commit (also enforced
-  by pre-commit). Always run before pytest. The `lint.yml` CI workflow
-  runs `ruff check .` *and* `ruff format --check` as separate jobs; the
-  `ci.yml` lint+test job only runs `ruff check .`. Fix format locally
-  with `uv run ruff format .` (run `--check` first, then `format .` if
-  it fails — never let unformatted code reach PR review). Note `ruff`
-  line-length is **100** here, not the default 88 (see `[tool.ruff]`
-  in `pyproject.toml`); pre-commit's `ruff` hook auto-fixes with
-  `--fix --exit-non-zero-on-fix`, so staged files get modified and must
-  be re-added. The lint job also runs `tests/docs/test_doc_links.py`
-  (broken cross-doc refs) and `tests/docs/test_ci_gate_claims.py`
-  (verifies CI enforcement claims in docs are backed by real workflows).
+  Run `uv sync` after clone and after adding any dependency.
+- **Pre-commit:** `uv run pre-commit install`. Run on demand with
+  `uv run pre-commit run --all-files`. Hooks: ruff (with `--fix
+  --exit-non-zero-on-fix`, so staged files get modified and must be
+  re-added), ruff-format, gitleaks, and standard hygiene checks.
+- **Lint:** `uv run ruff check .` — must pass before commit. `ruff`
+  line-length is **100** here, not the default 88 (see `[tool.ruff]` in
+  `pyproject.toml`). Fix format with `uv run ruff format .`. The
+  `lint.yml` CI workflow runs both `ruff check .` and
+  `ruff format --check` as separate jobs. The `ci.yml` workflow's
+  `pre-commit` job also enforces both via pre-commit hooks. Both
+  workflows run `tests/docs/test_doc_links.py` (broken cross-doc refs)
+  and `tests/docs/test_ci_gate_claims.py` (CI enforcement claims in docs
+  backed by real workflows).
 - **Test:** `uv run pytest` — must pass before commit. Run after lint.
-  Pytest discovers both `tests/` and `benchmarks/` (see `testpaths` in
-  `pyproject.toml`); benchmark tasks under `benchmarks/tasks/` are gated
-  by the `@pytest.mark.benchmark` marker (ADR-0004, ADR-0005).
-    - Unit tests only: `uv run pytest -m "not benchmark"`
-    - Single test: `uv run pytest tests/path/to_test.py::test_name`
-    - Single benchmark: `uv run pytest benchmarks/tasks/test_name.py -m benchmark`
-    - Full benchmark suite: `uv run pytest -m benchmark`
-    - List registered benchmark tasks without running them:
-      `uv run pytest --co -q -m benchmark`
-    - **Test fixtures** (defined in `tests/conftest.py` and `benchmarks/conftest.py`):
-      - `model_adapter` (tests/conftest.py): session-scoped `ModelAdapter`
-        selected by `TEST_MODEL_MODE` — defaults to a deterministic
-        `MockModelAdapter` with no network access, so unit tests and
-        most benchmarks run offline. Set `TEST_MODEL_MODE=real` to drive
-        `OpenAICompatibleAdapter` against `OPENCODE_SERVER_URL` /
-        `LLAMACPP_HOST` for live integration runs (matches
-        `.github/workflows/test.yml::test-real-model`).
-        **Session-scoped**: do not re-configure it mid-test.
-      - `mock_adapter` (tests/conftest.py): fresh `MockModelAdapter` per
-        test; ignore `TEST_MODEL_MODE`. Use when configuring
-        per-test responses without sharing state.
-      - `benchmark_workspace` (benchmarks/conftest.py): per-test isolated
-        `tmp_path` the benchmark task treats as the agent's entire
-        filesystem. Indirect-parametrize with the name of a directory
-        under `benchmarks/fixtures/<name>/` to seed inputs (fails loudly
-        if the fixture directory is missing).
-  - `benchmarks/fixtures/` contains large benchmark inputs and is
-    excluded from ruff, ruff-format, and pytest on purpose
-    (`pyproject.toml` `extend-exclude` + `norecursedirs`). Don't lint
-    or import from it; copy fixtures into the `benchmark_workspace`
-    (or `tests/`) if you need them outside a benchmark task.
-- **Critic harness-load smoke test:** before the pytest suite, the
-  Critic runs `harness/scripts/load_check.py` to confirm the harness
-  imports and registers cleanly. If your hook or skill change fails
-  there but passes pytest, the harness can't be loaded at runtime.
-- **CLI tools** (registered in `pyproject.toml` §`[project.scripts]`):
-  - `uv run fx-runner --task "..."` — run a single agent task session
-    (extra flags `--harness-dir`, `--trace-path`, `--workspace-root`,
-    `--model-id`, `--quantization`, `--path-or-endpoint`; same module
-    as `python -m foundry_x.execution.runner`)
-  - `uv run foundry-x-trace` (alias `foundry-trace`) — trace-driven
-    inspection. Subcommands worth knowing: `sessions`, `show <sid>`,
-    `events-grep`, `render-failure`, `seed-sample-trace` (plant a
-    deterministic offline session), and `prune` (drop old sessions
-    from `logs/traces.db` — see Operational notes below). `--help` for
-    the full list.
-  - `uv run foundry-kpis` — compute the three PRD success-metric
-    KPIs (cycle time, regression rate, improvement rate) plus the
-    tracked token-budget metric from traces.
-  - `uv run fx-trace regression-report` — aggregate `critic_verdict`
-    events from `logs/` into a regression baseline report.
-  - `uv run foundry-evolve evolve --session-id <id>` — run one evolution
-    iteration (Digester → Evolver → Critic) against an existing
-    session. Use `approve <uuid>` to mark a ProposedEdit as reviewed
-    and `apply <uuid>` to apply it to the harness. Pass `--no-verify`
-    to skip the Critic gate (local-only, audit-logged). Pass `--background`
-    to run non-blocking. Both flags are documented in SECURITY.md.
-  - `uv run foundry-sweep` — parametric sweep of harness variants
-    (e.g. quantization sweep; Phase 3).
-  - `uv run fx-trace` (from `observability/cli.py`) — KPI reports,
-    regression reports, session summaries, tool-latency percentiles.
-  - `uv run foundry-x-trace` / `foundry-trace` (from `trace/cli.py`) —
-    trace inspection: list/show sessions, grep events, redact secrets,
-    seed sample traces, prune the trace store.
+  Pytest discovers both `tests/` and `benchmarks/` (`testpaths` in
+  `pyproject.toml`); benchmark tasks are gated by `@pytest.mark.benchmark`
+  (ADR-0004, ADR-0005).
+  - Unit tests only: `uv run pytest -m "not benchmark"`
+  - Single test: `uv run pytest tests/path/to_test.py::test_name`
+  - Single benchmark: `uv run pytest benchmarks/tasks/test_name.py -m benchmark`
+  - Full benchmark suite: `uv run pytest -m benchmark`
+  - List benchmark tasks without running: `uv run pytest --co -q -m benchmark`
+  - **Test fixtures** (`tests/conftest.py`, `benchmarks/conftest.py`):
+    - `model_adapter` — session-scoped `ModelAdapter` selected by
+      `TEST_MODEL_MODE`. Defaults to `mock` (deterministic, no network)
+      so unit tests and most benchmarks run offline. Set
+      `TEST_MODEL_MODE=real` to drive `OpenAICompatibleAdapter` against
+      `OPENCODE_SERVER_URL` / `LLAMACPP_HOST` (matches
+      `.github/workflows/test.yml::test-real-model`). **Session-scoped**:
+      do not re-configure it mid-test.
+    - `mock_adapter` — fresh `MockModelAdapter` per test; ignores
+      `TEST_MODEL_MODE`. Use when configuring per-test responses.
+    - `benchmark_workspace` — per-test isolated `tmp_path` the benchmark
+      task treats as the agent's entire filesystem. Indirect-parametrize
+      with a `benchmarks/fixtures/<name>/` directory to seed inputs (raises
+      `FileNotFoundError` if the fixture directory is missing).
+  - `benchmarks/fixtures/` is excluded from ruff, ruff-format, and pytest
+    on purpose (`pyproject.toml` `extend-exclude` + `norecursedirs`).
+    Don't lint or import from it; copy fixtures into the
+    `benchmark_workspace` (or `tests/`) if you need them outside a
+    benchmark task.
+- **Harness load check:** the Critic (and CI in both `ci.yml` and
+  `test.yml`) runs `harness/scripts/load_check.py` before pytest to confirm
+  the harness imports and registers cleanly. If your hook or skill change
+  fails there but passes pytest, the harness can't be loaded at runtime.
+- **CLI tools** (seven registered in `pyproject.toml` §`[project.scripts]`):
+
+  | Command | Purpose |
+  | --- | --- |
+  | `uv run fx-runner --task "..."` | Run a single agent task session (flags: `--harness-dir`, `--trace-path`, `--workspace-root`, `--model-id`) |
+  | `uv run foundry-x-trace` / `foundry-trace` | Trace inspection: `sessions`, `show`, `events-grep`, `render-failure`, `seed-sample-trace`, `prune` |
+  | `uv run fx-trace` | KPI reports, regression reports, session summaries, tool-latency percentiles |
+  | `uv run foundry-kpis` | Three PRD KPIs (cycle time, regression rate, improvement rate) + token-budget metric |
+  | `uv run foundry-evolve evolve --session-id <id>` | One evolution iteration (Digester→Evolver→Critic). Also: `approve <uuid>`, `apply <uuid>`, `--background`, `--no-verify` |
+  | `uv run foundry-sweep` | Parametric sweep of harness variants (Phase 3) |
+
+  Pass `--help` to any command for the full flag surface.
 - **Operational notes:**
-  - `logs/` is gitignored but grows without bound. Manage retention
-    with `uv run foundry-x-trace prune --keep-last N` or
-    `--older-than DAYS`; both support `--dry-run`. Add `--vacuum`
-    on a sqlite retention pass to reclaim the `traces.db-wal` sidecar
-    that heavy pruning otherwise grows unboundedly (issue #896).
-  - End-to-end real-model benchmarks (launch llama-server, run the
-    sandboxed agent, assert the trace store grew, tear down):
-    `infra/scripts/run_benchmark.sh --task "..." [--model <gguf>]
-    [--dry-run] [--keep-server]`. See the script header for env
-    vars (`LLAMACPP_HOST`, `LLAMACPP_NGL`, etc.).
-  - Trace backend: SQLite is default (`./logs/traces.db`, WAL mode);
-    switch with `FOUNDRY_TRACE_BACKEND=jsonl` and a `.jsonl` path.
-    Same schema either way (ADR-0003).
-  - Dependency audit: `pip-audit` runs weekly in CI (audit.yml) and on
-    every PR touching `pyproject.toml`, `uv.lock`, or any
-    `requirements*.txt`. Use `uvx --from "pip-audit==2.10.1" pip-audit`
-    locally (ADR-0002).
-- **Type discipline:** Python 3.11+ syntax. `pydantic` for all
-  structured data at module boundaries (ADR-0006). No `Any` without
-  a comment explaining why.
-- **Logging:** the project's own `TraceLogger`. Do not sprinkle
-  `print()` or generic `logging.info` in library code; route through
-  trace events so the evolution loop can see them.
-- **Search:** prefer `rg` over `grep`.
-- **Shell:** prefer `workdir` over `cd`. Quote paths with spaces.
+  - `logs/` grows without bound. Prune with
+    `uv run foundry-x-trace prune --keep-last N` or `--older-than DAYS`
+    (both support `--dry-run`). Add `--vacuum` on a sqlite retention pass
+    to reclaim the `traces.db-wal` sidecar (issue #896).
+  - Real-model E2E benchmarks: `infra/scripts/run_benchmark.sh --task "..."`
+    (see script header for env vars like `LLAMACPP_HOST`, `LLAMACPP_NGL`).
+  - Trace backend: SQLite default (`./logs/traces.db`, WAL mode). Switch
+    with `FOUNDRY_TRACE_BACKEND=jsonl` and a `.jsonl` path. Same schema
+    either way (ADR-0003).
+  - Dependency audit: `pip-audit` runs weekly in CI and on PRs touching
+    `pyproject.toml`/`uv.lock`/`requirements*.txt`. Run locally with
+    `uvx --from "pip-audit==2.10.1" pip-audit`.
+- **Type discipline:** Python 3.11+. `pydantic` for all structured data
+  at module boundaries (ADR-0006). No `Any` without a comment explaining why.
+- **Logging:** route through `TraceLogger`, not `print()` or generic
+  `logging.info` in library code. The evolution loop depends on trace events.
+- **Search:** prefer `rg` over `grep`. **Shell:** prefer `workdir` over `cd`.
 
 ## 5. Commit and PR etiquette
 
-- **Branch from `develop` and target `develop`.** The `main` branch is
-  protected — all work branches off `develop` and PRs target `develop`.
-  Use `git checkout -b fix/issue-NNN-description develop` to create branches.
 - One logical change per commit. If a refactor is needed to make the
   feature possible, that is two commits in two PRs.
 - Commit subject: 50 chars, imperative, no trailing period.
   Example: `feat(trace): persist tool-call latency histogram`.
 - PR description must include: motivation, evidence (trace excerpt or
   test output), risk, and the ADR(s) it advances or supersedes.
-- Keep PRs <400 lines of diff where possible. If a change is larger,
-  write the plan to `docs/adr/NNNN-...md` first.
+- Keep PRs <400 lines of diff where possible. If larger, write the plan
+  to `docs/adr/NNNN-...md` first.
 
-## 6. When you are stuck
-
-If after one focused attempt you cannot make progress:
-
-1. Stop. Do not retry the same action with random tweaks.
-2. State the failure concretely: what you tried, what you observed,
-   what you expected.
-3. List the assumptions that might be wrong.
-4. Ask the human a specific question.
-
-This mirrors operating rule 3 of `harness/system_prompt.txt` — we
-practice what we preach.
-
-## 7. The self-reference loop
+## 6. The self-reference loop
 
 The agent harness in this repo is written using tools shaped by the harness.
 Keep the two layers strictly separate:
 
 - **`src/foundry_x/`** — the *foundry*: Python code that wraps and evolves agents.
-  When you read `src/foundry_x/execution/runner.py`, that is the code that talks to the agent.
-- **`harness/`** — the *artifact being evolved*: the agent's own DNA (`system_prompt.txt`, `hooks/`, `skills/`). All three are version-controlled and evolved by the Evolver→Critic loop. Skills are JSON tool definitions the agent can invoke; hooks are Python middleware that runs around every tool call.
+  `src/foundry_x/execution/runner.py` is the code that talks to the agent.
+- **`harness/`** — the *artifact being evolved*: the agent's own DNA
+  (`system_prompt.txt`, `hooks/`, `skills/`). All three are version-controlled
+  and evolved by the Evolver→Critic loop. Skills are JSON tool definitions the
+  agent can invoke; hooks are Python middleware that runs around every tool call.
 
 Mixing these up is the most common mistake newcomers make.
 
-## 8. Known discrepancies
+## 7. Known discrepancies
 
-- **Python version**: CI installs Python 3.14 (`uv python install 3.14` in workflow files).
-  `.python-version` may lag and currently says `3.12`. `pyproject.toml` requires `>=3.11`.
-  When in doubt, match what the CI uses (3.14).
+- **Python version**: CI installs Python 3.14 (`uv python install 3.14` in
+  workflow files). `.python-version` says `3.12`. `pyproject.toml` requires
+  `>=3.11`. When in doubt, match what CI uses (3.14).
 - **Stale AGENTS files**: `AGENTS_BASE_*.md`, `AGENTS_LOCAL_*.md`, and
   `AGENTS_REMOTE_*.md` in the repo root are stale backups from a previous
   session — not the canonical `AGENTS.md`.
 - **README CLI table is incomplete**: `README.md` documents only three
-  console scripts (`fx-trace`, `foundry-kpis`, `foundry-x-trace`/
-  `foundry-trace`), but `pyproject.toml` §`[project.scripts]` registers
-  seven. The full set — including `fx-runner`, `foundry-evolve`, and
-  `foundry-sweep` — is in §4 below; treat that list, not the README
-  table, as authoritative.
+  console scripts, but `pyproject.toml` §`[project.scripts]` registers
+  seven. Treat §4 above, not the README table, as authoritative.
