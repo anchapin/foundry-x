@@ -273,6 +273,11 @@ def test_every_benchmark_task_has_matching_fixture_directory() -> None:
         if task.difficulty_tier == "smoke":
             continue
         fixture_path = FIXTURES_DIR / task_name
+        # Hard-tier tasks nest fixtures under fixtures/<tier>/<name>
+        # (ADR-0028); accept the tiered layout as a valid alternative.
+        tiered_path = FIXTURES_DIR / task.difficulty_tier / task_name
+        if not fixture_path.is_dir() and tiered_path.is_dir():
+            fixture_path = tiered_path
         if not fixture_path.is_dir():
             missing.append(
                 f"{source_file.relative_to(REPO_ROOT)}: "
