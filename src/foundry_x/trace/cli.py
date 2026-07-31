@@ -4,6 +4,7 @@ import argparse
 import csv
 import difflib
 import json
+import os
 import re
 import sys
 import warnings
@@ -266,8 +267,11 @@ def _events_grep(args: argparse.Namespace) -> int:
     for event in events:
         payload_text = json.dumps(event.payload, sort_keys=True)
         if pattern.search(payload_text):
-            sys.stdout.write(f"{event.timestamp}  {event.kind}  {payload_text}\n")
+            if not getattr(args, "count", False):
+                sys.stdout.write(f"{event.timestamp}  {event.kind}  {payload_text}\n")
             matches += 1
+    if getattr(args, "count", False):
+        sys.stdout.write(f"{matches}\n")
     return 0 if matches else 1
 
 
@@ -680,9 +684,26 @@ def _info(args: argparse.Namespace) -> int:
 
     Prints WAL size, DB size, and session count for operators to detect
     WAL bloat before it becomes problematic.
+
+    Issue #1336: WAL auto-vacuum advice adds FOUNDRY_WAL_WARN_BYTES
+    (default 100 MB) to make the threshold configurable, and detects
+    whether the store is actively written to (open session without
+    ended_at) so the warning can distinguish expected WAL growth from
+    accumulated bloat.
+
+    Issue #1335: ``--format json`` exposes a machine-readable payload
+    with ``backend``, ``db_size_bytes``, ``wal_size_bytes``,
+    ``session_count``, and ``wal_warning`` (true when WAL > 100 MB).
+    ``--out`` writes output to a file; for JSON the content is also
+    echoed to stdout so operators can pipe and redirect simultaneously.
     """
     logger = _logger_for(_get_trace_db(args))
     sessions = list(logger.list_sessions())
+
+    wal_threshold_bytes = int(os.environ.get("FOUNDRY_WAL_WARN_BYTES", str(100 * 1024 * 1024)))
+
+    fmt = getattr(args, "format", "text")
+    out_path = getattr(args, "out", None)
 
     if logger.backend == "sqlite":
         db_path = Path(_get_trace_db(args))
@@ -691,28 +712,78 @@ def _info(args: argparse.Namespace) -> int:
         db_size = db_path.stat().st_size if db_path.exists() else 0
         session_count = len(sessions)
 
-        sys.stdout.write("Backend: sqlite\n")
-        sys.stdout.write(f"DB size: {db_size} bytes\n")
-        sys.stdout.write(f"WAL size: {wal_size} bytes\n")
-        sys.stdout.write(f"Sessions: {session_count}\n")
+        has_open_session = any(s.ended_at is None for s in sessions)
+        wal_warning = wal_size > wal_threshold_bytes
 
-        if wal_size > 100 * 1024 * 1024:
+        if fmt == "json":
+            result = {
+                "backend": "sqlite",
+                "db_size_bytes": db_size,
+                "wal_size_bytes": wal_size,
+                "session_count": session_count,
+                "wal_warning": wal_warning,
+            }
+            output = json.dumps(result, indent=2) + "\n"
+            if out_path:
+                Path(out_path).write_text(output, encoding="utf-8")
+            sys.stdout.write(output)
+        else:
+            out_lines = [
+                "Backend: sqlite",
+                f"DB size: {db_size} bytes",
+                f"WAL size: {wal_size} bytes",
+                f"Sessions: {session_count}",
+                "",
+            ]
+            out_text = "\n".join(out_lines)
+            if out_path:
+                Path(out_path).write_text(out_text, encoding="utf-8")
+            sys.stdout.write(out_text)
+
+        if wal_warning:
             sys.stderr.write(
-                f"WARNING: WAL size ({wal_size} bytes) exceeds 100 MB threshold. "
-                f"Run `foundry-trace prune --vacuum` to reclaim WAL space.\n"
+                f"WARNING: WAL size ({wal_size} bytes) exceeds "
+                f"{wal_threshold_bytes} bytes threshold. "
+                f"Run `foundry-trace prune --vacuum` to reclaim WAL space."
             )
+            if has_open_session:
+                sys.stderr.write(
+                    " Note: store has open session(s) — WAL may include uncommitted writes."
+                )
+            sys.stderr.write("\n")
     else:
         db_path = Path(_get_trace_db(args))
         db_size = db_path.stat().st_size if db_path.exists() else 0
         session_count = len(sessions)
 
-        sys.stdout.write("Backend: jsonl\n")
-        sys.stdout.write(f"File size: {db_size} bytes\n")
-        sys.stdout.write(f"Sessions: {session_count}\n")
+        if fmt == "json":
+            result = {
+                "backend": "jsonl",
+                "db_size_bytes": db_size,
+                "wal_size_bytes": 0,
+                "session_count": session_count,
+                "wal_warning": False,
+            }
+            output = json.dumps(result, indent=2) + "\n"
+            if out_path:
+                Path(out_path).write_text(output, encoding="utf-8")
+            sys.stdout.write(output)
+        else:
+            out_lines = [
+                "Backend: jsonl",
+                f"File size: {db_size} bytes",
+                f"Sessions: {session_count}",
+                "",
+            ]
+            out_text = "\n".join(out_lines)
+            if out_path:
+                Path(out_path).write_text(out_text, encoding="utf-8")
+            sys.stdout.write(out_text)
 
     return 0
 
 
+# --- Issue #1044:
 # --- Issue #1044: diagnose — guided failure-mode triage ---------------------
 # Implements the six-row "Common failure modes" table from
 # docs/ARCHITECTURE.md §Common failure modes as a single automated pass.
@@ -919,6 +990,7 @@ _TIMELINE_CATEGORIES: dict[str, tuple[str, str]] = {
     "task_completed": ("TASK", "OK"),
     "task_failed": ("TASK", "!!"),
     "task_aborted": ("TASK", "XX"),
+    "token_budget_aborted": ("TASK", "XX"),
     "user_prompt": ("PROMPT", ">>"),
     "model_request": ("MODEL", "->"),
     "model_response": ("MODEL", "<-"),
@@ -934,7 +1006,14 @@ _TIMELINE_CATEGORIES: dict[str, tuple[str, str]] = {
 
 # Error kinds get a distinct visual marker in the timeline.
 _TIMELINE_ERROR_KINDS: frozenset[str] = frozenset(
-    {"model_error", "task_failed", "task_aborted", "hook_registry_error", "injection_blocked"}
+    {
+        "model_error",
+        "task_failed",
+        "task_aborted",
+        "token_budget_aborted",
+        "hook_registry_error",
+        "injection_blocked",
+    }
 )
 
 # Bar rendering: max bar width in characters, and the scale factor (ms → chars).
@@ -1462,6 +1541,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Deprecated: use --trace-db instead.",
     )
+    events_grep_parser.add_argument(
+        "--count",
+        action="store_true",
+        help="Print only the integer count of matching events instead of event lines.",
+    )
     events_grep_parser.set_defaults(func=_events_grep)
 
     # Issue #192 subcommands: redact-session / redact-key.
@@ -1631,6 +1715,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "--db",
         default=None,
         help="Deprecated: use --trace-db instead.",
+    )
+    info_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help=(
+            "Output format: 'text' (default) prints human-readable lines; "
+            "'json' emits a machine-readable payload with backend, db_size_bytes, "
+            "wal_size_bytes, session_count, and wal_warning (issue #1335)."
+        ),
+    )
+    info_parser.add_argument(
+        "--out",
+        default=None,
+        help="Write output to this path (JSON is also echoed to stdout; issue #1335).",
     )
     info_parser.set_defaults(func=_info)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# trivial change to trigger fresh CI
 import asyncio
 import json
 import os
@@ -453,7 +454,9 @@ class OpenAICompatibleAdapter(ModelAdapter):
                     ) from exc
                 if status == 429:
                     self._emit_rate_limit(exc.response.headers)
-                backoff_ms = _compute_backoff_ms(attempt)
+                    backoff_ms = _compute_429_backoff_ms(attempt, exc.response.headers)
+                else:
+                    backoff_ms = _compute_backoff_ms(attempt)
                 self._emit_retry(attempt + 1, exc, backoff_ms)
                 await asyncio.sleep(backoff_ms / 1000)
                 continue
@@ -536,17 +539,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
         )
 
     def token_pricing(self) -> tuple[float, float]:
-        """Return ``(input_per_1m_usd, output_per_1m_usd)``; emits RuntimeWarning for unknown models."""
-        # OpenAICompatibleAdapter has no pricing table; emit warning and return (0.0, 0.0)
-        # so operators are alerted to the missing pricing data rather than silently reporting $0.00.
-        warnings.warn(
-            f"OpenAICompatibleAdapter: no pricing entry for model '{self.model}'; "
-            "cost attribution will report $0.00. "
-            "Consider using a CloudModelAdapter subclass with a known pricing table.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return (0.0, 0.0)
+        """Return ``(input_per_1m_usd, output_per_1m_usd)`` for the model."""
+        return _resolve_token_pricing(self.model, _OPENAI_PRICING_PER_1M)
 
     def _emit_cost_and_rate_limit(
         self,
@@ -658,6 +652,43 @@ def _compute_backoff_ms(attempt: int) -> int:
     """
     ceiling = min(_BASE_BACKOFF_MS * (2**attempt), _MAX_BACKOFF_MS)
     return random.randint(0, ceiling)
+
+
+def _compute_429_backoff_ms(attempt: int, headers: httpx.Headers) -> int:
+    """Backoff for HTTP 429 using Retry-After or rate-limit reset headers (issue #1358).
+
+    Priority:
+    1. ``Retry-After`` header (seconds, possibly fractional) — used directly + jitter.
+    2. ``x-ratelimit-remaining-requests: 0`` + reset header — parsed and used + jitter.
+    3. Falls back to exponential jitter via :func:`_compute_backoff_ms`.
+
+    The result is capped at :data:`_MAX_BACKOFF_MS`. A small uniform random
+    jitter in ``[0, 500]`` ms is added on top of any header-derived value to
+    avoid thundering-herd synchronisation.
+    """
+    lowered = {k.lower(): v for k, v in headers.items()}
+
+    retry_after = lowered.get("retry-after")
+    if retry_after is not None:
+        try:
+            seconds = float(retry_after)
+            backoff_ms = min(int(seconds * 1000), _MAX_BACKOFF_MS)
+            return backoff_ms + random.randint(0, 500)
+        except ValueError:
+            pass
+
+    if lowered.get("x-ratelimit-remaining-requests") == "0":
+        reset = lowered.get("x-ratelimit-reset-requests") or lowered.get(
+            "anthropic-ratelimit-requests-reset"
+        )
+        if reset is not None:
+            try:
+                backoff_ms = min(int(float(reset) * 1000), _MAX_BACKOFF_MS)
+                return backoff_ms + random.randint(0, 500)
+            except ValueError:
+                pass
+
+    return _compute_backoff_ms(attempt)
 
 
 def _is_retryable_status(status_code: int) -> bool:
@@ -1098,7 +1129,10 @@ class CloudModelAdapter(ABC):
                         status_code=status,
                         response_body=exc.response.text,
                     ) from exc
-                backoff_ms = _compute_backoff_ms(attempt)
+                if status == 429:
+                    backoff_ms = _compute_429_backoff_ms(attempt, exc.response.headers)
+                else:
+                    backoff_ms = _compute_backoff_ms(attempt)
                 self._emit_retry(attempt + 1, exc, backoff_ms)
                 await asyncio.sleep(backoff_ms / 1000)
                 continue

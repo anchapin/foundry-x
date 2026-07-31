@@ -194,6 +194,7 @@ pin their producer, payload contract, and failure-signal classification
 | **`task_completed`** | `Runner.main` (terminal, success path) | `{"duration_ms": int}` — wall-clock time of the entire `run_task` awaitable. | no |
 | **`task_failed`** | `Runner.main` (terminal, exception path) | `{"error_type": str, "message": str, "duration_ms": int}` — exception class name, `str(exc)`, and wall-clock duration; stack frames are deliberately omitted to keep traces compact (ADR-0007). | **yes** (terminal) |
 | **`task_aborted`** | `Runner.run_with_limits` (wall-clock cap, SECURITY.md "Runaway detection") | `{"reason": "wall_clock", "timeout_s": float \| null, "token_budget": int \| null}` — the cap that fired plus the active token budget at abort time. When `reason="token_budget"` the event contributes to the `token_budget_hit_rate` and `token_budget_abort_count` KPIs surfaced in the default `foundry-kpis` summary (issue #704). | **yes** (terminal) |
+| **`token_budget_aborted`** | `Runner.run_task` (issue #1355) | `{"tokens_used": int, "token_budget": int}` — dedicated terminal failure marker emitted when the running token total exceeds `limits.token_budget`. Emitted alongside `task_aborted(reason="token_budget")` to provide a purpose-built abort signal for token-budget failures. Contributes to the `token_budget_hit_rate` and `token_budget_abort_count` KPIs. | **yes** (terminal) |
 
 ### Agent loop
 
@@ -240,14 +241,17 @@ set the Digester considers structural failure markers; treat it as a
 subset of the broader kind vocabulary above.
 
 - **`FAILURE_KINDS`** (constant in
-  `src/foundry_x/evolution/digester.py:85-118`): `tool_error`,
-  `task_failed`, `task_aborted`, `run_failed`, `agent_error`, `error`,
-  `model_error`, `hook_registry_error`, `server_unavailable`.
-  `task_failed` and `task_aborted` are emitted by the production Runner:
-  `task_failed` when the agent loop raises an exception, and
-  `task_aborted` when the wall-clock cap fires (reason=`wall_clock`)
-  or the token budget is exceeded (reason=`token_budget`). The remaining
-  four are reserved vocabulary recognized by the Digester for
+  `src/foundry_x/evolution/digester.py:85-123`): `tool_error`,
+  `task_failed`, `task_aborted`, `token_budget_aborted`, `run_failed`,
+  `agent_error`, `error`, `model_error`, `hook_registry_error`,
+  `server_unavailable`. `task_failed` and `task_aborted` are emitted by
+  the production Runner: `task_failed` when the agent loop raises an
+  exception, and `task_aborted` when the wall-clock cap fires
+  (reason=`wall_clock`) or the token budget is exceeded
+  (reason=`token_budget`). `token_budget_aborted` (issue #1355) is a
+  dedicated terminal failure marker emitted alongside `task_aborted` to
+  provide a purpose-built signal for token-budget failures. The
+  remaining four are reserved vocabulary recognized by the Digester for
   compatibility with legacy producers and tests. `model_error` (issue
   #867) is emitted by the Runner when `adapter.complete` raises, paired
   with `outcome.reason="model_error"`; issue #931 added a second trigger
@@ -272,7 +276,7 @@ subset of the broader kind vocabulary above.
   value here is a vocabulary change and must ship with both a producer
   and a regression test (ADR-0004).
 - **`FAILURE_PAYLOAD_KEYS`** (constant in
-  `src/foundry_x/evolution/digester.py:120-126`): `error`, `traceback`,
+  `src/foundry_x/evolution/digester.py:125-131`): `error`, `traceback`,
   `exception`. A `tool_result` whose payload has any of these keys is
   classified as a failure even though its `kind` is benign — the
   signal is on the payload, not on the kind. The same payload-key

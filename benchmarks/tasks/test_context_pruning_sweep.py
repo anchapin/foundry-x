@@ -69,8 +69,6 @@ TASK = BenchmarkTask(
 _THRESHOLDS = ["4096", "8192", "16384"]
 _EVENT_THRESHOLD = 50
 
-_SWEEP_RESULTS: list[ContextPruningSweepResult] = []
-
 
 class _SweepStubAdapter:
     """Stub ``ModelAdapter`` for the sweep that emits escalating token usage.
@@ -236,18 +234,21 @@ def _install_on_error_tracker(tracker):
 def test_context_pruning_sweep_run(
     benchmark_workspace: Path,
     context_tokens: str,
+    sweep_results_path: Path,
 ) -> None:
     """Run the sweep at one ``FOUNDRY_CONTEXT_TOKENS`` threshold.
 
     Drives ``Runner.run_task`` with the stub adapter and ``TokenAwarePruningHook``.
-    Records the outcome and ``context_pruned`` event count into the module-level
-    ``_SWEEP_RESULTS`` list for the aggregation test to consume.
+    Records the outcome and ``context_pruned`` event count into the session-scoped
+    ``sweep_results_path`` file for the aggregation test to consume.
 
     Parameters
     ----------
     context_tokens:
         The ``FOUNDRY_CONTEXT_TOKENS`` value for this parametrized run.
         One of "4096", "8192", "16384".
+    sweep_results_path:
+        Session-scoped path shared across all sweep tests in the same worker.
     """
     token_threshold = int(context_tokens)
 
@@ -317,16 +318,16 @@ def test_context_pruning_sweep_run(
         )
         token_budget_hit = task_abort is not None
 
-        _SWEEP_RESULTS.append(
-            ContextPruningSweepResult(
-                threshold=token_threshold,
-                passed=passed,
-                context_pruned_count=context_pruned_count,
-                token_budget_hit=token_budget_hit,
-                dropped_total=dropped_total,
-                total_events=total_events,
-            )
+        result = ContextPruningSweepResult(
+            threshold=token_threshold,
+            passed=passed,
+            context_pruned_count=context_pruned_count,
+            token_budget_hit=token_budget_hit,
+            dropped_total=dropped_total,
+            total_events=total_events,
         )
+        with open(sweep_results_path, "a") as f:
+            f.write(result.model_dump_json() + "\n")
 
         assert hook_failures == [], (
             f"expected zero HookRegistry._on_error calls; got {hook_failures!r}"
@@ -340,10 +341,10 @@ def test_context_pruning_sweep_run(
 
 
 @pytest.mark.benchmark
-def test_context_pruning_sweep_aggregate() -> None:
+def test_context_pruning_sweep_aggregate(sweep_results_path: Path) -> None:
     """Aggregate results across all three thresholds and assert regression bounds.
 
-    Reads the module-level ``_SWEEP_RESULTS`` list (populated by the three
+    Reads the session-scoped ``sweep_results_path`` file (populated by the three
     parametrized ``test_context_pruning_sweep_run`` runs) and asserts:
 
     1. Exactly three results are present (one per threshold).
@@ -357,16 +358,24 @@ def test_context_pruning_sweep_aggregate() -> None:
 
     A value near 1.0 means pruning rarely fired; near 0.0 means heavy pruning.
     """
-    thresholds_seen = {r.threshold for r in _SWEEP_RESULTS}
-    assert len(_SWEEP_RESULTS) == 3, (
-        f"expected 3 sweep results (one per threshold); got {len(_SWEEP_RESULTS)}: "
-        f"{[(r.threshold, r.passed) for r in _SWEEP_RESULTS]!r}"
+    _sweep_results: list[ContextPruningSweepResult] = []
+    if sweep_results_path.exists():
+        with open(sweep_results_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    _sweep_results.append(ContextPruningSweepResult.model_validate_json(line))
+
+    thresholds_seen = {r.threshold for r in _sweep_results}
+    assert len(_sweep_results) == 3, (
+        f"expected 3 sweep results (one per threshold); got {len(_sweep_results)}: "
+        f"{[(r.threshold, r.passed) for r in _sweep_results]!r}"
     )
     assert thresholds_seen == {4096, 8192, 16384}, (
         f"expected thresholds {{4096, 8192, 16384}}; got {thresholds_seen!r}"
     )
 
-    result_by_threshold = {r.threshold: r for r in _SWEEP_RESULTS}
+    result_by_threshold = {r.threshold: r for r in _sweep_results}
     r_8192 = result_by_threshold[8192]
     r_16384 = result_by_threshold[16384]
     _ = result_by_threshold[4096]
@@ -386,7 +395,7 @@ def test_context_pruning_sweep_aggregate() -> None:
             f"16384={'pass' if r_16384.passed else 'fail'})"
         )
 
-    for r in _SWEEP_RESULTS:
+    for r in _sweep_results:
         assert r.context_pruned_count >= 0, (
             f"context_pruned_count must be non-negative for threshold {r.threshold}; "
             f"got {r.context_pruned_count}"
@@ -397,3 +406,135 @@ def test_context_pruning_sweep_aggregate() -> None:
         assert r.total_events > 0, (
             f"total_events must be positive for threshold {r.threshold}; got {r.total_events}"
         )
+
+
+class _NeverCalledAdapter:
+    """Mock adapter used only for validation-path tests.
+
+    In the error case (context_tokens > budget) the ``ValueError`` fires
+    before any adapter method is called.  In the non-error cases the
+    adapter IS called by ``run_task``, so ``stream()`` must yield at
+    least one well-formed ``ModelResponseChunk`` — otherwise the
+    synchronous ``_consume_model_stream`` loop ``async for`` crashes with
+    ``AttributeError: 'NoneType' object has no attribute 'content'``.
+    """
+
+    async def complete(self, messages, tools=None, **kwargs):
+        raise RuntimeError("_NeverCalledAdapter.complete() was reached")
+
+    async def chat(self, messages, tools=None, **kwargs):
+        raise RuntimeError("_NeverCalledAdapter.chat() was reached")
+
+    async def stream(self, messages, tools=None, **kwargs):
+        yield ModelResponseChunk(content="")
+
+
+@pytest.mark.benchmark
+def test_context_tokens_above_token_budget_raises_value_error(
+    benchmark_workspace: Path,
+    monkeypatch,
+) -> None:
+    """ADR-0021 §6 regression: ``ValueError`` fires when
+    ``FOUNDRY_CONTEXT_TOKENS > FOUNDRY_TOKEN_BUDGET``.
+
+    The guard prevents a TOCTOU-class failure where the pruning threshold
+    exceeds the abort threshold, causing sessions to prune indefinitely
+    without ever aborting.  The validation fires synchronously at
+    ``run_task`` startup, before the model loop begins, so a
+    ``_NeverCalledAdapter`` is sufficient to exercise the path.
+    """
+    monkeypatch.setenv("FOUNDRY_CONTEXT_TOKENS", "10000")
+    monkeypatch.setenv("FOUNDRY_TOKEN_BUDGET", "5000")
+
+    harness_dir = benchmark_workspace / "harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    (harness_dir / "system_prompt.txt").write_text("stub harness\n")
+    (harness_dir / "skills").mkdir(exist_ok=True)
+
+    db = benchmark_workspace / "traces.db"
+
+    async def _call_run_task() -> None:
+        logger = TraceLogger(db)
+        with logger.session(harness_version="test-0.0") as sid:
+            await run_task(
+                "context-tokens- validation",
+                harness_dir,
+                logger,
+                sid,
+                model_adapter=_NeverCalledAdapter(),
+            )
+
+    with pytest.raises(ValueError, match=r"FOUNDRY_CONTEXT_TOKENS.*FOUNDRY_TOKEN_BUDGET"):
+        asyncio.run(_call_run_task())
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize(
+    "context_tokens,budget",
+    [
+        ("5000", "10000"),
+        ("5000", "5000"),
+    ],
+)
+def test_context_tokens_at_or_below_token_budget_succeeds(
+    benchmark_workspace: Path,
+    monkeypatch,
+    context_tokens: str,
+    budget: str,
+) -> None:
+    """ADR-0021 §6: no exception when ``FOUNDRY_CONTEXT_TOKENS <= FOUNDRY_TOKEN_BUDGET``.
+
+    False-positive prevention: the guard must not fire when the threshold
+    is at or below the budget.
+    """
+    monkeypatch.setenv("FOUNDRY_CONTEXT_TOKENS", context_tokens)
+    monkeypatch.setenv("FOUNDRY_TOKEN_BUDGET", budget)
+
+    harness_dir = benchmark_workspace / "harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    (harness_dir / "system_prompt.txt").write_text("stub harness\n")
+    (harness_dir / "skills").mkdir(exist_ok=True)
+
+    db = benchmark_workspace / "traces.db"
+
+    async def _call_run_task() -> None:
+        logger = TraceLogger(db)
+        with logger.session(harness_version="test-0.0") as sid:
+            await run_task(
+                "context-tokens-under-budget",
+                harness_dir,
+                logger,
+                sid,
+                model_adapter=_NeverCalledAdapter(),
+            )
+
+    asyncio.run(_call_run_task())
+
+
+@pytest.mark.benchmark
+def test_context_tokens_set_budget_unset_succeeds(benchmark_workspace: Path, monkeypatch) -> None:
+    """ADR-0021 §6: when ``FOUNDRY_TOKEN_BUDGET`` is absent the guard skips
+    the comparison entirely (budget_raw is empty → check is bypassed).
+    """
+    monkeypatch.setenv("FOUNDRY_CONTEXT_TOKENS", "100000")
+    monkeypatch.delenv("FOUNDRY_TOKEN_BUDGET", raising=False)
+
+    harness_dir = benchmark_workspace / "harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    (harness_dir / "system_prompt.txt").write_text("stub harness\n")
+    (harness_dir / "skills").mkdir(exist_ok=True)
+
+    db = benchmark_workspace / "traces.db"
+
+    async def _call_run_task() -> None:
+        logger = TraceLogger(db)
+        with logger.session(harness_version="test-0.0") as sid:
+            await run_task(
+                "context-tokens-no-budget",
+                harness_dir,
+                logger,
+                sid,
+                model_adapter=_NeverCalledAdapter(),
+            )
+
+    asyncio.run(_call_run_task())

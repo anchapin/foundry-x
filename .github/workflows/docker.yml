@@ -54,4 +54,4 @@ jobs:
       # margin (criterion 2). On breach pytest fails with a message
       # naming baseline, observed size, and the file to bump (criterion 3).
       - name: Assert image size against baseline
-        run: uv run pytest tests/infra/test_docker_build.py -v
+        run: uv run pytest -n auto tests/infra/test_docker_build.py -v

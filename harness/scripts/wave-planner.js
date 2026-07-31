@@ -3,6 +3,7 @@
 const fs = require("fs");
 
 const MAX_PER_WAVE = 3;
+const LARGE_FILE_LINES_THRESHOLD = 1000;
 
 function readInput() {
   if (process.argv.length > 2) {
@@ -25,7 +26,12 @@ function extractFileRefs(text) {
     let m;
     while ((m = pat.exec(text)) !== null) {
       const f = m[1];
-      if (!f.includes("http") && !f.includes("://") && f.length > 3) {
+      if (
+        !f.startsWith("logs/") &&
+        !f.includes("http") &&
+        !f.includes("://") &&
+        f.length > 3
+      ) {
         files.add(f);
       }
     }
@@ -55,7 +61,34 @@ function extractModuleRefs(text) {
   return [...modules];
 }
 
-function analyzeIssue(issue) {
+function isTestFile(path) {
+  return /[\/\\]tests?[\/\\]/.test(path) || /(^|[\/\\])test_[a-zA-Z0-9_]+\.py$/.test(path);
+}
+
+function extractBaseModuleName(filePath) {
+  const baseName = filePath.split(/[\/\\]/).pop() || "";
+  const match = baseName.match(/^(?:test_)?([a-zA-Z0-9_]+)\.py$/);
+  return match ? match[1] : null;
+}
+
+function deriveTestedModule(testPath) {
+  return extractBaseModuleName(testPath);
+}
+
+function extractFileSize(path) {
+  try {
+    const stat = fs.statSync(path);
+    if (stat.isFile()) {
+      const content = fs.readFileSync(path, "utf8");
+      return content.split("\n").length;
+    }
+  } catch {
+    // File not accessible, skip size check
+  }
+  return 0;
+}
+
+function analyzeIssue(issue, workspaceRoot = process.cwd()) {
   const body = issue.body || "";
   const title = issue.title || "";
   const fullText = `${title}\n${body}`;
@@ -63,7 +96,35 @@ function analyzeIssue(issue) {
   const fileRefs = extractFileRefs(fullText);
   const moduleRefs = extractModuleRefs(fullText);
 
-  const affectedFiles = [...new Set([...fileRefs, ...moduleRefs])];
+  const testFiles = fileRefs.filter(isTestFile);
+  const regularFiles = fileRefs.filter((f) => !isTestFile(f));
+
+  const testedModules = [];
+  for (const tf of testFiles) {
+    const mod = deriveTestedModule(tf);
+    if (mod) {
+      testedModules.push(mod);
+    }
+  }
+
+  const baseModuleNames = [];
+  for (const f of regularFiles) {
+    const base = extractBaseModuleName(f);
+    if (base) {
+      baseModuleNames.push(base);
+    }
+  }
+
+  const largeTestFiles = [];
+  for (const tf of testFiles) {
+    const fullPath = workspaceRoot + "/" + tf;
+    const lines = extractFileSize(fullPath);
+    if (lines > LARGE_FILE_LINES_THRESHOLD) {
+      largeTestFiles.push(tf);
+    }
+  }
+
+  const affectedFiles = [...new Set([...regularFiles, ...moduleRefs, ...testedModules, ...baseModuleNames])];
   const hasKnownDeps = affectedFiles.length > 0;
 
   return {
@@ -73,6 +134,10 @@ function analyzeIssue(issue) {
       typeof l === "string" ? l : l.name || ""
     ),
     affected_files: affectedFiles,
+    test_files: testFiles,
+    tested_modules: testedModules,
+    base_module_names: baseModuleNames,
+    large_test_files: largeTestFiles,
     has_known_deps: hasKnownDeps,
   };
 }
@@ -90,6 +155,38 @@ function buildConflictGraph(analyzed) {
         b.affected_files.includes(f)
       );
       if (sharesFiles) {
+        adj[i].add(j);
+        adj[j].add(i);
+      }
+
+      const aModules = new Set(a.tested_modules || []);
+      const bModules = new Set(b.tested_modules || []);
+      const aFiles = new Set(a.affected_files || []);
+      const bFiles = new Set(b.affected_files || []);
+      for (const mod of aModules) {
+        if (bFiles.has(mod)) {
+          adj[i].add(j);
+          adj[j].add(i);
+          break;
+        }
+      }
+      for (const mod of bModules) {
+        if (aFiles.has(mod)) {
+          adj[i].add(j);
+          adj[j].add(i);
+          break;
+        }
+      }
+
+      const aLarge = new Set(a.large_test_files || []);
+      const bLarge = new Set(b.large_test_files || []);
+      const aTests = a.test_files || [];
+      const bTests = b.test_files || [];
+      if (aLarge.size > 0 && bTests.some((f) => aLarge.has(f))) {
+        adj[i].add(j);
+        adj[j].add(i);
+      }
+      if (bLarge.size > 0 && aTests.some((f) => bLarge.has(f))) {
         adj[i].add(j);
         adj[j].add(i);
       }
@@ -131,12 +228,12 @@ function graphColoring(adj, n, maxPerColor) {
   return colors;
 }
 
-function planWaves(issues) {
+function planWaves(issues, workspaceRoot = process.cwd()) {
   if (!issues || issues.length === 0) {
     return { waves: [], total_issues: 0, total_waves: 0 };
   }
 
-  const analyzed = issues.map(analyzeIssue);
+  const analyzed = issues.map((issue) => analyzeIssue(issue, workspaceRoot));
   const adj = buildConflictGraph(analyzed);
   const colors = graphColoring(adj, analyzed.length, MAX_PER_WAVE);
 
@@ -163,7 +260,8 @@ function planWaves(issues) {
 function main() {
   const input = readInput();
   const issues = Array.isArray(input) ? input : input.issues || [];
-  const plan = planWaves(issues);
+  const workspaceRoot = input.workspaceRoot || process.cwd();
+  const plan = planWaves(issues, workspaceRoot);
   console.log(JSON.stringify(plan, null, 2));
 }
 

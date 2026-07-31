@@ -58,6 +58,126 @@ class TestInferBackend:
         assert _infer_backend("logs/traces.jsonl") == "jsonl"
 
 
+class TestExportPrometheus:
+    """Tests for --export-prometheus flag (issue #1364)."""
+
+    def test_export_prometheus_emits_kpi_metrics(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_failing_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        rc = main(
+            [
+                "evolve",
+                "--session-id",
+                sid,
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+                "--export-prometheus",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "foundryx_kpi_entry" in captured.out
+        assert 'kpi="cycle_time_seconds"' in captured.out
+        assert 'kpi="improvement_rate"' in captured.out
+        assert 'kpi="regression_rate"' in captured.out
+        assert rc == 1
+
+    def test_export_prometheus_exit_code_unaffected(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_failing_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        rc_with = main(
+            [
+                "evolve",
+                "--session-id",
+                sid,
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+                "--export-prometheus",
+            ]
+        )
+
+        db2 = tmp_path / "traces2.db"
+        sid2 = _populate_failing_session(db2)
+        harness2 = tmp_path / "harness2"
+        harness2.mkdir()
+        _write_minimal_harness(harness2)
+
+        rc_without = main(
+            [
+                "evolve",
+                "--session-id",
+                sid2,
+                "--trace-db",
+                str(db2),
+                "--harness-dir",
+                str(harness2),
+            ]
+        )
+
+        assert rc_with == rc_without == 1
+
+    def test_export_prometheus_clean_session(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_clean_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        rc = main(
+            [
+                "evolve",
+                "--session-id",
+                sid,
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+                "--export-prometheus",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "foundryx_kpi_entry" in captured.out
+        assert 'kpi="cycle_time_seconds"' in captured.out
+        assert 'kpi="improvement_rate"' in captured.out
+        assert 'kpi="regression_rate"' in captured.out
+        assert rc == 0
+
+    def test_export_prometheus_via_run_loop(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_failing_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        _report, _edit, _verdict, exit_code, _harness_version = _run_loop(
+            session_id=sid,
+            trace_db=str(db),
+            harness_dir=harness,
+            verbose=False,
+            export_prometheus=True,
+        )
+
+        captured = capsys.readouterr()
+        assert "foundryx_kpi_entry" in captured.out
+        assert 'kpi="cycle_time_seconds"' in captured.out
+        assert 'kpi="improvement_rate"' in captured.out
+        assert 'kpi="regression_rate"' in captured.out
+        assert exit_code == 1
+
+
 class TestFoundryEvolveCLI:
     def test_unknown_session_returns_exit_2(self, tmp_path, capsys):
         db = tmp_path / "traces.db"
@@ -347,3 +467,108 @@ class TestRunLoopIntegration:
         assert exit_code == 0
         assert _report is not None
         assert _report.proposed_class == "clean"
+
+
+class TestCycleTime:
+    """Tests for cycle time computation and display (issue #1361)."""
+
+    def test_failing_session_includes_cycle_time_in_output(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_failing_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        rc = main(
+            [
+                "evolve",
+                "--session-id",
+                sid,
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "Cycle time:" in captured.out
+        assert "s" in captured.out
+        assert rc == 1
+
+    def test_failing_session_cycle_time_is_positive(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_failing_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        main(
+            [
+                "evolve",
+                "--session-id",
+                sid,
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+            ]
+        )
+
+        captured = capsys.readouterr()
+        import re
+
+        match = re.search(r"Cycle time:\s+([\d.]+)s", captured.out)
+        assert match is not None, "Cycle time line not found in output"
+        cycle_time = float(match.group(1))
+        assert cycle_time >= 0, f"Cycle time should be non-negative, got {cycle_time}"
+
+    def test_clean_session_does_not_include_cycle_time(self, tmp_path, capsys):
+        db = tmp_path / "traces.db"
+        sid = _populate_clean_session(db)
+        harness = tmp_path / "harness"
+        harness.mkdir()
+        _write_minimal_harness(harness)
+
+        rc = main(
+            [
+                "evolve",
+                "--session-id",
+                sid,
+                "--trace-db",
+                str(db),
+                "--harness-dir",
+                str(harness),
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert "Cycle time:" not in captured.out
+        assert rc == 0
+
+    def test_render_critic_verdict_with_cycle_time(self):
+        from foundry_x.evolution.cli import _render_critic_verdict
+        from foundry_x.evolution.critic import CriticVerdict
+
+        verdict = CriticVerdict(
+            verdict=True,
+            passed_checks=["check1"],
+            failed_checks=[],
+            notes="Test notes",
+        )
+        output = _render_critic_verdict(verdict, cycle_time_seconds=42.5)
+        assert "Cycle time:" in output
+        assert "42.5s" in output
+
+    def test_render_critic_verdict_without_cycle_time(self):
+        from foundry_x.evolution.cli import _render_critic_verdict
+        from foundry_x.evolution.critic import CriticVerdict
+
+        verdict = CriticVerdict(
+            verdict=True,
+            passed_checks=["check1"],
+            failed_checks=[],
+            notes="Test notes",
+        )
+        output = _render_critic_verdict(verdict, cycle_time_seconds=None)
+        assert "Cycle time:" not in output

@@ -239,10 +239,10 @@ def test_render_history_markdown_five_entries_in_correct_order(tmp_path):
     table = render_history_markdown(entries)
     lines = table.splitlines()
 
-    # Header + 5 data rows.
+    # Header + 5 data rows + trailing schema_version comment.
     assert lines[0] == "| Timestamp | Cycle Time (s) | Regression Rate | Improvement Rate |"
     assert lines[1] == "| --- | --- | --- | --- |"
-    assert len(lines) == 7
+    assert len(lines) == 8
 
     # Each data row carries the matching improvement_rate in append order.
     for idx, rate in enumerate(rates, start=2):
@@ -308,8 +308,12 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
     # streaming_quality_mean_ttft_ms, streaming_quality_p50_ttft_ms,
     # streaming_quality_p95_ttft_ms, mean_prompt_tokens_per_step, and
     # mean_completion_tokens_per_step are the issue #1271 aggregate metrics.
+    # total_sessions is the issue #1337 session count for survivorship bias.
+    # schema_version is the issue #1334 schema version marker.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
+        "cycle_time_p50_seconds",
+        "cycle_time_p95_seconds",
         "regression_rate",
         "improvement_rate",
         "token_budget_abort_count",
@@ -336,6 +340,12 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "streaming_quality_p95_ttft_ms",
         "mean_prompt_tokens_per_step",
         "mean_completion_tokens_per_step",
+        "hook_overhead_ms_p50",
+        "hook_overhead_ms_p95",
+        "hook_post_overhead_ms_p50",
+        "hook_post_overhead_ms_p95",
+        "total_sessions",
+        "schema_version",
     }
     assert "injection_blocks" not in payload
     assert "token_totals" not in payload
@@ -523,8 +533,8 @@ def test_render_history_markdown_trend_false_has_no_sparkline_columns():
     ]
     table = render_history_markdown(entries, trend=False)
     lines = table.splitlines()
-    # Header + separator + 1 data row.
-    assert len(lines) == 3
+    # Header + separator + 1 data row + trailing schema_version comment.
+    assert len(lines) == 4
     # No sparkline characters in the data row.
     assert "▁" not in lines[2]
     assert "█" not in lines[2]
@@ -630,7 +640,7 @@ def test_render_history_markdown_trend_adds_sparkline_columns(tmp_path):
     assert "Impr. Rate |" in header
 
     assert lines[1] == "| --- | --- | --- | --- | --- | --- | --- |"
-    assert len(lines) == 5  # header + separator + 3 data rows
+    assert len(lines) == 6  # header + separator + 3 data rows + trailing comment
 
     for idx, rate in enumerate([0.1, 0.4, 0.7], start=2):
         row = lines[idx]
@@ -947,6 +957,6 @@ def test_render_history_markdown_byte_identical_when_all_aux_zero(tmp_path):
     table = render_history_markdown(entries)
     lines = table.splitlines()
 
-    # header + separator + 1 data row — no extra sections.
-    assert len(lines) == 3
+    # header + separator + 1 data row + trailing schema_version comment.
+    assert len(lines) == 4
     assert "Reliability Signals" not in table

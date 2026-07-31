@@ -34,31 +34,37 @@ Before you write code in this repo, read in this order:
    TraceLogger, Digester, Evolver, Critic and how they connect).
 8. `docs/OPERATOR.md` — human-side workflow that mirrors the agent
    loop in §3 below.
-9. `docs/MODEL_CONFIG.md` — the full set of model-side env vars
+ 9. `docs/MODEL_CONFIG.md` — the full set of model-side env vars
    (`OPENCODE_SERVER_URL`, `FOUNDRY_TOKEN_BUDGET`, `FOUNDRY_TASK_TIMEOUT`,
    `FOUNDRY_MAX_EVENTS_PER_SESSION`, `FOUNDRY_REQUEST_TIMEOUT_S`, …) and the
    resolution order. Three resource caps guard against runaway loops:
    `FOUNDRY_TASK_TIMEOUT` (wall-clock, default 600 s),
    `FOUNDRY_TOKEN_BUDGET` (total tokens, unset), and
    `FOUNDRY_MAX_EVENTS_PER_SESSION` (event count, unset).
+   Key derived caps: `FOUNDRY_CONTEXT_TOKENS` (set to a positive int to
+   switch from event-count pruning to token-aware pruning — see ADR-0021).
+   `FOUNDRY_SMOKE_BENCHMARK_TAGS` (comma-separated, default `smoke`) selects
+   the fast-reject benchmark subset for rapid iteration.
+   `FOUNDRY_GATE_TIMEOUT_S` (float, default unbounded) bounds every Critic
+   subprocess so a hanging child cannot inflate cycle-time KPIs.
 10. `docs/adr/` — read the relevant ADR before changing that area:
     - `harness/` → ADR-0004 | `pyproject.toml` / deps → ADR-0002
     - `src/foundry_x/trace/` → ADR-0007, ADR-0003 | `benchmarks/` → ADR-0004, ADR-0005
     - Module-boundary models → ADR-0006 | `src/foundry_x/execution/` → ADR-0010
     - `src/foundry_x/evolution/` → ADR-0010 | `evolution/loop.py` → ADR-0010
-      - Run `ls docs/adr/` for the full current set (0001–0035); key decisions:
-        - Conventional Commits → ADR-0008
-        - Security-eval benchmarks → ADR-0009
-        - Manifest as evolver target → ADR-0012
-        - Model abstraction → ADR-0014 (ADR-0015 merged into it)
-        - Review state machine → ADR-0017
-        - Context pruning at scale → ADR-0021
-        - External eval validation study → ADR-0023
-        - Cross-session failure accumulator → ADR-0030
-        - Security benchmark vectors → ADR-0031
-        - Smoke DifficultyTier definition → ADR-0034
-        - Parallel issue-generation prompt → ADR-0035
-        - Cloud model adapters → ADR-0029
+      - Run `ls docs/adr/` for the full current set (0001–0035); key decisions recently added:
+         - ADR-0035 (parallel issue-generation prompt)
+         - ADR-0034 (Smoke DifficultyTier definition)
+         - ADR-0031 (security benchmark vectors)
+         - ADR-0030 (cross-session failure accumulator)
+         - ADR-0029 (cloud model adapters)
+         - Conventional Commits → ADR-0008
+         - Security-eval benchmarks → ADR-0009
+         - Manifest as evolver target → ADR-0012
+         - Model abstraction → ADR-0014 (ADR-0015 merged into it)
+         - Review state machine → ADR-0017
+         - Context pruning at scale → ADR-0021
+         - External eval validation study → ADR-0023
 11. The relevant module under `src/foundry_x/`.
 
 If you have not read the ADR for the subsystem you are about to change,
@@ -84,6 +90,9 @@ and ask the human.
   `foundry-evolve evolve --no-verify` skips the gate locally and records
   a synthetic "skipped" `CriticVerdict` (documented in SECURITY.md) — it
   cannot ship a harness edit to `main`.
+  **Early-exit:** diffs touching only `docs/`, `.pre-commit-config.yaml`,
+  or `pyproject.toml` skip the benchmark suite (they are not critical to
+  benchmark outcomes); all other changes run the full gate.
 - **Never run destructive commands** (`rm -rf`, `git reset --hard`,
   force-push to a branch other than your own throwaway, dropping a
   database) without an explicit rollback path stated in the response.
@@ -145,7 +154,8 @@ mirrors the way our product works:
   in `pyproject.toml`); pre-commit's `ruff` hook auto-fixes with
   `--fix --exit-non-zero-on-fix`, so staged files get modified and must
   be re-added. The lint job also runs `tests/docs/test_doc_links.py`
-  to catch broken cross-doc references.
+  (broken cross-doc refs) and `tests/docs/test_ci_gate_claims.py`
+  (verifies CI enforcement claims in docs are backed by real workflows).
 - **Test:** `uv run pytest` — must pass before commit. Run after lint.
   Pytest discovers both `tests/` and `benchmarks/` (see `testpaths` in
   `pyproject.toml`); benchmark tasks under `benchmarks/tasks/` are gated
@@ -203,16 +213,9 @@ mirrors the way our product works:
     session. Use `approve <uuid>` to mark a ProposedEdit as reviewed
     and `apply <uuid>` to apply it to the harness. Pass `--no-verify`
     to skip the Critic gate (local-only, audit-logged). Pass `--background`
-    to run non-blocking. Pass `--latest` to auto-select the most recent
-    session without needing the UUID. All flags are documented in
-    `foundry-evolve evolve --help`.
-  - `uv run foundry-evolve daemon` — poll the trace store for unevolved
-    sessions and run the evolution loop on each automatically;
-    graceful SIGTERM shutdown (issue #1047).
+    to run non-blocking. Both flags are documented in SECURITY.md.
   - `uv run foundry-sweep` — parametric sweep of harness variants
-    (e.g. quantization sweep; Phase 3). Each model file is matched via
-    glob (default `*.<quant>.gguf`); `FOUNDRY_MODEL_PATH` must point to
-    the directory containing model files.
+    (e.g. quantization sweep; Phase 3).
   - `uv run fx-trace` (from `observability/cli.py`) — KPI reports,
     regression reports, session summaries, tool-latency percentiles.
   - `uv run foundry-x-trace` / `foundry-trace` (from `trace/cli.py`) —
@@ -282,3 +285,12 @@ Keep the two layers strictly separate:
 - **`harness/`** — the *artifact being evolved*: the agent's own DNA (`system_prompt.txt`, `hooks/`, `skills/`). All three are version-controlled and evolved by the Evolver→Critic loop. Skills are JSON tool definitions the agent can invoke; hooks are Python middleware that runs around every tool call.
 
 Mixing these up is the most common mistake newcomers make.
+
+## 8. Known discrepancies
+
+- **Python version**: CI installs Python 3.14 (`uv python install 3.14` in workflow files).
+  `.python-version` may lag and currently says `3.12`. `pyproject.toml` requires `>=3.11`.
+  When in doubt, match what the CI uses (3.14).
+- **Stale AGENTS files**: `AGENTS_BASE_*.md`, `AGENTS_LOCAL_*.md`, and
+  `AGENTS_REMOTE_*.md` in the repo root are stale backups from a previous
+  session — not the canonical `AGENTS.md`.

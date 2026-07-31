@@ -80,6 +80,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from foundry_x.evolution.digester import INJECTION_BLOCKED_KIND
+from foundry_x.evolution.loop import EVOLVER_DURATION_KIND
 from foundry_x.observability.regression_report import VerdictRecord
 from foundry_x.trace.logger import TraceEvent, TraceLogger
 
@@ -98,6 +99,10 @@ def _get_trace_db(args: argparse.Namespace) -> str:
 
 TASK_ABORTED_KIND = "task_aborted"
 TOKEN_BUDGET_REASON = "token_budget"
+# Issue #1355: the runner emits ``token_budget_aborted`` as a dedicated
+# terminal failure marker when the running token total exceeds the budget.
+# This constant centralizes the kind spelling for KPI and regression consumers.
+TOKEN_BUDGET_ABORTED_KIND = "token_budget_aborted"
 # Issue #869: the runner emits ``task_aborted(reason="event_limit")`` when the
 # per-session event cap is exceeded (see ``execution/runner.py:1523``). The
 # constant lives next to ``TOKEN_BUDGET_REASON`` so any future reference
@@ -143,6 +148,14 @@ MODEL_RATE_LIMIT_KIND = "model_rate_limit"
 # detects a URL whose host is not in FETCH_ALLOWED_DOMAINS. The
 # ``fetch_blocked_count`` KPI is the total number of such events.
 FETCH_BLOCKED_KIND = "fetch_blocked"
+
+# Issue #1334: the schema version of the KPI history log. Bump this whenever
+# a field is added to or removed from :class:`KpiHistoryEntry`. Readers compare
+# the entry's embedded ``schema_version`` against this constant and emit a
+# warning when the entry was written by a newer schema (forward-compatibility)
+# or an older one (backward-compatibility — fields added in newer schemas
+# will be absent and readers should degrade gracefully).
+KPI_SCHEMA_VERSION = 1
 
 #: Dimension accepted by :func:`compute_kpis`'s ``group_by`` parameter
 #: (issue #898, #1039). Each value selects which field drives the
@@ -382,6 +395,8 @@ class KpiSummary(BaseModel):
     """
 
     cycle_time_seconds: float | None = None
+    cycle_time_p50_seconds: float | None = None
+    cycle_time_p95_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
     injection_blocks: dict[str, int] = {}
@@ -405,6 +420,10 @@ class KpiSummary(BaseModel):
     excluded_token_budget: int = 0
     excluded_event_limit: int = 0
     excluded_other: int = 0
+    # Issue #1337: total sessions with a ``task_received`` event for the
+    # harness version filter. Used to compute the exclusion percentage so the
+    # markdown advisory can fire when >20% of sessions were excluded.
+    total_sessions: int = 0
     evolver_llm_failure_count: int = 0
     evolver_llm_failure_rate: float = 0.0
     token_budget_overrun_pct: float | None = None
@@ -550,11 +569,17 @@ class KpiHistoryEntry(BaseModel):
     the p50/p95 of all tool_call events' ``hook_overhead_ms`` and
     ``hook_post_overhead_ms`` fields, respectively, across all tools in
     the analysis window.
+    Issue #1334 adds ``schema_version`` — the module's
+    :const:`KPI_SCHEMA_VERSION` is written into every new entry so readers
+    can detect schema drift and warn gracefully.
     """
 
+    schema_version: int = KPI_SCHEMA_VERSION
     timestamp: str
     harness_version: str | None = None
     cycle_time_seconds: float | None = None
+    cycle_time_p50_seconds: float | None = None
+    cycle_time_p95_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
     hooks_disabled_count: int = 0
@@ -941,6 +966,8 @@ def compute_kpis(
     """
     (
         cycle_time,
+        cycle_time_p50,
+        cycle_time_p95,
         excluded_wall_clock,
         excluded_token_budget,
         excluded_event_limit,
@@ -948,6 +975,14 @@ def compute_kpis(
     ) = _cycle_time(logger, harness_version=harness_version)
     excluded_from_cycle_time = (
         excluded_wall_clock + excluded_token_budget + excluded_event_limit + excluded_other
+    )
+    # Issue #1337: count all sessions with task_received so the markdown advisory
+    # can fire when >20% were excluded from cycle_time.
+    total_sessions = len(
+        {
+            e.session_id
+            for e in logger.query_events(kind="task_received", harness_version=harness_version)
+        }
     )
     regression_rate, improvement_rate = _verdict_rates(
         logger, harness_version=harness_version, task_metadata=task_metadata
@@ -976,6 +1011,7 @@ def compute_kpis(
     evolver_llm_failure_count, evolver_llm_failure_rate = _evolver_llm_failure(
         logger, harness_version=harness_version
     )
+    evolver_duration_ms = _evolver_duration_ms(logger, harness_version=harness_version)
     model_cost_count, total_model_cost_usd = _model_cost_count(
         logger, harness_version=harness_version
     )
@@ -999,6 +1035,8 @@ def compute_kpis(
 
     return KpiSummary(
         cycle_time_seconds=cycle_time,
+        cycle_time_p50_seconds=cycle_time_p50,
+        cycle_time_p95_seconds=cycle_time_p95,
         regression_rate=regression_rate,
         improvement_rate=improvement_rate,
         injection_blocks=injection_blocks,
@@ -1022,8 +1060,10 @@ def compute_kpis(
         excluded_token_budget=excluded_token_budget,
         excluded_event_limit=excluded_event_limit,
         excluded_other=excluded_other,
+        total_sessions=total_sessions,
         evolver_llm_failure_count=evolver_llm_failure_count,
         evolver_llm_failure_rate=evolver_llm_failure_rate,
+        evolver_duration_ms=evolver_duration_ms,
         model_cost_count=model_cost_count,
         total_model_cost_usd=total_model_cost_usd,
         model_rate_limit_count=model_rate_limit_count,
@@ -1187,6 +1227,12 @@ def _compute_deltas(
 
     return {
         "cycle_time_seconds": _delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds),
+        "cycle_time_p50_seconds": _delta(
+            baseline.cycle_time_p50_seconds, candidate.cycle_time_p50_seconds
+        ),
+        "cycle_time_p95_seconds": _delta(
+            baseline.cycle_time_p95_seconds, candidate.cycle_time_p95_seconds
+        ),
         "regression_rate": _delta(baseline.regression_rate, candidate.regression_rate),
         "improvement_rate": _delta(baseline.improvement_rate, candidate.improvement_rate),
         "token_budget_hit_rate": _delta(
@@ -1225,6 +1271,8 @@ def _compute_deltas(
         "evolver_llm_failure_rate": _delta(
             baseline.evolver_llm_failure_rate, candidate.evolver_llm_failure_rate
         ),
+        # Issue #1346: evolver duration delta (lower is better — faster evolver).
+        "evolver_duration_ms": _delta(baseline.evolver_duration_ms, candidate.evolver_duration_ms),
         # Issue #1281: model cost, rate limit, and fetch blocked deltas.
         "model_cost_count": candidate.model_cost_count - baseline.model_cost_count,
         "total_model_cost_usd": _delta(
@@ -1273,12 +1321,12 @@ def _cycle_time(
     logger: TraceLogger,
     harness_version: str | None = None,
     since: str | None = None,
-) -> tuple[float | None, int, int, int, int]:
+) -> tuple[float | None, float | None, float | None, int, int, int, int]:
     """Mean wall-clock time from ``task_received`` to ``critic_verdict`` plus exclusion breakdown.
 
     Returns
     -------
-    ``(mean_seconds, excluded_wall_clock, excluded_token_budget, excluded_event_limit, excluded_other)``.
+    ``(mean_seconds, p50_seconds, p95_seconds, excluded_wall_clock, excluded_token_budget, excluded_event_limit, excluded_other)``.
 
     The mean is over sessions that have both a ``task_received`` and a
     ``critic_verdict`` event with a strictly positive delta; it is
@@ -1369,13 +1417,18 @@ def _cycle_time(
     if not deltas:
         return (
             None,
+            None,
+            None,
             excluded_wall_clock,
             excluded_token_budget,
             excluded_event_limit,
             excluded_other,
         )
+    sorted_deltas = sorted(deltas)
     return (
         sum(deltas) / len(deltas),
+        _percentile(sorted_deltas, 50),
+        _percentile(sorted_deltas, 95),
         excluded_wall_clock,
         excluded_token_budget,
         excluded_event_limit,
@@ -1848,6 +1901,12 @@ def _token_budget_aborts(
     ):
         if event.payload.get("reason") == TOKEN_BUDGET_REASON:
             sessions_with_abort.add(event.session_id)
+    # Issue #1355: also count the dedicated token_budget_aborted event
+    for event in logger.query_events(
+        kind=TOKEN_BUDGET_ABORTED_KIND,
+        harness_version=harness_version,
+    ):
+        sessions_with_abort.add(event.session_id)
     return len(sessions_with_abort)
 
 
@@ -1855,7 +1914,7 @@ def _token_budget_hit_rate(
     logger: TraceLogger,
     harness_version: str | None = None,
 ) -> float:
-    """Fraction of sessions with at least one ``task_aborted(reason="token_budget")`` event.
+    """Fraction of sessions with at least one ``task_aborted(reason="token_budget")`` or ``token_budget_aborted`` event.
 
     Issue #551 — the token budget hit rate is a fourth tracked metric
     exposed via ``foundry-kpis`` alongside the three PRD KPIs. It signals
@@ -1864,7 +1923,8 @@ def _token_budget_hit_rate(
     enough, or that the model-context window is being misspent.
 
     A session contributes to the numerator if it has at least one
-    ``task_aborted`` event whose ``payload["reason"] == "token_budget"``.
+    ``task_aborted`` event whose ``payload["reason"] == "token_budget"``,
+    or at least one ``token_budget_aborted`` event (issue #1355).
     The denominator is the total number of sessions that have a
     ``task_received`` event (matching the harness version filter), which
     is the natural population boundary for the KPI.
@@ -1879,6 +1939,12 @@ def _token_budget_hit_rate(
         if event.payload.get("reason") == "token_budget":
             sessions_with_abort.add(event.session_id)
 
+    # Issue #1355: also count the dedicated token_budget_aborted event
+    for event in logger.query_events(
+        kind=TOKEN_BUDGET_ABORTED_KIND, harness_version=harness_version
+    ):
+        sessions_with_abort.add(event.session_id)
+
     if not all_sessions:
         return 0.0
     return len(sessions_with_abort) / len(all_sessions)
@@ -1888,12 +1954,12 @@ def _token_budget_overrun(
     logger: TraceLogger,
     harness_version: str | None = None,
 ) -> float | None:
-    """Mean token budget overrun percentage across sessions that hit ``task_aborted(reason="token_budget")`` (issue #1112).
+    """Mean token budget overrun percentage across sessions that hit ``task_aborted(reason="token_budget")`` or ``token_budget_aborted`` (issues #1112, #1355).
 
     For each session that recorded at least one ``task_aborted`` event with
-    ``reason="token_budget"``, extracts ``tokens_used`` and ``token_budget`` from
-    the payload and computes the percentage overrun:
-    ``(tokens_used - token_budget) / token_budget * 100``.
+    ``reason="token_budget"``, or at least one ``token_budget_aborted`` event,
+    extracts ``tokens_used`` and ``token_budget`` from the payload and computes
+    the percentage overrun: ``(tokens_used - token_budget) / token_budget * 100``.
 
     Sessions are first-attempt-only (only the first abort event per session is
     considered) to avoid skewing the mean with repeated aborts in the same
@@ -1918,6 +1984,20 @@ def _token_budget_overrun(
             if isinstance(tokens_used, int) and isinstance(token_budget, int) and token_budget > 0:
                 overrun_pct = (tokens_used - token_budget) / token_budget * 100.0
                 session_overruns[sid] = overrun_pct
+
+    # Issue #1355: also process the dedicated token_budget_aborted event
+    for event in logger.query_events(
+        kind=TOKEN_BUDGET_ABORTED_KIND,
+        harness_version=harness_version,
+    ):
+        sid = event.session_id
+        if sid in session_overruns:
+            continue
+        tokens_used = event.payload.get("tokens_used")
+        token_budget = event.payload.get("token_budget")
+        if isinstance(tokens_used, int) and isinstance(token_budget, int) and token_budget > 0:
+            overrun_pct = (tokens_used - token_budget) / token_budget * 100.0
+            session_overruns[sid] = overrun_pct
 
     if not session_overruns:
         return None
@@ -2303,6 +2383,36 @@ def _evolver_llm_failure(
     return total_count, rate
 
 
+def _evolver_duration_ms(
+    logger: TraceLogger,
+    harness_version: str | None = None,
+) -> float | None:
+    """Mean ``evolver_duration_ms`` from ``evolver_duration`` events (issue #1346).
+
+    Queries every ``evolver_duration`` trace event emitted by
+    :func:`~foundry_x.evolution.loop._emit_evolver_duration` and returns
+    the mean of their ``evolver_duration_ms`` payload field.
+
+    Returns ``None`` when no evolver phase was recorded for any session, so
+    the field stays compact in the JSON output and operators can distinguish
+    "no evolver ran" (None) from "evolver ran with 0 ms duration" (0.0).
+
+    Uses one :meth:`TraceLogger.query_events` cursor (issue #273) with the
+    kind and ``harness_version`` filters pushed down.
+    """
+    durations: list[float] = []
+    for event in logger.query_events(
+        kind=EVOLVER_DURATION_KIND,
+        harness_version=harness_version,
+    ):
+        ms = event.payload.get("evolver_duration_ms")
+        if ms is not None:
+            durations.append(ms)
+    if not durations:
+        return None
+    return sum(durations) / len(durations)
+
+
 def _model_cost_count(
     logger: TraceLogger,
     harness_version: str | None = None,
@@ -2496,6 +2606,8 @@ def _render_markdown(summary: KpiSummary) -> str:
         "| KPI | Value |",
         "| --- | --- |",
         f"| Cycle Time (seconds) | {_format_value(summary.cycle_time_seconds)} |",
+        f"| Cycle Time p50 (seconds) | {_format_value(summary.cycle_time_p50_seconds)} |",
+        f"| Cycle Time p95 (seconds) | {_format_value(summary.cycle_time_p95_seconds)} |",
         f"| Regression Rate | {_format_value(summary.regression_rate)} |",
         f"| Improvement Rate | {_format_value(summary.improvement_rate)} |",
         f"| Hooks Disabled Count | {summary.hooks_disabled_count} |",
@@ -2674,6 +2786,17 @@ def _render_markdown(summary: KpiSummary) -> str:
             lines.append(f"| token_budget | {summary.excluded_token_budget} |")
             lines.append(f"| event_limit | {summary.excluded_event_limit} |")
             lines.append(f"| other | {summary.excluded_other} |")
+    # Issue #1337: when >20% of sessions were excluded, surface a one-line
+    # advisory so operators can tell a representative mean from a survivorship-
+    # biased one.
+    if (
+        summary.total_sessions > 0
+        and summary.excluded_from_cycle_time / summary.total_sessions > 0.20
+    ):
+        lines.append("")
+        lines.append(
+            "⚠️ Cycle time mean reflects only surviving sessions; see excluded_from_cycle_time."
+        )
     if summary.failure_class_distribution:
         total = sum(summary.failure_class_distribution.values())
         lines.append("")
@@ -2786,6 +2909,18 @@ def _render_comparison_markdown(baseline: KpiSummary, candidate: KpiSummary) -> 
             f"{_format_value(baseline.cycle_time_seconds)} | "
             f"{_format_value(candidate.cycle_time_seconds)} | "
             f"{_format_delta(baseline.cycle_time_seconds, candidate.cycle_time_seconds, higher_is_better=False)} |"
+        ),
+        (
+            "| Cycle Time p50 (seconds) | "
+            f"{_format_value(baseline.cycle_time_p50_seconds)} | "
+            f"{_format_value(candidate.cycle_time_p50_seconds)} | "
+            f"{_format_delta(baseline.cycle_time_p50_seconds, candidate.cycle_time_p50_seconds, higher_is_better=False)} |"
+        ),
+        (
+            "| Cycle Time p95 (seconds) | "
+            f"{_format_value(baseline.cycle_time_p95_seconds)} | "
+            f"{_format_value(candidate.cycle_time_p95_seconds)} | "
+            f"{_format_delta(baseline.cycle_time_p95_seconds, candidate.cycle_time_p95_seconds, higher_is_better=False)} |"
         ),
         (
             "| Regression Rate | "
@@ -3116,6 +3251,7 @@ def append_kpi_history(
     payload["timestamp"] = _now_iso()
     if harness_version is not None:
         payload["harness_version"] = harness_version
+    payload["schema_version"] = KPI_SCHEMA_VERSION
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(payload) + "\n")
 
@@ -3130,6 +3266,10 @@ def read_kpi_history(path: Path) -> list[KpiHistoryEntry]:
     does not blank the trend table. A missing file yields an empty
     list so the caller can render the placeholder table without a
     precondition check.
+
+    Issue #1334: emits a warning when an entry's ``schema_version`` is
+    lower than the module's :const:`KPI_SCHEMA_VERSION`, indicating the
+    entry was written by an older schema and may be missing fields.
     """
     if not path.exists():
         return []
@@ -3140,9 +3280,20 @@ def read_kpi_history(path: Path) -> list[KpiHistoryEntry]:
             if not stripped:
                 continue
             try:
-                entries.append(KpiHistoryEntry.model_validate_json(stripped))
+                entry = KpiHistoryEntry.model_validate_json(stripped)
             except ValidationError:
                 continue
+            if entry.schema_version < KPI_SCHEMA_VERSION:
+                warnings.warn(
+                    f"KPI history entry written by schema_version="
+                    f"{entry.schema_version} is older than the current "
+                    f"schema_version={KPI_SCHEMA_VERSION}; some fields may "
+                    f"be absent or defaulted. Consider re-running with an "
+                    f"updated foundry-x to read this history entry.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            entries.append(entry)
     return entries
 
 
@@ -3219,6 +3370,10 @@ def render_history_markdown(
 
     Issue #705: a Failure Class Distribution section is appended when
     at least one entry carries a non-empty ``failure_class_distribution``.
+
+    Issue #1334: a trailing comment reports the schema version range
+    across the loaded entries so operators can see at a glance whether
+    the history was written with a consistent schema.
     """
     if not entries:
         return "_No KPI history entries yet._"
@@ -3284,6 +3439,10 @@ def render_history_markdown(
                 count = entry.failure_class_distribution.get(cls, 0)
                 row.append(f" {count} |")
             lines.append("".join(row))
+    schema_versions = sorted({e.schema_version for e in entries})
+    lines.append(
+        f"<!-- KPI history schema_version: min={schema_versions[0]}, max={schema_versions[-1]}, current={KPI_SCHEMA_VERSION} -->"
+    )
     return "\n".join(lines)
 
 
@@ -3452,10 +3611,23 @@ def _render_validation_markdown(results: list[TaskValidationResult]) -> str:
     return "\n".join(lines)
 
 
+_TOKEN_BUDGET_OVERRUN_EPILOG = """
+Environment variables for alert thresholds:
+  FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX
+                        Exit 3 when token_budget_overrun_pct exceeds this value.
+                        Example: FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX=100.0
+                        (issue #1354).
+  FOUNDRY_CONTEXT_EFFICIENCY_MIN
+                        Exit 2 when context_efficiency falls below this value.
+                        (issue #1286).
+"""
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="foundry-kpis",
         description="Compute and display the three PRD success-metric KPIs.",
+        epilog=_TOKEN_BUDGET_OVERRUN_EPILOG,
     )
     parser.add_argument(
         "--trace-db",
@@ -3752,6 +3924,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             f" is below FOUNDRY_CONTEXT_EFFICIENCY_MIN={min_efficiency}\n"
         )
         return 2
+
+    # Issue #1354: FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX triggers exit 3 when overrun
+    # exceeds the configured ceiling. Backward-compatible: absent env var is ignored.
+    max_overrun = os.environ.get("FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX")
+    if (
+        max_overrun is not None
+        and summary.token_budget_overrun_pct is not None
+        and summary.token_budget_overrun_pct > float(max_overrun)
+    ):
+        sys.stderr.write(
+            f"[ALERT] token_budget_overrun_pct {summary.token_budget_overrun_pct:.4f}"
+            f" exceeds FOUNDRY_TOKEN_BUDGET_OVERRUN_MAX={max_overrun}\n"
+        )
+        return 3
 
     return 0
 

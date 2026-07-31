@@ -1197,34 +1197,244 @@ class Evolver:
 
         LLM-driven generation is attempted when ``FOUNDRY_EVOLVER_LLM_ENABLED`` is set
         and a ModelAdapter is configured (issue #1116).
+
+        The LLM is called once per batch regardless of the number of failure classes,
+        as specified in ADR-0030 §5 (issue #1259).
         """
         all_edits: list[ProposedEdit] = []
         seen_targets: dict[str, ProposedEdit] = {}
 
-        for failure in batch_report.failure_reports:
-            if failure.proposed_class == "clean":
-                continue
+        failures_to_process = [
+            f for f in batch_report.failure_reports if f.proposed_class != "clean"
+        ]
+        if not failures_to_process:
+            return []
 
+        try:
+            self._check_rate_limit()
+        except EvolverGuardError:
+            self._record_generation_attempt(attempt=1, error="rate_limit_exceeded")
+            return []
+
+        if self._model_adapter is not None and _is_llm_edit_gen_enabled():
             try:
-                self._check_rate_limit()
+                edits = await self._generate_batch_edits_async(
+                    self._model_adapter, harness_dir, failures_to_process
+                )
+            except EvolverLLMError as exc:
+                self._record_generation_attempt(attempt=1, error=f"llm_fallback: {exc}")
+                edits = self._propose_batch_from_template(harness_dir, failures_to_process)
+        else:
+            edits = self._propose_batch_from_template(harness_dir, failures_to_process)
+
+        for edit in edits:
+            if edit.target_file not in seen_targets:
+                seen_targets[edit.target_file] = edit
+                all_edits.append(edit)
+
+        return all_edits
+
+    async def _generate_batch_edits_async(
+        self,
+        adapter: ModelAdapter,
+        harness_dir: Path,
+        failures: list[FailureReport],
+        max_retries: int = 2,
+    ) -> list[ProposedEdit]:
+        """Generate ProposedEdit objects via a single LLM call for multiple failures.
+
+        This method addresses issue #1259 by calling the LLM once per batch rather
+        than once per failure class, as specified in ADR-0030 §5.
+
+        Args:
+            adapter: The model adapter to use for LLM calls.
+            harness_dir: Path to the harness directory.
+            failures: List of failure reports to generate edits for in a single batch.
+            max_retries: Maximum number of retry attempts.
+
+        Returns:
+            List of ProposedEdit objects that passed validation.
+
+        Raises:
+            EvolverLLMError: if all attempts fail to produce valid edits.
+        """
+        from foundry_x.execution.model_adapter import ModelMessage
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                self._check_llm_rate_limit()
             except EvolverGuardError:
-                self._record_generation_attempt(attempt=1, error="rate_limit_exceeded")
+                raise EvolverLLMError("LLM rate limit exceeded before attempt") from None
+
+            self.record_llm_call()
+            try:
+                prompt = self._build_batch_llm_prompt(failures)
+                messages = [
+                    ModelMessage(
+                        role="system",
+                        content="You are a helpful assistant that proposes harness edits.",
+                    ),
+                    ModelMessage(role="user", content=prompt),
+                ]
+                async with asyncio.timeout(_get_llm_timeout()):
+                    response = await adapter.complete(messages)
+            except TimeoutError:
+                self._record_generation_attempt(attempt=attempt, error="llm_timeout")
+                if attempt == max_retries:
+                    self._record_generation_exhausted(max_retries, "llm_timeout")
+                    raise EvolverLLMError("LLM call timed out") from None
+                await asyncio.sleep(_jittered_backoff(attempt))
+                continue
+            except Exception as exc:
+                self._record_generation_attempt(
+                    attempt=attempt,
+                    error=f"model call failed: {exc}",
+                )
+                if attempt == max_retries:
+                    self._record_generation_exhausted(max_retries, f"model call failed: {exc}")
+                    raise EvolverLLMError(
+                        f"generation failed after {max_retries} attempts: {exc}"
+                    ) from exc
+                await asyncio.sleep(_jittered_backoff(attempt))
                 continue
 
-            if self._model_adapter is not None and _is_llm_edit_gen_enabled():
-                try:
-                    edits = await self.generate_edits(self._model_adapter, harness_dir, failure)
-                except EvolverLLMError as exc:
-                    self._record_generation_attempt(attempt=1, error=f"llm_fallback: {exc}")
-                    edits = self._propose_from_template(harness_dir, failure)
-            else:
-                edits = self._propose_from_template(harness_dir, failure)
+            text = response.message.content or ""
+            try:
+                edits = _parse_edits_from_response(text)
+            except EvolverGenerationError as exc:
+                self._record_generation_attempt(
+                    attempt=attempt,
+                    error=str(exc),
+                    model_response_excerpt=text,
+                )
+                if attempt == max_retries:
+                    self._record_generation_exhausted(max_retries, str(exc))
+                    raise EvolverLLMError(
+                        f"generation failed after {max_retries} attempts: {exc}"
+                    ) from exc
+                await asyncio.sleep(_jittered_backoff(attempt))
+                continue
 
+            validated: list[ProposedEdit] = []
+            validation_errors: list[str] = []
             for edit in edits:
-                if edit.target_file not in seen_targets:
-                    seen_targets[edit.target_file] = edit
-                    all_edits.append(edit)
+                try:
+                    self._validate_edit(edit)
+                    validated.append(edit)
+                except EvolverGuardError as exc:
+                    validation_errors.append(str(exc))
+                    self._record_generation_attempt(
+                        attempt=attempt,
+                        error=f"edit validation failed: {exc}",
+                        model_response_excerpt=text,
+                    )
 
+            if validated:
+                for edit in validated:
+                    self._record_proposals(edit=edit, failure_class="batch")
+                return validated
+
+            if attempt == max_retries:
+                error_summary = (
+                    "; ".join(validation_errors) if validation_errors else "no valid edits"
+                )
+                self._record_generation_exhausted(max_retries, error_summary)
+                raise EvolverLLMError(
+                    f"no valid ProposedEdit objects after {max_retries} attempts: {error_summary}"
+                )
+            await asyncio.sleep(_jittered_backoff(attempt))
+
+        raise EvolverLLMError(
+            f"generation loop exited without producing edits (max_retries={max_retries})"
+        )
+
+    def _build_batch_llm_prompt(self, failures: list[FailureReport]) -> str:
+        """Build an LLM prompt from a batch of failure reports (issue #1259).
+
+        Concatenates failure reports into a single prompt so the LLM can generate
+        edits for all failures in one call, rather than requiring N calls for N failures.
+
+        Args:
+            failures: List of failure reports to include in the prompt.
+        """
+        sections: list[str] = []
+
+        for i, failure in enumerate(failures, 1):
+            lines = [
+                f"FAILURE {i} OF {len(failures)}",
+                "=" * 50,
+                f"Summary: {failure.summary}",
+                f"Failure class: {failure.proposed_class}",
+            ]
+            if failure.seen_across_n_sessions >= PATTERN_MIN_SESSIONS:
+                lines.extend(
+                    [
+                        "",
+                        "CROSS-SESSION PATTERN DETECTED",
+                        "=" * 50,
+                        (
+                            f"This failure class+context has been observed in "
+                            f"{failure.seen_across_n_sessions} sessions. The pattern "
+                            f"is recurring and warrants a targeted, high-confidence "
+                            f"structural edit (e.g. a hook) rather than a prompt patch."
+                        ),
+                    ]
+                )
+            if failure.suspected_causes:
+                lines.append("")
+                lines.append("Suspected causes:")
+                for cause in failure.suspected_causes:
+                    lines.append(f"  - {cause}")
+            if failure.failed_steps:
+                lines.append("")
+                lines.append("Failed steps:")
+                for step in failure.failed_steps:
+                    lines.append(f"  - {step}")
+            sections.append("\n".join(lines))
+
+        prompt_parts = [
+            "You are an expert agent harness engineer. Your task is to propose",
+            "targeted edits to the agent harness to fix failures.",
+            "",
+            "\n".join(sections),
+            "",
+            "HARNESS EDIT CONSTRAINTS",
+            "=" * 50,
+            "You may only propose edits to files under the `harness/` directory.",
+            "Allowed targets:",
+            "  - harness/system_prompt.txt (leaf file)",
+            "  - harness/manifest.json (leaf file)",
+            "  - harness/hooks/*.py (arbitrary depth)",
+            "  - harness/skills/*.json (arbitrary depth)",
+            "",
+            "Each proposed edit must include:",
+            "  1. target_file: path relative to harness/",
+            "  2. rationale: brief explanation of why this edit addresses the failure",
+            "  3. unified_diff: a valid git-apply unified diff with --- a/ and +++ b/ headers",
+            "",
+            "OUTPUT FORMAT",
+            "=" * 50,
+            "Respond with a JSON array of proposed edits:",
+            '[{"target_file": "...", "rationale": "...", "unified_diff": "..."}]',
+            "",
+            "Only output valid JSON. Each unified_diff must start with '--- a/' and '+++ b/' headers.",
+        ]
+        return "\n".join(prompt_parts)
+
+    def _propose_batch_from_template(
+        self,
+        harness_dir: Path,
+        failures: list[FailureReport],
+    ) -> list[ProposedEdit]:
+        """Generate proposals from templates for multiple failures.
+
+        Fallback method called when LLM generation fails or is unavailable.
+        Processes each failure individually via _propose_from_template.
+        """
+        all_edits: list[ProposedEdit] = []
+        for failure in failures:
+            edits = self._propose_from_template(harness_dir, failure)
+            all_edits.extend(edits)
         return all_edits
 
     def _propose_from_template(

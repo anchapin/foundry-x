@@ -318,6 +318,7 @@ async def test_run_task_aborts_when_running_total_exceeds_token_budget(tmp_path)
     assert len(aborted) == 1
     assert aborted[0].payload == {
         "reason": "token_budget",
+        "step": 1,
         "tokens_used": 200,
         "token_budget": 150,
     }
@@ -531,6 +532,7 @@ async def test_run_task_token_budget_check_runs_before_message_append(tmp_path):
     assert len(aborted) == 1
     assert aborted[0].payload == {
         "reason": "token_budget",
+        "step": 1,
         "tokens_used": 300,
         "token_budget": 150,
     }
@@ -690,4 +692,83 @@ async def test_token_budget_survives_collision_with_max_steps(tmp_path, monkeypa
     assert outcome.payload["tokens_total"] == 200
 
     # The loop must NOT have asked the adapter for a third round-trip.
+    assert adapter.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_token_budget_abort_emits_dedicated_event(tmp_path):
+    """Issue #1355: when token budget is exceeded, the runner emits a dedicated
+    ``token_budget_aborted`` event alongside the existing
+    ``task_aborted(reason="token_budget")`` event.
+
+    The new event provides a purpose-built abort signal for token-budget
+    failures that KPI consumers and the Digester can use directly without
+    having to filter by ``reason="token_budget"`` on ``task_aborted``.
+    """
+    harness_dir = tmp_path / "harness"
+    _stub_harness(harness_dir)
+    db = tmp_path / "traces.db"
+
+    def _step_response(step_index: int) -> ModelResponse:
+        tool_call = ModelToolCall(
+            id=f"call_step_{step_index}",
+            type="function",
+            function=ToolCallFunction(
+                name="bash",
+                arguments=json.dumps({"command": "true"}),
+            ),
+        )
+        return ModelResponse(
+            message=ModelMessage(role="assistant", content=None, tool_calls=[tool_call]),
+            tool_calls=[tool_call],
+            finish_reason="tool_calls",
+            usage=ModelUsage(prompt_tokens=40, completion_tokens=60, total_tokens=100),
+        )
+
+    responses = [
+        _step_response(0),
+        _step_response(1),
+    ]
+    adapter = _ScriptedAdapter(responses)
+    limits = RunLimits(token_budget=150)
+
+    async def noop_executor(name, arguments):
+        return {"status": "ok"}
+
+    logger = TraceLogger(db)
+    with logger.session(harness_version="test-0.0") as session_id:
+        await run_task(
+            "token-budget-aborted-event-1355",
+            harness_dir,
+            logger,
+            session_id,
+            model_adapter=adapter,
+            skill_executor=noop_executor,
+            limits=limits,
+        )
+
+    events = logger.load_session(session_id)
+
+    # Issue #1355: verify the dedicated token_budget_aborted event is emitted
+    token_aborted = [event for event in events if event.kind == "token_budget_aborted"]
+    assert len(token_aborted) == 1, (
+        f"expected exactly 1 token_budget_aborted event, got {len(token_aborted)}"
+    )
+    assert token_aborted[0].payload["tokens_used"] == 200
+    assert token_aborted[0].payload["token_budget"] == 150
+    assert token_aborted[0].payload["overrun_pct"] == pytest.approx(33.333333, rel=1e-3)
+
+    # Existing task_aborted event must still be emitted with reason="token_budget"
+    task_aborted = [event for event in events if event.kind == "task_aborted"]
+    assert len(task_aborted) == 1
+    assert task_aborted[0].payload["reason"] == "token_budget"
+    assert task_aborted[0].payload["tokens_used"] == 200
+    assert task_aborted[0].payload["token_budget"] == 150
+
+    # outcome must reflect the token_budget abort
+    outcome = next(event for event in events if event.kind == "outcome")
+    assert outcome.payload["status"] == "failed"
+    assert outcome.payload["reason"] == "token_budget"
+
+    # The loop must NOT have asked the adapter for a third round-trip
     assert adapter.calls == 2

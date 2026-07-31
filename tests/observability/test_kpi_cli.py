@@ -455,6 +455,8 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     # mean_completion_tokens_per_step are the issue #1271 aggregate metrics.
     assert set(payload.keys()) == {
         "cycle_time_seconds",
+        "cycle_time_p50_seconds",
+        "cycle_time_p95_seconds",
         "regression_rate",
         "improvement_rate",
         "injection_blocks",
@@ -483,6 +485,7 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "excluded_token_budget",
         "excluded_event_limit",
         "excluded_other",
+        "total_sessions",
         "evolver_llm_failure_count",
         "evolver_llm_failure_rate",
         "per_skill",
@@ -496,6 +499,11 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
         "streaming_quality_p95_ttft_ms",
         "mean_prompt_tokens_per_step",
         "mean_completion_tokens_per_step",
+        "hook_overhead",
+        "hook_overhead_ms_p50",
+        "hook_overhead_ms_p95",
+        "hook_post_overhead_ms_p50",
+        "hook_post_overhead_ms_p95",
     }
 
 

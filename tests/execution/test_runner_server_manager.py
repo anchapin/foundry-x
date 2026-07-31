@@ -119,6 +119,7 @@ class _FakeServerManager:
         )
         self.is_healthy_calls = 0
         self.restart_calls = 0
+        self._restart_count = 0
 
     @property
     def host(self) -> str:
@@ -128,12 +129,18 @@ class _FakeServerManager:
     def health_url(self) -> str:
         return "http://127.0.0.1:8080/health"
 
+    @property
+    def restart_count(self) -> int:
+        return self._restart_count
+
     async def is_healthy(self) -> bool:
         self.is_healthy_calls += 1
         return self._healthy
 
     async def restart(self) -> bool:
         self.restart_calls += 1
+        if self._restart_outcome:
+            self._restart_count += 1
         return self._restart_outcome
 
 

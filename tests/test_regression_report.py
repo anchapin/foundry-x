@@ -941,3 +941,134 @@ def test_analyze_regressions_group_by_no_metadata_empty(tmp_path):
 
     analysis = analyze_regressions(logger, group_by="skill", task_metadata=None)
     assert analysis.slice_regressions.skill == {}
+
+
+# ---------------------------------------------------------------------------
+# Issue #1348: target_file in regression attribution
+# ---------------------------------------------------------------------------
+
+
+def test_regression_report_shows_target_file_for_regressed_task(tmp_path):
+    """Regression report surfaces target_file for regressed tasks."""
+    logger = TraceLogger(tmp_path / "traces.db")
+    sid_a, sid_b = _three_sessions(logger)[:2]
+
+    record_verdict(
+        logger,
+        sid_a,
+        CriticVerdict(
+            verdict=True, passed_checks=["task-A"], target_file="harness/skills/foo.json"
+        ),
+    )
+    record_verdict(
+        logger,
+        sid_b,
+        CriticVerdict(
+            verdict=False,
+            failed_checks=["task-A"],
+            target_file="harness/skills/foo.json",
+        ),
+    )
+
+    report = generate_regression_report(logger)
+    regressed = _section(report, "Regressed Tasks")
+    assert "harness/skills/foo.json" in regressed
+    assert "task-A" in regressed
+
+
+def test_regression_report_shows_empty_target_file_when_none(tmp_path):
+    """Regression report shows empty cell when target_file is None (ambiguous)."""
+    logger = TraceLogger(tmp_path / "traces.db")
+    sid_a, sid_b = _three_sessions(logger)[:2]
+
+    record_verdict(logger, sid_a, CriticVerdict(verdict=True, passed_checks=["task-A"]))
+    record_verdict(
+        logger,
+        sid_b,
+        CriticVerdict(verdict=False, failed_checks=["task-A"], target_file=None),
+    )
+
+    report = generate_regression_report(logger)
+    regressed = _section(report, "Regressed Tasks")
+    assert "task-A" in regressed
+    # When target_file is None, the cell should be empty (just || with nothing before)
+
+
+def test_analyze_regressions_returns_target_file_in_regression_rows(tmp_path):
+    """analyze_regressions returns target_file in RegressionRow objects."""
+    logger = TraceLogger(tmp_path / "traces.db")
+    sid_a, sid_b = _three_sessions(logger)[:2]
+
+    record_verdict(
+        logger,
+        sid_a,
+        CriticVerdict(verdict=True, passed_checks=["task-A"], target_file="harness/hooks/bar.py"),
+    )
+    record_verdict(
+        logger,
+        sid_b,
+        CriticVerdict(
+            verdict=False,
+            failed_checks=["task-A"],
+            target_file="harness/hooks/bar.py",
+        ),
+    )
+
+    analysis = analyze_regressions(logger)
+    assert len(analysis.regressions) == 1
+    assert analysis.regressions[0].task == "task-A"
+    assert analysis.regressions[0].target_file == "harness/hooks/bar.py"
+
+
+def test_analyze_regressions_target_file_none_for_ambiguous_diff(tmp_path):
+    """When target_file is None (ambiguous multi-file diff), it is preserved in rows."""
+    logger = TraceLogger(tmp_path / "traces.db")
+    sid_a, sid_b = _three_sessions(logger)[:2]
+
+    record_verdict(logger, sid_a, CriticVerdict(verdict=True, passed_checks=["task-A"]))
+    record_verdict(
+        logger,
+        sid_b,
+        CriticVerdict(verdict=False, failed_checks=["task-A"], target_file=None),
+    )
+
+    analysis = analyze_regressions(logger)
+    assert len(analysis.regressions) == 1
+    assert analysis.regressions[0].target_file is None
+
+
+def test_regression_report_json_includes_target_file(tmp_path):
+    """JSON output includes target_file in regression rows."""
+    logger = TraceLogger(tmp_path / "traces.db")
+    sid_a, sid_b = _three_sessions(logger)[:2]
+
+    record_verdict(
+        logger,
+        sid_a,
+        CriticVerdict(
+            verdict=True, passed_checks=["task-A"], target_file="harness/skills/baz.json"
+        ),
+    )
+    record_verdict(
+        logger,
+        sid_b,
+        CriticVerdict(
+            verdict=False,
+            failed_checks=["task-A"],
+            target_file="harness/skills/baz.json",
+        ),
+    )
+
+    rc = cli_main(["regression-report", "--db", str(tmp_path / "traces.db"), "--format", "json"])
+    assert rc == 0
+
+    import sys
+    from io import StringIO
+
+    captured = StringIO()
+    sys.stdout = captured
+    rc = cli_main(["regression-report", "--db", str(tmp_path / "traces.db"), "--format", "json"])
+    sys.stdout = sys.__stdout__
+    payload = json.loads(captured.getvalue())
+    assert len(payload["regressions"]) == 1
+    assert payload["regressions"][0]["target_file"] == "harness/skills/baz.json"

@@ -577,6 +577,21 @@ def test_task_aborted_token_budget_classifies_as_context_overflow() -> None:
     assert "token_budget" in report.summary
 
 
+def test_task_aborted_wall_clock_falls_through_to_generic_walk() -> None:
+    """Issue #1345: ``task_aborted(reason='wall_clock')`` must NOT be handled
+    by the context-overflow aggregator; it should fall through to the generic
+    walk and be classified as ``tool-error`` (the catch-all).
+
+    Unlike ``task_aborted(reason='token_budget')`` which IS a context-overflow
+    signal, wall-clock aborts are timing issues unrelated to context pressure.
+    """
+    events = [
+        _ev("task_aborted", {"reason": "wall_clock", "timeout_s": 120.0}, event_id="e1", seq=1),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class != "context-overflow"
+
+
 # --- Specificity / precedence ----------------------------------------------
 # digester.py:65-71: each mode has a priority, and the most-specific keyword
 # wins over the ``tool-error`` catch-all. If a payload accidentally contains
@@ -1297,7 +1312,7 @@ class TestDigestBatch:
         assert batch.failure_reports[1].proposed_class == "wrong-tool"
 
     def test_batch_context_overflow_takes_precedence(self):
-        """A context-overflow failure is the only report even with other failures."""
+        """Context-overflow appears first but does NOT short-circuit other failures (issue #1260)."""
         events = [
             _ev("user_prompt", {"text": "go"}, event_id="e1", seq=1),
             _ev(
@@ -1314,11 +1329,12 @@ class TestDigestBatch:
             ),
         ]
         batch = Digester().digest_batch(_SESSION, events)
-        assert batch.total_failures == 1
+        assert batch.total_failures == 2
         assert batch.failure_reports[0].proposed_class == "context-overflow"
+        assert batch.failure_reports[1].proposed_class == "wrong-tool"
 
     def test_batch_injection_blocks_takes_precedence(self):
-        """Injection blocks aggregate and take precedence over later failures."""
+        """Injection blocks appear first but do NOT short-circuit other failures (issue #1260)."""
         events = [
             _ev("user_prompt", {"text": "go"}, event_id="e1", seq=1),
             _ev(
@@ -1335,8 +1351,9 @@ class TestDigestBatch:
             ),
         ]
         batch = Digester().digest_batch(_SESSION, events)
-        assert batch.total_failures == 1
+        assert batch.total_failures == 2
         assert batch.failure_reports[0].proposed_class == INJECTION_ATTEMPT_CLASS
+        assert batch.failure_reports[1].proposed_class == "tool-error"
 
     def test_batch_failure_reports_have_correct_session_id(self):
         """All failure reports in the batch carry the correct session_id."""

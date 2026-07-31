@@ -11,6 +11,7 @@ from foundry_x.trace.logger import TraceLogger
 VERDICT_KIND = "critic_verdict"
 TASK_ABORTED_KIND = "task_aborted"
 TOKEN_BUDGET_REASON = "token_budget"
+TOKEN_BUDGET_ABORTED_KIND = "token_budget_aborted"
 
 GroupByDim = Literal["skill", "task_family", "difficulty_tier"]
 
@@ -60,6 +61,7 @@ class VerdictRecord(BaseModel):
     verdict: bool | None = None
     passed_checks: list[str] = Field(default_factory=list)
     failed_checks: list[str] = Field(default_factory=list)
+    skipped_checks: list[str] = Field(default_factory=list)
     notes: str = ""
     failure_class: str | None = Field(default=None)
     target_file: str | None = Field(default=None)
@@ -71,6 +73,7 @@ class _Regression:
     was_passing_session: str
     now_failing_session: str
     now_failing_version: str
+    target_file: str | None = None
 
 
 @dataclass
@@ -79,6 +82,7 @@ class _NewPass:
     was_failing_session: str
     now_passing_session: str
     now_passing_version: str
+    target_file: str | None = None
 
 
 class RegressionRow(BaseModel):
@@ -88,6 +92,7 @@ class RegressionRow(BaseModel):
     was_passing_session: str
     now_failing_session: str
     now_failing_version: str
+    target_file: str | None = None
 
 
 class NewPassRow(BaseModel):
@@ -97,6 +102,7 @@ class NewPassRow(BaseModel):
     was_failing_session: str
     now_passing_session: str
     now_passing_version: str
+    target_file: str | None = None
 
 
 class RegressionAnalysis(BaseModel):
@@ -134,6 +140,7 @@ def record_verdict(logger: TraceLogger, session_id: str, verdict: CriticVerdict)
         verdict=verdict.verdict,
         passed_checks=list(verdict.passed_checks),
         failed_checks=list(verdict.failed_checks),
+        skipped_checks=list(verdict.skipped_checks),
         notes=verdict.notes,
         failure_class=verdict.failure_class,
         target_file=verdict.target_file,
@@ -195,6 +202,7 @@ def _compute(
                         was_passing_session=prior_passed[task],
                         now_failing_session=session_id,
                         now_failing_version=session_version,
+                        target_file=verdict.target_file,
                     )
                 )
         for task in verdict.passed_checks:
@@ -205,6 +213,7 @@ def _compute(
                         was_failing_session=prior_failed[task],
                         now_passing_session=session_id,
                         now_passing_version=session_version,
+                        target_file=verdict.target_file,
                     )
                 )
         for task in verdict.passed_checks:
@@ -366,23 +375,29 @@ def _render(
         "",
     ]
     if regressions:
-        lines.append("| Task | Was passing (session) | Now failing (session) | Manifest version |")
-        lines.append("| --- | --- | --- | --- |")
+        lines.append(
+            "| Task | Was passing (session) | Now failing (session) | Manifest version | Target file |"
+        )
+        lines.append("| --- | --- | --- | --- | --- |")
         for reg in regressions:
+            target_file = reg.target_file if reg.target_file else ""
             lines.append(
                 f"| {reg.task} | {reg.was_passing_session} | "
-                f"{reg.now_failing_session} | {reg.now_failing_version} |"
+                f"{reg.now_failing_session} | {reg.now_failing_version} | {target_file} |"
             )
     else:
         lines.append("_None._")
     lines += ["", "## New Passes", ""]
     if new_passes:
-        lines.append("| Task | Was failing (session) | Now passing (session) | Manifest version |")
-        lines.append("| --- | --- | --- | --- |")
+        lines.append(
+            "| Task | Was failing (session) | Now passing (session) | Manifest version | Target file |"
+        )
+        lines.append("| --- | --- | --- | --- | --- |")
         for pas in new_passes:
+            target_file = pas.target_file if pas.target_file else ""
             lines.append(
                 f"| {pas.task} | {pas.was_failing_session} | "
-                f"{pas.now_passing_session} | {pas.now_passing_version} |"
+                f"{pas.now_passing_session} | {pas.now_passing_version} | {target_file} |"
             )
     else:
         lines.append("_None._")
@@ -423,7 +438,7 @@ def _count_token_budget_aborts(
     logger: TraceLogger,
     since: str | None = None,
 ) -> int:
-    """Count sessions with at least one ``task_aborted(reason="token_budget")`` event.
+    """Count sessions with at least one ``task_aborted(reason="token_budget")`` or ``token_budget_aborted`` event.
 
     Issue #466: token budget aborts are task-shaped failures (a task exceeded
     the model's context budget), not harness regressions. They are reported
@@ -434,11 +449,16 @@ def _count_token_budget_aborts(
 
     Issue #1270 — the ``since`` filter is pushed down to the store so
     time-bounded queries do not materialize events outside the window.
+
+    Issue #1355: also counts the dedicated ``token_budget_aborted`` event.
     """
     sessions_with_abort: set[str] = set()
     for event in logger.query_events(kind=TASK_ABORTED_KIND, since=since):
         if event.payload.get("reason") == TOKEN_BUDGET_REASON:
             sessions_with_abort.add(event.session_id)
+    # Issue #1355: also count the dedicated token_budget_aborted event
+    for event in logger.query_events(kind=TOKEN_BUDGET_ABORTED_KIND, since=since):
+        sessions_with_abort.add(event.session_id)
     return len(sessions_with_abort)
 
 

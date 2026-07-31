@@ -18,6 +18,7 @@ from foundry_x.evolution.critic import CriticVerdict
 from foundry_x.observability.kpis import (
     KpiSummary,
     _format_delta,
+    _render_markdown,
     compute_kpis,
     main,
 )
@@ -551,3 +552,140 @@ def test_tool_argument_parse_error_count_round_trips_through_kpi_summary(tmp_pat
     round_tripped = KpiSummary.model_validate(summary.model_dump())
     assert round_tripped == summary
     assert round_tripped.tool_argument_parse_error_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #1337: survivorship bias advisory in markdown output.
+# A one-line advisory appears when >20% of sessions were excluded from
+# cycle_time so operators can tell a representative mean from a biased one.
+# ---------------------------------------------------------------------------
+
+
+def test_total_sessions_counted_correctly(tmp_path):
+    """``total_sessions`` equals the number of sessions with a ``task_received`` event."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+    _seed_session(logger, "v1", verdict=False)
+    _seed_session(logger, "v1", verdict=True)
+
+    summary = compute_kpis(logger)
+
+    assert summary.total_sessions == 3
+
+
+def test_total_sessions_respects_harness_version_filter(tmp_path):
+    """``total_sessions`` honors ``harness_version`` filtering."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True)
+    _seed_session(logger, "v1", verdict=None)
+    _seed_session(logger, "v2", verdict=True)
+    _seed_session(logger, "v2", verdict=True)
+
+    v1_summary = compute_kpis(logger, harness_version="v1")
+    v2_summary = compute_kpis(logger, harness_version="v2")
+
+    assert v1_summary.total_sessions == 2
+    assert v2_summary.total_sessions == 2
+
+
+def test_total_sessions_zero_when_no_sessions(tmp_path):
+    """Zero sessions yields ``total_sessions == 0``."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+
+    summary = compute_kpis(logger)
+
+    assert summary.total_sessions == 0
+
+
+def test_survivorship_advisory_fires_when_more_than_20_percent_excluded(tmp_path):
+    """The ⚠️ advisory appears when >20%% of sessions were excluded (issue #1337).
+
+    Plants 8 sessions where 3 complete and 5 are excluded (62.5% exclusion rate),
+    which is well above the 20% threshold.
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    for _ in range(3):
+        _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    for _ in range(5):
+        _seed_session(logger, "v1", verdict=None)
+
+    summary = compute_kpis(logger)
+
+    assert summary.total_sessions == 8
+    assert summary.excluded_from_cycle_time == 5
+    rendered = _render_markdown(summary)
+    assert (
+        "⚠️ Cycle time mean reflects only surviving sessions; see excluded_from_cycle_time."
+        in rendered
+    )
+
+
+def test_survivorship_advisory_does_not_fire_at_exactly_20_percent_excluded(tmp_path):
+    """At exactly 20%% exclusion the advisory does NOT fire (threshold is strictly >20%%)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    for _ in range(4):
+        _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    for _ in range(1):
+        _seed_session(logger, "v1", verdict=None)
+
+    summary = compute_kpis(logger)
+
+    assert summary.total_sessions == 5
+    assert summary.excluded_from_cycle_time == 1
+    assert summary.excluded_from_cycle_time / summary.total_sessions == 0.20
+    rendered = _render_markdown(summary)
+    assert "⚠️ Cycle time mean reflects only surviving sessions" not in rendered
+
+
+def test_survivorship_advisory_does_not_fire_when_below_20_percent_excluded(tmp_path):
+    """When <20%% of sessions are excluded the advisory does NOT fire."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    for _ in range(9):
+        _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    for _ in range(1):
+        _seed_session(logger, "v1", verdict=None)
+
+    summary = compute_kpis(logger)
+
+    assert summary.total_sessions == 10
+    assert summary.excluded_from_cycle_time == 1
+    rendered = _render_markdown(summary)
+    assert "⚠️ Cycle time mean reflects only surviving sessions" not in rendered
+
+
+def test_survivorship_advisory_does_not_fire_when_no_exclusions(tmp_path):
+    """With zero exclusions the advisory does NOT fire (clean store stays compact)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+
+    summary = compute_kpis(logger)
+
+    assert summary.excluded_from_cycle_time == 0
+    rendered = _render_markdown(summary)
+    assert "⚠️ Cycle time mean reflects only surviving sessions" not in rendered
+
+
+def test_survivorship_advisory_uses_total_sessions_not_surviving(tmp_path):
+    """The 20% threshold is based on total_sessions, not surviving sessions.
+
+    1 complete (surviving) + 1 excluded = 50% exclusion rate → fires.
+    """
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    _seed_session(logger, "v1", verdict=True, passed_checks=["bench"])
+    _seed_session(logger, "v1", verdict=None)
+
+    summary = compute_kpis(logger)
+
+    assert summary.total_sessions == 2
+    assert summary.excluded_from_cycle_time == 1
+    rendered = _render_markdown(summary)
+    assert "⚠️ Cycle time mean reflects only surviving sessions" in rendered

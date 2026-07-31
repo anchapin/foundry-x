@@ -40,10 +40,13 @@ pytest_plugins = ["pytester"]
 
 import ast
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from benchmarks.conftest import FIXTURES_ROOT, _seed_workspace
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARKS_DIR = REPO_ROOT / "benchmarks"
@@ -221,16 +224,37 @@ def test_benchmark_tasks_have_no_network_imports() -> None:
     )
 
 
+def _fixture_dir_has_tracked_files(fixture_path: Path) -> bool:
+    """Return True if ``fixture_path`` has at least one file tracked by git.
+
+    Uses ``git ls-files`` to check for tracked files. An empty directory
+    (no tracked files) will fail this check, preventing the hygiene issue
+    where fixture directories exist on disk but are not tracked by git
+    (issue #1322).
+    """
+    result = subprocess.run(
+        ["git", "ls-files", str(fixture_path)],
+        capture_output=True,
+        text=True,
+        cwd=fixture_path.parent.parent,
+        check=False,
+    )
+    return bool(result.stdout.strip())
+
+
 @pytest.mark.benchmark
 def test_every_benchmark_task_has_matching_fixture_directory() -> None:
     """Fixture-existence invariant: every non-smoke ``BenchmarkTask`` has a fixture dir.
 
     Imports each ``benchmarks/tasks/test_*.py`` module, reads its
     ``TASK = BenchmarkTask(...)`` instance, and asserts the named fixture
-    directory exists under ``benchmarks/fixtures/``. A missing dir would
-    produce a confusing ``FileNotFoundError`` deep inside ``conftest.py``
-    at task-run time (conftest.py:63-69); surfacing the mismatch at
-    collection time keeps the failure mode local and unambiguous.
+    directory exists under ``benchmarks/fixtures/`` AND has at least one
+    tracked file (preventing the issue in #1322 where empty directories
+    were not tracked by git).
+
+    A missing dir would produce a confusing ``FileNotFoundError`` deep
+    inside ``conftest.py`` at task-run time (conftest.py:63-69); surfacing
+    the mismatch at collection time keeps the failure mode local and unambiguous.
 
     The smoke canary (``difficulty_tier="smoke"``) is excluded: by design
     it requires no fixture data and no agent invocation -- it is a
@@ -242,20 +266,22 @@ def test_every_benchmark_task_has_matching_fixture_directory() -> None:
     assert declared, "no BenchmarkTask instances declared under benchmarks/tasks/"
 
     missing: list[str] = []
+    empty: list[str] = []
     for task_name, source_file in declared:
-        # Import the module to read the task's ``difficulty_tier``.
-        # Cheap: module is already cached in sys.modules by
-        # ``_declared_benchmark_tasks``.
         module = __import__(f"benchmarks.tasks.{source_file.stem}", fromlist=["TASK"])
         task = module.TASK
         if task.difficulty_tier == "smoke":
-            # Smoke canary -- no fixture data by design (issue #27).
             continue
         fixture_path = FIXTURES_DIR / task_name
         if not fixture_path.is_dir():
             missing.append(
                 f"{source_file.relative_to(REPO_ROOT)}: "
                 f"fixture directory missing: {fixture_path.relative_to(REPO_ROOT)}"
+            )
+        elif not _fixture_dir_has_tracked_files(fixture_path):
+            empty.append(
+                f"{source_file.relative_to(REPO_ROOT)}: "
+                f"fixture directory has no tracked files: {fixture_path.relative_to(REPO_ROOT)}"
             )
 
     assert not missing, (
@@ -264,3 +290,30 @@ def test_every_benchmark_task_has_matching_fixture_directory() -> None:
         + "\n  - ".join(missing)
         + f"\n\nDeclared tasks: {[name for name, _ in declared]}"
     )
+    assert not empty, (
+        "Benchmark tasks reference fixture directories that have no tracked files "
+        "(add a .gitkeep to make them trackable by git; see issue #1322):\n  - "
+        + "\n  - ".join(empty)
+        + f"\n\nDeclared tasks: {[name for name, _ in declared]}"
+    )
+
+
+def test_benchmark_fixture_env_var_seeds_workspace(
+    benchmark_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``PYTEST_BENCHMARK_FIXTURE`` env var exercises the same seeding path as ``@parametrize``.
+
+    ``benchmark_workspace`` falls back to ``os.environ["PYTEST_BENCHMARK_FIXTURE"]``
+    when ``request.param`` is absent (conftest.py:234). This test exercises that
+    code path and asserts the seeded content is identical to the ``@parametrize``
+    path verified in ``benchmarks/test_workspace_fixture.py::test_workspace_seeds_from_fixtures``.
+
+    This test intentionally carries no ``@pytest.mark.benchmark`` marker: it is
+    an infrastructure contract test, not a benchmark task for the Critic gate
+    (issue #1367 acceptance criteria).
+    """
+    monkeypatch.setenv("PYTEST_BENCHMARK_FIXTURE", "sample")
+    _seed_workspace(benchmark_workspace, "sample")
+
+    expected = FIXTURES_ROOT / "sample" / "expected.txt"
+    assert (benchmark_workspace / "expected.txt").read_text() == expected.read_text()

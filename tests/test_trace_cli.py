@@ -440,6 +440,48 @@ def test_events_grep_unknown_session_returns_nonzero(tmp_path, capsys):
     assert rc == 1
 
 
+def test_events_grep_count_flag(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid_a, _ = _populate_two_versions(db)
+
+    rc = main(
+        [
+            "events-grep",
+            sid_a,
+            "--db",
+            str(db),
+            "--pattern",
+            r"BUG-1234",
+            "--count",
+        ]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.strip() == "1"
+
+
+def test_events_grep_count_flag_no_match(tmp_path, capsys):
+    db = tmp_path / "traces.db"
+    sid_a, _ = _populate_two_versions(db)
+
+    rc = main(
+        [
+            "events-grep",
+            sid_a,
+            "--db",
+            str(db),
+            "--pattern",
+            r"this-string-will-not-appear",
+            "--count",
+        ]
+    )
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert out.strip() == "0"
+
+
 # --- Issue #192: redact-session / redact-key ---------------------------------
 
 _BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
@@ -1323,6 +1365,110 @@ def test_info_empty_db_shows_zero_sessions(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "Sessions: 0" in out
+
+
+def test_info_sqlite_json_format_includes_wal_warning(tmp_path, capsys):
+    """JSON output exposes wal_warning boolean and required keys per issue #1335."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db, backend="sqlite")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    rc = main(["info", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["backend"] == "sqlite"
+    assert "db_size_bytes" in data
+    assert "wal_size_bytes" in data
+    assert "session_count" in data
+    assert "wal_warning" in data
+    assert isinstance(data["wal_warning"], bool)
+
+
+def test_info_sqlite_json_format_wal_warning_false_when_small_wal(tmp_path, capsys):
+    """When WAL is small (no bloat), wal_warning is False even with an open session."""
+    import sqlite3
+    from datetime import UTC, datetime
+
+    db = tmp_path / "traces.db"
+    TraceLogger(db, backend="sqlite")
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO sessions (session_id, started_at, harness_version) VALUES (?, ?, ?)",
+        ("open-session", datetime.now(UTC).isoformat(), "0.1.0"),
+    )
+    conn.commit()
+    conn.close()
+
+    rc = main(["info", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["wal_warning"] is False
+
+
+def test_info_sqlite_json_format_wal_warning_false_when_closed_session(tmp_path, capsys):
+    """When all sessions are closed and WAL is small, wal_warning is False."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db, backend="sqlite")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    rc = main(["info", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["wal_warning"] is False
+
+
+def test_info_wal_threshold_from_env_var(tmp_path, capsys, monkeypatch):
+    """FOUNDRY_WAL_WARN_BYTES controls the WAL warning threshold."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db, backend="sqlite")
+
+    with logger.session(harness_version="0.1.0") as sid:
+        blob = "x" * 1024
+        for _ in range(500):
+            logger.record(sid, "tool_call", {"name": "read_file", "blob": blob})
+
+    wal_path = db.with_suffix(db.suffix + "-wal")
+
+    import os
+
+    os.truncate(str(wal_path), 10 * 1024 * 1024 + 1)  # 10 MB
+
+    monkeypatch.setenv("FOUNDRY_WAL_WARN_BYTES", str(5 * 1024 * 1024))
+
+    rc = main(["info", "--db", str(db)])
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "10 MB" in err or "exceeds" in err
+
+
+def test_info_jsonl_json_format(tmp_path, capsys):
+    """JSONL backend JSON output per issue #1335."""
+    db = tmp_path / "traces.jsonl"
+    logger = TraceLogger(db, backend="jsonl")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, "tool_call", {"name": "read_file"})
+
+    rc = main(["info", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["backend"] == "jsonl"
+    assert "db_size_bytes" in data
+    assert data["wal_size_bytes"] == 0
+    assert data["session_count"] == 1
+    assert data["wal_warning"] is False
 
 
 # --- Issue #1044: diagnose subcommand tests ---------------------------------

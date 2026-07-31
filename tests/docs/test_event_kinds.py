@@ -98,6 +98,7 @@ KNOWN_KINDS: frozenset[str] = frozenset(
         "task_completed",
         "task_failed",
         "task_received",
+        "token_budget_aborted",
         "token_usage_missing",
         "tool_argument_parse_error",
         "tool_call",

@@ -13,6 +13,7 @@ import statistics
 import subprocess
 import sys
 import time
+import warnings
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -569,28 +570,34 @@ async def run_with_limits(
     log: TraceLogger,
     session_id: str,
     limits: RunLimits,
+    *,
+    get_step: Callable[[], int | None] | None = None,
 ) -> Any:
     """Await ``awaitable`` under the wall-clock cap in ``limits``.
 
     On timeout, record a ``task_aborted`` trace event (reason ``wall_clock``)
-    carrying the exceeded cap, then re-raise :class:`asyncio.TimeoutError` so
-    the caller observes the abort. This is the SECURITY.md "Runaway
-    detection" guardrail: a degenerate harness edit that loops unbounded is
-    aborted before it can exhaust resources.
+    carrying the exceeded cap and current step (if ``get_step`` is provided),
+    then re-raise :class:`asyncio.TimeoutError` so the caller observes the
+    abort. This is the SECURITY.md "Runaway detection" guardrail: a degenerate
+    harness edit that loops unbounded is aborted before it can exhaust resources.
     """
     if limits.task_timeout_s is None:
         return await awaitable
     try:
         return await asyncio.wait_for(awaitable, timeout=limits.task_timeout_s)
     except TimeoutError:
+        step = get_step() if get_step is not None else None
+        payload: dict[str, Any] = {
+            "reason": "wall_clock",
+            "timeout_s": limits.task_timeout_s,
+            "token_budget": limits.token_budget,
+        }
+        if step is not None:
+            payload["step"] = step
         log.record(
             session_id,
             kind="task_aborted",
-            payload={
-                "reason": "wall_clock",
-                "timeout_s": limits.task_timeout_s,
-                "token_budget": limits.token_budget,
-            },
+            payload=payload,
         )
         raise
 
@@ -609,7 +616,13 @@ def _resolve_max_steps(env: Mapping[str, str] | None = None) -> int:
     if not raw:
         return _DEFAULT_MAX_AGENT_STEPS
     value = int(raw)
-    return value if value > 0 else _DEFAULT_MAX_AGENT_STEPS
+    if value <= 0:
+        warnings.warn(
+            f"FOUNDRY_MAX_AGENT_STEPS={value!r} is non-positive; "
+            f"falling back to {_DEFAULT_MAX_AGENT_STEPS}."
+        )
+        return _DEFAULT_MAX_AGENT_STEPS
+    return value
 
 
 def _is_max_steps_dynamic(env: Mapping[str, str] | None = None) -> bool:
@@ -1710,11 +1723,11 @@ async def run_task(
         adapter.on_retry = _on_retry
 
     # Wire cost + rate-limit trace events for cloud adapters (issue #1041,
-    # ADR-0029). `OpenAICompatibleAdapter` does not expose these hooks; only
-    # `CloudModelAdapter` subclasses surface per-response cost and rate-limit
-    # windows. The trace events feed the improvement-rate KPI's cost
-    # attribution and operator-visible rate-limit headroom.
-    if isinstance(adapter, CloudModelAdapter):
+    # ADR-0029, #1356). `OpenAICompatibleAdapter` surfaces these hooks via
+    # `_emit_cost_and_rate_limit` (issue #1235). The trace events feed the
+    # improvement-rate KPI's cost attribution and operator-visible rate-limit
+    # headroom.
+    if isinstance(adapter, CloudModelAdapter | OpenAICompatibleAdapter):
 
         def _on_cost(event: ModelCostEvent, _sid: str = session_id) -> None:
             log.record(
@@ -1736,10 +1749,8 @@ async def run_task(
     registry = _resolve_hook_registry(log, session_id)
     hook_call_cls, hook_result_cls = _import_hook_types()
 
-    # Wire injection firewall tracer (issue #733): the default registry's
-    # InjectionFirewallHook was registered with tracer=None. Walk the hook
-    # list and wire the first such instance we find so that blocked tool
-    # results emit ``injection_blocked`` events to the TraceLogger.
+    # Wire injection firewall tracer (issue #733): register the tracer with
+    # the registry so that the InjectionFirewallHook auto-wires it (issue #1342).
     # The tracer signature for InjectionFirewallHook is Callable[[dict], None]
     # (one argument: the payload dict); the hook internally calls
     # tracer(payload) and the tracer forwards to log.record with the
@@ -1750,25 +1761,19 @@ async def run_task(
         def _inject_tracer(kind: str, payload: dict[str, object]) -> None:
             log.record(session_id, kind=kind, payload=payload)
 
-        for hook in registry._hooks:
-            if isinstance(hook, InjectionFirewallHook) and hook._tracer is None:
-                hook._tracer = _inject_tracer  # type: ignore[attr-defined]
+        registry.register_tracer(InjectionFirewallHook, _inject_tracer)
 
-    # Wire WebFetchHook tracer (issue #1054): the default registry's
-    # WebFetchHook was registered with tracer=None. Walk the hook list
-    # and wire the first such instance so that blocked fetches emit
-    # ``fetch_blocked`` events to the TraceLogger. The tracer signature
-    # is Callable[[str, dict], None] (kind string and payload dict),
-    # matching the Tracer protocol used by InjectionFirewallHook.
+    # Wire WebFetchHook tracer (issue #1054): register the tracer with the
+    # registry so that the WebFetchHook auto-wires it (issue #1342). The
+    # tracer signature is Callable[[str, dict], None] (kind string and payload
+    # dict), matching the Tracer protocol used by InjectionFirewallHook.
     if registry is not None:
         from harness.hooks.web_fetch import WebFetchHook
 
         def _fetch_tracer(kind: str, payload: dict[str, object]) -> None:
             log.record(session_id, kind=kind, payload=payload)
 
-        for hook in registry._hooks:
-            if isinstance(hook, WebFetchHook) and hook._tracer is None:
-                hook._tracer = _fetch_tracer
+        registry.register_tracer(WebFetchHook, _fetch_tracer)
 
     # Context pruning: when FOUNDRY_CONTEXT_TOKENS is set, register
     # TokenAwarePruningHook so the runner's accumulated tokens_used drives
@@ -2088,8 +2093,19 @@ async def run_task(
                     kind="task_aborted",
                     payload={
                         "reason": "token_budget",
+                        "step": step,
                         "tokens_used": tokens_used,
                         "token_budget": token_budget,
+                    },
+                )
+                overrun_pct = (tokens_used - token_budget) / token_budget * 100.0
+                _record_and_count(
+                    session_id,
+                    kind="token_budget_aborted",
+                    payload={
+                        "tokens_used": tokens_used,
+                        "token_budget": token_budget,
+                        "overrun_pct": overrun_pct,
                     },
                 )
                 break
@@ -2282,6 +2298,10 @@ async def run_task(
                 "steps": outcome_steps,
                 "ttft_ms": ttft_p50,
                 "tokens_total": tokens_used,
+                "server_restart_count": server_manager.restart_count
+                if server_manager is not None
+                else None,
+                "message_count": len(messages),
             },
         )
 
@@ -2357,6 +2377,12 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         "(issue #1028). Stored in session metadata to allow the study "
         "aggregator to separate internal-suite runs from external-slice runs.",
     )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Run harness, adapter, and environment pre-flight checks "
+        "without executing the agent loop. Exits 0 on success, 2 on failure.",
+    )
     args = parser.parse_args()
 
     harness_dir = Path(args.harness_dir).resolve()
@@ -2371,6 +2397,37 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
         sys.exit(2)
     if str(harness_dir) not in sys.path:
         sys.path.insert(0, str(harness_dir))
+
+    if args.validate:
+        failed = False
+        try:
+            validate_harness_layout(harness_dir)
+        except HarnessValidationError as exc:
+            joined = ", ".join(exc.missing)
+            print(
+                f"error: harness validation failed: {exc.harness_dir} is missing required entries: {joined}",
+                file=sys.stderr,
+            )
+            failed = True
+
+        try:
+            build_model_adapter()
+        except ValueError as exc:
+            print(f"error: model adapter configuration error: {exc}", file=sys.stderr)
+            failed = True
+
+        trace_path = Path(args.trace_path)
+        try:
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            trace_path.open(mode="a", encoding="utf-8").close()
+        except OSError as exc:
+            print(f"error: trace store is not writable: {trace_path}: {exc}", file=sys.stderr)
+            failed = True
+
+        if failed:
+            sys.exit(2)
+        print("Validation: OK")
+        sys.exit(0)
 
     workspace_root = Path(args.workspace_root).resolve() if args.workspace_root else None
 
