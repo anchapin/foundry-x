@@ -203,7 +203,7 @@ def test_render_failure_cli_exits_zero_on_planted_session(tmp_path, capsys):
     db = tmp_path / "traces.db"
     sid = _plant_failing_session(db)
 
-    rc = main(["render-failure", sid, "--trace-path", str(db)])
+    rc = main(["render-failure", sid, "--trace-db", str(db)])
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -218,7 +218,7 @@ def test_render_failure_cli_out_writes_markdown_file(tmp_path):
     out_file = tmp_path / "report.md"
 
     rc = main(
-        ["render-failure", sid, "--trace-path", str(db), "--out", str(out_file)],
+        ["render-failure", sid, "--trace-db", str(db), "--out", str(out_file)],
     )
 
     assert rc == 0
@@ -227,6 +227,84 @@ def test_render_failure_cli_out_writes_markdown_file(tmp_path):
     assert content.startswith("# Failure Report")
     assert sid in content
     assert "## Classification" in content
+
+
+def test_render_failure_trace_path_emits_deprecation_warning(tmp_path, capsys):
+    """--trace-path still works but emits a DeprecationWarning (issue #1253)."""
+    db = tmp_path / "traces.db"
+    sid = _plant_failing_session(db)
+
+    with pytest.warns(DeprecationWarning, match="--trace-path is deprecated"):
+        rc = main(["render-failure", sid, "--trace-path", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "# Failure Report" in out
+
+
+def test_render_failure_db_alias_emits_deprecation_warning(tmp_path, capsys):
+    """--db alias still works but emits a DeprecationWarning (issue #1253)."""
+    db = tmp_path / "traces.db"
+    sid = _plant_failing_session(db)
+
+    with pytest.warns(DeprecationWarning, match="--db is deprecated"):
+        rc = main(["render-failure", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "# Failure Report" in out
+
+
+def test_render_failure_format_json(tmp_path, capsys):
+    """render-failure --format json produces valid JSON output (issue #1253)."""
+    db = tmp_path / "traces.db"
+    sid = _plant_failing_session(db)
+
+    rc = main(["render-failure", sid, "--trace-db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["session_id"] == sid
+    assert "summary" in data
+    assert "suspected_causes" in data
+    assert "failed_steps" in data
+    assert "proposed_class" in data
+
+
+def test_render_failure_out_json_auto_detected(tmp_path):
+    """--out ending in .json auto-selects JSON format (issue #1253)."""
+    db = tmp_path / "traces.db"
+    sid = _plant_failing_session(db)
+    out_file = tmp_path / "report.json"
+
+    rc = main(
+        ["render-failure", sid, "--trace-db", str(db), "--out", str(out_file)],
+    )
+
+    assert rc == 0
+    data = json.loads(out_file.read_text(encoding="utf-8"))
+    assert data["session_id"] == sid
+
+
+def test_render_failure_jsonl_backend(tmp_path, capsys):
+    """render-failure works on the JSONL backend (issue #1253)."""
+    db = tmp_path / "traces.jsonl"
+    logger = TraceLogger(db, backend="jsonl")
+    with logger.session(harness_version="0.1.0", model_id="m") as sid:
+        logger.record(sid, kind="user_prompt", payload={"text": "do work"})
+        logger.record(
+            sid,
+            kind="tool_error",
+            payload={"error": "exit code 1", "traceback": "boom"},
+        )
+
+    rc = main(["render-failure", sid, "--trace-db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "# Failure Report" in out
+    assert sid in out
 
 
 def test_sqlite_trace_file_is_valid_database(tmp_path):
