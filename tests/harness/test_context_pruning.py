@@ -1142,7 +1142,7 @@ def test_sqlite_pruner_concurrent_access_no_busy_errors(tmp_path) -> None:
         try:
             for _ in range(20):
                 pruner(sid, frozenset({"tool_result", "user_prompt"}), 200)
-        except sqlite3.Error as e:  # pragma: no cover — SQLITE_BUSY would surface here
+        except sqlite3.Error as e:
             errors.append(e)
 
     threads = [threading.Thread(target=prune_loop) for _ in range(3)]
