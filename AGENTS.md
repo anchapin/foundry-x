@@ -154,7 +154,8 @@ mirrors the way our product works:
   in `pyproject.toml`); pre-commit's `ruff` hook auto-fixes with
   `--fix --exit-non-zero-on-fix`, so staged files get modified and must
   be re-added. The lint job also runs `tests/docs/test_doc_links.py`
-  to catch broken cross-doc references.
+  (broken cross-doc refs) and `tests/docs/test_ci_gate_claims.py`
+  (verifies CI enforcement claims in docs are backed by real workflows).
 - **Test:** `uv run pytest` — must pass before commit. Run after lint.
   Pytest discovers both `tests/` and `benchmarks/` (see `testpaths` in
   `pyproject.toml`); benchmark tasks under `benchmarks/tasks/` are gated
@@ -284,3 +285,12 @@ Keep the two layers strictly separate:
 - **`harness/`** — the *artifact being evolved*: the agent's own DNA (`system_prompt.txt`, `hooks/`, `skills/`). All three are version-controlled and evolved by the Evolver→Critic loop. Skills are JSON tool definitions the agent can invoke; hooks are Python middleware that runs around every tool call.
 
 Mixing these up is the most common mistake newcomers make.
+
+## 8. Known discrepancies
+
+- **Python version**: CI installs Python 3.14 (`uv python install 3.14` in workflow files).
+  `.python-version` may lag and currently says `3.12`. `pyproject.toml` requires `>=3.11`.
+  When in doubt, match what the CI uses (3.14).
+- **Stale AGENTS files**: `AGENTS_BASE_*.md`, `AGENTS_LOCAL_*.md`, and
+  `AGENTS_REMOTE_*.md` in the repo root are stale backups from a previous
+  session — not the canonical `AGENTS.md`.
