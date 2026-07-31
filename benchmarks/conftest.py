@@ -211,6 +211,18 @@ def _seed_workspace(
     _expand_templates(workspace, source)
 
 
+@pytest.fixture(scope="session")
+def sweep_results_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Session-scoped path for sweep results shared across tests in the same worker.
+
+    Each pytest-xdist worker creates its own session-scoped fixture, so results are
+    correctly shared within a worker but isolated across workers (which is the
+    correct semantics for xdist parallelism — each worker runs a full test suite
+    independently).
+    """
+    return tmp_path_factory.mktemp("sweep_results") / "results.jsonl"
+
+
 @pytest.fixture
 def benchmark_workspace(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Path]:
     """Yield an isolated, per-test working directory for a benchmark task.
