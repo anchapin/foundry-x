@@ -34,7 +34,6 @@ from harness.hooks.context_pruning import (
     DEFAULT_THRESHOLD,
     DEFAULT_TOKEN_THRESHOLD,
     ContextPruningHook,
-    Pruner,
     TokenAwarePruningHook,
     TokenCounter,
     Tracer,
@@ -1138,17 +1137,15 @@ def test_sqlite_pruner_concurrent_access_no_busy_errors(tmp_path) -> None:
     with logger.session(harness_version="test-0.0") as sid:
         _plant(logger, sid, 500)
 
-    def make_pruner() -> Pruner:
-        return _sqlite_pruner(db)
-
-    def prune_loop(pruner: Pruner) -> None:
+    def prune_loop() -> None:
+        pruner = _sqlite_pruner(db)
         try:
             for _ in range(20):
                 pruner(sid, frozenset({"tool_result", "user_prompt"}), 200)
-        except sqlite3.Error as e:  # pragma: no cover — SQLITE_BUSY would surface here
+        except sqlite3.Error as e:
             errors.append(e)
 
-    threads = [threading.Thread(target=prune_loop, args=(make_pruner(),)) for _ in range(3)]
+    threads = [threading.Thread(target=prune_loop) for _ in range(3)]
     for t in threads:
         t.start()
     for t in threads:
