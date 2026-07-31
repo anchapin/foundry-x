@@ -5,8 +5,6 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
-
 WAVE_PLANNER = Path(__file__).parent.parent.parent / "harness" / "scripts" / "wave-planner.js"
 
 
@@ -18,6 +16,7 @@ def _run_wave_planner(issues: list[dict]) -> dict:
         capture_output=True,
         text=True,
         timeout=10,
+        check=False,
     )
     assert proc.returncode == 0, f"wave-planner failed: {proc.stderr}"
     return json.loads(proc.stdout)
