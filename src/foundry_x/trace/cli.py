@@ -15,7 +15,11 @@ from typing import Any
 
 from foundry_x.evolution.digester import Digester
 from foundry_x.observability.render import render_failure_report, render_failure_report_json
-from foundry_x.observability.timeline import format_timeline
+from foundry_x.observability.timeline import (
+    format_timeline,
+    render_timeline_json,
+    render_timeline_svg,
+)
 from foundry_x.trace.logger import TraceEvent, TraceLogger, TraceSession
 
 
@@ -1298,6 +1302,27 @@ def _doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_timeline_format(args_format: str | None, out: str | None) -> str:
+    """Resolve the output format for ``timeline`` (issue #1255).
+
+    Explicit ``--format`` always wins. When unset, the format is
+    inferred from the ``--out`` file extension (``.svg`` → svg,
+    ``.json`` → json, ``.md``/``.markdown`` → markdown); otherwise
+    ``'ascii'`` (the default, backward-compatible behavior) is returned.
+    """
+    if args_format is not None:
+        return args_format
+    if out is not None:
+        ext = Path(out).suffix.lower()
+        if ext == ".svg":
+            return "svg"
+        if ext == ".json":
+            return "json"
+        if ext in (".md", ".markdown"):
+            return "markdown"
+    return "ascii"
+
+
 def _timeline(args: argparse.Namespace) -> int:
     """Implement ``timeline`` (issue #1036).
 
@@ -1306,6 +1331,13 @@ def _timeline(args: argparse.Namespace) -> int:
     categories. Supports ``--kind`` to filter by event kind and
     ``--no-color`` to disable TTY detection (colors are not used in
     the current implementation but the flag is reserved).
+
+    Issue #1255: ``--format {ascii,markdown,json,svg}`` selects the
+    render mode. ``ascii`` (default) keeps the graphical bars;
+    ``markdown`` reuses :func:`format_timeline`; ``json`` reuses
+    :func:`render_timeline_json`; ``svg`` reuses
+    :func:`render_timeline_svg` from ``observability/timeline.py``.
+    ``--out`` auto-detects the format from the file extension.
     """
     logger = _logger_for(_get_trace_db(args))
     session_id, rc = _resolve_session_id(args, logger)
@@ -1325,11 +1357,33 @@ def _timeline(args: argparse.Namespace) -> int:
             sys.stderr.write(f"No events matching kind '{kind_filter}' in session {session_id}.\n")
             return 1
 
-    output = build_graphical_timeline(events, kind_filter=kind_filter, use_color=use_color)
+    fmt = _resolve_timeline_format(getattr(args, "format", None), getattr(args, "out", None))
+
+    # Warn when explicit --format conflicts with --out extension (mirrors
+    # the fx-trace timeline conflict-detection pattern, issue #1149).
+    if getattr(args, "format", None) is not None and args.out is not None:
+        expected_ext = "." + fmt
+        if not Path(args.out).suffix.lower().endswith(expected_ext):
+            sys.stderr.write(
+                f"warning: --format {fmt} conflicts with --out extension "
+                f"'{Path(args.out).suffix}'; writing {fmt} anyway\n"
+            )
+
+    if fmt == "json":
+        output = render_timeline_json(events)
+    elif fmt == "svg":
+        output = render_timeline_svg(events)
+    elif fmt == "markdown":
+        output = format_timeline(events)
+    else:
+        output = build_graphical_timeline(events, kind_filter=kind_filter, use_color=use_color)
+
     if args.out:
         Path(args.out).write_text(output, encoding="utf-8")
     else:
         sys.stdout.write(output)
+        if not output.endswith("\n"):
+            sys.stdout.write("\n")
     return 0
 
 
@@ -2010,6 +2064,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--db",
         default=None,
         help="Deprecated: use --trace-db instead.",
+    )
+    timeline_parser.add_argument(
+        "--format",
+        choices=["ascii", "markdown", "json", "svg"],
+        default=None,
+        help=(
+            "Output format (issue #1255). Default: 'ascii' (graphical bars). "
+            "'markdown' renders a plain text timeline (format_timeline). "
+            "'json' emits structured JSON (render_timeline_json). "
+            "'svg' renders a Gantt chart (render_timeline_svg). "
+            "When --out ends in '.svg', '.json', or '.md', the format is "
+            "auto-selected from the extension."
+        ),
     )
     timeline_parser.add_argument(
         "--out",

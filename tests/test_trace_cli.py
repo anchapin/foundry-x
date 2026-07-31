@@ -1782,6 +1782,174 @@ def test_timeline_output_file(tmp_path):
     assert "tool_call" in text
 
 
+# --- Issue #1255: timeline --format {ascii,markdown,json,svg} -----------------
+
+
+def test_timeline_default_format_is_ascii(tmp_path, capsys):
+    """Default format produces the graphical ASCII bars output (#1255 AC1)."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+
+    rc = main(["timeline", sid, "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Timeline:" in out
+    assert "[" in out  # duration bars
+
+
+def test_timeline_format_ascii_explicit(tmp_path, capsys):
+    """--format ascii produces the same graphical bars as the default."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+
+    rc = main(["timeline", sid, "--db", str(db), "--format", "ascii"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Timeline:" in out
+    assert "[" in out
+
+
+def test_timeline_format_markdown(tmp_path, capsys):
+    """--format markdown produces plain text via format_timeline (#1255 AC2)."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+
+    rc = main(["timeline", sid, "--db", str(db), "--format", "markdown"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    # format_timeline uses step numbers and offsets, not the graphical header.
+    assert "Timeline:" not in out
+    assert "user_prompt" in out
+    assert "tool_call" in out
+    # Markdown output should have step numbers like #1, #2.
+    assert "#1" in out
+    assert "[" not in out  # no duration bars in markdown mode
+
+
+def test_timeline_format_json(tmp_path, capsys):
+    """--format json produces parseable JSON array (#1255 AC3)."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+
+    rc = main(["timeline", sid, "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert isinstance(payload, list)
+    assert len(payload) == 3  # user_prompt, tool_call, outcome
+    record = payload[0]
+    assert "step" in record
+    assert "kind" in record
+    assert "offset_seconds" in record
+    assert record["kind"] == "user_prompt"
+
+
+def test_timeline_format_svg(tmp_path, capsys):
+    """--format svg produces a valid SVG Gantt chart (#1255 AC4)."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+
+    rc = main(["timeline", sid, "--db", str(db), "--format", "svg"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.startswith("<svg")
+    assert "</svg>" in out
+    assert "rect" in out
+
+
+def test_timeline_out_svg_autoselects_svg(tmp_path):
+    """--out with .svg extension auto-selects svg format (#1255 AC6)."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+    out_file = tmp_path / "timeline.svg"
+
+    rc = main(["timeline", sid, "--db", str(db), "--out", str(out_file)])
+
+    assert rc == 0
+    text = out_file.read_text(encoding="utf-8")
+    assert text.startswith("<svg")
+    assert "</svg>" in text
+
+
+def test_timeline_out_json_autoselects_json(tmp_path):
+    """--out with .json extension auto-selects json format (#1255 AC6)."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+    out_file = tmp_path / "timeline.json"
+
+    rc = main(["timeline", sid, "--db", str(db), "--out", str(out_file)])
+
+    assert rc == 0
+    text = out_file.read_text(encoding="utf-8")
+    payload = json.loads(text)
+    assert isinstance(payload, list)
+    assert len(payload) == 3
+
+
+def test_timeline_out_md_autoselects_markdown(tmp_path):
+    """--out with .md extension auto-selects markdown format (#1255 AC6)."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+    out_file = tmp_path / "timeline.md"
+
+    rc = main(["timeline", sid, "--db", str(db), "--out", str(out_file)])
+
+    assert rc == 0
+    text = out_file.read_text(encoding="utf-8")
+    assert "user_prompt" in text
+    assert "#1" in text
+    assert "Timeline:" not in text
+
+
+def test_timeline_format_conflict_warns(tmp_path, capsys):
+    """--format svg with --out .md warns about the mismatch (mirrors fx-trace)."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+    out_file = tmp_path / "timeline.md"
+
+    rc = main(["timeline", sid, "--db", str(db), "--format", "svg", "--out", str(out_file)])
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "conflicts" in err
+    # SVG content is written despite the mismatch.
+    text = out_file.read_text(encoding="utf-8")
+    assert text.startswith("<svg")
+
+
+def test_timeline_format_json_with_kind_filter(tmp_path, capsys):
+    """--format json works with --kind filter."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+
+    rc = main(["timeline", sid, "--db", str(db), "--format", "json", "--kind", "tool_call"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert isinstance(payload, list)
+    assert len(payload) == 1
+    assert payload[0]["kind"] == "tool_call"
+
+
+def test_timeline_format_svg_with_kind_filter(tmp_path, capsys):
+    """--format svg works with --kind filter."""
+    db = tmp_path / "traces.db"
+    sid = _populate(db)
+
+    rc = main(["timeline", sid, "--db", str(db), "--format", "svg", "--kind", "tool_call"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.startswith("<svg")
+    assert "</svg>" in out
+
+
 def test_build_graphical_timeline_header(tmp_path):
     """The header reports event count and total span."""
     from foundry_x.trace.cli import build_graphical_timeline
