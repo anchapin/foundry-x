@@ -1219,3 +1219,36 @@ def test_smoke_tier_success_has_no_skipped_checks(
     verdict = critic.evaluate("", tier="smoke")
     assert verdict.verdict is True
     assert "beta" not in verdict.skipped_checks
+
+
+def test_run_sweep_captures_skipped_lines(
+    harness_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SKIPPED pytest output lines are captured in task_results (issue #1252)."""
+
+    fake_output = (
+        "benchmarks/tasks/test_foo.py::test_pass PASSED            [ 33%]\n"
+        "benchmarks/tasks/test_foo.py::test_fail FAILED            [ 66%]\n"
+        "benchmarks/tasks/test_foo.py::test_skip SKIPPED (reason)  [100%]\n"
+        "======================== 2 passed, 1 failed, 1 skipped in 0.5s "
+        "========================\n"
+    )
+
+    def fake_run(*args: object, **kwargs: object) -> object:
+        cmd = args[0] if args else kwargs.get("args")
+        if cmd is not None and "pytest" in str(cmd):
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout=fake_output, stderr=""
+            )
+        return original_run(*args, **kwargs)
+
+    original_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    critic = Critic(harness_dir, pytest_args=["-q", "-m", "benchmark"])
+    result = critic._run_sweep_for_quant("model.q4.gguf", "model-q4")
+
+    names = {tr.name: tr.passed for tr in result.task_results}
+    assert "test_pass" in names and names["test_pass"] is True
+    assert "test_fail" in names and names["test_fail"] is False
+    assert "test_skip" in names and names["test_skip"] is False

@@ -881,7 +881,7 @@ class Critic:
                             pass
 
             stripped = line.strip()
-            if " PASSED" in stripped or " FAILED" in stripped:
+            if " PASSED" in stripped or " FAILED" in stripped or " SKIPPED" in stripped:
                 task_name = self._extract_task_name(stripped)
                 if task_name:
                     task_results.append(
