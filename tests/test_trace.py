@@ -1233,3 +1233,287 @@ def test_iter_unevolved_verdicts_jsonl_vs_sqlite_count_equivalence(tmp_path):
     assert len(sqlite_verdicts) == len(jsonl_verdicts)
     assert all(e.kind == "critic_verdict" for e in sqlite_verdicts)
     assert all(e.kind == "critic_verdict" for e in jsonl_verdicts)
+
+
+# --- --latest / --harness-version auto-session selection (issue #1254) --------
+
+
+def _plant_multi_version_sessions(db: Path) -> list[tuple[str, str]]:
+    """Plant 3 sessions across 2 harness versions (issue #1254).
+
+    Returns ``[(session_id, harness_version), ...]`` in insertion (oldest
+    first) order:
+      1. v1.0 with payload ``"session-one"``
+      2. v2.0 with payload ``"session-two"``
+      3. v1.0 with payload ``"session-three"``  ← global most-recent
+
+    ``--latest`` (no filter) picks #3. ``--latest --harness-version v2.0``
+    picks #2. ``--latest --harness-version v1.0`` picks #3.
+    """
+    logger = TraceLogger(db)
+    sessions: list[tuple[str, str]] = []
+    with logger.session(harness_version="v1.0", model_id="m") as sid:
+        logger.record(sid, kind="user_prompt", payload={"text": "session-one"})
+        sessions.append((sid, "v1.0"))
+    with logger.session(harness_version="v2.0", model_id="m") as sid:
+        logger.record(sid, kind="user_prompt", payload={"text": "session-two"})
+        sessions.append((sid, "v2.0"))
+    with logger.session(harness_version="v1.0", model_id="m") as sid:
+        logger.record(sid, kind="user_prompt", payload={"text": "session-three"})
+        sessions.append((sid, "v1.0"))
+    return sessions
+
+
+def test_session_show_latest_picks_most_recent(tmp_path, capsys):
+    """session-show --latest renders the globally most recent session (#1254 AC1)."""
+    db = tmp_path / "traces.db"
+    sessions = _plant_multi_version_sessions(db)
+    expected_sid = sessions[-1][0]
+
+    rc = main(["session-show", "--latest", "--trace-db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"Session: {expected_sid}" in out
+
+
+def test_session_show_latest_with_harness_version(tmp_path, capsys):
+    """session-show --latest --harness-version picks the right build (#1254 AC2)."""
+    db = tmp_path / "traces.db"
+    sessions = _plant_multi_version_sessions(db)
+    v2_sid = sessions[1][0]
+
+    rc = main(["session-show", "--latest", "--harness-version", "v2.0", "--trace-db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"Session: {v2_sid}" in out
+
+
+def test_timeline_latest_picks_most_recent(tmp_path, capsys):
+    """timeline --latest renders the most recent session's timeline (#1254 AC3)."""
+    db = tmp_path / "traces.db"
+    _plant_multi_version_sessions(db)
+
+    rc = main(["timeline", "--latest", "--trace-db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Timeline:" in out
+    assert "session-three" in out
+
+
+def test_timeline_latest_with_kind_filter(tmp_path, capsys):
+    """timeline --latest --kind filters the most recent session (#1254 AC4)."""
+    db = tmp_path / "traces.db"
+    logger = TraceLogger(db)
+    with logger.session(harness_version="v1.0", model_id="m") as sid:
+        logger.record(sid, kind="user_prompt", payload={"text": "hi"})
+        logger.record(sid, kind="tool_call", payload={"name": "read_file"})
+
+    rc = main(["timeline", "--latest", "--kind", "tool_call", "--trace-db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tool_call" in out
+    assert "user_prompt" not in out
+
+
+def test_diagnose_latest_picks_most_recent(tmp_path, capsys):
+    """diagnose --latest runs the triage on the most recent session (#1254)."""
+    db = tmp_path / "traces.db"
+    sessions = _plant_multi_version_sessions(db)
+    expected_sid = sessions[-1][0]
+
+    rc = main(["diagnose", "--latest", "--trace-db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"`{expected_sid}`" in out
+
+
+def test_render_failure_latest_picks_most_recent(tmp_path, capsys):
+    """render-failure --latest digests the most recent session (#1254)."""
+    db = tmp_path / "traces.db"
+    sessions = _plant_multi_version_sessions(db)
+    expected_sid = sessions[-1][0]
+
+    rc = main(["render-failure", "--latest", "--trace-db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert expected_sid in out
+
+
+def test_export_latest_picks_most_recent(tmp_path, capsys):
+    """export --latest exports the most recent session as JSONL (#1254)."""
+    db = tmp_path / "traces.db"
+    sessions = _plant_multi_version_sessions(db)
+    expected_sid = sessions[-1][0]
+
+    rc = main(["export", "--latest", "--trace-db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    lines = [json.loads(line) for line in out.strip().splitlines() if line]
+    assert len(lines) == 1
+    assert lines[0]["session_id"] == expected_sid
+
+
+def test_export_latest_with_harness_version(tmp_path, capsys):
+    """export --latest --harness-version picks the right build (#1254)."""
+    db = tmp_path / "traces.db"
+    sessions = _plant_multi_version_sessions(db)
+    v2_sid = sessions[1][0]
+
+    rc = main(["export", "--latest", "--harness-version", "v2.0", "--trace-db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    lines = [json.loads(line) for line in out.strip().splitlines() if line]
+    assert len(lines) == 1
+    assert lines[0]["session_id"] == v2_sid
+
+
+def test_events_grep_latest_picks_most_recent(tmp_path, capsys):
+    """events-grep --latest scans the most recent session (#1254)."""
+    db = tmp_path / "traces.db"
+    _plant_multi_version_sessions(db)
+
+    rc = main(["events-grep", "--latest", "--pattern", "session-three", "--trace-db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "session-three" in out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["session-show", "--latest", "some-sid"],
+        ["timeline", "--latest", "some-sid"],
+        ["diagnose", "--latest", "some-sid"],
+        ["render-failure", "--latest", "some-sid"],
+        ["events-grep", "--latest", "some-sid", "--pattern", "x"],
+    ],
+)
+def test_latest_and_session_id_mutually_exclusive(tmp_path, capsys, argv):
+    """--latest + a session_id argument exits 2 (#1254 AC5)."""
+    db = tmp_path / "traces.db"
+    _plant_multi_version_sessions(db)
+
+    rc = main([*argv, "--trace-db", str(db)])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "mutually exclusive" in err
+
+
+def test_export_latest_and_session_id_mutually_exclusive(tmp_path, capsys):
+    """export --latest + --session-id exits 2 (#1254 AC5)."""
+    db = tmp_path / "traces.db"
+    _plant_multi_version_sessions(db)
+
+    rc = main(
+        [
+            "export",
+            "--latest",
+            "--session-id",
+            "some-sid",
+            "--trace-db",
+            str(db),
+        ]
+    )
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "mutually exclusive" in err
+
+
+def test_export_latest_and_all_mutually_exclusive(tmp_path, capsys):
+    """export --latest + --all exits 2 (#1254)."""
+    db = tmp_path / "traces.db"
+    _plant_multi_version_sessions(db)
+
+    rc = main(["export", "--latest", "--all", "--trace-db", str(db)])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "mutually exclusive" in err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["session-show"],
+        ["timeline"],
+        ["diagnose"],
+        ["render-failure"],
+        ["events-grep", "--pattern", "x"],
+    ],
+)
+def test_no_session_id_and_no_latest_exits_two(tmp_path, capsys, argv):
+    """Omitting both session_id and --latest exits 2 (#1254 AC5)."""
+    db = tmp_path / "traces.db"
+    _plant_multi_version_sessions(db)
+
+    rc = main([*argv, "--trace-db", str(db)])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "either a session_id or --latest is required" in err
+
+
+def test_export_no_session_id_and_no_latest_exits_two(tmp_path, capsys):
+    """export without --session-id, --all, or --latest exits 2 (#1254 AC5)."""
+    db = tmp_path / "traces.db"
+    _plant_multi_version_sessions(db)
+
+    rc = main(["export", "--trace-db", str(db)])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "either a session_id or --latest is required" in err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["session-show", "--latest"],
+        ["timeline", "--latest"],
+        ["diagnose", "--latest"],
+        ["render-failure", "--latest"],
+        ["events-grep", "--latest", "--pattern", "x"],
+        ["export", "--latest"],
+    ],
+)
+def test_latest_empty_store_exits_zero(tmp_path, capsys, argv):
+    """--latest on an empty trace store prints 'no sessions' and exits 0 (#1254 AC6)."""
+    db = tmp_path / "empty.db"
+
+    rc = main([*argv, "--trace-db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no sessions" in out
+
+
+def test_latest_with_missing_harness_version_empty(tmp_path, capsys):
+    """--latest --harness-version for a non-existent version prints 'no sessions' (#1254)."""
+    db = tmp_path / "traces.db"
+    _plant_multi_version_sessions(db)
+
+    rc = main(
+        [
+            "session-show",
+            "--latest",
+            "--harness-version",
+            "v9.9",
+            "--trace-db",
+            str(db),
+        ]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no sessions" in out

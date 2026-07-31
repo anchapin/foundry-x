@@ -57,11 +57,78 @@ def _get_render_failure_db(args: argparse.Namespace) -> str:
     return args.trace_db
 
 
+def _resolve_session_id(
+    args: argparse.Namespace, logger: TraceLogger
+) -> tuple[str | None, int | None]:
+    """Resolve the session_id for commands supporting ``--latest`` (issue #1254).
+
+    Centralises the auto-session-selection logic so the six inspection
+    commands (``session-show``, ``timeline``, ``diagnose``,
+    ``render-failure``, ``export``, ``events-grep``) share one code path.
+    Mirrors the ``fx-trace`` ``--latest`` / ``--harness-version`` pattern
+    (observability/cli.py ``_resolve_latest_session_id``).
+
+    Returns ``(session_id, None)`` on success. Returns ``(None, exit_code)``
+    when the caller should stop and return *exit_code*:
+
+    - ``2`` when ``--latest`` and a ``session_id`` are both given
+      (mutually exclusive), or when neither is given.
+    - ``0`` when ``--latest`` is used but the trace store is empty
+      (prints ``no sessions`` to stdout, matching ``fx-trace``).
+    """
+    latest = getattr(args, "latest", False)
+    session_id = getattr(args, "session_id", None)
+    harness_version = getattr(args, "harness_version", None)
+
+    if latest and session_id is not None:
+        sys.stderr.write("--latest and a session_id are mutually exclusive\n")
+        return None, 2
+    if not latest and session_id is None:
+        sys.stderr.write("either a session_id or --latest is required\n")
+        return None, 2
+    if latest:
+        sessions = logger.list_sessions(harness_version=harness_version)
+        if not sessions:
+            sys.stdout.write("no sessions\n")
+            return None, 0
+        return sessions[-1].session_id, None
+    return session_id, None
+
+
+def _add_latest_session_flags(parser: argparse.ArgumentParser) -> None:
+    """Add ``--latest`` and ``--harness-version`` to *parser* (issue #1254).
+
+    Keeps the six inspection subcommands' flag definitions in one place
+    so the help text stays consistent.
+    """
+    parser.add_argument(
+        "--latest",
+        action="store_true",
+        default=False,
+        help=(
+            "Select the most recent session automatically. "
+            "Mutually exclusive with a session_id argument (exit code 2). "
+            "Combine with --harness-version to pick the most recent "
+            "session for that harness build."
+        ),
+    )
+    parser.add_argument(
+        "--harness-version",
+        default=None,
+        help=(
+            "When combined with --latest, pick the most recent session for this harness version."
+        ),
+    )
+
+
 def _render_failure(args: argparse.Namespace) -> int:
     db_path = _get_render_failure_db(args)
     logger = _logger_for(db_path)
-    events = logger.load_session(args.session_id)
-    report = Digester().digest(args.session_id, events)
+    session_id, rc = _resolve_session_id(args, logger)
+    if rc is not None:
+        return rc
+    events = logger.load_session(session_id)
+    report = Digester().digest(session_id, events)
     fmt = getattr(args, "format", None)
     if fmt is None and args.out is not None and args.out.endswith(".json"):
         fmt = "json"
@@ -143,7 +210,8 @@ def _export(args: argparse.Namespace) -> int:
     """Export trace events in JSONL or CSV format.
 
     Supports:
-    - Single session (``--session-id``) or all sessions (``--all``)
+    - Single session (``--session-id``), all sessions (``--all``),
+      or auto-select the most recent session (``--latest``, issue #1254)
     - JSONL or CSV output format (``--format jsonl|csv``)
     - Filtering by event kind (``--kind``)
     - Filtering by harness version (``--harness-version``)
@@ -151,6 +219,9 @@ def _export(args: argparse.Namespace) -> int:
     logger = _logger_for(_get_trace_db(args))
 
     if getattr(args, "all", False):
+        if getattr(args, "latest", False):
+            sys.stderr.write("export: --all and --latest are mutually exclusive.\n")
+            return 2
         events = list(
             logger.query_events(
                 kind=getattr(args, "kind", None),
@@ -158,10 +229,9 @@ def _export(args: argparse.Namespace) -> int:
             )
         )
     else:
-        session_id = getattr(args, "session_id", None)
-        if session_id is None:
-            sys.stderr.write("export: must specify --session-id or --all.\n")
-            return 1
+        session_id, rc = _resolve_session_id(args, logger)
+        if rc is not None:
+            return rc
         events = list(logger.load_session(session_id))
         kind_filter = getattr(args, "kind", None)
         if kind_filter is not None:
@@ -267,11 +337,14 @@ def _session_show(args: argparse.Namespace) -> int:
     mirroring ``_show`` and the grep convention.
     """
     logger = TraceLogger(_get_trace_db(args))
-    events = logger.load_session(args.session_id)
+    session_id, rc = _resolve_session_id(args, logger)
+    if rc is not None:
+        return rc
+    events = logger.load_session(session_id)
     if not events:
-        sys.stderr.write(f"No events found for session {args.session_id}.\n")
+        sys.stderr.write(f"No events found for session {session_id}.\n")
         return 1
-    sys.stdout.write(f"Session: {args.session_id}\n")
+    sys.stdout.write(f"Session: {session_id}\n")
     sys.stdout.write(f"Events: {len(events)}\n\n")
     sys.stdout.write(format_timeline(events) + "\n")
     return 0
@@ -290,9 +363,12 @@ def _events_grep(args: argparse.Namespace) -> int:
     exceptions' rule in AGENTS.md.
     """
     logger = TraceLogger(_get_trace_db(args))
-    events = logger.load_session(args.session_id)
+    session_id, rc = _resolve_session_id(args, logger)
+    if rc is not None:
+        return rc
+    events = logger.load_session(session_id)
     if not events:
-        sys.stderr.write(f"No events found for session {args.session_id}.\n")
+        sys.stderr.write(f"No events found for session {session_id}.\n")
         return 1
     try:
         pattern = re.compile(args.pattern)
@@ -977,11 +1053,14 @@ def _diagnose(args: argparse.Namespace) -> int:
     jsonl backends via :func:`_logger_for`.
     """
     logger = _logger_for(_get_trace_db(args))
-    events = logger.load_session(args.session_id)
+    session_id, rc = _resolve_session_id(args, logger)
+    if rc is not None:
+        return rc
+    events = logger.load_session(session_id)
     if not events:
-        sys.stderr.write(f"session {args.session_id} not found or empty.\n")
+        sys.stderr.write(f"session {session_id} not found or empty.\n")
         return 1
-    report = build_diagnose_report(args.session_id, events)
+    report = build_diagnose_report(session_id, events)
     if args.out:
         Path(args.out).write_text(report, encoding="utf-8")
     else:
@@ -1229,9 +1308,12 @@ def _timeline(args: argparse.Namespace) -> int:
     the current implementation but the flag is reserved).
     """
     logger = _logger_for(_get_trace_db(args))
-    events = logger.load_session(args.session_id)
+    session_id, rc = _resolve_session_id(args, logger)
+    if rc is not None:
+        return rc
+    events = logger.load_session(session_id)
     if not events:
-        sys.stderr.write(f"No events found for session {args.session_id}.\n")
+        sys.stderr.write(f"No events found for session {session_id}.\n")
         return 1
     kind_filter = getattr(args, "kind", None)
     use_color = not getattr(args, "no_color", False)
@@ -1240,9 +1322,7 @@ def _timeline(args: argparse.Namespace) -> int:
     if kind_filter is not None:
         events = [e for e in events if e.kind == kind_filter]
         if not events:
-            sys.stderr.write(
-                f"No events matching kind '{kind_filter}' in session {args.session_id}.\n"
-            )
+            sys.stderr.write(f"No events matching kind '{kind_filter}' in session {session_id}.\n")
             return 1
 
     output = build_graphical_timeline(events, kind_filter=kind_filter, use_color=use_color)
@@ -1418,7 +1498,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "render-failure",
         help="Render a Digester FailureReport as Markdown or JSON.",
     )
-    render_parser.add_argument("session_id", help="Trace session to digest.")
+    render_parser.add_argument(
+        "session_id",
+        nargs="?",
+        default=None,
+        help="Trace session to digest (omit with --latest).",
+    )
     render_parser.add_argument(
         "--trace-db",
         default="logs/traces.db",
@@ -1447,6 +1532,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write output to this path instead of stdout.",
     )
+    _add_latest_session_flags(render_parser)
     render_parser.set_defaults(func=_render_failure)
 
     sessions_parser = sub.add_parser(
@@ -1509,9 +1595,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Filter to events of this kind (e.g. 'tool_call', 'model_response').",
     )
     export_parser.add_argument(
+        "--latest",
+        action="store_true",
+        default=False,
+        help=(
+            "Export the most recent session automatically. "
+            "Mutually exclusive with --all and --session-id (issue #1254). "
+            "Combine with --harness-version to pick the most recent "
+            "session for that harness build."
+        ),
+    )
+    export_parser.add_argument(
         "--harness-version",
         default=None,
-        help="Filter to sessions with this harness version (only with --all).",
+        help=(
+            "Filter sessions by harness version. With --all, exports all "
+            "matching sessions. With --latest, picks the most recent "
+            "matching session."
+        ),
     )
     export_parser.add_argument(
         "--trace-db",
@@ -1562,7 +1663,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "session-show",
         help="Print every event of a session via the timeline renderer.",
     )
-    session_show_parser.add_argument("session_id", help="Session to display.")
+    session_show_parser.add_argument(
+        "session_id",
+        nargs="?",
+        default=None,
+        help="Session to display (omit with --latest).",
+    )
     session_show_parser.add_argument(
         "--trace-db",
         default="logs/traces.db",
@@ -1573,13 +1679,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Deprecated: use --trace-db instead.",
     )
+    _add_latest_session_flags(session_show_parser)
     session_show_parser.set_defaults(func=_session_show)
 
     events_grep_parser = sub.add_parser(
         "events-grep",
         help="Print events whose payload JSON matches a regex.",
     )
-    events_grep_parser.add_argument("session_id", help="Session to scan.")
+    events_grep_parser.add_argument(
+        "session_id",
+        nargs="?",
+        default=None,
+        help="Session to scan (omit with --latest).",
+    )
     events_grep_parser.add_argument(
         "--pattern",
         required=True,
@@ -1600,6 +1712,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print only the integer count of matching events instead of event lines.",
     )
+    _add_latest_session_flags(events_grep_parser)
     events_grep_parser.set_defaults(func=_events_grep)
 
     # Issue #192 subcommands: redact-session / redact-key.
@@ -1842,7 +1955,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "diagnose",
         help="Run all six ARCHITECTURE.md failure-mode checks (issue #1044).",
     )
-    diagnose_parser.add_argument("session_id", help="Session to diagnose.")
+    diagnose_parser.add_argument(
+        "session_id",
+        nargs="?",
+        default=None,
+        help="Session to diagnose (omit with --latest).",
+    )
     diagnose_parser.add_argument(
         "--trace-db",
         default="logs/traces.db",
@@ -1858,6 +1976,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write the report to this path instead of stdout.",
     )
+    _add_latest_session_flags(diagnose_parser)
     diagnose_parser.set_defaults(func=_diagnose)
 
     # --- timeline (issue #1036) ---
@@ -1867,7 +1986,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     timeline_parser.add_argument(
         "session_id",
-        help="The session ID to render a timeline for.",
+        nargs="?",
+        default=None,
+        help="The session ID to render a timeline for (omit with --latest).",
     )
     timeline_parser.add_argument(
         "--kind",
@@ -1895,6 +2016,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write the timeline to this path instead of stdout.",
     )
+    _add_latest_session_flags(timeline_parser)
     timeline_parser.set_defaults(func=_timeline)
 
     # Issue #1123: single-task benchmark execution. Resolves a named benchmark
