@@ -213,6 +213,23 @@ test("--dry-run includes HIGH_COLLISION_FILES", async () => {
   }
 });
 
+test("filters out non-existent file paths from issue body", async () => {
+  const issues = [
+    { number: 1, title: "Issue 1", body: "Fix the bug in src/foo.py", state: "open", labels: [] },
+  ];
+
+  const { stdout } = await runPlannerDryRun({ issues });
+  const result = JSON.parse(stdout);
+
+  const issue1 = result.issues.find((i) => i.number === 1);
+  if (issue1.affected_files.includes("src/foo.py")) {
+    throw new Error("src/foo.py should be filtered out — it does not exist");
+  }
+  if (!issue1.affected_files.includes("cmd/nexus/main.go")) {
+    throw new Error("Should still include HIGH_COLLISION_FILES even when non-existent");
+  }
+});
+
 test("shows help with --help flag", async () => {
   return new Promise((resolve, reject) => {
     const proc = spawn("node", [wavePlannerPath, "--help"], {
