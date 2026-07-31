@@ -26,7 +26,12 @@ function extractFileRefs(text) {
     let m;
     while ((m = pat.exec(text)) !== null) {
       const f = m[1];
-      if (!f.includes("http") && !f.includes("://") && f.length > 3) {
+      if (
+        !f.startsWith("logs/") &&
+        !f.includes("http") &&
+        !f.includes("://") &&
+        f.length > 3
+      ) {
         files.add(f);
       }
     }
