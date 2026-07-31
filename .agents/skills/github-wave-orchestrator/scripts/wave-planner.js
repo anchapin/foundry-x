@@ -12,22 +12,60 @@ function readInput() {
   return JSON.parse(fs.readFileSync("/dev/stdin", "utf8"));
 }
 
-// Files that are frequently touched by gofmt/struct-alignment even when not
-// explicitly mentioned in issue text. These are added to every issue's file list
-// to ensure issues that touch them are scheduled in the same wave.
-const HIGH_COLLISION_FILES = [
-  "cmd/nexus/main.go",
-  "cmd/nexus/main_test.go",
-];
+// Files that are frequently touched even when not explicitly mentioned in
+// issue text. These are added to every issue's file list to ensure issues
+// that touch them are scheduled in the same wave.
+//
+// Configurable (in priority order):
+//   1. WAVE_PLANNER_HIGH_COLLISION_FILES env var (comma-separated paths)
+//   2. .wave-planner.config.json  -> { "high_collision_files": ["..."] }
+//   3. wave-planner.config.json (legacy fallback name)
+// Defaults to an empty array so file-conflict detection relies entirely on
+// the regex-based extraction from issue bodies unless a repo opts in.
+function loadHighCollisionFiles() {
+  // 1. Environment variable
+  const envVal = process.env.WAVE_PLANNER_HIGH_COLLISION_FILES;
+  if (envVal !== undefined && envVal.trim() !== "") {
+    return envVal
+      .split(",")
+      .map((f) => f.trim())
+      .filter((f) => f.length > 0);
+  }
+
+  // 2/3. Config file (JSON)
+  const repoRoot = findRepoRoot();
+  const searchDirs = [process.cwd(), repoRoot].filter(Boolean);
+  for (const dir of searchDirs) {
+    for (const name of [".wave-planner.config.json", "wave-planner.config.json"]) {
+      const cfgPath = path.join(dir, name);
+      if (fs.existsSync(cfgPath)) {
+        try {
+          const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+          if (Array.isArray(cfg.high_collision_files)) {
+            return cfg.high_collision_files.filter(
+              (f) => typeof f === "string" && f.length > 0
+            );
+          }
+        } catch {
+          // Ignore malformed config; fall through to default.
+        }
+      }
+    }
+  }
+
+  // 4. Default: empty — rely on regex-based file extraction from issue bodies.
+  return [];
+}
 
 function extractFileRefs(text) {
   if (!text) return [];
+  const highCollisionFiles = loadHighCollisionFiles();
   const files = new Set();
-  const highCollisionSet = new Set(HIGH_COLLISION_FILES);
+  const highCollisionSet = new Set(highCollisionFiles);
 
-  // Always add high-collision files — they are touched by gofmt/alignment even
-  // when not explicitly mentioned in the issue body.
-  for (const f of HIGH_COLLISION_FILES) {
+  // Add configured high-collision files (if any) — they are touched by tooling
+  // even when not explicitly mentioned in the issue body.
+  for (const f of highCollisionFiles) {
     files.add(f);
   }
 
