@@ -15,6 +15,12 @@ from typing import Any
 
 from foundry_x.evolution.digester import Digester
 from foundry_x.observability.render import render_failure_report, render_failure_report_json
+from foundry_x.observability.session_summary import (
+    SessionSummaryReport,
+    _failure_class_distribution_from_rows,
+    build_session_summary,
+    render_session_summary,
+)
 from foundry_x.observability.timeline import (
     format_timeline,
     render_timeline_json,
@@ -1541,6 +1547,68 @@ def _session_diff(args: argparse.Namespace) -> int:
     return 1
 
 
+_DEFAULT_SUMMARY_LIMIT = 10
+
+
+def _session_summary(args: argparse.Namespace) -> int:
+    """Implement ``session-summary`` (issue #1256).
+
+    Renders a one-row-per-session roll-up of recorded outcomes by
+    reusing :func:`build_session_summary` and
+    :func:`render_session_summary` from
+    :mod:`foundry_x.observability.session_summary`, mirroring
+    ``fx-trace session-summary`` so operators who use ``foundry-trace``
+    as their primary inspection CLI do not have to switch tools.
+
+    ``--latest`` and ``--limit`` are mutually exclusive (exit code 2).
+    When neither is given, at most ``_DEFAULT_SUMMARY_LIMIT`` (10) of
+    the most recent sessions are shown.
+    """
+    logger = _logger_for(_get_trace_db(args))
+    rows = build_session_summary(
+        logger,
+        harness_version=args.harness_version,
+        since=args.since,
+    )
+    failure_class_distribution = _failure_class_distribution_from_rows(rows)
+
+    if args.latest and args.limit is not None:
+        sys.stderr.write("--latest and --limit are mutually exclusive\n")
+        return 2
+    if args.latest:
+        rows = rows[:1]
+    elif args.limit is not None:
+        rows = rows[: args.limit]
+    else:
+        rows = rows[:_DEFAULT_SUMMARY_LIMIT]
+
+    fmt = getattr(args, "format", None)
+    if fmt is None and args.out is not None and args.out.endswith(".json"):
+        fmt = "json"
+    if fmt is None:
+        fmt = "markdown"
+
+    if fmt == "json":
+        report = SessionSummaryReport(
+            failure_class_distribution=failure_class_distribution,
+            rows=list(rows),
+        )
+        rendered = report.model_dump_json(indent=2) + "\n"
+    else:
+        rendered = (
+            render_session_summary(
+                rows, limit=None, failure_class_distribution=failure_class_distribution
+            )
+            + "\n"
+        )
+
+    if args.out:
+        Path(args.out).write_text(rendered, encoding="utf-8")
+    else:
+        sys.stdout.write(rendered)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="foundry-trace",
@@ -2146,6 +2214,67 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write the unified diff to this path instead of stdout.",
     )
     session_diff_parser.set_defaults(func=_session_diff)
+
+    # --- session-summary (issue #1256) ---
+    # Mirrors ``fx-trace session-summary`` so operators using
+    # ``foundry-trace`` as their primary CLI can get a per-session
+    # outcome roll-up without switching tools.
+    session_summary_parser = sub.add_parser(
+        "session-summary",
+        help="Render a one-row-per-session roll-up of recorded outcomes (issue #1256).",
+    )
+    session_summary_parser.add_argument(
+        "--trace-db",
+        default="logs/traces.db",
+        help="Path to the trace SQLite database or JSONL file (default: logs/traces.db).",
+    )
+    session_summary_parser.add_argument(
+        "--db",
+        default=None,
+        help="Deprecated: use --trace-db instead.",
+    )
+    session_summary_parser.add_argument(
+        "--harness-version",
+        default=None,
+        help="Only include sessions recorded with this harness version.",
+    )
+    session_summary_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Show at most N sessions after newest-first ordering (default: 10).",
+    )
+    session_summary_parser.add_argument(
+        "--since",
+        default=None,
+        help="ISO-8601 timestamp; only include sessions started at or after this time.",
+    )
+    session_summary_parser.add_argument(
+        "--latest",
+        action="store_true",
+        default=False,
+        help=(
+            "Print only the single most recent session row. "
+            "Mutually exclusive with --limit (exit code 2). "
+            "Combine with --harness-version to pick the most recent row "
+            "matching that harness build."
+        ),
+    )
+    session_summary_parser.add_argument(
+        "--format",
+        default=None,
+        choices=("markdown", "json"),
+        help=(
+            "Output format. Default: 'markdown'. When --out ends in '.json', "
+            "'json' is selected automatically."
+        ),
+    )
+    session_summary_parser.add_argument(
+        "--out",
+        default=None,
+        help="Write the summary to this path instead of stdout.",
+    )
+    session_summary_parser.set_defaults(func=_session_summary)
 
     return parser
 
