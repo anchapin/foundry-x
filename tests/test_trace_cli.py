@@ -2402,3 +2402,285 @@ def test_session_diff_help_discoverable(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "session-diff" in out
+
+
+# ---------------------------------------------------------------------------
+# Issue #1256: session-summary outcome rollup subcommand for foundry-trace.
+# Mirrors ``fx-trace session-summary`` so operators using ``foundry-trace``
+# as their primary CLI can get per-session outcome data without switching tools.
+# ---------------------------------------------------------------------------
+
+_SUMMARY_SESSIONS = [
+    # (sid, harness_version, started_at, ended_at, outcome_payload | None)
+    (
+        "sess-old",
+        "0.1.0",
+        "2026-07-10T10:00:00+00:00",
+        "2026-07-10T10:00:05+00:00",
+        {"status": "success", "reason": "final_answer", "steps": 2},
+    ),
+    (
+        "sess-mid",
+        "0.1.0",
+        "2026-07-10T11:00:00+00:00",
+        "2026-07-10T11:00:30+00:00",
+        {"status": "truncated", "reason": "max_steps", "steps": 12},
+    ),
+    (
+        "sess-no-outcome",
+        "0.1.0",
+        "2026-07-10T12:00:00+00:00",
+        "2026-07-10T12:00:02+00:00",
+        None,
+    ),
+    (
+        "sess-new",
+        "0.2.0",
+        "2026-07-10T13:00:00+00:00",
+        "2026-07-10T13:01:00+00:00",
+        {"status": "failed", "reason": "model_error", "steps": 4},
+    ),
+]
+
+
+def _plant_summary_sessions(db_path) -> None:
+    """Plant four deterministic sessions for session-summary tests."""
+    import sqlite3
+    import uuid
+
+    TraceLogger(db_path)
+    with sqlite3.connect(db_path) as conn:
+        for sid, hv, started_at, ended_at, outcome in _SUMMARY_SESSIONS:
+            conn.execute(
+                "INSERT INTO sessions "
+                "(session_id, started_at, harness_version, model_id, metadata, ended_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, started_at, hv, None, "{}", ended_at),
+            )
+            if outcome is None:
+                continue
+            conn.execute(
+                "INSERT INTO events (event_id, session_id, timestamp, kind, payload) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    sid,
+                    started_at,
+                    "outcome",
+                    json.dumps(outcome),
+                ),
+            )
+
+
+def test_session_summary_prints_table(tmp_path, capsys):
+    """session-summary prints a roll-up table with outcome columns."""
+    db = tmp_path / "traces.db"
+    _plant_summary_sessions(db)
+
+    rc = main(["session-summary", "--db", str(db)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "session_id" in out
+    assert "started_at" in out
+    assert "duration" in out
+    assert "outcome.status" in out
+    assert "outcome.reason" in out
+    assert "steps" in out
+
+
+def test_session_summary_empty_store_says_no_sessions(tmp_path, capsys):
+    """Empty trace store exits 0 with 'no sessions'."""
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["session-summary", "--db", str(db)])
+
+    assert rc == 0
+    assert "no sessions" in capsys.readouterr().out
+
+
+def test_session_summary_respects_harness_version(tmp_path, capsys):
+    """--harness-version filters to sessions of that build."""
+    db = tmp_path / "traces.db"
+    _plant_summary_sessions(db)
+
+    rc = main(["session-summary", "--db", str(db), "--harness-version", "0.2.0"])
+
+    assert rc == 0
+    out_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    # Header + one data row (sess-new is the only 0.2.0 session).
+    assert len(out_lines) == 2
+    assert "sess-new" in out_lines[1]
+    assert "sess-old" not in out_lines[1]
+
+
+def test_session_summary_respects_limit(tmp_path, capsys):
+    """--limit truncates to N most recent sessions."""
+    db = tmp_path / "traces.db"
+    _plant_summary_sessions(db)
+
+    rc = main(["session-summary", "--db", str(db), "--limit", "2"])
+
+    assert rc == 0
+    out_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    # Header + 2 data rows.
+    assert len(out_lines) == 3
+
+
+def test_session_summary_default_limit_is_10(tmp_path, capsys):
+    """Without --limit, the default of 10 most recent sessions is shown."""
+    db = tmp_path / "traces.db"
+    import sqlite3
+
+    TraceLogger(db)
+    with sqlite3.connect(db) as conn:
+        for i in range(15):
+            conn.execute(
+                "INSERT INTO sessions "
+                "(session_id, started_at, harness_version, model_id, metadata, ended_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    f"sess-{i:03d}",
+                    f"2026-07-{10 + i // 24}T{i % 24:02d}:00:00+00:00",
+                    "0.1.0",
+                    None,
+                    "{}",
+                    None,
+                ),
+            )
+
+    rc = main(["session-summary", "--db", str(db)])
+
+    assert rc == 0
+    out_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    # Header + 10 data rows (default limit).
+    assert len(out_lines) == 11
+
+
+def test_session_summary_respects_since(tmp_path, capsys):
+    """--since filters sessions by start time."""
+    db = tmp_path / "traces.db"
+    _plant_summary_sessions(db)
+
+    rc = main(["session-summary", "--db", str(db), "--since", "2026-07-10T11:30:00+00:00"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "sess-old" not in out
+    assert "sess-mid" not in out
+    assert "sess-no-outcome" in out
+    assert "sess-new" in out
+
+
+def test_session_summary_latest_renders_single_newest_row(tmp_path, capsys):
+    """--latest prints only the single most recent session row."""
+    db = tmp_path / "traces.db"
+    _plant_summary_sessions(db)
+
+    rc = main(["session-summary", "--db", str(db), "--latest"])
+
+    assert rc == 0
+    out_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    # Header + exactly one data row.
+    assert len(out_lines) == 2
+    assert "sess-new" in out_lines[1]
+
+
+def test_session_summary_latest_with_harness_version(tmp_path, capsys):
+    """--latest --harness-version picks the newest session for that build."""
+    db = tmp_path / "traces.db"
+    _plant_summary_sessions(db)
+
+    rc = main(
+        [
+            "session-summary",
+            "--db",
+            str(db),
+            "--latest",
+            "--harness-version",
+            "0.1.0",
+        ]
+    )
+
+    assert rc == 0
+    out_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert len(out_lines) == 2
+    # Among 0.1.0 sessions, sess-no-outcome is the newest (12:00).
+    assert "sess-no-outcome" in out_lines[1]
+
+
+def test_session_summary_latest_empty_store_says_no_sessions(tmp_path, capsys):
+    """--latest on an empty store exits 0 with 'no sessions'."""
+    db = tmp_path / "traces.db"
+    TraceLogger(db)
+
+    rc = main(["session-summary", "--db", str(db), "--latest"])
+
+    assert rc == 0
+    assert "no sessions" in capsys.readouterr().out
+
+
+def test_session_summary_latest_conflicts_with_limit(tmp_path, capsys):
+    """--latest and --limit are mutually exclusive (exit code 2)."""
+    db = tmp_path / "traces.db"
+    _plant_summary_sessions(db)
+
+    rc = main(["session-summary", "--db", str(db), "--latest", "--limit", "2"])
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "--latest and --limit are mutually exclusive" in captured.err
+
+
+def test_session_summary_format_json(tmp_path, capsys):
+    """--format json emits a SessionSummaryReport JSON blob."""
+    db = tmp_path / "traces.db"
+    _plant_summary_sessions(db)
+
+    rc = main(["session-summary", "--db", str(db), "--format", "json"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert "rows" in data
+    assert len(data["rows"]) == 4
+
+
+def test_session_summary_out_writes_to_file(tmp_path, capsys):
+    """--out writes the summary to a file instead of stdout."""
+    db = tmp_path / "traces.db"
+    _plant_summary_sessions(db)
+    out_file = tmp_path / "summary.md"
+
+    rc = main(["session-summary", "--db", str(db), "--out", str(out_file)])
+
+    assert rc == 0
+    assert capsys.readouterr().out == ""
+    text = out_file.read_text("utf-8")
+    assert "session_id" in text
+    assert "sess-new" in text
+
+
+def test_session_summary_format_json_infers_from_out_extension(tmp_path, capsys):
+    """When --out ends in .json, JSON is auto-selected."""
+    db = tmp_path / "traces.db"
+    _plant_summary_sessions(db)
+    out_file = tmp_path / "summary.json"
+
+    rc = main(["session-summary", "--db", str(db), "--out", str(out_file)])
+
+    assert rc == 0
+    data = json.loads(out_file.read_text("utf-8"))
+    assert "rows" in data
+
+
+def test_session_summary_help_discoverable(tmp_path, capsys):
+    """The subcommand appears in --help output."""
+    try:
+        main(["--help"])
+    except SystemExit:
+        pass
+
+    out = capsys.readouterr().out
+    assert "session-summary" in out
