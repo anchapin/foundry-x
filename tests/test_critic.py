@@ -359,6 +359,40 @@ def test_minimum_token_budget_used_when_multiple_tasks(
     assert captured_env.get("FOUNDRY_TOKEN_BUDGET") == "3000"
 
 
+def test_injection_patterns_sync_with_firewall() -> None:
+    """Every INJECTION_PATTERNS entry from the firewall is present in the
+    Critic's _INJECTION_PATTERNS (issue #1250).
+
+    The Critic keeps a hand-maintained copy of the firewall's pattern list as
+    plain strings (so it can scan a diff without importing the harness
+    package). If a pattern is added to the firewall but not the Critic, the
+    Critic's diff-side scan silently uses a stale list and the gate passes a
+    security regression (SECURITY.md Threat #2).
+
+    The Critic may carry *extra* patterns beyond the firewall (stricter
+    scanning is not a regression), so this asserts a subset relationship
+    (firewall ⊆ critic) rather than exact equality.
+    """
+    from foundry_x.evolution.critic import _INJECTION_PATTERNS as critic_patterns
+    from harness.hooks.injection_firewall import INJECTION_PATTERNS
+
+    critic_set = set(critic_patterns)
+    missing = [(name, pat) for name, pat in INJECTION_PATTERNS if (name, pat) not in critic_set]
+    assert not missing, (
+        f"Critic _INJECTION_PATTERNS is out of sync with "
+        f"harness/hooks/injection_firewall.py INJECTION_PATTERNS: "
+        f"{len(missing)} pattern(s) present in the firewall but missing "
+        f"from the Critic: {missing}. Add them to "
+        f"src/foundry_x/evolution/critic.py _INJECTION_PATTERNS."
+    )
+    # Every firewall pattern must be covered — critic may have extras.
+    assert len(critic_patterns) >= len(INJECTION_PATTERNS), (
+        f"Critic has {len(critic_patterns)} patterns but the firewall has "
+        f"{len(INJECTION_PATTERNS)}; the Critic must cover every firewall "
+        f"pattern."
+    )
+
+
 def test_scan_diff_for_injection_flags_all_firewall_patterns() -> None:
     """All INJECTION_PATTERNS categories trigger _scan_diff_for_injection (issue #807).
 
