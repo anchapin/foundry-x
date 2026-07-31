@@ -38,6 +38,7 @@ from harness.hooks.context_pruning import (
     TokenAwarePruningHook,
     TokenCounter,
     Tracer,
+    _sqlite_pruner,
     _SqlitePruner,
     register_into,
     register_token_aware_into,
