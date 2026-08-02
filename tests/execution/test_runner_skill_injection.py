@@ -135,3 +135,28 @@ def test_inject_skill_list_sorted_alphabetically(tmp_path: Path):
     result = _inject_skill_list(harness, prompt)
 
     assert result == "- alpha\n- mike\n- zulu"
+
+
+def test_inject_skill_list_skips_entry_missing_name(tmp_path: Path):
+    """Issue #1463: an entry missing 'name' must be skipped, not crash."""
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    (harness / "system_prompt.txt").write_text("{{ SKILL_LIST }}", encoding="utf-8")
+    manifest = {
+        "version": "0.1.0",
+        "model_target": "test/model",
+        "hooks": [],
+        "skills": ["alpha.json", "beta.json"],
+        "skill_inventory": [
+            {"name": "alpha", "description": "Alpha"},
+            {"description": "no name key here"},
+            {"name": "beta", "description": "Beta"},
+        ],
+    }
+    (harness / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    prompt = (harness / "system_prompt.txt").read_text(encoding="utf-8")
+    result = _inject_skill_list(harness, prompt)
+
+    assert result == "- alpha\n- beta"
+    assert "{{ SKILL_LIST }}" not in result

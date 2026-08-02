@@ -14,6 +14,7 @@ Validates seven invariants:
 * ``harness/system_prompt.txt`` exists and is non-empty
 * ``import harness.hooks`` succeeds and the registry instantiates
 * ``harness/manifest.json`` cross-refs resolve on disk (issue #277)
+* ``skill_inventory`` names match ``skills[]`` names (issue #1463)
 * hook execution order matches manifest declaration (issue #567)
 
 Stdlib-only by design. The script adds the parent of ``--harness-dir`` to
@@ -126,6 +127,8 @@ def _check_manifest(harness_dir: Path) -> list[str]:
     * required keys (``version``, ``model_target``, ``hooks``, ``skills``)
     * every ``skills`` entry resolves under ``harness/skills/``
     * every ``hooks`` entry resolves to ``harness/hooks/<entry>.py``
+    * ``skill_inventory`` entries each have ``name``, have no duplicates, and
+      the name set matches ``skills[]`` (issue #1463)
     * ``version`` matches ``harness/VERSION`` when that file exists
 
     Returns early when structural keys are missing -- cross-ref checks are
@@ -191,6 +194,56 @@ def _check_manifest(harness_dir: Path) -> list[str]:
                     )
     else:
         failures.append(f"{manifest}: 'hooks' must be a list, got {type(hooks).__name__}")
+
+    # Issue #1463: ``skill_inventory`` is consumed by runner._inject_skill_list
+    # to build the {{ SKILL_LIST }} system-prompt section, but was never
+    # validated by load_check. A ProposedEdit that updates ``skills[]`` but
+    # forgets ``skill_inventory`` silently desyncs them. Validate that every
+    # entry has a ``name`` key, there are no duplicate names, and the set of
+    # ``skill_inventory`` names equals the set derived from ``skills[]``.
+    skill_inventory = doc.get("skill_inventory")
+    if skill_inventory is not None:
+        if not isinstance(skill_inventory, list):
+            failures.append(
+                f"{manifest}: 'skill_inventory' must be a list, got "
+                f"{type(skill_inventory).__name__}"
+            )
+        else:
+            inv_names: list[str] = []
+            for idx, entry in enumerate(skill_inventory):
+                if not isinstance(entry, dict):
+                    failures.append(
+                        f"{manifest}: skill_inventory[{idx}] must be a JSON object, "
+                        f"got {type(entry).__name__}"
+                    )
+                    continue
+                if "name" not in entry:
+                    failures.append(
+                        f"{manifest}: skill_inventory[{idx}] missing required key 'name' "
+                        f"(runner.py _inject_skill_list accesses entry['name'])"
+                    )
+                    continue
+                inv_names.append(str(entry["name"]))
+            if isinstance(skills, list):
+                skills_name_set = {str(s).removesuffix(".json") for s in skills}
+                inv_name_set = set(inv_names)
+                duplicates = sorted(name for name in inv_name_set if inv_names.count(name) > 1)
+                if duplicates:
+                    failures.append(
+                        f"{manifest}: skill_inventory has duplicate name(s): {duplicates!r}"
+                    )
+                missing_from_inv = sorted(skills_name_set - inv_name_set)
+                extra_in_inv = sorted(inv_name_set - skills_name_set)
+                if missing_from_inv:
+                    failures.append(
+                        f"{manifest}: skill_inventory is missing name(s) present in skills[]: "
+                        f"{missing_from_inv!r} (issue #1463)"
+                    )
+                if extra_in_inv:
+                    failures.append(
+                        f"{manifest}: skill_inventory has name(s) not in skills[]: "
+                        f"{extra_in_inv!r} (issue #1463)"
+                    )
 
     version_file = harness_dir / "VERSION"
     if version_file.exists():
