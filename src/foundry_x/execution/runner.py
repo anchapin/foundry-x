@@ -147,6 +147,18 @@ _DEFAULT_REQUEST_TIMEOUT_S: float = 30.0
 
 _WORKSPACE_ROOT_ENV = "FOUNDRY_WORKSPACE_ROOT"
 
+# Upper bound on a single bash-skill command timeout (issue #1467). The bash
+# skill executor reads ``timeout_seconds`` straight from model-provided tool
+# arguments; without a cap a model can pass ``timeout_seconds=999999`` and
+# effectively disable the per-command timeout, letting one hung command burn
+# the whole ``FOUNDRY_TASK_TIMEOUT`` wall-clock budget. ``FOUNDRY_BASH_MAX_TIMEOUT_S``
+# is the foundry-owned override; an empty / missing value or a non-positive
+# integer falls back to the default below. The wall-clock ``RunLimits`` cap
+# still guards the entire session — this guards each command (SECURITY.md
+# "Runaway detection").
+_BASH_MAX_TIMEOUT_ENV = "FOUNDRY_BASH_MAX_TIMEOUT_S"
+_DEFAULT_BASH_MAX_TIMEOUT_S: int = 60
+
 
 def _resolve_workspace_root(env: Mapping[str, str] | None = None) -> Path:
     """Resolve the agent workspace root for file-operation skill executors.
@@ -667,6 +679,37 @@ def _resolve_request_timeout(env: Mapping[str, str] | None = None) -> float:
     return value if value > 0 else _DEFAULT_REQUEST_TIMEOUT_S
 
 
+def _resolve_bash_max_timeout(env: Mapping[str, str] | None = None) -> int:
+    """Resolve the per-command bash skill timeout cap in seconds (issue #1467).
+
+    ``FOUNDRY_BASH_MAX_TIMEOUT_S`` clamps the model-supplied ``timeout_seconds``
+    so a malicious or buggy harness cannot disable the per-command guard. The
+    wall-clock :class:`RunLimits` cap still guards the whole session; this
+    guards each individual bash invocation.
+
+    Resolution rules:
+
+    - Empty / absent → :data:`_DEFAULT_BASH_MAX_TIMEOUT_S`.
+    - Non-positive (``<= 0``) → :data:`_DEFAULT_BASH_MAX_TIMEOUT_S` (the cap
+      cannot be disabled per-command; one hung command would otherwise consume
+      the entire session budget).
+    - Non-integer → :class:`ValueError` so a typo in ``.env`` surfaces at
+      process start rather than silently disabling the guard (AGENTS.md §2).
+    """
+    source = env if env is not None else os.environ
+    raw = source.get(_BASH_MAX_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_BASH_MAX_TIMEOUT_S
+    value = int(raw)
+    if value <= 0:
+        warnings.warn(
+            f"{_BASH_MAX_TIMEOUT_ENV}={value!r} is non-positive; "
+            f"falling back to {_DEFAULT_BASH_MAX_TIMEOUT_S}."
+        )
+        return _DEFAULT_BASH_MAX_TIMEOUT_S
+    return value
+
+
 def _load_tool_definitions(skills_dir: Path) -> list[ToolDefinition]:
     """Build the ``ToolDefinition`` surface from ``harness/skills/*.json``.
 
@@ -897,13 +940,23 @@ async def _bash_skill_executor(
     - ``cwd`` is confined to ``workspace_dir`` via ``_resolve_path`` (issue #935);
       a ``cwd`` that resolves outside the workspace returns an error result
       instead of executing, mirroring the file-operation skill confinement
-    - ``timeout_seconds`` defaults to 30; on timeout exit_code=-1 and truncated=True
+    - ``timeout_seconds`` defaults to 30 and is clamped to
+      ``FOUNDRY_BASH_MAX_TIMEOUT_S`` (default 60, issue #1467) so a model cannot
+      disable the per-command guard by passing an inflated value
     - ``max_output_bytes`` defaults to 32768; output is truncated at newline boundary
     """
     command: str = arguments.get("command", "")
     cwd_arg: str | None = arguments.get("cwd")
     timeout_seconds: int = arguments.get("timeout_seconds", 30)
     max_output_bytes: int = arguments.get("max_output_bytes", 32768)
+
+    bash_max_timeout = _resolve_bash_max_timeout()
+    if timeout_seconds > bash_max_timeout:
+        warnings.warn(
+            f"bash skill timeout_seconds={timeout_seconds} exceeds cap "
+            f"{bash_max_timeout}; clamping (issue #1467)."
+        )
+        timeout_seconds = bash_max_timeout
 
     cwd: Path | None = None
     if cwd_arg:
