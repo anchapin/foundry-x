@@ -9,6 +9,7 @@ import pytest
 from foundry_x.execution.runner import (
     _bash_skill_executor,
     _default_skill_executor,
+    _resolve_bash_max_timeout,
     _truncate_at_newline,
 )
 
@@ -188,6 +189,90 @@ class TestBashSkillExecutor:
         result = await _bash_skill_executor("bash", {"command": "echo *"})
         assert result["exit_code"] == 0
         assert "*" in result["stdout"] or "test_bash_skill_executor" in result["stdout"]
+
+
+class TestBashTimeoutClamp:
+    """Issue #1467: model-supplied ``timeout_seconds`` is clamped to an upper bound."""
+
+    @pytest.mark.asyncio
+    async def test_inflated_timeout_is_clamped_to_cap(self) -> None:
+        """A model sending ``timeout_seconds=999999`` uses the cap (60 by default).
+
+        We assert the command completes quickly (echo is instant) and that a
+        warning is emitted documenting the clamp — proving the inflated value
+        did not reach ``subprocess.run``.
+        """
+        with pytest.warns(UserWarning, match="exceeds cap"):
+            result = await _bash_skill_executor(
+                "bash", {"command": "echo fast", "timeout_seconds": 999999}
+            )
+        assert result["exit_code"] == 0
+        assert "fast" in result["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_clamped_timeout_still_kills_hung_command(self, monkeypatch) -> None:
+        """The clamped cap is enforced: with a 1s cap, a ``sleep 10`` with a
+        huge requested timeout is killed within the cap window — proving the
+        inflated value did not reach ``subprocess.run``."""
+        monkeypatch.setenv("FOUNDRY_BASH_MAX_TIMEOUT_S", "1")
+        with pytest.warns(UserWarning, match="exceeds cap"):
+            result = await _bash_skill_executor(
+                "bash",
+                {"command": "sleep 10", "timeout_seconds": 999999},
+            )
+        assert result["exit_code"] == -1
+        assert result["truncated"] is True
+
+    @pytest.mark.asyncio
+    async def test_timeout_within_cap_is_not_clamped(self, monkeypatch) -> None:
+        """A timeout under the cap produces no warning and is respected."""
+        monkeypatch.setenv("FOUNDRY_BASH_MAX_TIMEOUT_S", "5")
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = await _bash_skill_executor(
+                "bash", {"command": "echo ok", "timeout_seconds": 2}
+            )
+        assert result["exit_code"] == 0
+        assert "ok" in result["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_env_override_raises_cap(self, monkeypatch) -> None:
+        """A lower ``FOUNDRY_BASH_MAX_TIMEOUT_S`` clamps even modest requests."""
+        monkeypatch.setenv("FOUNDRY_BASH_MAX_TIMEOUT_S", "1")
+        with pytest.warns(UserWarning, match="exceeds cap"):
+            result = await _bash_skill_executor(
+                "bash", {"command": "sleep 10", "timeout_seconds": 30}
+            )
+        assert result["exit_code"] == -1
+        assert result["truncated"] is True
+
+
+class TestResolveBashMaxTimeout:
+    """Tests for the ``_resolve_bash_max_timeout`` config resolver (issue #1467)."""
+
+    def test_absent_env_returns_default(self, monkeypatch) -> None:
+        monkeypatch.delenv("FOUNDRY_BASH_MAX_TIMEOUT_S", raising=False)
+        assert _resolve_bash_max_timeout() == 60
+
+    def test_empty_env_returns_default(self, monkeypatch) -> None:
+        monkeypatch.setenv("FOUNDRY_BASH_MAX_TIMEOUT_S", "")
+        assert _resolve_bash_max_timeout() == 60
+
+    def test_explicit_value_is_returned(self, monkeypatch) -> None:
+        monkeypatch.setenv("FOUNDRY_BASH_MAX_TIMEOUT_S", "120")
+        assert _resolve_bash_max_timeout() == 120
+
+    def test_non_positive_falls_back_to_default(self, monkeypatch) -> None:
+        monkeypatch.setenv("FOUNDRY_BASH_MAX_TIMEOUT_S", "0")
+        with pytest.warns(UserWarning, match="non-positive"):
+            assert _resolve_bash_max_timeout() == 60
+
+    def test_non_integer_raises(self, monkeypatch) -> None:
+        monkeypatch.setenv("FOUNDRY_BASH_MAX_TIMEOUT_S", "oops")
+        with pytest.raises(ValueError):
+            _resolve_bash_max_timeout()
 
 
 class TestDefaultSkillExecutor:
