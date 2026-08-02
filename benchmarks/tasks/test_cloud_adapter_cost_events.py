@@ -109,8 +109,8 @@ class _ScriptedCloudAdapter(CloudModelAdapter):
     def rate_limit_headers(self) -> tuple[str, ...]:
         return tuple(self._rate_limit_headers.keys())
 
-    def token_pricing(self) -> tuple[float, float]:
-        return (1.0, 4.0)
+    def _token_pricing_with_known(self) -> tuple[float, float, bool]:
+        return (1.0, 4.0, True)
 
     def parse_rate_limit(self, headers_lower: Mapping[str, str]) -> ModelRateLimitInfo:
         def _to_int(value: str | None) -> int | None:
