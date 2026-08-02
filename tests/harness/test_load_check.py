@@ -727,3 +727,81 @@ def test_load_check_fails_when_skill_inventory_has_duplicate_names(
         f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     )
     assert "duplicate" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Duplicate skill-name detection tests (issue #1460)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
+def test_load_check_fails_when_two_skill_files_share_name(tmp_path: Path) -> None:
+    """Issue #1460: two skill files with the same ``doc["name"]`` must fail.
+    The runner globs ``skills/*.json`` and registers each ``doc["name"]`` as
+    a tool name; duplicates cause ambiguous tool dispatch."""
+    _make_fixture_harness(
+        tmp_path,
+        skills={
+            "dup_a.json": _VALID_SKILL | {"name": "dup"},
+            "dup_b.json": _VALID_SKILL | {"name": "dup"},
+        },
+        include_hooks=True,
+        hooks_init="",
+        hooks_base=_MINIMAL_HOOKS_BASE,
+    )
+    proc = subprocess.run(
+        [sys.executable, str(LOAD_CHECK), "--harness-dir", str(tmp_path / "harness")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+        check=False,
+    )
+    assert proc.returncode != 0, (
+        f"load_check should fail on duplicate skill names; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "duplicate skill name" in proc.stderr, (
+        f"stderr must mention duplicate skill name (issue #1460); got {proc.stderr!r}"
+    )
+    assert "'dup'" in proc.stderr, (
+        f"stderr must name the duplicated name (issue #1460); got {proc.stderr!r}"
+    )
+
+
+@pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
+def test_load_check_fails_when_manifest_skills_has_duplicate_entry(tmp_path: Path) -> None:
+    """Issue #1460: manifest ``skills[]`` listing the same filename twice must
+    fail. The runner would register the same tool twice, causing ambiguous
+    dispatch."""
+    _make_fixture_harness(
+        tmp_path,
+        skills={"real.json": _VALID_SKILL},
+        include_hooks=True,
+        hooks_init="",
+        hooks_base=_MINIMAL_HOOKS_BASE,
+        manifest={
+            "version": "0.1.0",
+            "model_target": "test/model",
+            "hooks": ["base"],
+            "skills": ["real.json", "real.json"],
+        },
+    )
+    proc = subprocess.run(
+        [sys.executable, str(LOAD_CHECK), "--harness-dir", str(tmp_path / "harness")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+        check=False,
+    )
+    assert proc.returncode != 0, (
+        f"load_check should fail on duplicate manifest skills[] entry; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "duplicate" in proc.stderr, (
+        f"stderr must mention duplicate (issue #1460); got {proc.stderr!r}"
+    )
+    assert "real.json" in proc.stderr, (
+        f"stderr must name the duplicated entry (issue #1460); got {proc.stderr!r}"
+    )

@@ -2,7 +2,7 @@
 """Smoke-test that the harness tree is loadable. Used by the Critic (ADR-0004)
 to gate ``ProposedEdit`` proposals before they are marked active.
 
-Validates seven invariants:
+Validates ten invariants:
 
 * the harness directory itself exists
 * every ``harness/skills/*.json`` parses and carries the five required keys
@@ -11,9 +11,14 @@ Validates seven invariants:
   #278): the runner globs by filename but exposes the internal ``name`` as
   the tool name, so a filename/name divergence would let the model see one
   tool name while debugging references point at another
+* every ``doc["name"]`` is unique across all skill files (issue #1460):
+  the runner registers each ``doc["name"]`` as a tool name, so duplicates
+  cause ambiguous tool dispatch
 * ``harness/system_prompt.txt`` exists and is non-empty
 * ``import harness.hooks`` succeeds and the registry instantiates
 * ``harness/manifest.json`` cross-refs resolve on disk (issue #277)
+* manifest ``skills[]`` entries are unique (issue #1460): the same filename
+  listed twice means the runner registers the same tool twice
 * ``skill_inventory`` names match ``skills[]`` names (issue #1463)
 * hook execution order matches manifest declaration (issue #567)
 
@@ -72,6 +77,12 @@ def _check_skills(harness_dir: Path) -> list[str]:
     if not skills_dir.is_dir():
         return [f"harness/skills directory does not exist: {skills_dir}"]
     failures: list[str] = []
+    # Issue #1460: aggregate doc["name"] across all skill files to detect
+    # duplicates. The runner's _load_tool_definitions globs skills/*.json
+    # and registers each doc["name"] as a tool name; two files sharing a
+    # name silently register two identically-named tools, causing ambiguous
+    # tool dispatch.
+    name_to_files: dict[str, list[str]] = {}
     for path in sorted(skills_dir.glob("*.json")):
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
@@ -99,6 +110,17 @@ def _check_skills(harness_dir: Path) -> list[str]:
                     f"{stem!r} (issue #278; runner.py exposes doc['name'] as "
                     f"the tool name while debugging references point at the file)"
                 )
+            name_to_files.setdefault(str(name), []).append(path.name)
+    # Issue #1460: fail when two or more skill files share the same
+    # doc["name"], which would register duplicate tool names in the runner.
+    for name, files in sorted(name_to_files.items()):
+        if len(files) > 1:
+            failures.append(
+                f"harness/skills: duplicate skill name {name!r} in "
+                f"[{', '.join(files)}] (issue #1460; runner.py "
+                f"_load_tool_definitions registers doc['name'] as the tool "
+                f"name, so duplicates cause ambiguous tool dispatch)"
+            )
     return failures
 
 
@@ -153,6 +175,18 @@ def _check_manifest(harness_dir: Path) -> list[str]:
     skills_dir = harness_dir / "skills"
     skills = doc["skills"]
     if isinstance(skills, list):
+        # Issue #1460: detect duplicate entries in manifest skills[]. The
+        # same filename listed twice means the runner registers the same
+        # tool twice, causing ambiguous dispatch.
+        skill_entry_list = [str(e) for e in skills]
+        dup_skill_entries = sorted({e for e in skill_entry_list if skill_entry_list.count(e) > 1})
+        if dup_skill_entries:
+            failures.append(
+                f"{manifest}: duplicate skill entry/entries in skills[]: "
+                f"{dup_skill_entries!r} (issue #1460; runner.py "
+                f"_load_tool_definitions would register the same tool name "
+                f"twice)"
+            )
         for entry in skills:
             skill_path = skills_dir / str(entry)
             if not skill_path.exists():
