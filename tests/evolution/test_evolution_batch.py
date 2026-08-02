@@ -1,4 +1,5 @@
-"""Tests for run_evolution_batch — specifically the zero-edit failure-class path (issue #1117) and deduplication (issue #1258)."""
+"""Tests for run_evolution_batch — zero-edit failure-class path (issue #1117),
+deduplication (issue #1258), and Critic dedup (issue #1456)."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from foundry_x.evolution.critic import Critic, CriticVerdict
 from foundry_x.evolution.evolver import Evolver, ProposedEdit
 from foundry_x.evolution.loop import run_evolution_batch
 from foundry_x.trace.logger import TraceEvent
@@ -357,3 +359,107 @@ class TestNoRedundantProposeCalls:
             f"but was called {propose_call_count} times"
         )
         assert result.total_failures == 1
+
+
+class TestCriticBatchDedup:
+    """Issue #1456: batch path must not re-evaluate identical diffs per failure class."""
+
+    @staticmethod
+    def _failure_events() -> list[TraceEvent]:
+        return [
+            _event("user_prompt", 0.0, {"prompt": "hello"}, event_id="e1"),
+            _event(
+                "tool_error",
+                1.0,
+                {"error": "no such tool: frobnicate"},
+                event_id="e-wrong-tool",
+            ),
+            _event("tool_error", 2.0, {"error": "traceback occurred"}, event_id="e-tool-err"),
+        ]
+
+    def test_evaluate_called_once_per_unique_diff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """critic.evaluate is called at most once per unique unified_diff."""
+        harness_dir = _write_harness(tmp_path)
+        events = self._failure_events()
+
+        edit = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="fix prompt",
+            unified_diff=(
+                "--- a/harness/system_prompt.txt\n"
+                "+++ b/harness/system_prompt.txt\n"
+                "@@ -1 +1 @@\n-old\n+new\n"
+            ),
+        )
+
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return [edit]
+
+        evaluate_calls: list[str] = []
+
+        def spy_evaluate(self, diff, **kwargs):
+            evaluate_calls.append(diff)
+            return CriticVerdict(verdict=True, edit_index=kwargs.get("edit_index"))
+
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
+        monkeypatch.setattr(Critic, "evaluate", spy_evaluate)
+        result = run_evolution_batch("sess-critic-dedup", events, harness_dir)
+
+        unique_diffs = {edit.unified_diff}
+        assert len(evaluate_calls) <= len(unique_diffs), (
+            f"critic.evaluate called {len(evaluate_calls)} times but there are only "
+            f"{len(unique_diffs)} unique diffs"
+        )
+        assert len(result.results) >= 2, "all failure classes should receive a verdict"
+        for r in result.results:
+            assert r.verdict is not None, "every result should have a (shared) verdict"
+
+    def test_evaluate_called_once_per_unique_diff_multi_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With two unique diffs to different files, evaluate is called at most twice."""
+        harness_dir = _write_harness(tmp_path)
+        events = self._failure_events()
+
+        edit_a = ProposedEdit(
+            target_file="harness/system_prompt.txt",
+            rationale="fix prompt",
+            unified_diff=(
+                "--- a/harness/system_prompt.txt\n"
+                "+++ b/harness/system_prompt.txt\n"
+                "@@ -1 +1 @@\n-old\n+new\n"
+            ),
+        )
+        edit_b = ProposedEdit(
+            target_file="harness/hooks/my_hook.py",
+            rationale="fix hook",
+            unified_diff=(
+                "--- a/harness/hooks/my_hook.py\n"
+                "+++ b/harness/hooks/my_hook.py\n"
+                "@@ -1 +1 @@\n-old\n+new\n"
+            ),
+        )
+
+        def mock_propose_batch(self, harness_dir, batch_report, current_diff=None):
+            return [edit_a, edit_b]
+
+        evaluate_calls: list[str] = []
+
+        def spy_evaluate(self, diff, **kwargs):
+            evaluate_calls.append(diff)
+            return CriticVerdict(verdict=True, edit_index=kwargs.get("edit_index"))
+
+        monkeypatch.setattr(Evolver, "propose_batch", mock_propose_batch)
+        monkeypatch.setattr(Critic, "evaluate", spy_evaluate)
+        result = run_evolution_batch("sess-critic-dedup-multi", events, harness_dir)
+
+        unique_diffs = {edit_a.unified_diff, edit_b.unified_diff}
+        assert len(evaluate_calls) <= len(unique_diffs), (
+            f"critic.evaluate called {len(evaluate_calls)} times but there are only "
+            f"{len(unique_diffs)} unique diffs"
+        )
+        assert len(result.results) >= 2
+        for r in result.results:
+            assert r.verdict is not None
