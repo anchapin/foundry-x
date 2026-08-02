@@ -35,10 +35,32 @@ jobs:
           name: junit-xml-test
           path: test-results/junit.xml
 
+  detect-benchmark-changes:
+    name: detect benchmark changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    outputs:
+      run: ${{ steps.check-changes.outputs.run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check for benchmark-relevant changes
+        id: check-changes
+        run: |
+          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -qE '(benchmarks/|src/foundry_x/(execution|trace|evolution)/|tests/)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   benchmark:
     name: pytest (benchmark only)
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.changed_files, 'benchmarks/') || contains(github.event.pull_request.changed_files, 'benchmarks/**/*') || contains(github.event.pull_request.changed_files, 'src/foundry_x/execution/') || contains(github.event.pull_request.changed_files, 'src/foundry_x/trace/'))
+    needs: detect-benchmark-changes
+    if: needs.detect-benchmark-changes.outputs.run == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
