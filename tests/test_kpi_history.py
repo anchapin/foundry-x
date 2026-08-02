@@ -316,6 +316,8 @@ def test_main_log_to_appends_to_jsonl(tmp_path):
         "cycle_time_p95_seconds",
         "regression_rate",
         "improvement_rate",
+        "verdict_count",
+        "sessions_with_verdicts",
         "token_budget_abort_count",
         "token_budget_hit_rate",
         "token_budget_overrun_pct",

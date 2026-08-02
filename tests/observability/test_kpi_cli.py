@@ -453,12 +453,16 @@ def test_main_json_format_emits_stable_top_level_keys(tmp_path, capsys):
     # streaming_quality_mean_ttft_ms, streaming_quality_p50_ttft_ms,
     # streaming_quality_p95_ttft_ms, mean_prompt_tokens_per_step, and
     # mean_completion_tokens_per_step are the issue #1271 aggregate metrics.
+    # verdict_count and sessions_with_verdicts are the issue #1461 rate
+    # denominators (ADR-0028 small-sample warning).
     assert set(payload.keys()) == {
         "cycle_time_seconds",
         "cycle_time_p50_seconds",
         "cycle_time_p95_seconds",
         "regression_rate",
         "improvement_rate",
+        "verdict_count",
+        "sessions_with_verdicts",
         "injection_blocks",
         "token_totals",
         "evolver_duration_ms",
