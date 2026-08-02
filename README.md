@@ -32,15 +32,20 @@ minutes and runs fully offline.
 
 ## CLI entrypoints
 
-Three console scripts ship with `foundry-x` (registered in
-`pyproject.toml` §`[project.scripts]`). Each runs offline against the
-trace store under `logs/` — no live model required.
+Seven console scripts ship with `foundry-x` (registered in
+`pyproject.toml` §`[project.scripts]`). The inspection and reporting
+tools run offline against the trace store under `logs/` — no live model
+required. `fx-runner` and `foundry-evolve` can drive a live model
+(`fx-runner --model-id`, or `FOUNDRY_*` model env vars).
 
 | Command | Module | Purpose |
 | --- | --- | --- |
+| `fx-runner` | [`execution/runner.py`](src/foundry_x/execution/runner.py) | Run a single agent task session (flags: `--harness-dir`, `--trace-path`, `--workspace-root`, `--model-id`) |
 | `fx-trace` | [`observability/cli.py`](src/foundry_x/observability/cli.py) | Trace-driven inspection: regression reports, timeline rendering, session roll-ups, tool-latency percentiles |
-| `foundry-kpis` | [`observability/kpis.py`](src/foundry_x/observability/kpis.py) | Compute the three PRD success-metric KPIs (cycle time, regression rate, improvement rate) from trace data |
-| `foundry-x-trace` (alias `foundry-trace`) | [`trace/cli.py`](src/foundry_x/trace/cli.py) | Inspect and render trace data per ADR-0007: list/show/export sessions, render failure reports, grep events, redact secrets, seed sample data |
+| `foundry-kpis` | [`observability/kpis.py`](src/foundry_x/observability/kpis.py) | Compute the three PRD success-metric KPIs (cycle time, regression rate, improvement rate) plus the token-budget metric from trace data |
+| `foundry-x-trace` (alias `foundry-trace`) | [`trace/cli.py`](src/foundry_x/trace/cli.py) | Inspect and render trace data per ADR-0007: list/show/export sessions, render failure reports, grep events, redact secrets, seed sample data, prune |
+| `foundry-evolve` | [`evolution/cli.py`](src/foundry_x/evolution/cli.py) | One evolution iteration (Digester→Evolver→Critic). Also: `approve <uuid>`, `apply <uuid>`, `--background`, `--no-verify` |
+| `foundry-sweep` | [`evolution/cli.py`](src/foundry_x/evolution/cli.py) | Parametric sweep of harness variants (Phase 3) |
 
 Each example below exits 0 against a fresh clone (no trace store yet):
 
