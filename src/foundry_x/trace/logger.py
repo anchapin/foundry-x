@@ -19,11 +19,11 @@ import sqlite3
 import sys
 import tempfile
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from pydantic import BaseModel, Field
 
@@ -1382,29 +1382,76 @@ class TraceLogger:
         self._conn.execute("VACUUM")
         self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
+    def _atomic_rewrite(self, line_writer: Callable[[TextIO], None]) -> None:
+        """Atomically rewrite ``self.path`` via temp file + ``os.replace``.
+
+        The temp file lives in the same directory as the target so
+        ``os.replace`` is an atomic same-filesystem rename (POSIX
+        guarantee) rather than a cross-device copy. ``line_writer``
+        receives the open temp file and writes the new content. If
+        anything raises before the rename completes, the original file
+        is untouched and the temp file is cleaned up — the store is
+        never observed in a half-written state.
+
+        Issue #1464: replaces the truncating ``open("w")`` writes
+        previously used by ``_prune_jsonl``, ``compact``, and
+        ``_redact_event_jsonl``, which left the store empty or partial
+        on a mid-write crash (SIGKILL, OOM, disk-full).
+        """
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=self.path.parent,
+            prefix=f".{self.path.name}.rewrite.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            try:
+                line_writer(tmp)
+                tmp.flush()
+                # Preserve the original mode so a 0644 trace file does
+                # not silently become 0600 (NamedTemporaryFile default).
+                try:
+                    os.chmod(tmp.name, self.path.stat().st_mode & 0o777)
+                except OSError:
+                    pass
+                os.replace(tmp.name, self.path)
+            finally:
+                # If anything above raised before the rename, clean up
+                # the temp file so we don't leak ``.<name>.rewrite.*.tmp``
+                # files. After a successful rename the name no longer
+                # exists, so FileNotFoundError is expected and swallowed.
+                try:
+                    os.unlink(tmp.name)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+
     def _prune_jsonl(self, to_delete: Sequence[str]) -> int:
         if not self.path.exists():
             return 0
         delete_set = set(to_delete)
-        kept: list[str] = []
         removed_sessions: set[str] = set()
-        with self.path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if not stripped:
-                    kept.append(line)
-                    continue
-                try:
-                    record = json.loads(stripped)
-                except json.JSONDecodeError:
-                    kept.append(line)
-                    continue
-                if record.get("session_id") in delete_set:
-                    removed_sessions.add(record.get("session_id"))
-                    continue
-                kept.append(line)
-        with self.path.open("w", encoding="utf-8") as fh:
-            fh.writelines(kept)
+
+        def _write_survivors(tmp: TextIO) -> None:
+            with self.path.open("r", encoding="utf-8") as src:
+                for line in src:
+                    stripped = line.strip()
+                    if not stripped:
+                        tmp.write(line)
+                        continue
+                    try:
+                        record = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        tmp.write(line)
+                        continue
+                    if record.get("session_id") in delete_set:
+                        removed_sessions.add(record.get("session_id"))
+                        continue
+                    tmp.write(line)
+
+        self._atomic_rewrite(_write_survivors)
         return len(removed_sessions)
 
     def _delete_session_sqlite(self, session_id: str) -> None:
@@ -1486,46 +1533,48 @@ class TraceLogger:
         Returns the number of orphaned ``session_end`` markers removed.
         Only works on the JSONL backend; SQLite VACUUM is handled automatically
         by the database engine (per issue #632 out-of-scope).
+
+        Issue #1464: the rewrite is atomic (temp file + ``os.replace``),
+        so a crash mid-write never leaves the store empty or partial.
         """
         if self.backend != "jsonl":
             return 0
         if not self.path.exists():
             return 0
 
-        kept: list[str] = []
         seen_starts: set[str] = set()
-        orphaned: list[str] = []
+        orphaned_count = 0
 
-        with self.path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if not stripped:
-                    kept.append(line)
-                    continue
-                try:
-                    record = json.loads(stripped)
-                except json.JSONDecodeError:
-                    kept.append(line)
-                    continue
+        def _write_compacted(tmp: TextIO) -> None:
+            nonlocal orphaned_count
+            with self.path.open("r", encoding="utf-8") as src:
+                for line in src:
+                    stripped = line.strip()
+                    if not stripped:
+                        tmp.write(line)
+                        continue
+                    try:
+                        record = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        tmp.write(line)
+                        continue
 
-                kind = record.get("kind")
-                session_id = record.get("session_id")
+                    kind = record.get("kind")
+                    session_id = record.get("session_id")
 
-                if kind == "session_start":
-                    if session_id not in seen_starts:
-                        seen_starts.add(session_id)
-                    kept.append(line)
-                elif kind == "session_end":
-                    if session_id not in seen_starts:
-                        orphaned.append(line)
+                    if kind == "session_start":
+                        if session_id not in seen_starts:
+                            seen_starts.add(session_id)
+                        tmp.write(line)
+                    elif kind == "session_end":
+                        if session_id not in seen_starts:
+                            orphaned_count += 1
+                        else:
+                            tmp.write(line)
                     else:
-                        kept.append(line)
-                else:
-                    kept.append(line)
+                        tmp.write(line)
 
-        orphaned_count = len(orphaned)
-        with self.path.open("w", encoding="utf-8") as fh:
-            fh.writelines(kept)
+        self._atomic_rewrite(_write_compacted)
 
         return orphaned_count
 
@@ -1605,8 +1654,11 @@ class TraceLogger:
         target_idx, target_record = session_events[event_index]
         target_record["payload"][key] = "[REDACTED]"
         lines[target_idx] = json.dumps(target_record) + "\n"
-        with self.path.open("w", encoding="utf-8") as fh:
-            fh.writelines(lines)
+
+        def _write_redacted(tmp: TextIO) -> None:
+            tmp.writelines(lines)
+
+        self._atomic_rewrite(_write_redacted)
         return True
 
     def _iter_events_jsonl(

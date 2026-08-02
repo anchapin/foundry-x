@@ -622,3 +622,129 @@ def test_delete_session_jsonl_streaming_handles_large_session(tmp_path):
     surviving = [s.session_id for s in logger.list_sessions()]
     assert drop not in surviving
     assert len(surviving) == 4
+
+
+# --- Issue #1464: atomic JSONL rewrites -------------------------------------
+# ``_prune_jsonl``, ``compact``, and ``_redact_event_jsonl`` previously used
+# truncating ``open("w")`` writes — a crash (SIGKILL, OOM, disk-full) between
+# truncation and the completed write left the JSONL store empty or partial.
+# These tests verify all three paths now use ``_atomic_rewrite`` (temp file +
+# ``os.replace``) so a mid-write crash leaves the original file untouched.
+
+
+def _raising_replace(src, dst, *args, **kwargs):
+    raise OSError("simulated rename failure")
+
+
+@pytest.fixture()
+def _jsonl_trace_with_two_sessions(tmp_path):
+    """Yield ``(logger, sid_a, sid_b)`` with one event per session."""
+    path = tmp_path / "traces.jsonl"
+    logger = TraceLogger(path, backend="jsonl")
+    with logger.session(harness_version="0.1.0") as sid_a:
+        logger.record(sid_a, kind="user_prompt", payload={"text": "alpha"})
+    with logger.session(harness_version="0.1.0") as sid_b:
+        logger.record(sid_b, kind="user_prompt", payload={"text": "beta"})
+    return logger, sid_a, sid_b
+
+
+def test_prune_jsonl_atomic_preserves_original_on_replace_failure(
+    _jsonl_trace_with_two_sessions,
+):
+    """``prune_sessions`` must leave the file byte-identical and leak no temp
+    file when ``os.replace`` raises (issue #1464)."""
+    logger, sid_a, sid_b = _jsonl_trace_with_two_sessions
+    pre_bytes = logger.path.read_bytes()
+
+    with (
+        mock.patch("foundry_x.trace.logger.os.replace", side_effect=_raising_replace),
+        pytest.raises(OSError, match="simulated rename failure"),
+    ):
+        logger.prune_sessions([sid_a])
+
+    assert logger.path.read_bytes() == pre_bytes
+    leftovers = [p.name for p in logger.path.parent.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == [], f"temp file leaked after failed rename: {leftovers}"
+    sids = [s.session_id for s in logger.list_sessions()]
+    assert sid_a in sids and sid_b in sids
+
+
+def test_compact_atomic_preserves_original_on_replace_failure(
+    _jsonl_trace_with_two_sessions,
+):
+    """``compact`` must leave the file byte-identical and leak no temp file
+    when ``os.replace`` raises (issue #1464)."""
+    logger, *_ = _jsonl_trace_with_two_sessions
+    pre_bytes = logger.path.read_bytes()
+
+    with (
+        mock.patch("foundry_x.trace.logger.os.replace", side_effect=_raising_replace),
+        pytest.raises(OSError, match="simulated rename failure"),
+    ):
+        logger.compact()
+
+    assert logger.path.read_bytes() == pre_bytes
+    leftovers = [p.name for p in logger.path.parent.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == [], f"temp file leaked after failed rename: {leftovers}"
+
+
+def test_redact_event_jsonl_atomic_preserves_original_on_replace_failure(
+    _jsonl_trace_with_two_sessions,
+):
+    """``redact_event`` must leave the file byte-identical and leak no temp
+    file when ``os.replace`` raises (issue #1464)."""
+    logger, sid_a, _ = _jsonl_trace_with_two_sessions
+    pre_bytes = logger.path.read_bytes()
+
+    with (
+        mock.patch("foundry_x.trace.logger.os.replace", side_effect=_raising_replace),
+        pytest.raises(OSError, match="simulated rename failure"),
+    ):
+        logger.redact_event(sid_a, 0, "text")
+
+    assert logger.path.read_bytes() == pre_bytes
+    leftovers = [p.name for p in logger.path.parent.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == [], f"temp file leaked after failed rename: {leftovers}"
+
+
+def test_prune_jsonl_atomic_leaves_no_temp_file_on_success(
+    _jsonl_trace_with_two_sessions,
+):
+    """After a successful atomic prune, no ``.tmp`` file lingers (issue
+    #1464)."""
+    logger, sid_a, _ = _jsonl_trace_with_two_sessions
+
+    logger.prune_sessions([sid_a])
+
+    leftovers = [p.name for p in logger.path.parent.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == [], f"temp file leaked after successful prune: {leftovers}"
+
+
+def test_compact_atomic_still_removes_orphaned_ends(tmp_path):
+    """Functional check: the atomic ``compact`` still removes orphaned
+    ``session_end`` markers (regression guard, issue #1464)."""
+    path = tmp_path / "traces.jsonl"
+    logger = TraceLogger(path, backend="jsonl")
+    with logger.session(harness_version="0.1.0") as sid:
+        logger.record(sid, kind="user_prompt", payload={"text": "x"})
+
+    # Append a dangling session_end for a session that never started.
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": "session_end", "session_id": "ghost"}) + "\n")
+
+    removed = logger.compact()
+    assert removed == 1
+    sids = [s.session_id for s in logger.list_sessions()]
+    assert sid in sids
+
+
+def test_redact_event_jsonl_atomic_still_redacts(
+    _jsonl_trace_with_two_sessions,
+):
+    """Functional check: the atomic ``redact_event`` still rewrites the
+    payload value (regression guard, issue #1464)."""
+    logger, sid_a, _ = _jsonl_trace_with_two_sessions
+
+    assert logger.redact_event(sid_a, 0, "text") is True
+    events = logger.load_session(sid_a)
+    assert events[0].payload["text"] == "[REDACTED]"
