@@ -3,7 +3,9 @@
 ## Status
 
 Accepted. 2026-07-11. Updated 2026-07-17: `context-overflow` removed
-from "pending" — shipped in issue #576 (Phase 3).
+from "pending" — shipped in issue #576 (Phase 3). Updated 2026-08-02:
+`infra-failure` class added for infrastructure/model-server failures
+(issue #1462).
 
 ## Context
 
@@ -164,6 +166,48 @@ pattern as the four existing classes.
   Review the pruning hook and the model's tendency to repeat tool
   calls."
 
+### The infra-failure class (issue #1462 amendment)
+
+The Digester's `_classify` previously routed `server_unavailable`,
+`hook_registry_error`, and `model_error` events into the generic
+`tool-error` catch-all because none matched a `_CLASS_KEYWORDS` bucket.
+The Evolver then proposed a `tool-error` template edit ("inspect the
+traceback") for what are actually infrastructure/model-server failures.
+No prompt edit can remediate any of these.
+
+- **Class name:** `infra-failure`.
+- **Trigger events:**
+  - `server_unavailable` (kind in `_INFRA_FAILURE_KINDS`) — the model
+    server is unreachable (`runner.py:1918`). Always `infra-failure`.
+  - `hook_registry_error` (kind in `_INFRA_FAILURE_KINDS`) —
+    `harness.hooks.get_registry()` raised (`runner.py:675`); the
+    security-critical `InjectionFirewallHook` is silently disabled.
+    Always `infra-failure`.
+  - `model_error` with a **non-transient** `error_type` —
+    `adapter.complete` raised (`runner.py:1592`) for a reason that is
+    not retryable (auth failure, config error, persistent runtime
+    fault). Transient model errors (rate limits, timeouts, connection
+    resets — matched against `_TRANSIENT_MODEL_ERROR_SUBSTRINGS`) stay
+    in the `tool-error` class so the Evolver can propose retry/backoff
+    guidance. `model_error` without an `error_type` is treated as
+    non-transient (the model server failed; that is an infra issue).
+- **Implementation:** pre-walk short-circuit in `_classify`
+  (`digester.py`) that checks `_INFRA_FAILURE_KINDS` first, then
+  routes non-transient `model_error` events to `infra-failure` before
+  the existing structured `model_error` path and the keyword walk.
+- **Evolver behaviour:** the Evolver skips harness-edit remediation
+  for `infra-failure` (returns `[]` in `propose()`, `propose_async()`,
+  `propose_batch()`, and `propose_batch_async()`). A
+  `generation_attempt` trace event with
+  `error="skipped: infra-failure is not remediable via prompt edit"`
+  is emitted so the skip is observable. The operator should check
+  model-server health, network connectivity, or harness registry
+  configuration — not the system prompt.
+- **Cause template:** "Infrastructure or model-server failure (matched:
+  {match}). No prompt edit can remediate this; the operator should
+  check model-server health, network connectivity, or harness registry
+  configuration."
+
 ### Two non-failure sentinels
 
 - **`clean`** — Returned by `Digester.digest` when no failure event
@@ -183,7 +227,8 @@ removes) a class:
 
 - `proposed_class` is one of: `wrong-tool`, `bad-prompt`,
   `state-leak`, `tool-error`, `injection-attempt`, `context-overflow`,
-  `clean`, `unknown`. No other strings reach `proposed_class`.
+  `infra-failure`, `clean`, `unknown`. No other strings reach
+  `proposed_class`.
 - The four code-defined classes are encoded in `_CLASS_KEYWORDS` in
   this fixed priority order, *most-specific first*:
   `wrong-tool` → `bad-prompt` → `state-leak` → `tool-error`. The
@@ -247,6 +292,14 @@ removes) a class:
   This prevents the security-critical class from falling through to
   the generic `unknown` template on the Evolver's template path.
   Tests: `tests/evolution/test_evolver_injection_template.py`.
+- **`infra-failure` skips harness remediation (issue #1462).** The
+  Evolver does not carry a template for `infra-failure` — by design.
+  Infrastructure/model-server failures cannot be remediated by any
+  `system_prompt.txt` edit. All four entry points (`propose`,
+  `propose_async`, `propose_batch`, `propose_batch_async`) short-circuit
+  the class and emit a `generation_attempt` trace event so the skip is
+  observable. The operator should check model-server health, network
+  connectivity, or harness registry configuration instead.
 - **Trace vocabulary alignment is unchanged.** Per ADR-0006 the
   vocabulary of `kind` values is a `pydantic` enum at module
   boundaries; this ADR does not modify that enum. The

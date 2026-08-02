@@ -14,6 +14,7 @@ from foundry_x.evolution.digester import (
     CONTEXT_OVERFLOW_CLASS,
     FAILURE_KINDS,
     FAILURE_PAYLOAD_KEYS,
+    INFRA_FAILURE_CLASS,
     INJECTION_ATTEMPT_CLASS,
     INJECTION_BLOCKED_KIND,
     Digester,
@@ -653,13 +654,10 @@ def test_unknown_function_keyword_classifies_as_wrong_tool() -> None:
         "run_failed",
         "agent_error",
         "error",
-        # Issue #867: ``model_error`` and ``hook_registry_error`` are
-        # production-emitted failure kinds that must trip the kind-field
-        # detector just like the legacy ``tool_error`` / ``task_failed``
-        # vocabulary. Pinning them here forces any future removal to be
-        # a deliberate, test-visible decision.
-        "model_error",
-        "hook_registry_error",
+        # Issue #1462: ``model_error``, ``hook_registry_error``, and
+        # ``server_unavailable`` now route to ``infra-failure`` (not
+        # ``tool-error``); they are covered by the dedicated infra-failure
+        # tests below.
     ],
 )
 def test_any_failure_kind_signals_via_kind_field(kind: str) -> None:
@@ -1023,16 +1021,16 @@ def test_hook_registry_error_vocabulary_is_pinned_in_failure_kinds() -> None:
 
 
 def test_model_error_kind_triggers_first_failure_classification() -> None:
-    """Issue #952/#1009: a ``model_error`` event with ``error_type`` is classified via
-    structured payload inspection (not keyword fallback) as ``tool-error`` class
-    per ADR-0011.
+    """Issue #1462: a ``model_error`` event with a non-transient ``error_type``
+    is classified as ``infra-failure`` (was ``tool-error``). The model server
+    failed; no prompt edit can remediate this.
     """
     events = [
         *_CLEAN_EVENTS,
         _model_error_event(message="synthetic model fault"),
     ]
     report = Digester().digest(_SESSION, events)
-    assert report.proposed_class == "tool-error"
+    assert report.proposed_class == "infra-failure"
     assert len(report.failed_steps) == 1
     step = report.failed_steps[0]
     assert step["kind"] == "model_error"
@@ -1040,7 +1038,7 @@ def test_model_error_kind_triggers_first_failure_classification() -> None:
     # The payload is preserved so the Evolver can re-derive error_type / message
     # without re-parsing the original transport exception.
     assert step["payload"]["error_type"] == "RuntimeError"
-    # The structured path adds error_type as a cause indicator.
+    # The infra-failure path adds error_type as a cause indicator.
     assert any("error_type=RuntimeError" in c for c in report.suspected_causes)
     assert "kind=model_error" in report.summary
     assert "synthetic model fault" in report.summary
@@ -1049,6 +1047,7 @@ def test_model_error_kind_triggers_first_failure_classification() -> None:
 def test_hook_registry_error_kind_triggers_first_failure_classification() -> None:
     """A ``hook_registry_error`` event trips the kind detector and surfaces as the first failure.
 
+    Issue #1462: classified as ``infra-failure`` (was ``tool-error``).
     Critical for #867: without this classification a session whose
     ``InjectionFirewallHook`` was silently disabled would be reported as
     clean even though every downstream security hook was off.
@@ -1058,7 +1057,7 @@ def test_hook_registry_error_kind_triggers_first_failure_classification() -> Non
         _hook_registry_error_event(message="firewall registry unreachable"),
     ]
     report = Digester().digest(_SESSION, events)
-    assert report.proposed_class == "tool-error"
+    assert report.proposed_class == "infra-failure"
     assert len(report.failed_steps) == 1
     step = report.failed_steps[0]
     assert step["kind"] == "hook_registry_error"
@@ -1123,10 +1122,11 @@ def test_hook_registry_error_precedes_tool_error_in_first_failure_walk() -> None
 # ---------------------------------------------------------------------------
 
 
-def test_model_error_with_error_type_classifies_as_tool_error_structured() -> None:
-    """Issue #952/#1009: ``model_error`` with ``error_type`` field uses structured
-    classification (not keyword matching), routing to ``tool-error`` class
-    per ADR-0011.
+def test_model_error_with_error_type_classifies_as_infra_failure_structured() -> None:
+    """Issue #1462: ``model_error`` with non-transient ``error_type`` uses
+    structured classification, routing to ``infra-failure`` class per ADR-0011.
+    ``ContextOverflowError`` is non-transient — no prompt edit can fix a
+    persistent model-server fault.
     """
     events = [
         *_CLEAN_EVENTS,
@@ -1138,7 +1138,7 @@ def test_model_error_with_error_type_classifies_as_tool_error_structured() -> No
         ),
     ]
     report = Digester().digest(_SESSION, events)
-    assert report.proposed_class == "tool-error"
+    assert report.proposed_class == "infra-failure"
     step = report.failed_steps[0]
     assert step["kind"] == "model_error"
     assert step["signal"] == "kind:model_error"
@@ -1147,9 +1147,9 @@ def test_model_error_with_error_type_classifies_as_tool_error_structured() -> No
 
 
 def test_model_error_with_ambiguous_in_message_not_misclassified_as_bad_prompt() -> None:
-    """Issue #952/#1009: ``model_error`` with ``error_type`` does not fall through to
-    keyword matching. The word ``ambiguous`` in the message must not misclassify
-    as ``bad-prompt`` when the event has a structured error_type field.
+    """Issue #1462: ``model_error`` with non-transient ``error_type`` routes to
+    ``infra-failure`` before keyword matching. The word ``ambiguous`` in the
+    message must not misclassify as ``bad-prompt``.
     """
     events = [
         *_CLEAN_EVENTS,
@@ -1161,7 +1161,7 @@ def test_model_error_with_ambiguous_in_message_not_misclassified_as_bad_prompt()
         ),
     ]
     report = Digester().digest(_SESSION, events)
-    assert report.proposed_class == "tool-error"
+    assert report.proposed_class == "infra-failure"
     assert report.failed_steps[0]["kind"] == "model_error"
 
 
@@ -1398,3 +1398,137 @@ class TestDigestBatch:
         )
         assert len(tool_error_report.failed_steps) == 1
         assert tool_error_report.failed_steps[0]["event_id"] == "e-fail2"
+
+
+# ---------------------------------------------------------------------------
+# Issue #1462: infrastructure/model-server failures classified as
+# ``infra-failure`` instead of falling through to the ``tool-error``
+# catch-all. No prompt edit can remediate these; the Evolver skips
+# harness-edit remediation.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "payload", "test_id"),
+    [
+        (
+            "server_unavailable",
+            {"reason": "model server unreachable", "host": "localhost:8080"},
+            "server_unavailable",
+        ),
+        (
+            "hook_registry_error",
+            {"error_type": "RuntimeError", "message": "registry failed"},
+            "hook_registry_error",
+        ),
+        (
+            "model_error",
+            {"step": 2, "error_type": "RuntimeError", "message": "adapter crashed"},
+            "model_error-non-transient",
+        ),
+        (
+            "model_error",
+            {"step": 1, "error_type": "AuthenticationError", "message": "bad key"},
+            "model_error-auth-error",
+        ),
+        (
+            "model_error",
+            {"step": 1, "error_type": "ConnectionRefusedError", "message": "refused"},
+            "model_error-connection-refused",
+        ),
+    ],
+)
+def test_infra_kinds_classified_as_infra_failure(kind, payload, test_id) -> None:
+    """Issue #1462: each infra kind must route to ``infra-failure``, not ``tool-error``."""
+    events = [*_CLEAN_EVENTS, _ev(kind, payload, event_id=f"e-{test_id}", seq=4)]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == INFRA_FAILURE_CLASS, f"failed for {test_id}"
+    assert len(report.failed_steps) == 1
+    step = report.failed_steps[0]
+    assert step["kind"] == kind
+    assert step["signal"] == f"kind:{kind}"
+    # Cause references the kind or error_type for traceability (ADR-0007).
+    assert report.suspected_causes
+
+
+def test_server_unavailable_classified_as_infra_failure() -> None:
+    """Issue #1462: ``server_unavailable`` must produce ``infra-failure``."""
+    events = [
+        *_CLEAN_EVENTS,
+        _ev(
+            "server_unavailable",
+            {"reason": "model server unreachable", "host": "localhost:8080"},
+            event_id="e-su",
+            seq=4,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == INFRA_FAILURE_CLASS
+    assert "infra-failure" in report.summary
+    assert any("server_unavailable" in c for c in report.suspected_causes)
+
+
+def test_model_error_without_error_type_classified_as_infra_failure() -> None:
+    """Issue #1462: ``model_error`` without ``error_type`` is treated as non-transient."""
+    events = [
+        *_CLEAN_EVENTS,
+        _ev("model_error", {"step": 3, "message": "opaque model failure"}, event_id="e-me", seq=4),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == INFRA_FAILURE_CLASS
+    assert report.failed_steps[0]["kind"] == "model_error"
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        "RateLimitError",
+        "TimeoutError",
+        "ConnectionResetError",
+        "temporarily_unavailable",
+    ],
+    ids=["rate-limit", "timeout", "connection-reset", "temporarily-unavailable"],
+)
+def test_transient_model_error_stays_as_tool_error(error_type: str) -> None:
+    """Issue #1462: transient model errors (rate limits, timeouts) stay ``tool-error``
+    so the Evolver can propose retry/backoff guidance.
+    """
+    events = [
+        *_CLEAN_EVENTS,
+        _ev(
+            "model_error",
+            {"step": 1, "error_type": error_type, "message": "transient"},
+            event_id="e-transient",
+            seq=4,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == "tool-error"
+    assert any(error_type in c for c in report.suspected_causes)
+
+
+def test_infra_failure_vocabulary_is_exported() -> None:
+    """The infra-failure class constant is pinned as a module-level export."""
+    assert INFRA_FAILURE_CLASS == "infra-failure"
+    # server_unavailable and hook_registry_error are still in FAILURE_KINDS
+    # so the first-failure walk detects them; the _classify short-circuit
+    # routes them to infra-failure before the keyword walk.
+    assert "server_unavailable" in FAILURE_KINDS
+    assert "hook_registry_error" in FAILURE_KINDS
+
+
+def test_infra_failure_takes_precedence_over_keyword_walk() -> None:
+    """A ``server_unavailable`` event with text that would match a keyword
+    (e.g. 'timeout') must still classify as ``infra-failure``, not ``tool-error``.
+    """
+    events = [
+        *_CLEAN_EVENTS,
+        _ev(
+            "server_unavailable",
+            {"reason": "connection timeout to model server"},
+            event_id="e-su-kw",
+            seq=4,
+        ),
+    ]
+    report = Digester().digest(_SESSION, events)
+    assert report.proposed_class == INFRA_FAILURE_CLASS

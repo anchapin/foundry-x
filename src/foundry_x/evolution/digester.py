@@ -81,6 +81,43 @@ class BatchFailureReport(BaseModel):
 INJECTION_BLOCKED_KIND: str = "injection_blocked"
 INJECTION_ATTEMPT_CLASS: str = "injection-attempt"
 CONTEXT_OVERFLOW_CLASS: str = "context-overflow"
+# Issue #1462: infrastructure/model-server failures that no prompt edit
+# can remediate. The Evolver skips harness-edit remediation for this class.
+INFRA_FAILURE_CLASS: str = "infra-failure"
+
+# Issue #1462: kinds that are unconditionally infrastructure failures.
+# ``server_unavailable`` = model server unreachable; ``hook_registry_error``
+# = harness hooks failed to load (security-critical degradation).
+# These always route to ``infra-failure`` regardless of payload content.
+_INFRA_FAILURE_KINDS: frozenset[str] = frozenset(
+    {
+        "server_unavailable",
+        "hook_registry_error",
+    }
+)
+
+# Issue #1462: ``model_error`` events whose ``error_type`` matches one of
+# these substrings are treated as transient (retryable). They stay in the
+# ``tool-error`` class so the Evolver can propose retry/backoff guidance.
+# Any ``model_error`` whose ``error_type`` does NOT match is classified as
+# ``infra-failure`` — a non-transient model-server fault that no prompt
+# edit can fix. ``model_error`` without an ``error_type`` is also treated
+# as non-transient (the model server failed; that is an infra issue).
+_TRANSIENT_MODEL_ERROR_SUBSTRINGS: tuple[str, ...] = (
+    "rate_limit",
+    "rate limit",
+    "ratelimit",
+    "429",
+    "too many requests",
+    "timeout",
+    "timed_out",
+    "timed out",
+    "deadline",
+    "connection_reset",
+    "connection reset",
+    "connectionreset",
+    "temporarily",
+)
 
 FAILURE_KINDS: frozenset[str] = frozenset(
     {
@@ -254,6 +291,14 @@ _CLASS_CAUSE_TEMPLATES: dict[str, str] = {
         "final answer. Add behavioral guidance so the agent self-corrects "
         "under context pressure, and review the pruning hook configuration."
     ),
+    # Issue #1462: infrastructure/model-server failures. No prompt edit can
+    # remediate these; the Evolver skips harness-edit remediation and surfaces
+    # an operator alert instead.
+    "infra-failure": (
+        "Infrastructure or model-server failure (matched: {match}). No prompt "
+        "edit can remediate this; the operator should check model-server "
+        "health, network connectivity, or harness registry configuration."
+    ),
 }
 
 
@@ -313,18 +358,42 @@ def _get_error_type(event: TraceEvent) -> str | None:
     return None
 
 
+def _is_transient_model_error(error_type: str) -> bool:
+    """Return True when ``error_type`` matches a known transient pattern.
+
+    Transient model errors (rate limits, timeouts, connection resets) are
+    retryable and stay in the ``tool-error`` class so the Evolver can
+    propose retry/backoff guidance. Non-transient errors are classified
+    as ``infra-failure`` (issue #1462).
+    """
+    lowered = error_type.lower()
+    return any(sub in lowered for sub in _TRANSIENT_MODEL_ERROR_SUBSTRINGS)
+
+
 def _classify(event: TraceEvent, signal: str) -> tuple[str, list[str]]:
     """Map a failing event to ``(proposed_class, suspected_causes)``.
 
     Structured classification takes precedence over keyword matching:
-    - ``model_error.error_type`` → dedicated class
+    - ``server_unavailable`` / ``hook_registry_error`` → ``infra-failure``
+      (issue #1462)
+    - non-transient ``model_error`` → ``infra-failure`` (issue #1462)
+    - transient ``model_error.error_type`` → ``tool-error``
     - ``tool_result.error`` non-null → tool-error class
     Keyword matching is kept as fallback only for ``tool_error`` events
     with opaque string payloads (no structured error_type field).
     """
+    # Issue #1462: infrastructure/model-server failures short-circuit
+    # before the keyword walk — no prompt edit can remediate them.
+    if event.kind in _INFRA_FAILURE_KINDS:
+        causes = [
+            _CLASS_CAUSE_TEMPLATES[INFRA_FAILURE_CLASS].format(match=event.kind),
+            f"kind={event.kind}",
+        ]
+        return INFRA_FAILURE_CLASS, causes
+
     if event.kind == "model_error":
         error_type = _get_error_type(event)
-        if error_type:
+        if error_type and _is_transient_model_error(error_type):
             return (
                 "tool-error",
                 [
@@ -332,6 +401,14 @@ def _classify(event: TraceEvent, signal: str) -> tuple[str, list[str]]:
                     f"error_type={error_type}",
                 ],
             )
+        # Non-transient or opaque model_error → infra failure (issue #1462).
+        match = error_type or "model_error"
+        causes = [
+            _CLASS_CAUSE_TEMPLATES[INFRA_FAILURE_CLASS].format(match=match),
+        ]
+        if error_type:
+            causes.append(f"error_type={error_type}")
+        return INFRA_FAILURE_CLASS, causes
 
     if event.kind == "tool_result" and "error" in event.payload:
         return (

@@ -14,7 +14,11 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, Field, field_validator
 
-from foundry_x.evolution.digester import BatchFailureReport, FailureReport
+from foundry_x.evolution.digester import (
+    INFRA_FAILURE_CLASS,
+    BatchFailureReport,
+    FailureReport,
+)
 from foundry_x.evolution.store import PATTERN_MIN_SESSIONS
 
 if TYPE_CHECKING:
@@ -1093,6 +1097,15 @@ class Evolver:
         if failure.proposed_class == "clean":
             return []
 
+        # Issue #1462: infra-failure cannot be remediated by any harness
+        # edit; skip remediation and emit an operator-facing trace event.
+        if failure.proposed_class == INFRA_FAILURE_CLASS:
+            self._record_generation_attempt(
+                attempt=1,
+                error=f"skipped: {INFRA_FAILURE_CLASS} is not remediable via prompt edit",
+            )
+            return []
+
         if self._model_adapter is not None and _is_llm_edit_gen_enabled():
             try:
                 return await self.generate_edits(self._model_adapter, harness_dir, failure)
@@ -1124,6 +1137,15 @@ class Evolver:
             self._record_generation_attempt(attempt=1, error="rate_limit_exceeded")
             return []
         if failure.proposed_class == "clean":
+            return []
+
+        # Issue #1462: infra-failure cannot be remediated by any harness
+        # edit; skip remediation and emit an operator-facing trace event.
+        if failure.proposed_class == INFRA_FAILURE_CLASS:
+            self._record_generation_attempt(
+                attempt=1,
+                error=f"skipped: {INFRA_FAILURE_CLASS} is not remediable via prompt edit",
+            )
             return []
 
         if self._model_adapter is not None and _is_llm_edit_gen_enabled():
@@ -1160,6 +1182,14 @@ class Evolver:
 
         for failure in batch_report.failure_reports:
             if failure.proposed_class == "clean":
+                continue
+
+            # Issue #1462: infra-failure cannot be remediated by any harness edit.
+            if failure.proposed_class == INFRA_FAILURE_CLASS:
+                self._record_generation_attempt(
+                    attempt=1,
+                    error=f"skipped: {INFRA_FAILURE_CLASS} is not remediable via prompt edit",
+                )
                 continue
 
             try:
@@ -1205,7 +1235,9 @@ class Evolver:
         seen_targets: dict[str, ProposedEdit] = {}
 
         failures_to_process = [
-            f for f in batch_report.failure_reports if f.proposed_class != "clean"
+            f
+            for f in batch_report.failure_reports
+            if f.proposed_class not in ("clean", INFRA_FAILURE_CLASS)
         ]
         if not failures_to_process:
             return []
