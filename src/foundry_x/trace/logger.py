@@ -327,6 +327,13 @@ _GCP_ADC_PATH_RE = re.compile(
 _GCP_PROJECT_ID_RE = re.compile(
     r"(\b(?:GCP_PROJECT_ID|GCP_PROJECT|GCP_LOCATION)=)[A-Za-z0-9_-]{4,}"
 )
+# Google API keys — ``AIza`` prefix followed by exactly 35 base64 chars
+# (issue #1466). These are the keys issued by Google Cloud Console and
+# found in ``.env`` files / CI configs alongside the GCP coverage from #824.
+_GOOGLE_API_KEY_RE = re.compile(r"\bAIza[A-Za-z0-9_\-]{35}\b")
+# GitLab personal access tokens — ``glpat-`` prefix followed by 20+
+# alphanumeric chars (issue #1466).
+_GITLAB_PAT_RE = re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b")
 
 _DEFAULT_SECRET_KEY_NAMES: frozenset[str] = frozenset(
     {
@@ -370,7 +377,8 @@ def _redact_value(value: str) -> str:
 
     Covers: PEM blocks, JWTs, sk- API keys, GitHub classic/fine-grained
     PATs, AWS access key IDs, Stripe live keys, Slack tokens, Bearer
-    headers, GCP access tokens (ya29...), and GCP service-account emails.
+    headers, GCP access tokens (ya29...), GCP service-account emails,
+    Google API keys (AIza...), and GitLab PATs (glpat-...).
     """
     value = _PEM_RE.sub("[REDACTED:pem]", value)
     value = _JWT_RE.sub("[REDACTED:jwt]", value)
@@ -384,6 +392,8 @@ def _redact_value(value: str) -> str:
     value = _GCP_SERVICE_ACCOUNT_EMAIL_RE.sub("[REDACTED:gcp-service-account]", value)
     value = _GCP_ADC_PATH_RE.sub("[REDACTED:gcp-adc-path]", value)
     value = _GCP_PROJECT_ID_RE.sub(r"\1[REDACTED:gcp-project-id]", value)
+    value = _GOOGLE_API_KEY_RE.sub("[REDACTED:google-api-key]", value)
+    value = _GITLAB_PAT_RE.sub("[REDACTED:gitlab-pat]", value)
     return value
 
 
@@ -399,8 +409,10 @@ def _redact(
     string values are scanned for ``sk-...``, ``Bearer ...``, PEM blocks,
     GitHub classic/fine-grained PATs, JWTs, AWS access key IDs, GCP
     service account emails, GCP ADC paths, GCP project ID env vars,
-    Stripe live keys, and Slack tokens. Issue #121 added the modern-token
-    set and the metadata-path coverage; issue #824 added GCP coverage.
+    Stripe live keys, Slack tokens, Google API keys (AIza...), and GitLab
+    PATs. Issue #121 added the modern-token set and the metadata-path
+    coverage; issue #824 added GCP coverage; issue #1466 added Google API
+    keys and GitLab PATs.
     """
     if isinstance(payload, dict):
         redacted: dict[str, Any] = {}

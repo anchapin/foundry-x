@@ -50,6 +50,10 @@ _SLACK_TOKEN = "xox" + "b-1234567890123-1234567890123-" + "abcdefghijklmnopqrstu
 _GCP_SA_EMAIL = "my-app@" + "iam.gserviceaccount.com"
 _GCP_PROJECT_ID = "my-project-" + "123456"
 _GCP_ADC_PATH = "/home/user/.config/gcloud/application_default_credentials.json"
+# Issue #1466 fixtures. Assembled from fragments so gitleaks does not flag
+# the literal at commit time; the runtime value matches the regexes.
+_GOOGLE_API_KEY = "AI" + "za" + "SyDQ8j3kNrVbT_2xJ5mKpQrS1vW8nL4oX7y"
+_GITLAB_PAT = "gl" + "pat-" + "aBcDeFgHiJkLmNoPqRsT"
 
 _BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
 
@@ -347,3 +351,43 @@ def test_redaction_scrubs_gcp_credentials_in_payload(tmp_path, backend):
     assert "[REDACTED:gcp-service-account]" in blob
     assert "[REDACTED:gcp-adc-path]" in blob
     assert "[REDACTED:gcp-project-id]" in blob
+
+
+# ---------------------------------------------------------------------------
+# Issue #1466: Google API key and GitLab PAT redaction.
+# ---------------------------------------------------------------------------
+
+
+def test_redaction_scrubs_google_api_key():
+    result = _redact({"output": f"GOOGLE_API_KEY={_GOOGLE_API_KEY}"})
+    assert _GOOGLE_API_KEY not in json.dumps(result)
+    assert result["output"] == "GOOGLE_API_KEY=[REDACTED:google-api-key]"
+
+
+def test_redaction_scrubs_gitlab_pat():
+    result = _redact({"output": f"token={_GITLAB_PAT}"})
+    assert _GITLAB_PAT not in json.dumps(result)
+    assert result["output"] == "token=[REDACTED:gitlab-pat]"
+
+
+@_BACKENDS
+def test_redaction_scrubs_google_api_key_and_gitlab_pat_persisted(tmp_path, backend):
+    """Both new patterns are redacted end-to-end through each backend."""
+    suffix = ".db" if backend == "sqlite" else ".jsonl"
+    path = tmp_path / f"traces{suffix}"
+    logger = TraceLogger(path, backend=backend)
+    with logger.session(harness_version="test-0.0") as sid:
+        logger.record(
+            sid,
+            kind="tool_result",
+            payload={
+                "google_key": f"key={_GOOGLE_API_KEY}",
+                "gitlab_token": _GITLAB_PAT,
+            },
+        )
+    payload = _read_persisted_payload(logger, sid)
+    blob = json.dumps(payload)
+    assert _GOOGLE_API_KEY not in blob
+    assert _GITLAB_PAT not in blob
+    assert "[REDACTED:google-api-key]" in payload["google_key"]
+    assert payload["gitlab_token"] == "[REDACTED:gitlab-pat]"
