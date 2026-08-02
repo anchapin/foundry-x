@@ -392,6 +392,11 @@ class KpiSummary(BaseModel):
     aggregate TTFT statistics across all sessions, plus
     ``mean_prompt_tokens_per_step`` and ``mean_completion_tokens_per_step``
     for token efficiency analysis per model response step.
+
+    Issue #1461 adds ``verdict_count`` and ``sessions_with_verdicts``: the
+    denominators behind ``improvement_rate`` and ``regression_rate``. A bare
+    rate cannot distinguish 1-of-2 from 50-of-100, so the counts are surfaced
+    alongside the rates; ADR-0028 warns N<5 is too small to trust.
     """
 
     cycle_time_seconds: float | None = None
@@ -399,6 +404,13 @@ class KpiSummary(BaseModel):
     cycle_time_p95_seconds: float | None = None
     regression_rate: float = 0.0
     improvement_rate: float = 0.0
+    # Issue #1461: denominators for the verdict-based rates. Without these a
+    # rate of 0.50 is ambiguous — 1-of-2 is noise, 50-of-100 is signal.
+    # ``verdict_count`` is the number of non-smoke verdicts that fed
+    # ``improvement_rate``; ``sessions_with_verdicts`` is the number of
+    # distinct sessions that fed ``regression_rate``. ADR-0028 warns N<5.
+    verdict_count: int = 0
+    sessions_with_verdicts: int = 0
     injection_blocks: dict[str, int] = {}
     token_totals: dict[str, int] = {}
     evolver_duration_ms: float | None = None
@@ -984,7 +996,7 @@ def compute_kpis(
             for e in logger.query_events(kind="task_received", harness_version=harness_version)
         }
     )
-    regression_rate, improvement_rate = _verdict_rates(
+    regression_rate, improvement_rate, verdict_count, sessions_with_verdicts = _verdict_rates(
         logger, harness_version=harness_version, task_metadata=task_metadata
     )
     injection_blocks = _injection_blocks(logger, harness_version=harness_version)
@@ -1039,6 +1051,8 @@ def compute_kpis(
         cycle_time_p95_seconds=cycle_time_p95,
         regression_rate=regression_rate,
         improvement_rate=improvement_rate,
+        verdict_count=verdict_count,
+        sessions_with_verdicts=sessions_with_verdicts,
         injection_blocks=injection_blocks,
         token_totals=token_totals,
         hooks_disabled_count=hooks_disabled_count,
@@ -1440,7 +1454,7 @@ def _verdict_rates(
     logger: TraceLogger,
     harness_version: str | None = None,
     task_metadata: dict[str, TaskKpiMetadata] | None = None,
-) -> tuple[float, float]:
+) -> tuple[float, float, int, int]:
     """Derive regression and improvement rates from persisted Critic verdicts.
 
     Verdicts are persisted as the :class:`VerdictRecord` shape
@@ -1457,6 +1471,11 @@ def _verdict_rates(
     * *regression_rate* = sessions with >=1 regressed task / sessions with a
       verdict, where a task regresses when it appears in ``failed_checks`` after
       having appeared in ``passed_checks`` in an earlier verdict.
+
+    Issue #1461 — the third and fourth return values are the denominators:
+    ``total_verdicts`` backs ``improvement_rate`` and the session count backs
+    ``regression_rate``. They are surfaced on :class:`KpiSummary` so a rate of
+    0.50 is no longer ambiguous; ADR-0028 warns N<5 is too small to trust.
 
     ADR-0034 §2 — smoke-tier exclusion
     ----------------------------------
@@ -1510,7 +1529,15 @@ def _verdict_rates(
     regression_rate = (
         len(regression_sessions) / len(sessions_with_verdicts) if sessions_with_verdicts else 0.0
     )
-    return regression_rate, improvement_rate
+    # Issue #1461: return the denominators so the caller can surface them
+    # (KpiSummary.verdict_count / sessions_with_verdicts) and the markdown
+    # renderer can flag small-sample rates per ADR-0028.
+    return (
+        regression_rate,
+        improvement_rate,
+        total_verdicts,
+        len(sessions_with_verdicts),
+    )
 
 
 def _groups_for_task(meta: TaskKpiMetadata, group_by: GroupByDim) -> set[str]:
@@ -2608,14 +2635,30 @@ def _render_markdown(summary: KpiSummary) -> str:
         f"| Cycle Time (seconds) | {_format_value(summary.cycle_time_seconds)} |",
         f"| Cycle Time p50 (seconds) | {_format_value(summary.cycle_time_p50_seconds)} |",
         f"| Cycle Time p95 (seconds) | {_format_value(summary.cycle_time_p95_seconds)} |",
-        f"| Regression Rate | {_format_value(summary.regression_rate)} |",
-        f"| Improvement Rate | {_format_value(summary.improvement_rate)} |",
+        (
+            f"| Regression Rate | {_format_value(summary.regression_rate)} "
+            f"(N={summary.sessions_with_verdicts} session(s)) |"
+        ),
+        (
+            f"| Improvement Rate | {_format_value(summary.improvement_rate)} "
+            f"(N={summary.verdict_count} verdict(s)) |"
+        ),
         f"| Hooks Disabled Count | {summary.hooks_disabled_count} |",
         f"| Hooks Disabled Rate | {_format_value(summary.hooks_disabled_rate)} |",
         f"| Token Budget Hit Rate | {_format_value(summary.token_budget_hit_rate)} |",
         f"| Token Budget Overrun % | {_format_value(summary.token_budget_overrun_pct)} |",
         f"| Context Efficiency | {_format_value(summary.context_efficiency)} |",
     ]
+    # Issue #1461: a verdict rate without its denominator is misleading — 0.50
+    # could be 1-of-2 (noise) or 50-of-100 (signal). ADR-0028 warns N<5 is too
+    # small to trust, so flag small-sample verdict counts for the operator.
+    if summary.sessions_with_verdicts < 5:
+        lines.append("")
+        lines.append(
+            f"⚠️ Small sample size: only {summary.sessions_with_verdicts} session(s) "
+            f"with verdicts (N<5). Interpret regression/improvement rates with "
+            "caution (ADR-0028)."
+        )
     # Issue #120: surface per-session ``injection_blocked`` counts only when
     # at least one session has ≥1 block; a clean trace store stays compact.
     if summary.injection_blocks:
