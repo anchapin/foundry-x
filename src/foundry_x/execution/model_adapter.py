@@ -404,7 +404,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
             finally:
                 await cm.__aexit__(None, None, None)
 
-            if final_usage is not None and last_headers is not None:
+            if last_headers is not None:
                 self._emit_cost_and_rate_limit(
                     ModelResponse(
                         message=ModelMessage(role="assistant"),
@@ -412,8 +412,6 @@ class OpenAICompatibleAdapter(ModelAdapter):
                     ),
                     last_headers,
                 )
-            if last_headers is not None:
-                self._emit_rate_limit(last_headers)
             return
 
     def _emit_retry(self, attempt: int, exc: Exception, backoff_ms: int) -> None:

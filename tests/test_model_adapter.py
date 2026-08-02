@@ -1163,3 +1163,95 @@ async def test_openai_compatible_on_rate_limit_callback_invoked():
     assert rate_limit_events[0].tokens_remaining == 1000
     assert rate_limit_events[0].requests_reset_seconds == 10.0
     assert rate_limit_events[0].tokens_reset_seconds == 100.0
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_stream_rate_limit_not_double_fired():
+    """stream() fires on_rate_limit exactly once when usage and headers are both present (#1472)."""
+    rate_limit_events: list[ModelRateLimitInfo] = []
+    cost_events: list[ModelCostEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = "\n".join(
+            [
+                "data: "
+                + json.dumps({"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]}),
+                "data: "
+                + json.dumps(
+                    {"usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}}
+                ),
+                "data: [DONE]",
+                "",
+            ]
+        )
+        return httpx.Response(
+            200,
+            content=body,
+            headers={
+                "content-type": "text/event-stream",
+                "x-ratelimit-remaining-requests": "49",
+                "x-ratelimit-remaining-tokens": "1000",
+                "x-ratelimit-reset-requests": "10s",
+                "x-ratelimit-reset-tokens": "100ms",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="llama-3.2",
+            client=client,
+            on_cost=cost_events.append,
+            on_rate_limit=rate_limit_events.append,
+        )
+        chunks = []
+        async for chunk in adapter.stream(
+            messages=[ModelMessage(role="user", content="hello")],
+        ):
+            chunks.append(chunk)
+
+    assert len(rate_limit_events) == 1
+    assert len(cost_events) == 1
+    assert rate_limit_events[0].requests_remaining == 49
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_stream_rate_limit_fires_once_without_usage():
+    """stream() still fires on_rate_limit once when usage is absent (#1472)."""
+    rate_limit_events: list[ModelRateLimitInfo] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = "\n".join(
+            [
+                "data: "
+                + json.dumps({"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]}),
+                "data: [DONE]",
+                "",
+            ]
+        )
+        return httpx.Response(
+            200,
+            content=body,
+            headers={
+                "content-type": "text/event-stream",
+                "x-ratelimit-remaining-requests": "7",
+                "x-ratelimit-remaining-tokens": "500",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="llama-3.2",
+            client=client,
+            on_rate_limit=rate_limit_events.append,
+        )
+        chunks = []
+        async for chunk in adapter.stream(
+            messages=[ModelMessage(role="user", content="hello")],
+        ):
+            chunks.append(chunk)
+
+    assert len(chunks) == 1
+    assert len(rate_limit_events) == 1
+    assert rate_limit_events[0].requests_remaining == 7
