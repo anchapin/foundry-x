@@ -781,7 +781,8 @@ def _inject_skill_list(harness_dir: Path, system_prompt: str) -> str:
         return system_prompt.replace("{{ SKILL_LIST }}", bullet_list)
 
     sorted_inventory = sorted(skill_inventory, key=lambda e: e.get("name", ""))
-    bullet_list = "\n".join(f"- {entry['name']}" for entry in sorted_inventory)
+    names = [e.get("name") for e in sorted_inventory]
+    bullet_list = "\n".join(f"- {name}" for name in names if name)
     return system_prompt.replace("{{ SKILL_LIST }}", bullet_list)
 
 

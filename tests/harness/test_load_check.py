@@ -566,3 +566,164 @@ def test_hook_order_validation_skips_without_phase(tmp_path: Path) -> None:
     assert "WARN" in proc.stderr
     assert "rate_limit" in proc.stderr
     assert "skipping order validation" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# skill_inventory validation tests (issue #1463)
+# ---------------------------------------------------------------------------
+
+_MANIFEST_SKILL_INV_OK = {
+    "version": "0.1.0",
+    "model_target": "test/model",
+    "hooks": ["base"],
+    "skills": ["alpha.json", "beta.json"],
+    "skill_inventory": [
+        {"name": "alpha", "description": "Alpha skill"},
+        {"name": "beta", "description": "Beta skill"},
+    ],
+}
+
+
+@pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
+def test_load_check_passes_when_skill_inventory_matches_skills(tmp_path: Path) -> None:
+    """Issue #1463: when skill_inventory names == skills[] names, check passes."""
+    harness = _make_fixture_harness_with_hooks(
+        tmp_path,
+        skills={
+            "alpha.json": _VALID_SKILL | {"name": "alpha"},
+            "beta.json": _VALID_SKILL | {"name": "beta"},
+        },
+        manifest=_MANIFEST_SKILL_INV_OK,
+        hook_modules={},
+    )
+    proc = subprocess.run(
+        [sys.executable, str(LOAD_CHECK), "--harness-dir", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"load_check should pass when skill_inventory is consistent; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+
+
+@pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
+def test_load_check_fails_when_skill_inventory_names_diverge_from_skills(
+    tmp_path: Path,
+) -> None:
+    """Issue #1463: skill_inventory names set != skills[] names set must fail."""
+    harness = _make_fixture_harness(
+        tmp_path,
+        skills={
+            "alpha.json": _VALID_SKILL | {"name": "alpha"},
+            "beta.json": _VALID_SKILL | {"name": "beta"},
+        },
+        include_hooks=True,
+        hooks_init="",
+        hooks_base=_MINIMAL_HOOKS_BASE,
+        manifest={
+            "version": "0.1.0",
+            "model_target": "test/model",
+            "hooks": ["base"],
+            "skills": ["alpha.json", "beta.json"],
+            "skill_inventory": [
+                {"name": "alpha", "description": "Alpha"},
+                {"name": "gamma", "description": "not in skills[]"},
+            ],
+        },
+    )
+    proc = subprocess.run(
+        [sys.executable, str(LOAD_CHECK), "--harness-dir", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+        check=False,
+    )
+    assert proc.returncode != 0, (
+        f"load_check should fail on skill_inventory/skills[] desync; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "gamma" in proc.stderr
+    assert "beta" in proc.stderr
+    assert "issue #1463" in proc.stderr
+
+
+@pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
+def test_load_check_fails_when_skill_inventory_entry_missing_name(
+    tmp_path: Path,
+) -> None:
+    """Issue #1463: a skill_inventory entry without 'name' must fail."""
+    harness = _make_fixture_harness(
+        tmp_path,
+        skills={
+            "alpha.json": _VALID_SKILL | {"name": "alpha"},
+            "beta.json": _VALID_SKILL | {"name": "beta"},
+        },
+        include_hooks=True,
+        hooks_init="",
+        hooks_base=_MINIMAL_HOOKS_BASE,
+        manifest={
+            "version": "0.1.0",
+            "model_target": "test/model",
+            "hooks": ["base"],
+            "skills": ["alpha.json", "beta.json"],
+            "skill_inventory": [
+                {"name": "alpha", "description": "Alpha"},
+                {"description": "missing name key"},
+            ],
+        },
+    )
+    proc = subprocess.run(
+        [sys.executable, str(LOAD_CHECK), "--harness-dir", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+        check=False,
+    )
+    assert proc.returncode != 0, (
+        f"load_check should fail on missing name in skill_inventory; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "missing required key 'name'" in proc.stderr
+
+
+@pytest.mark.skipif(not LOAD_CHECK.exists(), reason="harness/scripts/load_check.py missing")
+def test_load_check_fails_when_skill_inventory_has_duplicate_names(
+    tmp_path: Path,
+) -> None:
+    """Issue #1463: duplicate names in skill_inventory must fail."""
+    harness = _make_fixture_harness(
+        tmp_path,
+        skills={"alpha.json": _VALID_SKILL | {"name": "alpha"}},
+        include_hooks=True,
+        hooks_init="",
+        hooks_base=_MINIMAL_HOOKS_BASE,
+        manifest={
+            "version": "0.1.0",
+            "model_target": "test/model",
+            "hooks": ["base"],
+            "skills": ["alpha.json"],
+            "skill_inventory": [
+                {"name": "alpha", "description": "first"},
+                {"name": "alpha", "description": "duplicate"},
+            ],
+        },
+    )
+    proc = subprocess.run(
+        [sys.executable, str(LOAD_CHECK), "--harness-dir", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+        check=False,
+    )
+    assert proc.returncode != 0, (
+        f"load_check should fail on duplicate skill_inventory names; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "duplicate" in proc.stderr
