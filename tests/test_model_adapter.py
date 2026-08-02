@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from foundry_x.execution.model_adapter import (
     _MAX_BACKOFF_MS,
+    _OPENAI_PRICING_PER_1M,
     ModelAdapter,
     ModelAdapterError,
     ModelAdapterHTTPError,
@@ -25,6 +26,7 @@ from foundry_x.execution.model_adapter import (
     ToolDefinition,
     ToolFunctionSchema,
     _compute_429_backoff_ms,
+    _resolve_token_pricing,
 )
 from foundry_x.execution.runner import (
     _DEFAULT_REQUEST_TIMEOUT_S,
@@ -1101,7 +1103,7 @@ async def test_openai_compatible_on_cost_callback_with_nonzero_cost(monkeypatch)
             client=client,
             on_cost=cost_events.append,
         )
-        monkeypatch.setattr(adapter, "token_pricing", lambda: (0.5, 1.5))
+        monkeypatch.setattr(adapter, "_token_pricing_with_known", lambda: (0.5, 1.5, True))
         response = await adapter.complete(
             messages=[ModelMessage(role="user", content="hello")],
         )
@@ -1115,6 +1117,115 @@ async def test_openai_compatible_on_cost_callback_with_nonzero_cost(monkeypatch)
     assert cost_events[0].estimated_cost_usd == pytest.approx(
         0.5 * 100 / 1_000_000 + 1.5 * 50 / 1_000_000
     )
+    assert cost_events[0].pricing_known is True
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_on_cost_unknown_model_marks_pricing_unknown():
+    """Unknown model -> pricing_known=False, estimated_cost_usd=0.0 (issue #1465)."""
+    cost_events: list[ModelCostEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 200,
+                    "completion_tokens": 80,
+                    "total_tokens": 280,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="local-llama-uncatalogued",
+            client=client,
+            on_cost=cost_events.append,
+        )
+        response = await adapter.complete(
+            messages=[ModelMessage(role="user", content="hello")],
+        )
+
+    assert response.message.content == "done"
+    assert len(cost_events) == 1
+    event = cost_events[0]
+    assert event.prompt_tokens == 200
+    assert event.completion_tokens == 80
+    assert event.estimated_cost_usd == 0.0
+    assert event.pricing_known is False
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_on_cost_known_model_marks_pricing_known():
+    """Known model -> pricing_known=True and a real per-token cost (issue #1465)."""
+    cost_events: list[ModelCostEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1_000_000,
+                    "completion_tokens": 0,
+                    "total_tokens": 1_000_000,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://model.test/v1",
+            model="gpt-4o",
+            client=client,
+            on_cost=cost_events.append,
+        )
+        await adapter.complete(messages=[ModelMessage(role="user", content="hello")])
+
+    assert len(cost_events) == 1
+    event = cost_events[0]
+    assert event.pricing_known is True
+    # gpt-4o: $2.50/1M input -> 1M prompt tokens cost $2.50
+    assert event.estimated_cost_usd == pytest.approx(2.5)
+
+
+def test_resolve_token_pricing_returns_known_flag():
+    """_resolve_token_pricing stamps a known flag for all three resolution paths (issue #1465)."""
+    assert _resolve_token_pricing("gpt-4o", _OPENAI_PRICING_PER_1M) == (2.5, 10.0, True)
+    assert _resolve_token_pricing("never-heard-of-it", _OPENAI_PRICING_PER_1M) == (
+        0.0,
+        0.0,
+        False,
+    )
+
+
+def test_resolve_token_pricing_env_override_is_known(monkeypatch):
+    """A valid FOUNDRY_MODEL_PRICING_* override resolves with pricing_known=True (issue #1465)."""
+    monkeypatch.setenv("FOUNDRY_MODEL_PRICING_LOCAL_LLAMA", "1.25,5.0")
+    assert _resolve_token_pricing("local-llama", _OPENAI_PRICING_PER_1M) == (
+        1.25,
+        5.0,
+        True,
+    )
+
+
+def test_model_cost_event_pricing_known_defaults_true():
+    """ModelCostEvent.pricing_known defaults to True for backward compatibility (issue #1465)."""
+    event = ModelCostEvent(provider="openai", model="gpt-4o")
+    assert event.pricing_known is True
 
 
 @pytest.mark.asyncio

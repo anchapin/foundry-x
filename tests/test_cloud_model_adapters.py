@@ -920,3 +920,68 @@ def test_pricing_env_var_invalid_format_falls_back_to_hardcoded(monkeypatch):
         import asyncio
 
         asyncio.run(adapter.aclose())
+
+
+@pytest.mark.asyncio
+async def test_anthropic_cost_known_model_marks_pricing_known():
+    """CloudModelAdapter stamps pricing_known=True for a catalogued model (issue #1465)."""
+    cost_events: list[ModelCostEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1000, "output_tokens": 500},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-3-5-sonnet-20241022",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+            on_cost=cost_events.append,
+        )
+        await adapter.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert len(cost_events) == 1
+    event = cost_events[0]
+    assert event.pricing_known is True
+    expected = (1000 * 3.0 + 500 * 15.0) / 1_000_000.0
+    assert abs(event.estimated_cost_usd - round(expected, 8)) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_anthropic_cost_unknown_model_marks_pricing_unknown():
+    """CloudModelAdapter stamps pricing_known=False, cost 0.0 for an unknown model (issue #1465)."""
+    cost_events: list[ModelCostEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1000, "output_tokens": 500},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = AnthropicAdapter(
+            model="claude-future-unreleased",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            client=client,
+            on_cost=cost_events.append,
+        )
+        await adapter.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert len(cost_events) == 1
+    event = cost_events[0]
+    assert event.pricing_known is False
+    assert event.estimated_cost_usd == 0.0

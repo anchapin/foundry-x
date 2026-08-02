@@ -490,7 +490,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
             return
         prompt_tokens = usage.get("prompt_tokens", 0) or 0
         completion_tokens = usage.get("completion_tokens", 0) or 0
-        in_price, out_price = self.token_pricing()
+        in_price, out_price, pricing_known = self._token_pricing_with_known()
         cost = (prompt_tokens * in_price + completion_tokens * out_price) / 1_000_000.0
         self.on_cost(
             ModelCostEvent(
@@ -499,6 +499,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 estimated_cost_usd=round(cost, 8),
+                pricing_known=pricing_known,
             )
         )
 
@@ -536,9 +537,14 @@ class OpenAICompatibleAdapter(ModelAdapter):
             )
         )
 
+    def _token_pricing_with_known(self) -> tuple[float, float, bool]:
+        """Resolve pricing plus whether it was found (issue #1465)."""
+        return _resolve_token_pricing(self.model, _OPENAI_PRICING_PER_1M)
+
     def token_pricing(self) -> tuple[float, float]:
         """Return ``(input_per_1m_usd, output_per_1m_usd)`` for the model."""
-        return _resolve_token_pricing(self.model, _OPENAI_PRICING_PER_1M)
+        in_price, out_price, _ = self._token_pricing_with_known()
+        return in_price, out_price
 
     def _emit_cost_and_rate_limit(
         self,
@@ -549,7 +555,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         if self.on_cost is not None and response.usage is not None:
             prompt_tokens = response.usage.prompt_tokens
             completion_tokens = response.usage.completion_tokens
-            in_price, out_price = self.token_pricing()
+            in_price, out_price, pricing_known = self._token_pricing_with_known()
             cost = (prompt_tokens * in_price + completion_tokens * out_price) / 1_000_000.0
             self.on_cost(
                 ModelCostEvent(
@@ -558,6 +564,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     estimated_cost_usd=round(cost, 8),
+                    pricing_known=pricing_known,
                 )
             )
         if self.on_rate_limit is not None:
@@ -819,7 +826,10 @@ class ModelCostEvent(BaseModel):
     Cost is computed from the provider's per-token pricing table
     (`token_pricing`) and the reported `ModelUsage`. The Runner forwards
     this to the trace store so the improvement-rate KPI can attribute
-    spend to harness quality, not just model price.
+    spend to harness quality, not just model price. The `pricing_known`
+    flag is False when the model has no pricing entry, so consumers can
+    distinguish "pricing unknown" (``estimated_cost_usd`` of 0.0 is a
+    placeholder) from "genuinely free" (issue #1465).
     """
 
     provider: str = Field(
@@ -832,6 +842,17 @@ class ModelCostEvent(BaseModel):
         default=0.0,
         ge=0.0,
         description="Best-effort cost estimate in USD; 0.0 when pricing is unknown.",
+    )
+    pricing_known: bool = Field(
+        default=True,
+        description=(
+            "Whether per-token pricing was resolved for this model. False "
+            "when the model is absent from the pricing table and no "
+            "FOUNDRY_MODEL_PRICING_* env override applies, in which case "
+            "estimated_cost_usd is 0.0. Distinguishes 'pricing unknown' "
+            "from 'genuinely free' so the KPI consumer and Evolver can tell "
+            "which sessions carry reliable cost attribution (issue #1465)."
+        ),
     )
 
 
@@ -925,8 +946,20 @@ class CloudModelAdapter(ABC):
         """Header names this provider exposes rate-limit info under."""
 
     @abstractmethod
+    def _token_pricing_with_known(self) -> tuple[float, float, bool]:
+        """Return ``(input_per_1m_usd, output_per_1m_usd, pricing_known)``.
+
+        ``pricing_known`` is False when the model has no pricing entry and
+        no ``FOUNDRY_MODEL_PRICING_*`` env override, so ``model_cost``
+        events can distinguish "pricing unknown" from "genuinely free"
+        (issue #1465). Concrete subclasses implement this; the public
+        :meth:`token_pricing` delegates here and drops the flag.
+        """
+
     def token_pricing(self) -> tuple[float, float]:
         """Return ``(input_per_1m_usd, output_per_1m_usd)``; ``(0.0, 0.0)`` when unknown."""
+        in_price, out_price, _ = self._token_pricing_with_known()
+        return in_price, out_price
 
     # --- shared infrastructure -------------------------------------------
 
@@ -1059,7 +1092,7 @@ class CloudModelAdapter(ABC):
         if self.on_cost is not None and response.usage is not None:
             prompt_tokens = response.usage.prompt_tokens
             completion_tokens = response.usage.completion_tokens
-            in_price, out_price = self.token_pricing()
+            in_price, out_price, pricing_known = self._token_pricing_with_known()
             cost = (prompt_tokens * in_price + completion_tokens * out_price) / 1_000_000.0
             self.on_cost(
                 ModelCostEvent(
@@ -1068,6 +1101,7 @@ class CloudModelAdapter(ABC):
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     estimated_cost_usd=round(cost, 8),
+                    pricing_known=pricing_known,
                 )
             )
         if self.on_rate_limit is not None:
@@ -1453,18 +1487,20 @@ class AnthropicAdapter(CloudModelAdapter):
             ),
         )
 
-    def token_pricing(self) -> tuple[float, float]:
+    def _token_pricing_with_known(self) -> tuple[float, float, bool]:
         return _resolve_token_pricing(self.model, _ANTHROPIC_PRICING_PER_1M)
 
 
 def _resolve_token_pricing(
     model: str, hardcoded: dict[str, tuple[float, float]]
-) -> tuple[float, float]:
-    """Return ``(input_per_1m_usd, output_per_1m_usd)`` for *model*.
+) -> tuple[float, float, bool]:
+    """Return ``(input_per_1m_usd, output_per_1m_usd, pricing_known)`` for *model*.
 
     Checks ``FOUNDRY_MODEL_PRICING_<MODEL>`` env var first (format:
     ``input,output``, e.g. ``3.0,15.0``). Falls back to *hardcoded*
-    table. Returns ``(0.0, 0.0)`` when pricing is unknown.
+    table. Returns ``(0.0, 0.0, False)`` when pricing is unknown so
+    callers can stamp ``pricing_known=False`` on ``model_cost`` events
+    and distinguish "pricing unknown" from "genuinely free" (issue #1465).
     """
     env_key = f"FOUNDRY_MODEL_PRICING_{model.upper().replace('-', '_')}"
     raw = os.environ.get(env_key)
@@ -1472,7 +1508,7 @@ def _resolve_token_pricing(
         parts = raw.split(",")
         if len(parts) == 2:
             try:
-                return (float(parts[0]), float(parts[1]))
+                return (float(parts[0]), float(parts[1]), True)
             except ValueError:
                 warnings.warn(
                     f"Invalid pricing in {env_key}={raw!r}; expected 'input,output' float pair; "
@@ -1487,7 +1523,10 @@ def _resolve_token_pricing(
                 RuntimeWarning,
                 stacklevel=2,
             )
-    return hardcoded.get(model, (0.0, 0.0))
+    if model in hardcoded:
+        in_price, out_price = hardcoded[model]
+        return (in_price, out_price, True)
+    return (0.0, 0.0, False)
 
 
 _ANTHROPIC_PRICING_PER_1M: dict[str, tuple[float, float]] = {
@@ -1589,7 +1628,7 @@ class OpenAINativeAdapter(CloudModelAdapter):
             tokens_reset_seconds=_parse_duration(headers_lower.get("x-ratelimit-reset-tokens")),
         )
 
-    def token_pricing(self) -> tuple[float, float]:
+    def _token_pricing_with_known(self) -> tuple[float, float, bool]:
         return _resolve_token_pricing(self.model, _OPENAI_PRICING_PER_1M)
 
 
