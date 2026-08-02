@@ -552,6 +552,25 @@ def run_evolution_batch(
 
     use_batch_attribution = bool(batch_edits)
 
+    # Issue #1456: evaluate each unique diff once and share the verdict across
+    # all failure classes.  ``propose_batch`` deduplicates by ``target_file``
+    # (typically yielding a single edit to ``system_prompt.txt``), so without
+    # this cache the Critic would copy the harness, apply the patch, run
+    # ``load_check``, and spawn pytest N times — once per failure class — on
+    # the exact same diff.
+    diff_to_verdict: dict[str, CriticVerdict] = {}
+    if use_batch_attribution and not no_verify:
+        if critic is None:
+            critic = Critic(harness_dir=harness_dir)
+        for idx, edit in enumerate(batch_edits):
+            if edit.unified_diff not in diff_to_verdict:
+                diff_to_verdict[edit.unified_diff] = critic.evaluate(
+                    edit.unified_diff,
+                    edit_index=idx,
+                    failure_class=None,
+                    tier=critic_tier,
+                )
+
     results: list[EvolutionResult] = []
     all_edits: list[ProposedEdit] = []
 
@@ -614,12 +633,21 @@ def run_evolution_batch(
             if critic is None:
                 critic = Critic(harness_dir=harness_dir)
             for idx, edit in enumerate(failure_edits):
-                verdict = critic.evaluate(
-                    edit.unified_diff,
-                    edit_index=idx,
-                    failure_class=failure_report.proposed_class,
-                    tier=critic_tier,
-                )
+                cached = diff_to_verdict.get(edit.unified_diff)
+                if cached is not None:
+                    verdict = cached.model_copy(
+                        update={
+                            "edit_index": idx,
+                            "failure_class": failure_report.proposed_class,
+                        }
+                    )
+                else:
+                    verdict = critic.evaluate(
+                        edit.unified_diff,
+                        edit_index=idx,
+                        failure_class=failure_report.proposed_class,
+                        tier=critic_tier,
+                    )
                 verdict.target_file = target_file
 
         results.append(
@@ -698,6 +726,25 @@ async def run_evolution_batch_async(
 
     use_batch_attribution = bool(batch_edits)
 
+    # Issue #1456: evaluate each unique diff once and share the verdict across
+    # all failure classes.  ``propose_batch`` deduplicates by ``target_file``
+    # (typically yielding a single edit to ``system_prompt.txt``), so without
+    # this cache the Critic would copy the harness, apply the patch, run
+    # ``load_check``, and spawn pytest N times — once per failure class — on
+    # the exact same diff.
+    diff_to_verdict: dict[str, CriticVerdict] = {}
+    if use_batch_attribution and not no_verify:
+        if critic is None:
+            critic = Critic(harness_dir=harness_dir)
+        for idx, edit in enumerate(batch_edits):
+            if edit.unified_diff not in diff_to_verdict:
+                diff_to_verdict[edit.unified_diff] = critic.evaluate(
+                    edit.unified_diff,
+                    edit_index=idx,
+                    failure_class=None,
+                    tier=critic_tier,
+                )
+
     results: list[EvolutionResult] = []
     all_edits: list[ProposedEdit] = []
 
@@ -760,12 +807,21 @@ async def run_evolution_batch_async(
             if critic is None:
                 critic = Critic(harness_dir=harness_dir)
             for idx, edit in enumerate(failure_edits):
-                verdict = critic.evaluate(
-                    edit.unified_diff,
-                    edit_index=idx,
-                    failure_class=failure_report.proposed_class,
-                    tier=critic_tier,
-                )
+                cached = diff_to_verdict.get(edit.unified_diff)
+                if cached is not None:
+                    verdict = cached.model_copy(
+                        update={
+                            "edit_index": idx,
+                            "failure_class": failure_report.proposed_class,
+                        }
+                    )
+                else:
+                    verdict = critic.evaluate(
+                        edit.unified_diff,
+                        edit_index=idx,
+                        failure_class=failure_report.proposed_class,
+                        tier=critic_tier,
+                    )
                 verdict.target_file = target_file
 
         results.append(
