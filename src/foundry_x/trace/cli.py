@@ -696,7 +696,18 @@ _SEED_MODEL_ID = "seeded-llama-sample"
 # Issue #271: deterministic token-usage figures planted on the
 # ``model_response`` event so the KPI summary and timeline CLIs have token
 # data to surface without a live llama-server. All literal placeholders.
+# Issue #1470: the seed must use the canonical ``token_usage`` key (not
+# ``usage``) and carry the streaming-timing fields the runner always emits
+# (CONTEXT.md §Event kinds) so KPI consumers reading ``payload.token_usage``
+# see real data instead of ``null`` for seeded sessions.
 _SEED_USAGE = {"prompt_tokens": 42, "completion_tokens": 18, "total_tokens": 60}
+# Streaming-timing placeholders mirroring the runner's ``model_response``
+# contract. ``time_to_first_token_ms`` is null only when the stream produced
+# zero payload deltas; a tool-call response still counts as a delta, so the
+# seed uses a small positive value.
+_SEED_TTFT_MS = 5
+_SEED_CHUNK_COUNT = 1
+_SEED_TOTAL_STREAM_MS = 48
 # Default harness version used when ``--harness-version`` is omitted. Picked
 # to be obviously a synthetic seed (``seed-sample``) so real-run sessions
 # don't collide with the planted one in regression reports.
@@ -764,7 +775,15 @@ def _seed_sample_trace(args: argparse.Namespace) -> int:
                 ],
                 # Issue #271: token-usage accounting so the KPI summary and
                 # timeline renderers have a token surface to exercise.
-                "usage": _SEED_USAGE,
+                # Issue #1470: use the canonical ``token_usage`` key (not
+                # ``usage``) and include the streaming-timing fields the
+                # runner always emits (CONTEXT.md §Event kinds), so KPI
+                # consumers reading ``payload["token_usage"]`` get real data
+                # for seeded sessions instead of ``null``.
+                "token_usage": _SEED_USAGE,
+                "time_to_first_token_ms": _SEED_TTFT_MS,
+                "chunk_count": _SEED_CHUNK_COUNT,
+                "total_stream_ms": _SEED_TOTAL_STREAM_MS,
                 "tokens_used": _SEED_USAGE["total_tokens"],
             },
         )
