@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, Field
 
 from foundry_x.execution.harness_layout import (
+    HarnessContentError,
     HarnessValidationError,
 )
 from foundry_x.execution.harness_layout import (
@@ -2401,13 +2402,21 @@ def main(run_task_fn: Callable[..., Awaitable[None]] | None = None) -> None:
     if args.validate:
         failed = False
         try:
-            validate_harness_layout(harness_dir)
+            validate_harness_layout(harness_dir, strict=True)
         except HarnessValidationError as exc:
             joined = ", ".join(exc.missing)
             print(
                 f"error: harness validation failed: {exc.harness_dir} is missing required entries: {joined}",
                 file=sys.stderr,
             )
+            failed = True
+        except HarnessContentError as exc:
+            print(
+                f"error: harness content validation failed for {exc.harness_dir}:",
+                file=sys.stderr,
+            )
+            for msg in exc.failures:
+                print(f"  - {msg}", file=sys.stderr)
             failed = True
 
         try:
