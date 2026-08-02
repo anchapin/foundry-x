@@ -1291,7 +1291,40 @@ def test_seed_sample_trace_is_visible_to_existing_subcommands(tmp_path, capsys):
         assert required_kind in timeline
 
 
-# --- Issue #959: info -------------------------------------------------------
+def test_seed_sample_trace_model_response_uses_canonical_token_usage(tmp_path, capsys):
+    """Issue #1470: seeded ``model_response`` carries the canonical keys.
+
+    The production ``Runner`` emits ``model_response`` with ``token_usage``
+    (the canonical CONTEXT.md key), not ``usage``, plus the streaming-timing
+    fields ``time_to_first_token_ms``, ``chunk_count``, and
+    ``total_stream_ms``. KPI consumers and timeline renderers read
+    ``payload["token_usage"]``; a seeded session using the wrong key would
+    surface ``null`` token data and defeat the seed's purpose. This test
+    pins the runner's contract onto the seed so the bug cannot regress.
+    """
+    db = tmp_path / "traces.db"
+    rc = main(["seed-sample-trace", "--db", str(db)])
+    assert rc == 0
+    session_id = _parse_seeded_session_id(capsys.readouterr().out)
+
+    events = TraceLogger(db).load_session(session_id)
+    model_responses = [e for e in events if e.kind == "model_response"]
+    assert len(model_responses) == 1
+    payload = model_responses[0].payload
+
+    # Canonical key present with the runner's usage dict shape.
+    assert "usage" not in payload
+    assert payload["token_usage"] == {
+        "prompt_tokens": 42,
+        "completion_tokens": 18,
+        "total_tokens": 60,
+    }
+    # Streaming-timing fields the runner always emits (CONTEXT.md §Event kinds).
+    assert payload["time_to_first_token_ms"] is not None
+    assert isinstance(payload["chunk_count"], int)
+    assert isinstance(payload["total_stream_ms"], int)
+
+
 # ``foundry-trace info`` prints WAL size, DB size, and session count so
 # operators can detect WAL bloat before it becomes problematic.
 
