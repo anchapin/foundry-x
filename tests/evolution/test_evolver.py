@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-from foundry_x.evolution.digester import FailureReport
+from foundry_x.evolution.digester import INFRA_FAILURE_CLASS, FailureReport
 from foundry_x.evolution.evolver import (
     Evolver,
     ProposedEdit,
@@ -309,3 +309,79 @@ class TestProposeBatch:
         )
         edits = evolver.propose_batch(harness_dir, batch)
         assert edits == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #1462: infra-failure must not trigger a system_prompt.txt edit.
+# The Evolver skips harness-edit remediation for infra/model-server
+# failures because no prompt edit can remediate them.
+# ---------------------------------------------------------------------------
+
+
+class TestInfraFailureSkip:
+    """The Evolver must not propose edits for ``infra-failure`` class."""
+
+    def test_propose_returns_empty_for_infra_failure(self, tmp_path: Path) -> None:
+        """propose() returns [] for an infra-failure report."""
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        (harness_dir / "system_prompt.txt").write_text("original\n", encoding="utf-8")
+
+        evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+        failure = FailureReport(
+            session_id="s",
+            summary="server unavailable",
+            proposed_class=INFRA_FAILURE_CLASS,
+            failed_steps=[{"kind": "server_unavailable"}],
+        )
+        edits = evolver.propose(harness_dir, failure)
+        assert edits == []
+
+    def test_propose_does_not_target_system_prompt_for_infra_failure(self, tmp_path: Path) -> None:
+        """No ProposedEdit targets system_prompt.txt for infra-failure."""
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        (harness_dir / "system_prompt.txt").write_text("original\n", encoding="utf-8")
+
+        evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+        failure = FailureReport(
+            session_id="s",
+            summary="hook registry error",
+            proposed_class=INFRA_FAILURE_CLASS,
+            failed_steps=[{"kind": "hook_registry_error"}],
+        )
+        edits = evolver.propose(harness_dir, failure)
+        for edit in edits:
+            assert "system_prompt.txt" not in edit.target_file
+
+    def test_propose_batch_skips_infra_failure(self, tmp_path: Path) -> None:
+        """propose_batch() skips infra-failure reports."""
+        from foundry_x.evolution.digester import BatchFailureReport
+
+        harness_dir = tmp_path / "harness"
+        harness_dir.mkdir()
+        (harness_dir / "system_prompt.txt").write_text("original\n", encoding="utf-8")
+
+        evolver = Evolver(max_proposals_per_hour=10, max_diff_lines=200)
+        batch = BatchFailureReport(
+            session_id="s",
+            failure_reports=[
+                FailureReport(
+                    session_id="s",
+                    summary="server down",
+                    proposed_class=INFRA_FAILURE_CLASS,
+                    failed_steps=[{"kind": "server_unavailable"}],
+                ),
+                FailureReport(
+                    session_id="s",
+                    summary="no such tool: frobnicate",
+                    proposed_class="wrong-tool",
+                    failed_steps=[{"kind": "tool_error"}],
+                ),
+            ],
+            total_failures=2,
+        )
+        edits = evolver.propose_batch(harness_dir, batch)
+        # Only the wrong-tool edit should be proposed; infra-failure is skipped.
+        assert len(edits) == 1
+        assert edits[0].target_file == "harness/system_prompt.txt"

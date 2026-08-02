@@ -241,7 +241,7 @@ set the Digester considers structural failure markers; treat it as a
 subset of the broader kind vocabulary above.
 
 - **`FAILURE_KINDS`** (constant in
-  `src/foundry_x/evolution/digester.py:85-123`): `tool_error`,
+  `src/foundry_x/evolution/digester.py:122-160`): `tool_error`,
   `task_failed`, `task_aborted`, `token_budget_aborted`, `run_failed`,
   `agent_error`, `error`, `model_error`, `hook_registry_error`,
   `server_unavailable`. `task_failed` and `task_aborted` are emitted by
@@ -276,7 +276,7 @@ subset of the broader kind vocabulary above.
   value here is a vocabulary change and must ship with both a producer
   and a regression test (ADR-0004).
 - **`FAILURE_PAYLOAD_KEYS`** (constant in
-  `src/foundry_x/evolution/digester.py:125-131`): `error`, `traceback`,
+  `src/foundry_x/evolution/digester.py:162-168`): `error`, `traceback`,
   `exception`. A `tool_result` whose payload has any of these keys is
   classified as a failure even though its `kind` is benign — the
   signal is on the payload, not on the kind. The same payload-key
